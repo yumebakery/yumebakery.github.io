@@ -12835,7 +12835,8 @@ function AdjustTab({ state, dispatch, user }){
           filtered.length === 0
             ? h('div', { className:'px-3 py-2 text-xs text-gray-400' }, 'ไม่พบสินค้า')
             : filtered.slice(0, 30).map(i => {
-                const stock = i.stockByBranch?.[branchId] || 0;
+                const _rw = i.stockByBranch?.[branchId];   // 🆕 A5-UAT(arch P2-1): shape-safe display
+                const stock = (_rw && typeof _rw === 'object') ? Number(_rw._total||0) : (Number(_rw)||0);
                 const added = rows.some(r => r.itemId === i.id);
                 return h('button', { key:i.id, type:'button', disabled:added,
                   onClick:()=>addRow(i),
@@ -34275,6 +34276,9 @@ function NewPOModal({ state, dispatch, user, onClose }){
     if(zeroPriced.length > 0){
       const names = zeroPriced.map(l => (state.items.find(i=>i.id===l.itemId)?.name) || l.itemId).slice(0,6).join(', ');
       if(!window.confirm(`⚠️ มี ${zeroPriced.length} รายการราคา 0 บาท:\n${names}${zeroPriced.length>6?' …':''}\n\nราคา 0 จะทำให้ต้นทุนสินค้า/ยอด PO ผิด และปิดการตรวจ 3-way match\nถ้าตั้งใจให้เป็น "ของแถม" → ติ๊ก 🎁 ของแถม แทน\n\nยืนยันบันทึก PO ราคา 0 ต่อ?`)) return;
+      // 🆕 A4-UAT(audit P2): บันทึกร่องรอย force-save PO ราคา 0 (non-freebie) — ตรวจย้อนได้
+      dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'po_zero_price_override', by:user.username, byName:user.name||user.username,
+        ts:Date.now(), note:`บันทึก PO ราคา 0 (${zeroPriced.length} รายการ): ${names}`, summary:`PO ราคา 0 x${zeroPriced.length}` }});
     }
 
     // Duplicate check — PO supplier เดียวกันที่ยังไม่รับของครบ + มี item ซ้ำ
@@ -47751,7 +47755,9 @@ function JETab({ state, dispatch, user }){
         )
       ),
       canCreate && h('div', { className:'flex gap-2' },
-        h(Button, { variant:'warning', onClick:()=>setShowOpening(true) }, '⚖️ ตั้งยอดยกมา'),
+        // 🆕 A3-UAT(audit P1): ตั้งยอดยกมา = post JE ตรง ไม่ผ่าน maker-checker → จำกัด superuser/gm เท่านั้น (กันเสมียนปั้นยอด)
+        (isSuperUser(user) || user.role === 'gm') &&
+          h(Button, { variant:'warning', onClick:()=>setShowOpening(true) }, '⚖️ ตั้งยอดยกมา'),
         h(Button, { variant:'secondary', onClick:()=>setShowAuto(true) }, '⚡ Auto-post จาก INV/Pay'),
         h(Button, { variant:'primary', onClick:()=>setShowNew(true) }, '➕ JE Manual'),
       )
@@ -47891,7 +47897,7 @@ function OpeningBalanceModal({ state, dispatch, user, onClose }){
     }
     if(already && !window.confirm('⚠️ มี JE ยอดยกมาอยู่แล้ว — ตั้งซ้ำจะทำให้ยอดเบิ้ล\nยืนยันตั้งเพิ่มอีกใบ?')) return;
     const lines = [];
-    const _line = (code, dr, cr) => { const a = acc(code);
+    const _line = (code, dr, cr) => { const a = acc(code); if(!a) return;   // 🆕 hardening: กัน acc undefined → throw
       lines.push({ accountId:a.id, accountCode:a.code, account:a.code, accountName:a.name, debit:+(dr||0), credit:+(cr||0), description:'ยอดยกมา' }); };
     rows.forEach(r => { if(r.amt > 0){ if(r.side==='dr') _line(r.code, r.amt, 0); else _line(r.code, 0, r.amt); } });
     if(lines.length === 0){ alert('ยังไม่ได้ใส่ยอดใดๆ'); return; }
@@ -47907,6 +47913,11 @@ function OpeningBalanceModal({ state, dispatch, user, onClose }){
       refType:'opening', status:'posted', postedBy:user.username, createdBy:user.username,
       createdAt:Date.now(), postedAt:Date.now(), totalDebit:td, totalCredit:tc, lines,
     }});
+    // 🆕 A3-UAT(audit P2): audit trail เฉพาะการตั้งยอดยกมา (ตั้ง 3900/ปรับงบเปิดไม่ได้เงียบ)
+    dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'opening_balance_set',
+      by:user.username, byName:user.name||user.username, ts:Date.now(),
+      note:`ตั้งยอดยกมา ณ ${obDate} · DR ${money(td)} = CR ${money(tc)} · ส่วนต่างเข้า 3900 ${money(Math.abs(diff))}${already?' (ตั้งซ้ำ!)':''}`,
+      summary:`ตั้งยอดยกมา ${money(td)}` }});
     alert(`✅ ตั้งยอดยกมาเรียบร้อย · JE รวม ${money(td)}`);
     onClose();
   };
