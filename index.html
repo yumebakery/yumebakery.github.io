@@ -47854,9 +47854,12 @@ function JETab({ state, dispatch, user }){
 function OpeningBalanceModal({ state, dispatch, user, onClose }){
   const coa = state.chartOfAccounts || [];
   const acc = (code) => coa.find(a => a.code === code);
-  // มูลค่าสินค้าคงเหลือจาก FIFO layers (แนะนำยอด 1300)
-  const invValue = (state.fifoLayers||[]).reduce((t,l) => t + (Number(l.remaining)||0) * (Number(l.unitCost)||0), 0);
+  // 🆕 UAT-fix: มูลค่าสินค้าคงเหลือ "ยกมา" เฉพาะ layer opening (สต๊อกที่ import ตั้งต้น) — ไม่รวมของที่ซื้อเข้าหลัง go-live
+  //   (autoPostINV DR 1300 ตอนซื้อแล้ว → ถ้ารวมทั้งหมดจะ double-count 1300)
+  const invValue = (state.fifoLayers||[]).filter(l => l.sourceOpening)
+    .reduce((t,l) => t + (Number(l.remaining)||0) * (Number(l.unitCost)||0), 0);
   const already = (state.journalEntries||[]).some(j => j.source === 'opening_balance' && !j.voided);
+  const lockUntil = state.settings?.periodLockUntil;
 
   // แถวตั้งยอด: asset = ฝั่ง DR, liability/equity = ฝั่ง CR (ตาม normal side)
   const PRESET = [
@@ -47882,6 +47885,10 @@ function OpeningBalanceModal({ state, dispatch, user, onClose }){
 
   const submit = () => {
     if(busy) return;
+    // 🆕 UAT-fix: เช็ค period-lock เอง (ADD_JE จะ drop เงียบถ้างวดปิด แต่ modal โชว์สำเร็จ)
+    if(lockUntil && String(obDate) < String(lockUntil)){
+      alert(`📅 วันที่ยกมา ${obDate} อยู่ในงวดที่ปิดแล้ว (≤ ${lockUntil}) — เปลี่ยนวันที่ หรือปลด period lock ก่อน`); return;
+    }
     if(already && !window.confirm('⚠️ มี JE ยอดยกมาอยู่แล้ว — ตั้งซ้ำจะทำให้ยอดเบิ้ล\nยืนยันตั้งเพิ่มอีกใบ?')) return;
     const lines = [];
     const _line = (code, dr, cr) => { const a = acc(code);
@@ -47894,10 +47901,8 @@ function OpeningBalanceModal({ state, dispatch, user, onClose }){
     if(Math.abs(td-tc) > 0.01){ alert('JE ไม่สมดุล (ระบบผิดพลาด) — ยกเลิก'); return; }
     if(!window.confirm(`ตั้งยอดยกมา ณ ${obDate}\n\nรวมเดบิต ${money(td)} = เครดิต ${money(tc)}\nส่วนต่างเข้า 3900 (ยอดยกมา): ${money(Math.abs(diff))}\n\nยืนยันบันทึก JE?`)) return;
     setBusy(true);
-    const yymm = obDate.slice(2,7).replace('-','');
-    const seq = (state.seq?.je||0) + 1;
     dispatch({ type:'ADD_JE', data:{
-      id:genId('je'), jeNumber:`JE-OB-${yymm}-${String(seq).padStart(3,'0')}`, date:obDate,
+      id:genId('je'), date:obDate,   // jeNumber ให้ ADD_JE gen เอง (source='opening_balance' คือตัวระบุ)
       description:'ตั้งยอดยกมา (Opening Balances)', source:'opening_balance', sourceId:'opening',
       refType:'opening', status:'posted', postedBy:user.username, createdBy:user.username,
       createdAt:Date.now(), postedAt:Date.now(), totalDebit:td, totalCredit:tc, lines,
@@ -47909,8 +47914,8 @@ function OpeningBalanceModal({ state, dispatch, user, onClose }){
   return h(Modal, { isOpen:true, title:'⚖️ ตั้งยอดยกมา (Opening Balances)', onClose, size:'xl' },
     h('div', { className:'space-y-4' },
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-800' },
-        'ใส่ยอดคงเหลือ ณ วันเริ่มระบบของแต่ละบัญชี — ระบบสร้าง JE ก้อนเดียว ส่วนต่างเข้า "ยอดยกมา (3900)" อัตโนมัติเพื่อให้งบดุลสมดุล · ',
-        h('b', null, 'สินค้าคงเหลือ/เจ้าหนี้รายตัว ให้ตั้ง subledger แยก (นำเข้า Opening Stock / AP)')),
+        h('div', null, 'ใส่ยอด', h('b',null,'รวม'), 'แต่ละบัญชี ณ วันเริ่มระบบ (ระดับ GL/งบดุล) — ระบบสร้าง JE ก้อนเดียว ส่วนต่างเข้า "3900 ยอดยกมา" อัตโนมัติให้สมดุล'),
+        h('div', { className:'mt-1' }, '⚠️ ', h('b',null,'ต้องใส่ช่อง 1300 (สินค้าคงเหลือ) ด้วย'), ' = ยอดรวมมูลค่าสต๊อกตั้งต้น (ดูตัวเลขแนะนำด้านล่าง) · ', 'รายละเอียดรายตัว (สต๊อกแต่ละ SKU / เจ้าหนี้แต่ละใบ) นำเข้าแยกที่เมนูนำเข้า — ', h('b',null,'ยอดรวมทั้งสองทางต้องตรงกัน'))),
       already && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-800' },
         '⚠️ มี JE ยอดยกมาในระบบแล้ว — ตั้งซ้ำจะเบิ้ลยอด'),
       h('div', { className:'grid grid-cols-2 gap-3' },
