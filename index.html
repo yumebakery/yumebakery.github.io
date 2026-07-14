@@ -3423,7 +3423,7 @@ const { STORAGE_KEY, genId, getToday, LZ } = global.ERP;
 
 // ==================== INITIAL STATE ====================
 const INIT_STATE = {
-  version: 26,
+  version: 27,
   currentUser: null,
   currentBranch: 'b1',
 
@@ -4083,6 +4083,7 @@ const INIT_STATE = {
     { id:'2130', code:'2130', name:'ภาษีหัก ณ ที่จ่ายค้างนำส่ง (WHT payable)', type:'liability', normal:'credit' },
     { id:'3000', code:'3000', name:'ทุนจดทะเบียน', type:'equity', normal:'credit' },
     { id:'3100', code:'3100', name:'กำไรสะสม', type:'equity', normal:'credit' },
+    { id:'3900', code:'3900', name:'ยอดยกมา (Opening Balance Equity)', type:'equity', normal:'credit' },  // 🆕 A3: บัญชีพักตั้งยอดยกมา
     { id:'5410', code:'5410', name:'ค่าเสื่อมราคา', type:'expense', normal:'debit' },
     { id:'1659', code:'1659', name:'ค่าเสื่อมราคาสะสม (contra-asset)', type:'asset', normal:'credit' },
     // 🆕 B1 (council): บัญชีผลต่างสต๊อก/ของเสีย — ให้ปรับ/นับ/ตัดเสีย เข้า GL ได้
@@ -8074,6 +8075,13 @@ function _migrateStateOnce(s){
     }
     return { ...s, version: 26, chartOfAccounts: coa, approvalRules: rules };
   }
+  // 🆕 v26 → v27: A3 — บัญชี "ยอดยกมา (Opening Balance Equity)" 3900 สำหรับตั้งยอดเปิด
+  if(s.version === 26){
+    const coa = [...(s.chartOfAccounts||[])];
+    if(!coa.find(a => a.code === '3900'))
+      coa.push({ id:'3900', code:'3900', name:'ยอดยกมา (Opening Balance Equity)', type:'equity', normal:'credit' });
+    return { ...s, version: 27, chartOfAccounts: coa };
+  }
   // 🆕 v20 → v21: Wrong Transfer COA — เพิ่ม account 1180 + 5395
   if(s.version === 20){
     const coa = [...(s.chartOfAccounts||[])];
@@ -8126,7 +8134,7 @@ function _migrateStateOnce(s){
     return { ...s, version: 17, supplierMemos: s.supplierMemos || [], suppliers, chartOfAccounts: coa };
   }
   // 🆕 v22+ guard — กัน fall-through ไป v1 migrations ที่จะ corrupt state รุ่นใหม่
-  if((s.version || 0) >= 26) return s;
+  if((s.version || 0) >= 27) return s;
   // version < 9 → backfill user.position + add new approval rules (request_po_reopen) + asset categories
 
   // schema upgrade — รองรับ v1 → v3 / v2 → v3
@@ -11247,8 +11255,9 @@ function ReceiveFromTOModal({ to, state, dispatch, user, onClose }){
           shortLines.forEach(x => {
             const item = state.items.find(it => it.id === x.itemId);
             const desc = `ของขาดหายระหว่างขนส่ง: ${item?.name||x.itemId} ${fmtNum(x.shortOrder)} ${x.displayUnit||x.unit||''}`;
-            jeLines.push({ account: lossAccCode, debit: x.shortCost, credit: 0, description: desc });
-            if(invAccCode) jeLines.push({ account: invAccCode, debit: 0, credit: x.shortCost, description: desc });
+            // 🆕 A5: viewer อ่าน accountId/accountCode — เดิมมีแค่ account → JE ของขาดหายหายจากทุกงบ (P&L/TB/BS/GL)
+            jeLines.push({ accountId: lossAccCode, accountCode: lossAccCode, account: lossAccCode, debit: x.shortCost, credit: 0, description: desc });
+            if(invAccCode) jeLines.push({ accountId: invAccCode, accountCode: invAccCode, account: invAccCode, debit: 0, credit: x.shortCost, description: desc });
           });
           const totalDebit  = jeLines.reduce((s,l) => s + (l.debit||0), 0);
           const totalCredit = jeLines.reduce((s,l) => s + (l.credit||0), 0);
@@ -12741,7 +12750,10 @@ function AdjustTab({ state, dispatch, user }){
     const item = items.find(i => i.id === r.itemId);
     const reasonObj = ADJUST_REASONS.find(x => x.v === r.reason);
     const signed = reasonObj?.dir === 'out' ? -Math.abs(Number(r.delta)||0) : Math.abs(Number(r.delta)||0);
-    const cur = item?.stockByBranch?.[branchId] || 0;
+    // 🆕 A5: shape-safe — ที่ b1/สาขา multi-warehouse stockByBranch[bid] = {_total,byLoc} ไม่ใช่ number
+    //   เดิมอ่านดิบ → cur เป็น object → newQty ที่ส่ง approval = NaN → executor คำนวณ delta = -curQty → ยอดถูกล้างเป็น 0
+    const _raw = item?.stockByBranch?.[branchId];
+    const cur = (_raw && typeof _raw === 'object') ? Number(_raw._total||0) : (Number(_raw)||0);
     return { ...r, item, reasonObj, signed, cur, result: cur + signed };
   });
   const validRows = rowsWithCalc.filter(r => r.item && r.signed !== 0);
@@ -34257,6 +34269,14 @@ function NewPOModal({ state, dispatch, user, onClose }){
     const assetNoCat = valid.filter(l => l.isAsset && !l.assetCategoryId);
     if(assetNoCat.length > 0) return alert(`มี ${assetNoCat.length} รายการที่ติ๊ก "💎 เป็นทรัพย์สิน" แต่ยังไม่เลือกหมวดทรัพย์สิน — เลือกหมวดก่อนบันทึก`);
 
+    // 🆕 A4: กัน PO ราคา 0 ผ่านเงียบ (สินค้านำเข้า costPrice=0 → ราคา default 0 → ต้นทุน/3-way match เพี้ยน)
+    //   ของแถม (isFreebie) ราคา 0 ตั้งใจ ยกเว้น · ที่เหลือราคา ≤0 ต้องยืนยันก่อน
+    const zeroPriced = valid.filter(l => !l.isFreebie && !((Number(l.unitPrice)||0) > 0));
+    if(zeroPriced.length > 0){
+      const names = zeroPriced.map(l => (state.items.find(i=>i.id===l.itemId)?.name) || l.itemId).slice(0,6).join(', ');
+      if(!window.confirm(`⚠️ มี ${zeroPriced.length} รายการราคา 0 บาท:\n${names}${zeroPriced.length>6?' …':''}\n\nราคา 0 จะทำให้ต้นทุนสินค้า/ยอด PO ผิด และปิดการตรวจ 3-way match\nถ้าตั้งใจให้เป็น "ของแถม" → ติ๊ก 🎁 ของแถม แทน\n\nยืนยันบันทึก PO ราคา 0 ต่อ?`)) return;
+    }
+
     // Duplicate check — PO supplier เดียวกันที่ยังไม่รับของครบ + มี item ซ้ำ
     const openPOs = (state.pos||[]).filter(p =>
       p.supplierId === supplierId &&
@@ -46749,9 +46769,14 @@ function VATReport({ state }){
   const invs = useMemo(() => (state.invoices||[]).filter(i =>
     !i.voided && inDateRange(i.invDate, dr.startDate, dr.endDate) && (i.vat||0) > 0),
     [state.invoices, dr.startDate, dr.endDate]);
-  const ars = useMemo(() => (state.arInvoices||[]).filter(i =>
-    !i.voided && inDateRange(i.arDate, dr.startDate, dr.endDate) && (i.vat||0) > 0),
-    [state.arInvoices, dr.startDate, dr.endDate]);
+  // 🆕 A1: ภ.พ.30 ฝั่งขาย — อ่านจากเอกสารขายจริง (salesInvoices เต็มรูป + salesLight สาขา)
+  //   เดิมอ่าน state.arInvoices ซึ่งเป็น dead store (ไม่มี reducer ไหนเขียน) → VAT ขาย = 0 เสมอ = ยื่นภาษีขาด
+  const salesInv = useMemo(() => (state.salesInvoices||[]).filter(i =>
+    !i.voided && inDateRange(i.invDate, dr.startDate, dr.endDate) && (i.vat||0) > 0),
+    [state.salesInvoices, dr.startDate, dr.endDate]);
+  const salesLt = useMemo(() => (state.salesLight||[]).filter(i =>
+    !i.voided && inDateRange(i.date, dr.startDate, dr.endDate) && (i.vat||0) > 0),
+    [state.salesLight, dr.startDate, dr.endDate]);
 
   // Group by YYYY-MM
   // ฐาน VAT = นับเฉพาะส่วนที่มี VAT จริง (vatRate > 0)
@@ -46767,14 +46792,21 @@ function VATReport({ state }){
     months[ym].inBase += base;
     months[ym].inVat += i.vat||0;
   }
-  for(const a of ars){
-    const ym = (a.arDate||'').slice(0,7);
+  for(const si of salesInv){
+    const ym = (si.invDate||'').slice(0,7);
     if(!months[ym]) months[ym] = { ym, inBase:0, inVat:0, outBase:0, outVat:0 };
-    const vRate = Number(a.vatRate)||0;
-    const base = (a.vatableBase != null) ? Number(a.vatableBase)
-               : (vRate > 0 ? Number(a.subtotal||0) : 0);
-    months[ym].outBase += base;
-    months[ym].outVat += a.vat||0;
+    // ฐาน VAT ขาย = ผลรวม ex-VAT ของบรรทัดที่มี VAT จริง (บิลผสม 0%/7% นับเฉพาะส่วน 7%) · fallback subtotal
+    const vbase = (si.lines && si.lines.length)
+      ? si.lines.reduce((t,l) => t + ((Number(l.lineVat)||0) > 0 ? (Number(l.lineEx)||0) : 0), 0)
+      : Number(si.subtotal||0);
+    months[ym].outBase += vbase;
+    months[ym].outVat += Number(si.vat)||0;
+  }
+  for(const sl of salesLt){
+    const ym = (sl.date||'').slice(0,7);
+    if(!months[ym]) months[ym] = { ym, inBase:0, inVat:0, outBase:0, outVat:0 };
+    months[ym].outBase += Number(sl.subtotal)||0;   // sales-light = ราคารวม VAT → subtotal คือฐานที่ถอดแล้ว
+    months[ym].outVat += Number(sl.vat)||0;
   }
   // 🆕 VAT ขายจากการจำหน่ายทรัพย์สิน — JE source='asset_disposal' ไม่มี arInvoice คู่ ต้อง scan JE เอง (ไม่งั้น ภ.พ.30 ยื่นขาด)
   let dispCount = 0;
@@ -46810,7 +46842,7 @@ function VATReport({ state }){
     ),
     h('div', { className:'grid grid-cols-3 gap-3 mb-3' },
       h(KPICard, { label:'VAT ซื้อ', value:fmtCur(totalInVat), sub:`${invs.length} INV`, color:'blue', icon:'📥' }),
-      h(KPICard, { label:'VAT ขาย', value:fmtCur(totalOutVat), sub:`${ars.length} AR${dispCount?` + ${dispCount} จำหน่ายทรัพย์สิน`:''}`, color:'green', icon:'📤' }),
+      h(KPICard, { label:'VAT ขาย', value:fmtCur(totalOutVat), sub:`${salesInv.length} ใบกำกับ + ${salesLt.length} ขายสาขา${dispCount?` + ${dispCount} จำหน่าย`:''}`, color:'green', icon:'📤' }),
       h(KPICard, { label: net >= 0 ? 'VAT ต้องส่งกรมฯ' : 'VAT ได้คืน',
         value:fmtCur(Math.abs(net)), color: net >= 0 ? 'red' : 'purple', icon:'🧾' }),
     ),
@@ -47416,8 +47448,9 @@ function ACDashboard({ state, user, setTab }){
 
   const totalAP = (state.invoices||[]).filter(i => !i.voided).reduce((s,i) =>
     s + Math.max(0, (i.netPayable||0) - (i.paidAmount||0)), 0);
-  const totalAR = (state.arInvoices||[]).reduce((s,i) =>
-    s + Math.max(0, (i.total||0) - (i.paidAmount||0)), 0);
+  // 🆕 A1: AR จาก salesInvoices จริง (เดิม arInvoices = dead store → AR โชว์ 0)
+  const totalAR = (state.salesInvoices||[]).filter(i => !i.voided).reduce((s,i) =>
+    s + Math.max(0, (Number(i.netTotal)||Number(i.total)||0) - (Number(i.paidAmount)||0)), 0);
   const overdueAP = (state.invoices||[]).filter(i =>
     !i.voided && i.paymentStatus !== 'paid' && i.dueDate < today).length;
 
@@ -47684,6 +47717,7 @@ function GLByAccountTab({ state, dispatch, user }){
 function JETab({ state, dispatch, user }){
   const [showNew, setShowNew] = useState(false);
   const [showAuto, setShowAuto] = useState(false);
+  const [showOpening, setShowOpening] = useState(false);   // 🆕 A3: ตั้งยอดยกมา
   const [detail, setDetail] = useState(null);
   const [filter, setFilter] = useState('all');
   const dr = useDateRange(30);
@@ -47717,6 +47751,7 @@ function JETab({ state, dispatch, user }){
         )
       ),
       canCreate && h('div', { className:'flex gap-2' },
+        h(Button, { variant:'warning', onClick:()=>setShowOpening(true) }, '⚖️ ตั้งยอดยกมา'),
         h(Button, { variant:'secondary', onClick:()=>setShowAuto(true) }, '⚡ Auto-post จาก INV/Pay'),
         h(Button, { variant:'primary', onClick:()=>setShowNew(true) }, '➕ JE Manual'),
       )
@@ -47806,8 +47841,107 @@ function JETab({ state, dispatch, user }){
 
     showNew && h(NewJEModal, { state, dispatch, user, onClose:()=>setShowNew(false) }),
     showAuto && h(AutoPostModal, { state, dispatch, user, onClose:()=>setShowAuto(false) }),
+    showOpening && h(OpeningBalanceModal, { state, dispatch, user, onClose:()=>setShowOpening(false) }),
     detail && h(JEViewModal, { je:detail, state, onClose:()=>setDetail(null) })
   );
+}
+
+// ================================================================
+// ⚖️ A3 — ตั้งยอดยกมา (Opening Balances) → JE ก้อนเดียว balance ด้วย 3900
+//   ตั้งยอดเปิดของ เงินสด/ธนาคาร/ลูกหนี้/สินค้าคงเหลือ/ทรัพย์สิน + เจ้าหนี้/ทุน/กำไรสะสม
+//   ส่วนต่างเข้า 3900 (ยอดยกมา) อัตโนมัติ → JE สมดุลเสมอ · subledger สต๊อก/AP ตั้งแยก (import)
+// ================================================================
+function OpeningBalanceModal({ state, dispatch, user, onClose }){
+  const coa = state.chartOfAccounts || [];
+  const acc = (code) => coa.find(a => a.code === code);
+  // มูลค่าสินค้าคงเหลือจาก FIFO layers (แนะนำยอด 1300)
+  const invValue = (state.fifoLayers||[]).reduce((t,l) => t + (Number(l.remaining)||0) * (Number(l.unitCost)||0), 0);
+  const already = (state.journalEntries||[]).some(j => j.source === 'opening_balance' && !j.voided);
+
+  // แถวตั้งยอด: asset = ฝั่ง DR, liability/equity = ฝั่ง CR (ตาม normal side)
+  const PRESET = [
+    { code:'1110', hint:0 }, { code:'1120', hint:0 }, { code:'1150', hint:0 },
+    { code:'1300', hint:Number(invValue.toFixed(2)) }, { code:'1600', hint:0 },
+    { code:'2100', hint:0 }, { code:'2130', hint:0 }, { code:'2200', hint:0 },
+    { code:'3000', hint:0 }, { code:'3100', hint:0 },
+  ].filter(p => acc(p.code));
+  const [vals, setVals] = useState(() => Object.fromEntries(PRESET.map(p => [p.code, p.hint ? String(p.hint) : ''])));
+  const [obDate, setObDate] = useState(getToday());
+  const [busy, setBusy] = useState(false);
+
+  const money = n => (Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  let totDr = 0, totCr = 0;
+  const rows = PRESET.map(p => {
+    const a = acc(p.code); const amt = Number(vals[p.code])||0;
+    const side = a.normal === 'debit' ? 'dr' : 'cr';
+    if(side === 'dr') totDr += amt; else totCr += amt;
+    return { code:p.code, name:a.name, side, amt };
+  });
+  const diff = +(totDr - totCr).toFixed(2);   // + = ต้อง CR 3900 เพิ่ม / − = ต้อง DR 3900
+  const obeAcc = acc('3900');
+
+  const submit = () => {
+    if(busy) return;
+    if(already && !window.confirm('⚠️ มี JE ยอดยกมาอยู่แล้ว — ตั้งซ้ำจะทำให้ยอดเบิ้ล\nยืนยันตั้งเพิ่มอีกใบ?')) return;
+    const lines = [];
+    const _line = (code, dr, cr) => { const a = acc(code);
+      lines.push({ accountId:a.id, accountCode:a.code, account:a.code, accountName:a.name, debit:+(dr||0), credit:+(cr||0), description:'ยอดยกมา' }); };
+    rows.forEach(r => { if(r.amt > 0){ if(r.side==='dr') _line(r.code, r.amt, 0); else _line(r.code, 0, r.amt); } });
+    if(lines.length === 0){ alert('ยังไม่ได้ใส่ยอดใดๆ'); return; }
+    // balancer 3900
+    if(Math.abs(diff) > 0.001){ if(diff > 0) _line('3900', 0, diff); else _line('3900', -diff, 0); }
+    const td = +lines.reduce((s,l)=>s+l.debit,0).toFixed(2), tc = +lines.reduce((s,l)=>s+l.credit,0).toFixed(2);
+    if(Math.abs(td-tc) > 0.01){ alert('JE ไม่สมดุล (ระบบผิดพลาด) — ยกเลิก'); return; }
+    if(!window.confirm(`ตั้งยอดยกมา ณ ${obDate}\n\nรวมเดบิต ${money(td)} = เครดิต ${money(tc)}\nส่วนต่างเข้า 3900 (ยอดยกมา): ${money(Math.abs(diff))}\n\nยืนยันบันทึก JE?`)) return;
+    setBusy(true);
+    const yymm = obDate.slice(2,7).replace('-','');
+    const seq = (state.seq?.je||0) + 1;
+    dispatch({ type:'ADD_JE', data:{
+      id:genId('je'), jeNumber:`JE-OB-${yymm}-${String(seq).padStart(3,'0')}`, date:obDate,
+      description:'ตั้งยอดยกมา (Opening Balances)', source:'opening_balance', sourceId:'opening',
+      refType:'opening', status:'posted', postedBy:user.username, createdBy:user.username,
+      createdAt:Date.now(), postedAt:Date.now(), totalDebit:td, totalCredit:tc, lines,
+    }});
+    alert(`✅ ตั้งยอดยกมาเรียบร้อย · JE รวม ${money(td)}`);
+    onClose();
+  };
+
+  return h(Modal, { isOpen:true, title:'⚖️ ตั้งยอดยกมา (Opening Balances)', onClose, size:'xl' },
+    h('div', { className:'space-y-4' },
+      h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-800' },
+        'ใส่ยอดคงเหลือ ณ วันเริ่มระบบของแต่ละบัญชี — ระบบสร้าง JE ก้อนเดียว ส่วนต่างเข้า "ยอดยกมา (3900)" อัตโนมัติเพื่อให้งบดุลสมดุล · ',
+        h('b', null, 'สินค้าคงเหลือ/เจ้าหนี้รายตัว ให้ตั้ง subledger แยก (นำเข้า Opening Stock / AP)')),
+      already && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-800' },
+        '⚠️ มี JE ยอดยกมาในระบบแล้ว — ตั้งซ้ำจะเบิ้ลยอด'),
+      h('div', { className:'grid grid-cols-2 gap-3' },
+        h(Field, { label:'วันที่ยกมา' },
+          h(BEDateInput, { value:obDate, onChange:setObDate, className:'w-full px-3 py-2 border-2 rounded text-sm' })),
+        h('div', { className:'text-xs text-gray-500 self-end pb-2' },
+          'มูลค่าสินค้าคงเหลือจากสต๊อก (แนะนำใส่ช่อง 1300): ', h('b', null, money(invValue)))),
+      h('div', { className:'border rounded overflow-hidden' },
+        h('table', { className:'w-full text-sm' },
+          h('thead', null, h('tr',{className:'bg-gray-50 text-gray-500 text-xs'},
+            h('th',{className:'text-left px-3 py-1'},'บัญชี'),
+            h('th',{className:'text-center px-3 py-1'},'ฝั่ง'),
+            h('th',{className:'text-right px-3 py-1'},'ยอดยกมา'))),
+          h('tbody', null,
+            rows.map(r => h('tr',{key:r.code,className:'border-t'},
+              h('td',{className:'px-3 py-1.5'}, r.code, ' ', r.name),
+              h('td',{className:'text-center px-3 py-1.5 text-xs '+(r.side==='dr'?'text-blue-600':'text-green-600')}, r.side==='dr'?'เดบิต':'เครดิต'),
+              h('td',{className:'px-3 py-1'},
+                h('input',{ type:'number', min:0, value:vals[r.code]||'', placeholder:'0.00',
+                  onChange:e=>setVals(v=>({...v,[r.code]:e.target.value})),
+                  className:'w-32 px-2 py-1 border rounded text-right text-sm' }))))),
+          h('tfoot', null, h('tr',{className:'border-t-2 bg-gray-50 font-semibold text-xs'},
+            h('td',{className:'px-3 py-1.5'},'รวม'),
+            h('td',{className:'text-center px-3 py-1.5'}, 'DR ', money(totDr), ' / CR ', money(totCr)),
+            h('td',{className:'text-right px-3 py-1.5 '+(Math.abs(diff)<0.01?'text-gray-500':'text-amber-700')},
+              Math.abs(diff)<0.01 ? '✓ สมดุล' : `→ 3900: ${money(Math.abs(diff))}`)))),),
+      obeAcc && Math.abs(diff) > 0.01 && h('div', { className:'text-xs text-gray-500' },
+        `ส่วนต่าง ${money(Math.abs(diff))} จะลง "3900 ยอดยกมา" (${diff>0?'เครดิต':'เดบิต'}) — ถ้ายอดถูกครบ ควรเท่าทุน+กำไรสะสมจริง`),
+      h('div', { className:'flex gap-2 pt-3 border-t' },
+        h(Button, { variant:'primary', onClick:submit, disabled:busy }, busy?'กำลังบันทึก...':'⚖️ บันทึกยอดยกมา'),
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'))));
 }
 
 function NewJEModal({ state, dispatch, user, onClose }){
@@ -55396,6 +55530,7 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
     const headers = parseCSVLine(lines[0]);
     const parsed = [];
     const errs = [];
+    if(csvHasMojibake(text)) errs.push('⚠️ ไฟล์อาจไม่ใช่ UTF-8 (ภาษาไทยเพี้ยน) — เปิดใน Excel แล้ว Save As → CSV UTF-8 ก่อนนำเข้า');
     for(let i=1; i<lines.length; i++){
       if(!lines[i].trim()) continue;
       const cells = parseCSVLine(lines[i]);
@@ -55419,10 +55554,10 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         type: typeId || 'material',
         issueUnit: obj.issueUnit || 'ชิ้น',
         units: [{ name: obj.issueUnit||'ชิ้น', toBase:1 }],
-        costPrice: Number(obj.costPrice)||0,
-        salePrice: Number(obj.salePrice)||0,
-        minStock: Number(obj.minStock)||0,
-        maxStock: Number(obj.maxStock)||0,
+        costPrice: csvNum(obj.costPrice),   // 🆕 A6: ตัด comma/฿ ก่อน parse
+        salePrice: csvNum(obj.salePrice),
+        minStock: csvNum(obj.minStock),
+        maxStock: csvNum(obj.maxStock),
         tags: (obj.tags||'').split(/[,;]/).map(t=>t.trim()).filter(Boolean),
         active: true,
         stockByBranch: Object.fromEntries(state.branches.map(b => [b.id, 0])),
@@ -56327,6 +56462,17 @@ function QuickAddUnitPreset({ onSave, onClose }){
 // ================================================================
 // CSV LINE PARSER (handles quoted strings with commas)
 // ================================================================
+// 🆕 A6: parse เลขจาก CSV ไทย/Excel — ตัด thousand-separator (,) ช่องว่าง สัญลักษณ์เงิน ก่อน Number
+//   (กัน "1,234.50" quoted → Number()=NaN → 0 เงียบ · จุดตายของ opening balance/ราคาทุน)
+function csvNum(v){
+  if(v == null || v === '') return 0;
+  const s = String(v).replace(/[,\s฿บาท]/g, '');
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+// 🆕 A6: ไฟล์ไม่ใช่ UTF-8 (Excel ไทยเซฟ Windows-874/TIS-620) → อ่านผ่าน UTF-8 เจอ replacement char �
+function csvHasMojibake(text){ return typeof text === 'string' && text.indexOf('�') >= 0; }
+
 function parseCSVLine(line){
   const out = [];
   let cur = '', inQ = false;
@@ -56763,6 +56909,7 @@ function ImportCSVTab({ state, dispatch }){
     const headers = parseCSVLine(lines[0]).map(h => h.trim());
     const rows = [];
     const errors = [];
+    if(csvHasMojibake(text)) errors.push('⚠️ ไฟล์อาจไม่ใช่ UTF-8 (ภาษาไทยเพี้ยน) — Save As → CSV UTF-8 ก่อนนำเข้า');
     for(let i=1; i<lines.length; i++){
       const cells = parseCSVLine(lines[i]);
       const row = {};
@@ -56793,8 +56940,8 @@ function ImportCSVTab({ state, dispatch }){
       for(const row of preview.rows){
         const item = (state.items||[]).find(i => i.code === row.itemCode);
         if(!item){ console.warn('item not found:', row.itemCode); continue; }
-        const qty = Number(row.qty)||0;
-        const cost = Number(row.unitCost)||(item.costPrice||0);
+        const qty = csvNum(row.qty);   // 🆕 A6: ตัด comma ก่อน parse
+        const cost = row.unitCost ? csvNum(row.unitCost) : (item.costPrice||0);
         // 🆕 GL-4: ใช้ reducer เดียว (atomic + shape-safe สำหรับ multi-warehouse) แทน 3 dispatch
         dispatch({ type:'ADD_OPENING_STOCK', data:{
           itemId:item.id, branch:row.branchId, qty, unitCost:cost }});
@@ -59846,19 +59993,19 @@ function calcMonthKPI(state, period){
     return s + Math.max(0, cost - dep);
   }, 0);
 
-  // 5. AR — ลูกหนี้ (ถ้ามี)
-  const arOpen = (state.arInvoices||[]).filter(i =>
+  // 5. AR — ลูกหนี้ (จาก salesInvoices จริง · เดิม arInvoices = dead store → 0)
+  const arOpen = (state.salesInvoices||[]).filter(i =>
     !i.voided && upToMonth(i.invDate || i.createdDate, period)).map(i => {
     const paid = Number(i.paidAmount)||0;
-    return Math.max(0, (Number(i.totalAmount)||Number(i.netPayable)||0) - paid);
+    return Math.max(0, (Number(i.netTotal)||Number(i.total)||0) - paid);
   }).reduce((s,v) => s+v, 0);
 
   // 6. Sales เดือนนี้
   const salesLight = (state.salesLight||[]).filter(s => inMonth(s.date, period))
     .reduce((s,x) => s + (Number(x.totalRevenue)||0), 0);
-  const salesFull = (state.salesInvoices||state.arInvoices||[])
+  const salesFull = (state.salesInvoices||[])
     .filter(i => !i.voided && inMonth(i.invDate || i.createdDate, period))
-    .reduce((s,i) => s + (Number(i.totalAmount)||Number(i.netPayable)||0), 0);
+    .reduce((s,i) => s + (Number(i.total)||Number(i.netTotal)||0), 0);
   const salesTotal = salesLight + salesFull;
 
   // 7. Expenses เดือนนี้ (Direct INV + ค่าเสื่อม + อื่นๆ)
