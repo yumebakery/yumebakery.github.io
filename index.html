@@ -38143,13 +38143,52 @@ function autoPostINV(inv, state, dispatch, user){
 
   const lines = [];
   if(inv.amount > 0){
+    // 🆕 A9: แยกส่วนที่เป็น "ทรัพย์สิน" (GR line.isAsset) → DR บัญชีทรัพย์สินตามหมวด (1610/1620/1635/1660 → fallback 1600)
+    //   เดิมซื้อทรัพย์สินถูกลง 1300 (สินค้าคงเหลือ)/ค่าใช้จ่าย → PP&E ไม่เคยขึ้นงบ · ค่าเสื่อมคำนวณจากทะเบียนทรัพย์สินแยก
+    const _grIds = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+    const _grLines = _grIds.flatMap(gid => ((state.grs||[]).find(g => g.id === gid)?.lines) || []);
+    const assetByAcc = {};      // accountCode → { acc, amount(exVat) }
+    let assetTotalRaw = 0;
+    // 🆕 A9 (audit UAT): เพดาน capitalize — ต่ำกว่านี้ปล่อยเป็นค่าใช้จ่าย (default 0 = capitalize ทุกชิ้นตามเดิม)
+    const _capThreshold = Number(state.settings?.capitalizeThreshold) || 0;
+    for(const l of _grLines){
+      if(!l.isAsset) continue;
+      const lex = Number(l.lineExVat != null ? l.lineExVat : l.lineTotal) || 0;
+      if(lex <= 0) continue;
+      if(_capThreshold > 0 && lex < _capThreshold) continue;   // ต่ำกว่าเพดาน → ไม่ตั้งเป็นทรัพย์สิน (ตกไป baseAcc)
+      const cat = (state.assetCategories||[]).find(c => c.id === l.assetCategoryId);
+      const code = cat?.code || '1600';
+      const acc = accounts.find(a => a.code === code) || accounts.find(a => a.code === '1600');
+      if(!acc) continue;
+      assetByAcc[acc.code] = assetByAcc[acc.code] || { acc, amount:0 };
+      assetByAcc[acc.code].amount += lex;
+      assetTotalRaw += lex;
+    }
+    // แยกได้ต่อเมื่อยอดทรัพย์สินไม่เกิน inv.amount (กัน JE ไม่บาลานซ์) — ไม่งั้นถอยไปพฤติกรรมเดิม
+    const canSplitAsset = Object.keys(assetByAcc).length > 0 && assetTotalRaw > 0 && assetTotalRaw <= (Number(inv.amount)||0) + 0.01;
+
     // 🆕 B2: direct_expense ที่มี expenseLines ระบุสาขาราย-line → แตก DR ค่าใช้จ่ายต่อสาขา
-    //   (1 ใบมีได้หลายสาขาต่อ line → branchId ต้องอยู่ราย-line ไม่ใช่ header)
-    //   path ปกติ (PI ทั่วไป / ไม่มี expenseLines แตกสาขา) คงเดิม = DR ก้อนเดียว
     const expLines = inv.source === 'direct_expense' && Array.isArray(inv.expenseLines)
       ? inv.expenseLines.filter(l => l.branch && (Number(l.lineTotal)||0) > 0) : [];
     const expBranchTotal = expLines.reduce((s,l) => s + (Number(l.lineTotal)||0), 0);
-    if(expLines.length > 0 && Math.abs(expBranchTotal - inv.amount) < 0.01){
+
+    if(canSplitAsset){
+      // DR บัญชีทรัพย์สินตามหมวด + DR baseAcc (1300/ค่าใช้จ่าย) เฉพาะส่วนที่ไม่ใช่ทรัพย์สิน — รวม = inv.amount เป๊ะ
+      let pushed = 0;
+      for(const code in assetByAcc){
+        const a = assetByAcc[code];
+        const amt = Number(a.amount.toFixed(2));
+        lines.push({ accountId:a.acc.id, accountCode:a.acc.code, accountName:a.acc.name,
+          debit: amt, credit:0, branchId: inv.branch || state.currentBranch,
+          description: 'ทรัพย์สิน: ' + (inv.description||inv.invNumber||'') });
+        pushed += amt;
+      }
+      const nonAsset = Number(((Number(inv.amount)||0) - pushed).toFixed(2));
+      if(nonAsset > 0.005){
+        lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name,
+          debit: nonAsset, credit:0, branchId: inv.branch || state.currentBranch, description: inv.description||'' });
+      }
+    } else if(expLines.length > 0 && Math.abs(expBranchTotal - inv.amount) < 0.01){
       const byBranch = {};
       for(const l of expLines){ byBranch[l.branch] = (byBranch[l.branch]||0) + (Number(l.lineTotal)||0); }
       for(const br in byBranch){
@@ -38158,7 +38197,6 @@ function autoPostINV(inv, state, dispatch, user){
       }
     } else {
       // 🆕 money-path branchId: DR ก้อนเดียว (ไม่มี expenseLines แตกสาขา) — tag branch จาก INV ต้นทาง
-      //   ป้องกันตกไป HQ (b1) → กำไรต่อสาขาเพี้ยน (P&L filter ที่ l.branchId||j.branchId||'b1')
       lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name,
         debit: inv.amount, credit: 0, branchId: inv.branch || state.currentBranch, description: inv.description||'' });
     }
@@ -38866,7 +38904,51 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
   const totalShortAdjust = combinedShortInfo.reduce((s, x) => s + (x.shortAdjustment||0), 0);
   const allLinkedCNs = combinedShortInfo.flatMap(x => x.linkedCNs);
   const totalAmount = selected.reduce((s,g) => s + (g.totalValue||0), 0) + totalShortAdjust;
-  const vat = totalAmount * (Number(vatRate)||0) / 100;
+  // 🆕 A8: VAT per-line ข้าม GR — บิลผสม (ไข่/นม ยกเว้น VAT + ของมี VAT 7%) คิดถูก แทน header rate เดียวทั้งใบ
+  //   คำนวณจาก vatRate × lineTotal ตาม g.priceMode (mirror GRToINVModal) — GR line มีแค่ vatRate+lineTotal ไม่มี lineVat/lineExVat
+  //   GR เก่า/ไม่มี vatRate ราย-line → fallback header rate × totalValue
+  const vatBreakdown = useMemo(() => {
+    let vatTotal = 0, vatableBase = 0, exemptBase = 0, hasLineData = false;
+    for(const g of selected){
+      const gls = g.lines || [];
+      const hasField = gls.length > 0 && gls.some(l => l.vatRate !== undefined);
+      if(hasField){
+        hasLineData = true;
+        const gInc = g.priceMode === 'inclusive';   // inclusive → lineTotal รวม VAT แล้ว ต้องถอดออก
+        for(const l of gls){
+          const vRate = Number(l.vatRate) || 0;
+          const lineAmt = Number(l.lineTotal) || 0;
+          if(vRate > 0){
+            if(gInc){ const exVat = lineAmt * 100 / (100 + vRate); vatableBase += exVat; vatTotal += (lineAmt - exVat); }
+            else { vatableBase += lineAmt; vatTotal += lineAmt * vRate / 100; }
+          } else {
+            exemptBase += lineAmt;   // 0% → ฐานยกเว้น
+          }
+        }
+      } else {
+        const gv = Number(g.totalValue)||0;   // GR เก่า: header rate
+        vatableBase += gv; vatTotal += gv * (Number(vatRate)||0)/100;
+      }
+    }
+    // 🆕 A8: keep_inv_cn — ส่วน short รวมใน totalAmount (บิลเต็มยอด supplier) จึงต้องรวม VAT ด้วย
+    //   ให้ PI สะท้อนใบกำกับเต็ม แล้ว CN (APPLY_CN_AUTO_ON_PI) ค่อย reverse ส่วน short ให้สุทธิถูก · ใช้ cn.vatAmount (priceMode/exempt-safe)
+    if(hasLineData){
+      for(const x of combinedShortInfo){
+        if((x.shortAdjustment||0) > 0){
+          const cnVat = (x.linkedCNs||[]).reduce((s,cn)=>s+(Number(cn.vatAmount)||0),0);
+          vatTotal += cnVat;
+          if(cnVat > 0) vatableBase += x.shortAdjustment; else exemptBase += x.shortAdjustment;
+        }
+      }
+    }
+    return { vatTotal:Number(vatTotal.toFixed(2)), vatableBase:Number(vatableBase.toFixed(2)),
+      exemptBase:Number(exemptBase.toFixed(2)), hasLineData };
+  }, [selected, vatRate, combinedShortInfo]);
+  // ถ้า user override vatRate เป็น 0 ทั้งใบ (บิลยกเว้น VAT ล้วน) → เคารพ 0; ไม่งั้นใช้ per-line
+  const vat = (Number(vatRate)||0) === 0 ? 0
+    : (vatBreakdown.hasLineData ? vatBreakdown.vatTotal : totalAmount * (Number(vatRate)||0) / 100);
+  const vatableBase = (Number(vatRate)||0) === 0 ? 0
+    : (vatBreakdown.hasLineData ? vatBreakdown.vatableBase : totalAmount);
   const wht = totalAmount * (Number(whtRate)||0) / 100;
   const netPayable = totalAmount + vat - wht;
 
@@ -38950,6 +39032,7 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
       } : {}),
       amount: totalAmount,
       vatRate: Number(vatRate), vat,
+      vatableBase,   // 🆕 A8: ฐาน VAT จริง (บิลผสม) — ภ.พ.30 อ่านตัวนี้แทน amount
       whtRate: Number(whtRate), whtAmount: wht,
       creditUsed: creditAmt,
       depositUsed: depositAmt,
@@ -48960,14 +49043,24 @@ function WHTReport({ state }){
   const printWHT = purchaseMod?.printWHTCert;
   const { WHT_CATEGORIES, WHT_SUB5_TYPES } = global.ERP;
 
+  // 🆕 A7: WHT ยื่น ภ.ง.ด.3/53 ตาม "วันจ่ายจริง/วันที่หัก" ไม่ใช่ invDate
+  //   หน้าที่หัก ณ ที่จ่าย เกิดเมื่อจ่ายเงิน → วันหัก = วันออกใบรับรอง (cert.certDate) → วันจ่ายแรก → invDate (fallback)
+  const _firstPayDate = (invId) => {
+    const ds = (state.payments||[]).filter(p => !p.reversed
+        && p.approvalStatus !== 'pending' && p.approvalStatus !== 'rejected'   // 🆕 A7: นับเฉพาะจ่ายจริง (ผ่านอนุมัติ)
+        && (p.invId === invId || p.invoiceId === invId ||
+            p.invoiceIds?.includes(invId) || (p.allocations||[]).some(a => a.invoiceId === invId))
+      ).map(p => p.payDate || p.date).filter(Boolean).sort();
+    return ds[0] || null;
+  };
   // Flatten: each WHT line → one row (for INVs with multi-line WHT)
   const rows = useMemo(() => {
     const result = [];
     const invs = (state.invoices||[])
-      .filter(i => !i.voided && inDateRange(i.invDate, dr.startDate, dr.endDate) && (i.whtAmount||0) > 0)
-      .sort((a,b) => (b.invDate||'').localeCompare(a.invDate||''));
+      .filter(i => !i.voided && (i.whtAmount||0) > 0);   // 🆕 A7: กรองด้วยวันหักราย-line ด้านล่าง (ไม่ pre-filter invDate)
     for(const i of invs){
       const sup = state.suppliers.find(s => s.id === i.supplierId);
+      const firstPay = _firstPayDate(i.id);
       const lines = (i.whtLines && i.whtLines.length > 0) ? i.whtLines
         : (i.whtCategory && (i.whtAmount||0) > 0)
           ? [{ category:i.whtCategory, sub5:i.whtSub5, rate:i.whtRate, base:i.amount, whtAmount:i.whtAmount }]
@@ -48987,6 +49080,10 @@ function WHTReport({ state }){
           // ถ้ามีแต่ cert ที่ voided → skip line นี้ (ออกใบใหม่ไปแล้ว หรือยกเลิกจริง)
           return;
         }
+        // 🆕 A7: เดือนยื่นผูก "วันจ่ายจริง" เป็นหลัก (immutable) → certDate (retro แก้ได้ไม่ให้ override เดือน) → invDate
+        const whtDate = firstPay || cert?.certDate || i.invDate;
+        if(!inDateRange(whtDate, dr.startDate, dr.endDate)) return;
+        const pending = !firstPay && !cert?.certDate;   // ยังไม่จ่ายจริง+ไม่มีวันบนใบรับรอง → ตกไป invDate (ยังไม่ถึงกำหนดยื่น)
         const certNumber = cert?.certNumber || i.whtNumber || '-';
         result.push({
           inv: i, sup, line: l, idx, totalLines: lines.length,
@@ -48996,25 +49093,28 @@ function WHTReport({ state }){
           whtAmount: Number(l.whtAmount)||0,
           form: lineForm,           // per-line form
           certNumber,               // per-line cert number
+          whtDate, pending,         // 🆕 A7
         });
       });
     }
-    return result;
-  }, [state.invoices, state.suppliers, dr.startDate, dr.endDate]);
+    return result.sort((a,b) => (b.whtDate||'').localeCompare(a.whtDate||''));
+  }, [state.invoices, state.suppliers, state.payments, dr.startDate, dr.endDate]);
 
-  const totalWHT = rows.reduce((s,r) => s + r.whtAmount, 0);
-  const totalBase = rows.reduce((s,r) => s + r.base, 0);
-  const uniqueInvs = new Set(rows.map(r => r.inv.id));
+  // 🆕 A7: "ยอดสำหรับยื่น" นับเฉพาะแถวที่หักจริงแล้ว (จ่าย/มีใบรับรอง) — pending (ยังไม่จ่าย) ยังไม่มีภาระนำส่ง กันยื่นเกิน/ซ้ำ
+  const filingRows = rows.filter(r => !r.pending);
+  const totalWHT = filingRows.reduce((s,r) => s + r.whtAmount, 0);
+  const totalBase = filingRows.reduce((s,r) => s + r.base, 0);
+  const uniqueInvs = new Set(filingRows.map(r => r.inv.id));
 
   const doExport = () => {
-    const out = [['#','เลข WH','INV ระบบ','INV Sup','📄 Tax INV','วันที่','Supplier','เลขผู้เสียภาษี','ประเภทเงินได้','ท.ป.4/2528','ฐาน','อัตรา %','WHT','ภ.ง.ด.']];
-    rows.forEach((r, idx) => {
+    const out = [['#','เลข WH','INV ระบบ','INV Sup','📄 Tax INV','วันหัก ณ ที่จ่าย','Supplier','เลขผู้เสียภาษี','ประเภทเงินได้','ท.ป.4/2528','ฐาน','อัตรา %','WHT','ภ.ง.ด.']];
+    filingRows.forEach((r, idx) => {   // 🆕 A7: ยื่นเฉพาะที่หักจริง — ไม่รวม pending
       out.push([idx+1,
         r.certNumber,
         r.inv.invNumber || '',
         r.inv.supInvNumber || '',
         r.inv.supTaxInvNumber || '',
-        r.inv.invDate || '',
+        r.whtDate || r.inv.invDate || '',   // 🆕 A7: วันที่หัก ณ ที่จ่าย (ยื่นตามวันนี้)
         r.sup?.name || r.inv.supplierNameFreeform || '-',
         r.sup?.taxId || '-',
         r.isCustom ? (r.line.customLabel||'อื่นๆ') : (r.cat?.label || '-'),
@@ -49029,15 +49129,21 @@ function WHTReport({ state }){
     exportCSV(`wht-report-${dr.startDate}_${dr.endDate}.csv`, out);
   };
 
+  const pendingCount = rows.filter(r => r.pending).length;
+  const pendingWHT = rows.filter(r => r.pending).reduce((s,r) => s + r.whtAmount, 0);
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
-      h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง INV:' }),
+      h(DateRangeBar, { ...dr, showAll:true, label:'ช่วงวันจ่าย/หัก ณ ที่จ่าย:' }),
+      h('div', { className:'text-[11px] text-gray-500 mt-1' },
+        '🆕 จัดเดือนตาม ', h('b', null, 'วันจ่ายจริง/วันหัก ณ ที่จ่าย'), ' (วันจ่ายแรก → วันบนใบรับรอง → วันที่ INV)',
+        pendingCount > 0 && h('span', { className:'text-amber-600 ml-1' },
+          `· ⚠️ ${pendingCount} บรรทัด (${fmtCur(pendingWHT)}) ยังไม่จ่าย → ยังไม่มีภาระนำส่ง `, h('b', null, 'ไม่นับในยอดยื่น/CSV'), ' (โชว์ตามวันที่ INV ชั่วคราว)')),
     ),
 
     h('div', { className:'grid grid-cols-4 gap-3 mb-4' },
-      h(KPICard, { label:'# บรรทัด WHT', value:rows.length, sub:`${uniqueInvs.size} INV`, color:'blue', icon:'📋' }),
+      h(KPICard, { label:'# บรรทัด WHT', value:filingRows.length, sub:`${uniqueInvs.size} INV (จ่ายแล้ว)`, color:'blue', icon:'📋' }),
       h(KPICard, { label:'ฐานก่อน WHT', value:fmtCur(totalBase), color:'gray', icon:'💰' }),
-      h(KPICard, { label:'WHT รวม', value:fmtCur(totalWHT), sub:'รอนำส่ง', color:'pink', icon:'🧾' }),
+      h(KPICard, { label:'WHT รวม (สำหรับยื่น)', value:fmtCur(totalWHT), sub:'จ่ายแล้ว/หักจริง', color:'pink', icon:'🧾' }),
       h(KPICard, { label:'Suppliers', value:new Set(rows.map(r => r.sup?.id)).size, color:'amber', icon:'👥' }),
     ),
 
