@@ -1948,7 +1948,8 @@ function buildWHTCerts(validLines, defaultForm, opts){
 }
 
 // ==================== COMBOBOX (searchable dropdown) ====================
-function Combobox({ value, onChange, options, placeholder, disabled, className, renderOption, getLabel, getKey }){
+// 🆕 B2: getSearchText → ค้นหาด้วยหลาย field (เช่น supplier: ชื่อ+รหัส+เลขภาษี) · limit → render แค่ N รายการ (กันแลคตอน 1,000+ ตัว)
+function Combobox({ value, onChange, options, placeholder, disabled, className, renderOption, getLabel, getKey, getSearchText, limit }){
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const [hi, setHi] = useState(0);
@@ -2014,10 +2015,15 @@ function Combobox({ value, onChange, options, placeholder, disabled, className, 
 
   const filtered = q
     ? options.filter(o => {
-        const lbl = getLabel ? getLabel(o) : (o.label || o.name || '');
-        return lbl.toLowerCase().includes(q.toLowerCase());
+        // 🆕 B2: ค้นด้วย getSearchText (หลาย field) ถ้ามี ไม่งั้น fallback label
+        const hay = (getSearchText ? getSearchText(o) : (getLabel ? getLabel(o) : (o.label || o.name || ''))) || '';
+        return hay.toLowerCase().includes(q.toLowerCase());
       })
     : options;
+  // 🆕 B2: render แค่ N รายการแรก (default 80) — กัน DOM บวมตอน options 1,000+ ตัว (จริง 1,409 supplier)
+  const _limit = limit || 80;
+  const shown = filtered.length > _limit ? filtered.slice(0, _limit) : filtered;
+  const _more = filtered.length - shown.length;
 
   useEffect(() => { setHi(0); }, [q, open]);
   useEffect(() => {
@@ -2028,11 +2034,11 @@ function Combobox({ value, onChange, options, placeholder, disabled, className, 
 
   const onKeyDown = (e) => {
     if(!open) return;
-    if(e.key === 'ArrowDown'){ e.preventDefault(); setHi(x => Math.min(filtered.length-1, x+1)); }
+    if(e.key === 'ArrowDown'){ e.preventDefault(); setHi(x => Math.min(shown.length-1, x+1)); }
     else if(e.key === 'ArrowUp'){ e.preventDefault(); setHi(x => Math.max(0, x-1)); }
     else if(e.key === 'Enter'){
       e.preventDefault();
-      const opt = filtered[hi];
+      const opt = shown[hi];
       if(opt){
         const k = getKey ? getKey(opt) : (opt.id||opt.v||opt.value);
         onChange(k); setOpen(false);
@@ -2066,7 +2072,7 @@ function Combobox({ value, onChange, options, placeholder, disabled, className, 
       h('div', { ref:listRef, className:'overflow-y-auto max-h-48' },
         filtered.length === 0
           ? h('div', { className:'px-3 py-2 text-xs text-gray-400' }, `ไม่พบ "${q}"`)
-          : filtered.map((o, idx) => {
+          : shown.map((o, idx) => {
               const k = getKey ? getKey(o) : (o.id||o.v||o.value);
               const selected = value === k;
               const highlighted = idx === hi;
@@ -2078,7 +2084,10 @@ function Combobox({ value, onChange, options, placeholder, disabled, className, 
                   selected && 'font-semibold')
               }, renderOption ? renderOption(o) : (getLabel ? getLabel(o) : o.label||o.name||''));
             })
-      )
+      ),
+      // 🆕 B2: บอกว่ายังมีอีก — กระตุ้นให้พิมพ์ค้นหาแทน scroll หมื่นตัว (ภาษาคน ไม่โชว์เลขโปรแกรม)
+      _more > 0 && h('div', { className:'px-3 py-1.5 text-[11px] text-gray-500 border-t bg-gray-50' },
+        `แสดง ${shown.length} รายการแรก · พิมพ์ชื่อ/รหัส/เลขภาษี เพื่อค้นหาตัวที่เหลือ (ทั้งหมด ${filtered.length})`)
     )
   );
 }
@@ -3314,6 +3323,12 @@ Object.assign(global.ERP, {
         if(lastDaily !== today){
           await sb.from('erp_state_snapshots').upsert(Object.assign({ id: 'company:' + today, kind: 'daily' }, row), { onConflict:'id' });
           try { global.localStorage.setItem('erp_v5__lastDailyDate', today); } catch(_d){}
+          // 🆕 B5(ข): prune daily snapshot เก่ากว่า 60 วัน (กัน rows โตไม่จำกัด) — วันละครั้ง เงียบๆ พลาดได้
+          //   ใช้ saved_at bound (robust — ไม่พึ่ง lexical prefix ของ id) + kind='daily' (กัน company:latest หลุด)
+          try {
+            var _cutISO = new Date(Date.now() - 60*24*60*60*1000).toISOString();
+            await sb.from('erp_state_snapshots').delete().eq('kind','daily').lt('saved_at', _cutISO);
+          } catch(_prune){}
         }
       } catch(_daily){}
       return { ok:true };
@@ -7954,13 +7969,29 @@ function deductFIFO(layers, itemId, qty, branch, locId){
 
 // ==================== PERSISTENCE ====================
 let _saveTimer = null;
+// 🆕 B5(ก): safety-valve — ถ้า auditLog ยาวเกิน 15000 (≈หลายเดือน) เก็บแค่ล่าสุด 15000 + marker (tamper-evident)
+//   กัน state blob บวมไม่จำกัด · ใช้ทั้ง cloud-only path และ localStorage path (เดิม cap อยู่ใน localStorage path เท่านั้น
+//   → cloud-only return ก่อนถึง → cap ไม่เคยทำงานเลย = blob โตเรื่อยๆ)
+function _capAuditLogForSave(state){
+  try {
+    if(!(state && state.auditLog && state.auditLog.length > 15000)) return state;
+    const _drop = state.auditLog.length - 15000;
+    try { console.warn('⚠️ auditLog ' + state.auditLog.length + ' รายการ — persist แค่ล่าสุด 15000 (ตัดเก่าสุด ' + _drop + ') กัน blob โต'); } catch(_w){}
+    const _kept = state.auditLog.slice(-15000);
+    const _marker = { id:'al_trunc_'+(((_kept[0]&&_kept[0].ts)||0)).toString(36), ts:((_kept[0]&&_kept[0].ts)||0), type:'audit_truncated', by:'system',
+      note:'✂️ ตัด auditLog เก่าสุด ' + _drop + ' รายการตอน persist (กัน blob เต็ม) — ก่อนตัดมี ' + state.auditLog.length + ' รายการ · ⚠️ รายการก่อนหน้านี้ถูกตัดถาวรบน cloud (แนะนำ export auditLog เป็นระยะถ้าต้องเก็บครบเพื่อ compliance)' };
+    return { ...state, auditLog: [_marker, ..._kept] };
+  } catch(_cap){ return state; }
+}
+
 function saveState(state){
   // ☁️☁️ CLOUD-ONLY (2026-07-03): Supabase = source of truth — ไม่เขียน state ลง localStorage เลย
   //    push ขึ้น cloud แทน (debounce+rev check ใน SBSync) · โหมดปิด → localStorage เดิม 100%
   try {
     if(global.ERP && global.ERP.SBSync && global.ERP.SBSync.isCloudOnly && global.ERP.SBSync.isCloudOnly()){
       if(typeof window !== 'undefined' && window.__erpRestoring) return;   // 🔒 P1-4: กำลังกู้คืน — ห้าม schedule push
-      global.ERP.SBSync.scheduleCloudPush(state, (state.currentUser && state.currentUser.username) || undefined);
+      // 🆕 B5(ก): cap auditLog ก่อน push (เดิมข้ามเพราะ return ก่อนถึง cap ใน localStorage path)
+      global.ERP.SBSync.scheduleCloudPush(_capAuditLogForSave(state), (state.currentUser && state.currentUser.username) || undefined);
       return;
     }
   } catch(_co){}
@@ -7969,20 +8000,8 @@ function saveState(state){
   _saveTimer = setTimeout(() => {
     // 🔒 cloud-restore กำลังเขียน localStorage → ห้าม save ทับจนกว่า reload (กัน race ทับ snapshot ที่เพิ่งกู้)
     try { if(typeof window !== 'undefined' && window.__erpRestoring) return; } catch(_rg){}
-    // 🆕 UAT auditLog safety-valve: ถ้า audit ยาวเกิน 15000 (≈หลายเดือน) → persist แค่ล่าสุด 15000
-    // กัน state บวมชน quota จน R3 block การ save ใหม่ · ไม่ drop เงียบ (warn) · ของเก่า export Excel เก็บแล้ว
-    let _stateToSave = state;
-    try {
-      if(state.auditLog && state.auditLog.length > 15000){
-        const _drop = state.auditLog.length - 15000;
-        try { console.warn('⚠️ auditLog ' + state.auditLog.length + ' รายการ — persist แค่ล่าสุด 15000 (ตัดเก่าสุด ' + _drop + ') กัน quota'); } catch(_w){}
-        // 🆕 UAT (audit-control): ใส่ marker entry ก่อนตัด เพื่อให้ trail เองพิสูจน์ได้ว่า "ช่วงนี้ถูกตัด ไม่ใช่ไม่เคยมี" (tamper-evident)
-        const _kept = state.auditLog.slice(-15000);
-        const _marker = { id:'al_trunc_'+((_kept[0]&&_kept[0].ts)||0).toString(36), ts:((_kept[0]&&_kept[0].ts)||0), type:'audit_truncated', by:'system',
-          note:'✂️ ตัด auditLog เก่าสุด ' + _drop + ' รายการตอน persist (กัน quota เต็ม) — ก่อนตัดมี ' + state.auditLog.length + ' รายการ · ของเก่า export Excel เก็บ' };
-        _stateToSave = { ...state, auditLog: [_marker, ..._kept] };
-      }
-    } catch(_cap){}
+    // 🆕 B5(ก): auditLog safety-valve (ย้ายไป helper _capAuditLogForSave ใช้ร่วม cloud path)
+    const _stateToSave = _capAuditLogForSave(state);
     const json = JSON.stringify(_stateToSave);
     try {
       // บีบอัดก่อนเก็บ → ใส่ได้เกิน 5MB (prefix  = ถูกบีบ)
@@ -9291,6 +9310,42 @@ function GlobalDocSearch({ state, dispatch, user }){
   );
 }
 
+// 🆕 B4: แถบสถานะบันทึกขึ้น cloud — ให้ทุก role (โดยเฉพาะ staff สาขา) เห็นว่างานถูกเซฟขึ้น cloud แล้วหรือยัง
+//   cloud-only: ถ้า network ล้ม จะ retry เงียบๆ ทุก 10 วิ — เดิม staff คีย์ต่อได้เรื่อยๆ โดยไม่รู้ว่ายังไม่เซฟ
+function CloudSaveBadge(){
+  const SB = global.ERP.SBSync;
+  const [st, setSt] = useState(() => (SB && SB.cloudSaveStatus) ? SB.cloudSaveStatus() : null);
+  useEffect(() => {
+    if(!SB || !SB.cloudSaveStatus) return;
+    const t = setInterval(() => { try { setSt(SB.cloudSaveStatus()); } catch(_e){} }, 1500);
+    return () => clearInterval(t);
+  }, []);
+  if(!st || !st.cloudOnly) return null;   // โหมด local — ไม่ต้องโชว์
+  const critical = st.conflict || (st.error && (st.dirty || st.pushing));   // 🆕 B4: สถานะเสี่ยง — โชว์คำเสมอแม้บนมือถือ
+  let icon, text, cls, title;
+  if(st.conflict){
+    icon = '⛔'; text = 'ข้อมูลชนกัน'; cls = 'bg-red-100 text-red-700 border-red-300';
+    title = 'มีเครื่องอื่นบันทึกไปก่อน — โปรดโหลดหน้าใหม่';
+  } else if(st.error && (st.dirty || st.pushing)){
+    icon = '⚠️'; text = 'เซฟไม่ขึ้น—กำลังลองใหม่'; cls = 'bg-red-100 text-red-700 border-red-300 animate-pulse';
+    title = 'บันทึกขึ้น cloud ไม่สำเร็จ (' + (st.error||'network') + ') — ระบบจะลองใหม่ทุก 10 วิ · อย่าปิดแท็บ';
+  } else if(st.pushing){
+    icon = '⏳'; text = 'กำลังบันทึก…'; cls = 'bg-amber-100 text-amber-800 border-amber-300';
+    title = 'กำลังบันทึกขึ้น cloud';
+  } else if(st.dirty){
+    icon = '•'; text = 'รอบันทึก'; cls = 'bg-gray-100 text-gray-600 border-gray-300';
+    title = 'มีการแก้ไขที่ยังไม่ถูกบันทึก (จะบันทึกอัตโนมัติใน ~1.5 วิ)';
+  } else {
+    icon = '☁️'; text = 'บันทึกแล้ว'; cls = 'bg-green-100 text-green-700 border-green-300';
+    const _t = st.lastSaveAt ? new Date(st.lastSaveAt) : null;
+    title = 'บันทึกขึ้น cloud แล้ว' + (_t ? (' เมื่อ ' + _t.toLocaleTimeString('th-TH')) : '');
+  }
+  return h('div', { className: 'flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-medium ' + cls, title },
+    h('span', null, icon),
+    // สถานะเสี่ยง (ชนกัน/เซฟไม่ขึ้น) โชว์คำเสมอ — คนหน้าร้านบนมือถือต้องรู้ว่ายังไม่เซฟ · สถานะปกติซ่อนคำบนจอเล็ก
+    h('span', { className: critical ? 'inline' : 'hidden sm:inline' }, text));
+}
+
 function TopBar({ state, dispatch, user, currentBranch, setActiveTab }){
   const allowedBranches = getAllowedBranches(user, state);
   const canSwitch = allowedBranches.length > 1;
@@ -9328,6 +9383,8 @@ function TopBar({ state, dispatch, user, currentBranch, setActiveTab }){
 
       // Approval bell + User info + logout
       h('div', { className:'flex items-center gap-3' },
+        // 🆕 B4: สถานะบันทึกขึ้น cloud (ทุก role เห็น)
+        h(CloudSaveBadge, null),
         // 🆕 T5: Global search
         h(GlobalDocSearch, { state, dispatch, user }),
         h(ApprovalBell, { state, dispatch, user, onNavigate:setActiveTab }),
@@ -34672,10 +34729,19 @@ function NewPOModal({ state, dispatch, user, onClose }){
               h(global.ERP.Combobox, {
                 value: supplierId,
                 onChange: setSupplierId,
-                options: state.suppliers,
+                // 🆕 B2: กรอง supplier ที่ปิดใช้ออก (เก็บตัวที่ active หรือไม่ได้ตั้ง)
+                options: (state.suppliers||[]).filter(s => s.active !== false),
                 getKey: s => s.id,
-                getLabel: s => s.name,
-                placeholder: '— เลือก — (พิมพ์ค้นหาได้)',
+                // 🆕 B2: ช่องที่เลือกแล้วโชว์เลขภาษี/รหัสกำกับ — ยืนยันตรงใบได้ (กันเลือกผิดชื่อคล้าย)
+                getLabel: s => s.name + ((s.taxId || s.code || s.extCode) ? ' · ' + (s.code || s.extCode || s.taxId) : ''),
+                // 🆕 B2: ค้นด้วย ชื่อ/รหัส/เลขภาษี/ผู้ติดต่อ (1,409 ราย พิมพ์เลขภาษีเจอเลย)
+                getSearchText: s => [s.name, s.taxId, s.code, s.extCode, s.contact].filter(Boolean).join(' '),
+                // แสดงเลขภาษี/รหัส กำกับ กันเลือกผิดในชื่อคล้ายกัน
+                renderOption: s => h('div', null,
+                  h('div', null, s.name),
+                  (s.taxId || s.code || s.extCode) && h('div', { className:'text-[10px] text-gray-400' },
+                    [s.code || s.extCode, s.taxId].filter(Boolean).join(' · '))),
+                placeholder: '— เลือก — (พิมพ์ชื่อ/เลขภาษีค้นหา)',
               })),
             h('button', { type:'button', onClick:()=>setShowAddSup(true), title:'เพิ่ม supplier ใหม่',
               className:'px-2.5 py-2 bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded whitespace-nowrap' }, '➕ ใหม่')),
