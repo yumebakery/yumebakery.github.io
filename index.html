@@ -7465,6 +7465,74 @@ function reducer(s, a){
       };
     }
 
+    // ---------- 🆕 A2 UAT: ยกเลิก POS import (reversal) — คืนสต๊อก FG+วัตถุดิบ + FIFO + void JE (ตัดออกจาก ภ.พ.30) ----------
+    // a.data: { id, by, reason }
+    case 'VOID_POS_IMPORT': {
+      const pi = (s.posImports||[]).find(p => p.id === a.data.id);
+      if(!pi || pi.status === 'voided') return s;
+      let items = s.items;
+      // (1) คืนสต๊อก FG+วัตถุดิบ — negate delta ที่เคยลง (self-contained จาก stockApplied)
+      (pi.stockApplied||[]).forEach(su => {
+        items = items.map(it => it.id===su.itemId
+          ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, su.branch, su.locId, -(Number(su.delta)||0)) }
+          : it);
+      });
+      // (2) คืน FIFO วัตถุดิบ — เพิ่ม layer บวก (net กับ NEG layer เดิมถ้ามี)
+      let layers = s.fifoLayers;
+      if((pi.fifoApplied||[]).length){
+        layers = s.fifoLayers.slice();
+        (pi.fifoApplied).forEach(fd => {
+          const q = Number(fd.qty)||0;
+          if(q <= 0) return;
+          const lyr = {
+            id: 'fl_posrev_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+            itemId: fd.itemId, branch: fd.branch, locId: fd.locId||null,
+            qty: q, remaining: q, unitCost: 0, totalCost: 0,
+            date: new Date().toISOString().slice(0,10),
+            lot: 'POS-REV', note: 'คืนวัตถุดิบจากยกเลิก POS ' + pi.importNumber,
+          };
+          const net = netNegativeLayers(layers, lyr);   // ล้าง NEG layer เดิมก่อน
+          if(net && (Number(net.remaining)||0) > 0) layers.push(net);
+        });
+      }
+      // (3) กลับรายการ JE — post reversing JE (สลับ DR/CR) ตาม pattern sales_light_void
+      //     (P&L/GL/TB/BS sum เฉพาะ status='posted' ไม่เช็ค voided → ต้อง reverse ด้วย JE ตรงข้าม ไม่ใช่ flip flag)
+      let journalEntries = s.journalEntries || [];
+      if(pi.jeId){
+        const origJe = journalEntries.find(je => je.id === pi.jeId && je.status === 'posted' && !je.voidedReversal);
+        if(origJe){
+          journalEntries = [...journalEntries, {
+            id: 'je_posvoid_' + Date.now().toString(36) + Math.random().toString(36).slice(2,5),
+            jeNumber: 'JE-VOID-' + (origJe.jeNumber||''),
+            date: getToday(),
+            description: 'ยกเลิกนำเข้า POS ' + pi.importNumber + ' — ' + (a.data.reason||'-'),
+            source: 'pos_import_void', sourceId: pi.id, sourceRef: pi.importNumber,
+            branchId: pi.branchId,
+            status: 'posted', postedBy: a.data.by, postedAt: Date.now(), createdBy: a.data.by, createdAt: Date.now(),
+            voidedReversal: true,
+            totalDebit: origJe.totalCredit||0, totalCredit: origJe.totalDebit||0,
+            lines: (origJe.lines||[]).map(l => ({
+              accountId: l.accountId || l.account, accountCode: l.accountCode, accountName: l.accountName,
+              debit: l.credit || 0, credit: l.debit || 0, description: 'ยกเลิก: ' + (l.description||''),
+            })),
+          }];
+        }
+      }
+      // (4) flip posImport status='voided' (VATReport อ่าน VAT จาก posImports → ข้าม voided แล้ว) + movement ย้อน
+      const revMoves = (pi.stockApplied||[]).map(su => ({
+        id: 'mv_posrev_' + Date.now().toString(36) + Math.random().toString(36).slice(2,5),
+        type:'pos_void_reverse', itemId:su.itemId, qty: -(Number(su.delta)||0),
+        branch: su.branch, date: getToday(), ref: pi.importNumber,
+        note:'ย้อนรายการจากยกเลิก POS import', by: a.data.by,
+      }));
+      return { ...s, items, fifoLayers: layers, journalEntries,
+        movements: [...s.movements, ...revMoves],
+        posImports: (s.posImports||[]).map(p => p.id===pi.id
+          ? { ...p, status:'voided', voidedBy:a.data.by, voidedAt:Date.now(), voidReason:a.data.reason||null }
+          : p),
+      };
+    }
+
     // ---------- Bulk Add Production Orders (Auto-explosion) ----------
     // a.data: { masterOrder, subOrders:[...], movements? }
     // Master + Subs สร้างพร้อมกัน — Subs ผูก masterId + dependsOn
@@ -18006,6 +18074,7 @@ const {
   // Phase 2B Round 2: Auto-explosion
   getBatchProfiles, optimizeBatchCombination, detectSharedBase, findBomForWip,
   ensureLocStock,
+  findBomForOutput, yieldQtyForOutput, explodeBomDeep,  // 🆕 A2: POS back-flush BOM
   // Phase 2A permissions + helpers
   getUserAssignedLines, getUserAssignedStations, userCanQC,
   canSeeOrder, canActOnOperation, getMyOperations,
@@ -27910,6 +27979,49 @@ function BomBranchPicker({ branches, availableIn, toggleBranch, setAll, clearAll
 }
 
 // ================================================================
+// 🆕 A2: ลง GL ให้ POS import — DR เงินสด/CR รายได้+VAT (ยอดขาย) + DR COGS/CR สินค้าคงเหลือ (ต้นทุนขาย+ของเสีย)
+//   ยกรูปแบบจาก autoPostSalesLight (sales-light) — ราคาขาย POS = รวม VAT 7% แล้ว
+// ================================================================
+function autoPostPOSImport({ posImport, revenueTotal, vatBase, vatAmt, cogsTotal, jeId }, state, dispatch, user){
+  if((revenueTotal||0) <= 0 && (cogsTotal||0) <= 0) return null;   // ไม่มียอดขาย/ต้นทุน → ไม่ต้องลง GL
+  const accs = state.chartOfAccounts || [];
+  const find = (type, hint) => accs.find(a => a.type===type && (a.name||'').includes(hint)) || accs.find(a => a.type===type);
+  const cashAcc = find('asset','เงินสด') || accs.find(a => a.id==='1100');
+  const revAcc  = find('revenue','รายได้') || accs.find(a => a.type==='revenue');
+  const vatOut  = find('liability','ภาษีขาย') || accs.find(a => a.id==='2200');
+  const cogsAcc = accs.find(a => a.type==='cogs') || accs.find(a => a.id==='5100');
+  const invAcc  = find('asset','สินค้าคงเหลือ') || accs.find(a => a.id==='1300');
+  if(!cashAcc || !revAcc){ console.warn('[autoPostPOSImport] ขาด COA เงินสด/รายได้ — JE ไม่ถูก post'); return null; }
+  const _line = (acc, dr, cr, desc) => acc ? { accountId:acc.id, accountCode:acc.code, accountName:acc.name, debit:dr, credit:cr, description:desc } : null;
+  const lines = [];
+  if((revenueTotal||0) > 0){
+    lines.push(_line(cashAcc, revenueTotal, 0, `รับเงินสดขาย POS ${posImport.importNumber}`));
+    lines.push(_line(revAcc, 0, vatBase, `รายได้ขาย POS ${posImport.importNumber}`));
+    if(vatOut && (vatAmt||0) > 0) lines.push(_line(vatOut, 0, vatAmt, 'ภาษีขาย (POS)'));
+  }
+  if(cogsAcc && invAcc && (cogsTotal||0) > 0){
+    lines.push(_line(cogsAcc, cogsTotal, 0, `ต้นทุนขาย+ของเสีย POS ${posImport.importNumber}`));
+    lines.push(_line(invAcc, 0, cogsTotal, `ตัดสินค้าคงเหลือ POS ${posImport.importNumber}`));
+  }
+  const clean = lines.filter(Boolean);
+  if(clean.length === 0) return null;
+  const td = Number(clean.reduce((s,l)=>s+l.debit,0).toFixed(2));
+  const tc = Number(clean.reduce((s,l)=>s+l.credit,0).toFixed(2));
+  const _jeId = jeId || genId('je');
+  const bName = (state.branches||[]).find(b=>b.id===posImport.branchId)?.name || posImport.branchId;
+  dispatch({ type:'ADD_JE', data:{        // ADD_JE regenerates jeNumber + date-lock check เอง
+    id: _jeId,
+    date: posImport.importDate,
+    description: `นำเข้า POS ${posImport.importNumber} (${bName})`,
+    source:'pos_import', sourceId:posImport.id, sourceRef:posImport.importNumber,
+    branchId: posImport.branchId,
+    lines: clean, totalDebit:td, totalCredit:tc, status:'posted',
+    createdBy:user.username, postedBy:user.username, createdAt:Date.now(), postedAt:Date.now(),
+  }});
+  return _jeId;
+}
+
+// ================================================================
 // POS IMPORT TAB
 // ================================================================
 function POSImportTab({ state, dispatch, user, branchId }){
@@ -27959,7 +28071,9 @@ function POSImportTab({ state, dispatch, user, branchId }){
       const produced  = iProduced  >= 0 ? Number(cols[iProduced])  || 0 : 0;
       const scrap     = iScrap     >= 0 ? Number(cols[iScrap])     || 0 : 0;
       const sold      = iSold      >= 0 ? Number(cols[iSold])      || 0 : 0;
-      const remaining = iRemaining >= 0 ? Number(cols[iRemaining]) || 0 : null;
+      // 🆕 A2 UAT: "คงเหลือ" ว่าง/ไม่ใช่ตัวเลข → null (ตกไปโหมด apply-net) กันเซลล์ว่าง set FG=0 ล้างสต๊อกเงียบ
+      let remaining = null;
+      if(iRemaining >= 0){ const _rr = (cols[iRemaining]||'').trim(); if(_rr !== '' && !isNaN(Number(_rr))) remaining = Number(_rr); }
 
       const item = allItems.find(it =>
         (code && (it.code||'').toLowerCase() === code.toLowerCase()) ||
@@ -27992,31 +28106,171 @@ function POSImportTab({ state, dispatch, user, branchId }){
     if(!parsed) return;
     const matched = parsed.rows.filter(r => r.matched);
     if(matched.length === 0) return alert('ไม่มีรายการที่จับคู่กับสินค้าในระบบ');
-    if(!confirm(`ยืนยันนำเข้า: ${matched.length} รายการ\n\nผลิต: ${fmtNum(parsed.totalProduced)} · ตัดเสีย: ${fmtNum(parsed.totalScrap)} · ขาย: ${fmtNum(parsed.totalSold)}\n\nสาขา: ${branches.find(b=>b.id===targetBranch)?.name}`)) return;
-
     const today = importDate;
-    const stockUpdates = matched.filter(r => r.delta !== 0).map(r => ({
+
+    // 🆕 A2 UAT: pre-check วันที่ให้ตรงกับ _checkDateLock ใน reducer (กันสต๊อกเดินแต่ JE ถูกทิ้งเงียบ)
+    const _lock = state.settings?.periodLockUntil;
+    if(_lock && String(today) < String(_lock)){
+      return alert(`📅 งวด ≤ ${_lock} ถูกปิดแล้ว — นำเข้า POS วันที่ ${today} ไม่ได้`);
+    }
+    const _fdl = Number(state.settings?.futureDateLimit ?? 7);
+    if(_fdl >= 0){
+      const _t = new Date(); _t.setHours(23,59,59,999);
+      const _maxStr = new Date(_t.getTime() + _fdl*86400000).toISOString().slice(0,10);
+      if(String(today) > _maxStr) return alert(`📅 วันที่ ${today} อยู่ในอนาคตเกิน ${_fdl} วัน — นำเข้าไม่ได้`);
+    }
+
+    // 🆕 A2 UAT: เลขที่นำเข้า pre-gen → ใช้เป็น ref ของ movement ทุกใบ (ไล่ย้อนหาใบนำเข้าได้)
+    const importNumber = genPosImportNumber(state);
+
+    // 🆕 A2 UAT: ต้นทุนต่อหน่วย FG — ต้นทุนของ FG "ตัวมันเอง" ที่สาขานี้ก่อน (ไม่ใช่ระเบิดสูตรใหม่)
+    //   FIFO ของ FG (weighted remaining) → costPrice → ต้นทุน "วัตถุดิบล้วน" ต่อ output จาก BOM (ไม่รวม labor/OH)
+    const _fgUnitCost = (item) => {
+      const layers = (state.fifoLayers||[]).filter(l => l.itemId===item.id && l.branch===targetBranch && (Number(l.remaining)||0) > 0);
+      const tq = layers.reduce((s,l)=>s+(Number(l.remaining)||0),0);
+      const tv = layers.reduce((s,l)=>s+(Number(l.remaining)||0)*(Number(l.unitCost)||0),0);
+      if(tq > 0 && tv > 0) return tv/tq;
+      if(Number(item.costPrice) > 0) return Number(item.costPrice);
+      const bom = findBomForOutput(state, item.id, targetBranch);
+      if(bom){
+        try {
+          const bc = calcBomCost(bom, state, targetBranch);       // .material = วัตถุดิบล้วน
+          const outs = getBomOutputs(bom);
+          const rt = outs.reduce((s,o)=>s+(Number(o.ratio||o.qty)||0),0) || 1;
+          const out = outs.find(o=>o.productId===item.id);
+          if(out && Number(out.qty) > 0){
+            const uc = (bc.material * ((Number(out.ratio||out.qty)||0)/rt)) / Number(out.qty);
+            if(uc > 0) return uc;
+          }
+        } catch(e){ /* fall through */ }
+      }
+      return 0;
+    };
+
+    // 🆕 A2 UAT: รายได้/ต้นทุน per-row (COGS ใช้ต้นทุน FG จริง กัน margin ~100%)
+    const VAT_RATE = 0.07;
+    let revenueTotal = 0, cogsSold = 0, cogsScrap = 0, scrapUnits = 0, producedUnits = 0;
+    const zeroCost = [];   // ขายแต่หาต้นทุนไม่พบ → COGS=0 (margin ~100% เตือน soft)
+    matched.forEach(r => {
+      const fgCost = _fgUnitCost(r.item);
+      if(r.sold  > 0){
+        revenueTotal += r.sold * (Number(r.item.salePrice)||0); cogsSold += r.sold * fgCost;
+        if(!(fgCost > 0)) zeroCost.push(r.item.name);
+      }
+      if(r.scrap > 0){ cogsScrap += r.scrap * fgCost; scrapUnits += r.scrap; }
+      if(r.produced > 0) producedUnits += r.produced;
+    });
+    const cogsTotal = Number((cogsSold + cogsScrap).toFixed(2));
+    const vatBase   = revenueTotal > 0 ? Number((revenueTotal / (1+VAT_RATE)).toFixed(2)) : 0;
+    const vatAmt    = revenueTotal > 0 ? Number((revenueTotal - vatBase).toFixed(2)) : 0;
+    revenueTotal    = Number(revenueTotal.toFixed(2));
+
+    // 🆕 A2 UAT: pre-check COA ให้ครบก่อนแตะสต๊อก (atomicity — กันสต๊อกเดินแต่ GL ลงไม่ได้)
+    const _accs = state.chartOfAccounts || [];
+    const _fa = (type, hint) => _accs.find(a => a.type===type && (a.name||'').includes(hint)) || _accs.find(a => a.type===type);
+    if(revenueTotal > 0 && (!(_fa('asset','เงินสด')||_accs.find(a=>a.id==='1100')) || !(_fa('revenue','รายได้')||_accs.find(a=>a.type==='revenue'))))
+      return alert('⛔ ไม่พบผังบัญชีเงินสด/รายได้ — ตั้งค่าผังบัญชีก่อนนำเข้า (กันสต๊อกเดินแต่บัญชีไม่ลง)');
+    if(cogsTotal > 0 && (!(_accs.find(a=>a.type==='cogs')||_accs.find(a=>a.id==='5100')) || !(_fa('asset','สินค้าคงเหลือ')||_accs.find(a=>a.id==='1300'))))
+      return alert('⛔ ไม่พบผังบัญชีต้นทุนขาย/สินค้าคงเหลือ — ตั้งค่าผังบัญชีก่อนนำเข้า');
+
+    // 🆕 A2 UAT: ระเบิด BOM ตาม "ผลิต" — dedup ต่อ bom.id (สูตร joint ระเบิดครั้งเดียว กัน over-consume N เท่า)
+    //   รวมวัตถุดิบข้ามสูตร (consumeByItem) เพื่อเตือนของขาดแบบยอดรวม + ตัดทั้ง stockByBranch และ FIFO (soft)
+    const producedRows = matched.filter(r => r.produced > 0);
+    const seenBom = new Set();
+    const consumeByItem = new Map();   // itemId → { qty, name, itemType }
+    let bomCount = 0;
+    producedRows.forEach(r => {
+      const bom = findBomForOutput(state, r.item.id, targetBranch);
+      if(!bom || seenBom.has(bom.id)) return;
+      seenBom.add(bom.id);
+      // จำนวน batch = max ของทุก output ในสูตร (joint = ผลิตพร้อมกัน 1 batch ได้หลายอย่าง)
+      const outs = getBomOutputs(bom);
+      let batches = 0;
+      outs.forEach(o => {
+        const row = matched.find(x => x.item.id === o.productId);
+        const pq = row ? Number(row.produced)||0 : 0;
+        const yb = yieldQtyForOutput(state, bom, o.productId) || 0;
+        if(pq > 0 && yb > 0) batches = Math.max(batches, pq/yb);
+      });
+      if(batches <= 0) return;
+      bomCount++;
+      let rawLines = [];
+      try { rawLines = explodeBomDeep(bom, batches, state, targetBranch, { explodeToRaw:true }) || []; }
+      catch(e){ console.warn('[POS BOM explode]', r.item.name, e); }
+      rawLines.forEach(rl => {
+        if(!rl.itemId || !(Number(rl.baseQty) > 0)) return;
+        const prev = consumeByItem.get(rl.itemId) || { qty:0, name:rl.itemName||rl.itemId, itemType:rl.itemType||'material' };
+        prev.qty += Number(rl.baseQty);
+        consumeByItem.set(rl.itemId, prev);
+      });
+    });
+
+    const bomStockUpdates = [], materialFifoDeducts = [], bomMovements = [], bomShort = [];
+    consumeByItem.forEach((v, itemId) => {
+      const q = Number(v.qty.toFixed(6));
+      if(!(q > 0)) return;
+      const cur = Number(getStockAtBranch(state.items.find(x=>x.id===itemId)||{}, targetBranch)) || 0;
+      if(q > cur) bomShort.push(`${v.name}: มี ${fmtNum(cur)}, ใช้ ${fmtNum(q)}`);   // ยอดรวมข้ามสูตร (กันพลาดของใช้ร่วม)
+      bomStockUpdates.push({ itemId, branch: targetBranch, delta: -q,
+        locId: getDefaultLocationId(state, targetBranch, v.itemType || 'material') });
+      materialFifoDeducts.push({ itemId, qty: q, branch: targetBranch, allowNegative:true });   // ตัด FIFO ด้วย → เรดาร์สั่งซื้อเห็น
+      bomMovements.push({ id: genId('mv'), type:'pos_bom_consume', itemId, qty:-q, branch: targetBranch,
+        date: today, ref:importNumber, note:'POS: ตัดวัตถุดิบตามสูตร', by: user.username });
+    });
+
+    // 🆕 A2 UAT: idempotency soft-warn — กันกดนำเข้าซ้ำสาขา/วันเดียวกัน (double-post รายได้/VAT/ตัดวัตถุดิบ)
+    const dupes = (state.posImports||[]).filter(p => p.branchId===targetBranch && p.importDate===today && p.status!=='voided');
+    // scrap% เตือน (soft) — ของเสีย write-off เข้า COGS โดยไม่มี maker-checker
+    const scrapPct = producedUnits > 0 ? (scrapUnits/producedUnits*100) : 0;
+
+    let confirmMsg = `ยืนยันนำเข้า POS: ${matched.length} รายการ · สาขา ${branches.find(b=>b.id===targetBranch)?.name} · วันที่ ${today}\n\n`
+      + `ผลิต ${fmtNum(parsed.totalProduced)} · ตัดเสีย ${fmtNum(parsed.totalScrap)} · ขาย ${fmtNum(parsed.totalSold)}\n\n`
+      + `📒 ลงบัญชี: รายได้ ${fmtCur(vatBase)} + VAT ${fmtCur(vatAmt)} · ต้นทุนขาย ${fmtCur(cogsTotal)}\n`
+      + `🥖 ตัดวัตถุดิบ: ${bomCount} สูตร → ${bomStockUpdates.length} รายการ (ตัดทั้งสต๊อก+FIFO)`;
+    if(dupes.length > 0){
+      confirmMsg += `\n\n⚠️ สาขานี้วันที่ ${today} เคยนำเข้าแล้ว ${dupes.length} ใบ (${dupes.map(p=>p.importNumber).join(', ')})\n→ นำเข้าซ้ำจะลงรายได้/VAT/ต้นทุน + ตัดวัตถุดิบ "เพิ่มอีกชุด" แน่ใจไหม?`;
+    }
+    if(bomShort.length > 0){
+      confirmMsg += `\n\n⚠️ วัตถุดิบจะติดลบ ${bomShort.length} รายการ (ตัดต่อได้ ไว้เช็คสต๊อก):\n` + bomShort.slice(0,8).join('\n')
+        + (bomShort.length > 8 ? `\n…อีก ${bomShort.length-8} รายการ` : '');
+    }
+    if(scrapPct > 10){
+      confirmMsg += `\n\n⚠️ ของเสีย ${scrapPct.toFixed(1)}% ของยอดผลิต (สูงผิดปกติ — จะ write-off เข้าต้นทุน ${fmtCur(cogsScrap)}) ตรวจสอบก่อนยืนยัน`;
+    }
+    if(zeroCost.length > 0){
+      confirmMsg += `\n\n⚠️ สินค้าที่ขายแต่หาต้นทุนไม่พบ ${zeroCost.length} รายการ → ต้นทุนขาย=0 (กำไรจะเกินจริง):\n` + zeroCost.slice(0,6).join(', ')
+        + (zeroCost.length > 6 ? ` …+${zeroCost.length-6}` : '');
+    }
+    confirmMsg += `\n\nℹ️ FG ที่ขาย/ผลิตผ่าน POS ไม่มีล็อต/วันหมดอายุ และข้ามการเตือน QC — ใช้เพื่อกระทบยอดสิ้นวัน`;
+    if(!confirm(confirmMsg)) return;
+
+    const fgStockUpdates = matched.filter(r => r.delta !== 0).map(r => ({
       itemId: r.item.id, branch: targetBranch, delta: r.delta,
       locId: getDefaultLocationId(state, targetBranch, r.item.type),
     }));
+    const stockUpdates = [...fgStockUpdates, ...bomStockUpdates];
 
-    const movements = matched.flatMap(r => {
+    const fgMovements = matched.flatMap(r => {
       const movs = [];
       if(r.produced > 0) movs.push({ id:genId('mv'), type:'pos_produced', itemId:r.item.id,
-        qty:r.produced, branch:targetBranch, date:today, ref:'POS-Import',
+        qty:r.produced, branch:targetBranch, date:today, ref:importNumber,
         note:`POS: ผลิต`, by:user.username });
       if(r.scrap > 0) movs.push({ id:genId('mv'), type:'pos_scrap', itemId:r.item.id,
-        qty:-r.scrap, branch:targetBranch, date:today, ref:'POS-Import',
+        qty:-r.scrap, branch:targetBranch, date:today, ref:importNumber,
         note:`POS: ตัดเสีย`, by:user.username });
       if(r.sold > 0) movs.push({ id:genId('mv'), type:'pos_sold', itemId:r.item.id,
-        qty:-r.sold, branch:targetBranch, date:today, ref:'POS-Import',
+        qty:-r.sold, branch:targetBranch, date:today, ref:importNumber,
         note:`POS: ขาย`, by:user.username });
       return movs;
     });
+    const movements = [...fgMovements, ...bomMovements];
+
+    // 🆕 A2 UAT: pre-gen jeId → เก็บใน posImport ตั้งแต่แรก (สอบย้อน/void ได้) แล้วส่งให้ poster ใช้เลขเดียวกัน
+    const jeId = (revenueTotal > 0 || cogsTotal > 0) ? genId('je') : null;
 
     const posImport = {
       id: genId('pi'),
-      importNumber: genPosImportNumber(state),
+      importNumber,
       branchId: targetBranch,
       importDate: today,
       rows: parsed.rows.length,
@@ -28024,6 +28278,12 @@ function POSImportTab({ state, dispatch, user, branchId }){
       totalProduced: parsed.totalProduced,
       totalScrap: parsed.totalScrap,
       totalSold: parsed.totalSold,
+      // 🆕 A2: ผลลง GL + ตัดวัตถุดิบ (เก็บไว้สอบย้อน + ให้ ภ.พ.30 อ่าน vatBase/vatAmt)
+      revenueTotal, vatBase, vatAmt, cogsTotal, jeId: jeId || undefined,
+      bomCount, bomRawLines: bomStockUpdates.length, bomShortage: bomShort.length, scrapPct: Number(scrapPct.toFixed(1)),
+      reimportOf: dupes.length ? dupes.map(p=>p.importNumber) : undefined,
+      // 🆕 A2 UAT: reversal payload — ใช้ตอน void (คืนสต๊อก FG+วัตถุดิบ + FIFO)
+      stockApplied: stockUpdates, fifoApplied: materialFifoDeducts,
       detail: matched.map(r => ({
         itemId: r.item.id, code: r.item.code, name: r.item.name,
         produced: r.produced, scrap: r.scrap, sold: r.sold, remaining: r.remaining,
@@ -28035,13 +28295,37 @@ function POSImportTab({ state, dispatch, user, branchId }){
     };
 
     dispatch({ type:'ADD_POS_IMPORT', data:{ posImport, stockUpdates, movements } });
-    alert(`✅ นำเข้าสำเร็จ ${posImport.importNumber}\nอัปเดต ${stockUpdates.length} รายการ`);
+    // 🆕 A2 UAT: ตัด FIFO วัตถุดิบด้วย (soft, allowNegative) → stockByBranch กับ FIFO ตรงกัน + เรดาร์สั่งซื้อเห็นการใช้
+    if(materialFifoDeducts.length) dispatch({ type:'DEDUCT_FIFO_LAYERS', data: materialFifoDeducts });
+    // 🆕 A2: ลง GL (รายได้+VAT+ต้นทุนขาย) — เดิม POS ไม่ลงบัญชีเลย
+    if(jeId) autoPostPOSImport({ posImport, revenueTotal, vatBase, vatAmt, cogsTotal, jeId }, state, dispatch, user);
+    dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'pos_import', by:user.username, byName:user.name||user.username,
+      ts:Date.now(), refType:'pos_import', refId:posImport.importNumber, branch:targetBranch, jeId: jeId||null,
+      reimport: dupes.length>0 || undefined,
+      summary:`นำเข้า POS ${posImport.importNumber}: ขาย ${fmtCur(revenueTotal)} · ต้นทุน ${fmtCur(cogsTotal)} · ตัดวัตถุดิบ ${bomStockUpdates.length} รายการ${dupes.length?` · ⚠️ซ้ำกับ ${dupes.map(p=>p.importNumber).join(',')}`:''}${jeId?' · ลง GL แล้ว':' · ไม่มี GL'}` } });
+    alert(`✅ นำเข้าสำเร็จ ${posImport.importNumber}\n`
+      + `• อัปเดตสต๊อก ${fgStockUpdates.length} FG + ตัดวัตถุดิบ ${bomStockUpdates.length} รายการ (สต๊อก+FIFO)\n`
+      + `• ลงบัญชี: รายได้ ${fmtCur(vatBase)} + VAT ${fmtCur(vatAmt)}, ต้นทุนขาย ${fmtCur(cogsTotal)}${jeId?'':'\n(ไม่มียอดขาย → ไม่ลง GL)'}`);
     setStep('done');
     setRawText('');
     setParsed(null);
   };
 
   const reset = () => { setStep('paste'); setParsed(null); setRawText(''); };
+
+  // 🆕 A2 UAT: ยกเลิก POS import (คืนสต๊อก/วัตถุดิบ/FIFO + void JE) — จำกัดผู้ดูแล/GM
+  const canVoid = isSuperUser(user) || user.role === 'gm';
+  const voidImport = (p) => {
+    if(p.status === 'voided') return;
+    if(!canVoid) return alert('⛔ เฉพาะผู้ดูแล/GM เท่านั้นที่ยกเลิกได้');
+    const reason = prompt(`ยกเลิกนำเข้า POS ${p.importNumber} (${fmtDate(p.importDate)})?\n\nระบบจะ:\n• คืนสต๊อก FG + วัตถุดิบ\n• คืน FIFO วัตถุดิบ\n• void บัญชี (ตัดรายได้/VAT/ต้นทุน ออกจากงบ + ภ.พ.30)\n\nกรอกเหตุผล:`);
+    if(reason === null) return;
+    dispatch({ type:'VOID_POS_IMPORT', data:{ id:p.id, by:user.username, reason:reason||'(ไม่ระบุ)' } });
+    dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'pos_import_void', by:user.username, byName:user.name||user.username,
+      ts:Date.now(), refType:'pos_import', refId:p.importNumber, jeId:p.jeId||null,
+      summary:`ยกเลิก POS ${p.importNumber} (${reason||'-'}) — คืนสต๊อก/FIFO + void JE + ตัดออกจาก ภ.พ.30` } });
+    alert(`✅ ยกเลิก ${p.importNumber} แล้ว\nคืนสต๊อก/วัตถุดิบ + ตัดรายได้/VAT/ต้นทุนออกจากบัญชี`);
+  };
 
   return h('div', { className:'space-y-3' },
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-900' },
@@ -28050,7 +28334,10 @@ function POSImportTab({ state, dispatch, user, branchId }){
       h('br'),
       'คอลัมน์ที่รองรับ: ',
       h('code', { className:'bg-white px-1 rounded' }, 'รหัส | ชื่อ | ผลิต | ตัดเสีย | ขาย | คงเหลือ'),
-      ' (อังกฤษ: code, name, produced, scrap, sold, remaining)'
+      ' (อังกฤษ: code, name, produced, scrap, sold, remaining)',
+      h('br'),
+      h('span', { className:'text-blue-700' },
+        '✓ ตอนนำเข้าจะ: ลงบัญชีขาย+VAT+ต้นทุน · ตัดวัตถุดิบตามสูตร (สต๊อก+FIFO) · เตือนถ้านำเข้าซ้ำ/วัตถุดิบไม่พอ')
     ),
 
     step === 'paste' && h('div', { className:'space-y-3' },
@@ -28167,12 +28454,14 @@ function POSImportTab({ state, dispatch, user, branchId }){
               h('th', { className:'px-2 py-1 text-right' }, 'ผลิต'),
               h('th', { className:'px-2 py-1 text-right' }, 'ขาย'),
               h('th', { className:'px-2 py-1 text-left' }, 'ผู้นำเข้า'),
+              h('th', { className:'px-2 py-1 text-center' }, 'สถานะ'),
             )
           ),
           h('tbody', { className:'divide-y' },
             [...history].reverse().slice(0,5).map(p => {
               const br = branches.find(b => b.id === p.branchId);
-              return h('tr', { key:p.id, className:'hover:bg-gray-50' },
+              const voided = p.status === 'voided';
+              return h('tr', { key:p.id, className: cls('hover:bg-gray-50', voided && 'opacity-50 line-through') },
                 h('td', { className:'px-2 py-1 font-mono text-purple-700' }, p.importNumber),
                 h('td', { className:'px-2 py-1' }, fmtDate(p.importDate)),
                 h('td', { className:'px-2 py-1' }, br?.name || p.branchId),
@@ -28180,6 +28469,14 @@ function POSImportTab({ state, dispatch, user, branchId }){
                 h('td', { className:'px-2 py-1 text-right text-blue-700' }, fmtNum(p.totalProduced)),
                 h('td', { className:'px-2 py-1 text-right text-purple-700' }, fmtNum(p.totalSold)),
                 h('td', { className:'px-2 py-1 text-xs text-gray-500' }, p.by),
+                h('td', { className:'px-2 py-1 text-center no-underline' },
+                  voided
+                    ? h('span', { className:'text-red-500 text-xs', title:p.voidReason||'' }, 'ยกเลิกแล้ว')
+                    : (canVoid
+                        ? h('button', { className:'text-red-600 hover:text-red-800 text-xs underline',
+                            onClick:()=>voidImport(p) }, 'ยกเลิก')
+                        : h('span', { className:'text-green-600 text-xs' }, 'สำเร็จ'))
+                ),
               );
             })
           )
@@ -46827,6 +47124,20 @@ function VATReport({ state }){
     months[ym].outBase += Number((outVat/0.07).toFixed(2));   // ฐานภาษี = VAT/7%
     dispCount++;
   }
+  // 🆕 A2: VAT ขายจากการนำเข้า POS (source='pos_import') — ต้องขึ้น ภ.พ.30 ไม่งั้นยื่นภาษีขายขาด
+  //   อ่าน vatBase/vatAmt ที่ persist บน posImport (ฐานตรง ไม่ต้อง /0.07)
+  let posVatCount = 0;
+  for(const pi of (state.posImports||[])){
+    if(pi.status === 'voided') continue;
+    if(!inDateRange(pi.importDate, dr.startDate, dr.endDate)) continue;
+    const outVat = Number(pi.vatAmt)||0;
+    if(outVat <= 0) continue;
+    const ym = (pi.importDate||'').slice(0,7);
+    if(!months[ym]) months[ym] = { ym, inBase:0, inVat:0, outBase:0, outVat:0 };
+    months[ym].outVat += outVat;
+    months[ym].outBase += Number(pi.vatBase)||Number((outVat/0.07).toFixed(2));
+    posVatCount++;
+  }
   const rows = Object.values(months).sort((a,b) => b.ym.localeCompare(a.ym));
   const totalInVat = rows.reduce((s,r) => s + r.inVat, 0);
   const totalOutVat = rows.reduce((s,r) => s + r.outVat, 0);
@@ -46846,7 +47157,7 @@ function VATReport({ state }){
     ),
     h('div', { className:'grid grid-cols-3 gap-3 mb-3' },
       h(KPICard, { label:'VAT ซื้อ', value:fmtCur(totalInVat), sub:`${invs.length} INV`, color:'blue', icon:'📥' }),
-      h(KPICard, { label:'VAT ขาย', value:fmtCur(totalOutVat), sub:`${salesInv.length} ใบกำกับ + ${salesLt.length} ขายสาขา${dispCount?` + ${dispCount} จำหน่าย`:''}`, color:'green', icon:'📤' }),
+      h(KPICard, { label:'VAT ขาย', value:fmtCur(totalOutVat), sub:`${salesInv.length} ใบกำกับ + ${salesLt.length} ขายสาขา${posVatCount?` + ${posVatCount} POS`:''}${dispCount?` + ${dispCount} จำหน่าย`:''}`, color:'green', icon:'📤' }),
       h(KPICard, { label: net >= 0 ? 'VAT ต้องส่งกรมฯ' : 'VAT ได้คืน',
         value:fmtCur(Math.abs(net)), color: net >= 0 ? 'red' : 'purple', icon:'🧾' }),
     ),
