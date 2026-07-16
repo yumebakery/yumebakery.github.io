@@ -4345,15 +4345,16 @@ function reducer(s, a){
       for(const d of a.data){
         const result = deductFIFO(layers, d.itemId, d.qty, d.branch, d.locId);
         if(result.shortage > 0 && d.allowNegative){
-          // 🆕 สร้าง negative FIFO layer — รอ TR เข้ามาตัดยอดติดลบ
+          // 🆕 B3: ตี NEG layer @ costPrice (ไม่ใช่ 0) — ต้นทุน FG/มูลค่าคงคลังไม่ถูก zero เงียบ (mirror ADJUST_STOCK fifo_shortage)
+          const _negCp = Number((s.items.find(x => x.id === d.itemId)||{}).costPrice) || 0;
           layers.push({
             id: 'fl_neg_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
             itemId: d.itemId, branch: d.branch, locId: d.locId || null,
             qty: -result.shortage, remaining: -result.shortage,
-            unitCost: 0, totalCost: 0,
+            unitCost: _negCp, totalCost: -result.shortage * _negCp,
             date: new Date().toISOString().slice(0,10),
             lot: 'NEG', isNegative: true,
-            note: 'Auto-created จากการผลิตที่ใช้ stock เกิน · รอ TR เติม',
+            note: 'Auto-created จากการผลิตที่ใช้ stock เกิน · รอ TR เติม' + (_negCp > 0 ? ' · ตี @costPrice ' + _negCp : ' · ⚠️ costPrice=0 ต้นทุนยังเพี้ยน'),
           });
         }
       }
@@ -4368,14 +4369,16 @@ function reducer(s, a){
       for(const m of matItems){
         const result = deductFIFO(layers, m.itemId, m.qty, branch, locId);
         if(result.shortage > 0 && allowNegative){
+          // 🆕 B3: ตี NEG layer @ costPrice (ไม่ใช่ 0) — ต้นทุน FG ไม่ถูก zero เงียบ
+          const _negCp = Number((s.items.find(x => x.id === m.itemId)||{}).costPrice) || 0;
           layers.push({
             id: 'fl_neg_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
             itemId: m.itemId, branch, locId: locId || null,
             qty: -result.shortage, remaining: -result.shortage,
-            unitCost: 0, totalCost: 0,
+            unitCost: _negCp, totalCost: -result.shortage * _negCp,
             date: new Date().toISOString().slice(0,10),
             lot: 'NEG', isNegative: true,
-            note: 'Auto-created จากการผลิต · รอ TR เติม',
+            note: 'Auto-created จากการผลิต · รอ TR เติม' + (_negCp > 0 ? ' · ตี @costPrice ' + _negCp : ' · ⚠️ costPrice=0 ต้นทุนยังเพี้ยน'),
           });
         }
         // ตัด total branch stock (FIX-1: shape-safe สำหรับ multi-warehouse)
@@ -21156,6 +21159,25 @@ function StockShortageModal({ order, shortages, lineLoc, branchId, state, user, 
   const updateTrItem = (i, patch) => setTrItems(trItems.map((t,j) => j===i ? {...t, ...patch} : t));
   const removeTrItem = (i) => setTrItems(trItems.filter((_,j) => j !== i));
 
+  // 🆕 B3: ผลิตทั้งที่ของไม่พอ → สร้าง NEG layer ต้นทุน 0 → ต้นทุน FG ต่ำผิดเงียบ · เตือนแรง + audit trail (soft-gate)
+  const proceedNegative = () => {
+    // บริบท TR-request ล้วน (ไม่ใช่สร้างออเดอร์ผลิต) → ไม่ต้องเตือนต้นทุน FG
+    if(!order || order.orderNumber === 'MANUAL-REFILL'){ onConfirm(); return; }
+    const names = shortages.map(s => s.itemName).filter(Boolean);
+    if(!confirm(
+      '⚠️ ผลิตทั้งที่วัตถุดิบไม่พอ?\n\n' +
+      'ระบบจะสร้างสต๊อก "ติดลบ (NEG)" สำหรับส่วนที่ขาด (ตี @ ราคาต้นทุนมาตรฐาน) →\n' +
+      '• ถ้ายังไม่ตั้งต้นทุนมาตรฐาน (costPrice=0) ต้นทุน FG จะ "ต่ำกว่าจริง"\n' +
+      '• ต้องกระทบยอด/แก้ต้นทุนเมื่อของหรือราคาเข้ามาภายหลัง\n\n' +
+      'แนะนำ: กด "🚚 เปิด TR" เพื่อโอนของเข้าไลน์ก่อน (ต้นทุนจะถูก)\n\n' +
+      'วัตถุดิบที่ขาด: ' + names.slice(0,6).join(', ') + (names.length>6 ? ` …อีก ${names.length-6}` : '') +
+      '\n\nยืนยันผลิตต่อทั้งที่ต้นทุนจะเพี้ยน?')) return;
+    dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'plan_shortage_ack', by:user.username, byName:user.name||user.username,
+      ts:Date.now(), refType:'prod_order', refId:order.orderNumber, branch:branchId,
+      summary:'ผลิตทั้งที่วัตถุดิบไม่พอ → สต๊อกติดลบ ต้นทุน FG ต่ำผิด (ต้องกระทบยอด) · ' + order.orderNumber + ' · ขาด: ' + names.slice(0,8).join(', ') } });
+    onConfirm();
+  };
+
   // 🆕 เพิ่มวัตถุดิบที่ไม่ได้อยู่ใน shortage — ค้นหาจากทุกรายการในคลัง
   const [showAddItem, setShowAddItem] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -21320,8 +21342,10 @@ function StockShortageModal({ order, shortages, lineLoc, branchId, state, user, 
       h('div', { className:'flex gap-2 pt-3 border-t' },
         h(Button, { variant:'primary', onClick:createTRandOrder },
           '🚚 เปิด TR + สร้างออเดอร์'),
-        h(Button, { variant:'warning', onClick:onConfirm },
-          '⚠️ สร้างออเดอร์เลย (สต๊อกจะติดลบ)'),
+        h(Button, { variant:'warning', onClick:proceedNegative },
+          order && order.orderNumber === 'MANUAL-REFILL'
+            ? 'ปิดหน้าต่าง (ไม่เปิด TR)'
+            : '⚠️ สร้างออเดอร์เลย (ติดลบ · ต้นทุนเพี้ยน)'),
         h(Button, { variant:'secondary', onClick:onCancel }, 'ยกเลิก'))));
 }
 
@@ -29669,7 +29693,12 @@ function MyStationTab({ state, dispatch, user, branchId }){
         });
         if(_short.length > 0){
           const _names = _short.map(c => { const _it=(state.items||[]).find(x=>x.id===c.itemId); return (_it&&_it.name)||c.itemId; }).join(', ');
-          if(!confirm(`⚠️ วัตถุดิบไม่พอในสต๊อก: ${_names}\n\nถ้าตัดต่อ สต๊อกจะ "ติดลบ" + ต้นทุนส่วนที่ขาดคิดเป็น 0 (ต้นทุนผลิตจะต่ำกว่าจริง)\n\nยืนยันตัดวัตถุดิบต่อ?`)) return;
+          if(!confirm(`⚠️ วัตถุดิบไม่พอในสต๊อก: ${_names}\n\nถ้าตัดต่อ สต๊อกจะ "ติดลบ" + ต้นทุนส่วนที่ขาดตี @ ราคาต้นทุนมาตรฐาน (ถ้ายังไม่ตั้ง = 0 ต้นทุนยังเพี้ยน)\n\nยืนยันตัดวัตถุดิบต่อ?`)) return;
+          // 🆕 B3: audit ที่ event จริง (ตอน consume สร้าง NEG layer = ต้นทุน FG เพี้ยนจุดนี้ ไม่ใช่ตอน plan)
+          dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'plan_shortage_ack', subType:'prod_consume_negative',
+            by:user.username, byName:user.name||user.username, ts:Date.now(),
+            refType:'prod_order', refId: w.order.orderNumber + (w.batchSeq ? '·B'+w.batchSeq : ''), branch:w.order.branchId,
+            summary:'ตัดวัตถุดิบทั้งที่ไม่พอ → สต๊อกติดลบ ต้นทุน FG อาจต่ำผิด (ต้องกระทบยอดเมื่อของเข้า) · ' + w.order.orderNumber + ' · ขาด: ' + _names } });
         }
         const ref = w.order.orderNumber + (w.batchSeq ? '·B'+w.batchSeq : '');
         const movement = consumeItems.map(c => ({
