@@ -2989,9 +2989,17 @@ Object.assign(global.ERP, {
     var cfg = _cfg();
     if(!lib || !lib.createClient || !cfg.anonKey) return null;
     try {
+      // ⚠️ auth ใช้ implicit flow (default) → recovery link เป็น hash '#...type=recovery'
+      //    CloudGate ตรวจ recovery ด้วย location.hash — ห้ามเปลี่ยนเป็น flowType:'pkce' โดยไม่แก้ตัวตรวจ (PKCE ใช้ ?code= + อาจ fire SIGNED_IN แทน PASSWORD_RECOVERY)
       _client = lib.createClient(cfg.url, cfg.anonKey, {
         auth: { persistSession: true, autoRefreshToken: true },
       });
+      // 🆕 ฟัง PASSWORD_RECOVERY (คลิกลิงก์รีเซ็ตจากอีเมล) → CloudGate โชว์ฟอร์มตั้งรหัสใหม่
+      try {
+        _client.auth.onAuthStateChange(function(event){
+          if(event === 'PASSWORD_RECOVERY'){ _recoveryMode = true; _recoveryCbs.forEach(function(cb){ try { cb(); } catch(e){} }); }
+        });
+      } catch(_ev){}
     } catch(e){ console.warn('[SB] createClient failed', e); _client = null; }
     return _client;
   }
@@ -3115,6 +3123,31 @@ Object.assign(global.ERP, {
     try { await sb.auth.signOut(); } catch(e){}
     return { ok:true };
   }
+  // 🆕 ลืมรหัสผ่าน (self-service): ส่งอีเมลลิงก์รีเซ็ต → กลับมาที่แอป (redirectTo) พร้อม token recovery
+  //   ⚠️ ต้องเพิ่ม URL ของแอปใน Supabase → Authentication → URL Configuration → Redirect URLs
+  async function resetPasswordForEmail(email){
+    var sb = _sb(); if(!sb) return { ok:false, error:'ยังไม่ได้ตั้งค่า Supabase' };
+    var redirectTo;
+    try { redirectTo = global.location.origin + global.location.pathname; } catch(e){ redirectTo = undefined; }
+    try {
+      var res = await sb.auth.resetPasswordForEmail(email, { redirectTo: redirectTo });
+      if(res.error) return { ok:false, error: res.error.message };
+      return { ok:true };
+    } catch(e){ return { ok:false, error: String(e && e.message || e) }; }
+  }
+  // 🆕 ตั้งรหัสผ่านใหม่ (ระหว่าง session recovery หลังคลิกลิงก์จากอีเมล)
+  async function updatePassword(newPassword){
+    var sb = _sb(); if(!sb) return { ok:false, error:'ยังไม่ได้ตั้งค่า Supabase' };
+    try {
+      var res = await sb.auth.updateUser({ password: newPassword });
+      if(res.error) return { ok:false, error: res.error.message };
+      return { ok:true, user: res.data && res.data.user && res.data.user.email };
+    } catch(e){ return { ok:false, error: String(e && e.message || e) }; }
+  }
+  // 🆕 recovery detection — supabase-js auto-parse hash แล้ว fire PASSWORD_RECOVERY (บาง flow ก่อน UI mount)
+  var _recoveryMode = false, _recoveryCbs = [];
+  function onRecovery(cb){ if(typeof cb === 'function'){ _recoveryCbs.push(cb); if(_recoveryMode){ try { cb(); } catch(e){} } } }
+  function isRecoveryMode(){ return _recoveryMode; }
   async function getUser(){
     var sb = _sb(); if(!sb) return null;
     try {
@@ -3409,6 +3442,9 @@ Object.assign(global.ERP, {
     persistQueue: persistQueue, loadQueue: loadQueue,
     // ☁️ auth + snapshot backup
     signUp: signUp, signIn: signIn, signOut: signOut, getUser: getUser,
+    // 🆕 ลืมรหัสผ่าน (self-service)
+    resetPasswordForEmail: resetPasswordForEmail, updatePassword: updatePassword,
+    onRecovery: onRecovery, isRecoveryMode: isRecoveryMode,
     pushSnapshot: pushSnapshot, autoPush: autoPush, listSnapshots: listSnapshots,
     restoreToLocal: restoreToLocal, syncStatus: syncStatus, setAutoSync: setAutoSync,
     deviceId: deviceId,
@@ -9595,9 +9631,14 @@ function DashboardTab({ state, dispatch }){
 // (state เก็บใน global.__ERP_CLOUD_BOOT ให้ MainShell ใช้เป็น initial — localStorage ไม่ถูกใช้เก็บ state)
 function CloudGate(){
   const SB = global.ERP.SBSync;
-  const [phase, setPhase] = useState('checking');   // checking | login | loading | ready | error
+  // 🆕 ถ้าเปิดมาจากลิงก์รีเซ็ตรหัส (อีเมล) → เข้าโหมดตั้งรหัสใหม่ทันที (hash type=recovery ก่อน supabase-js ล้าง)
+  const [phase, setPhase] = useState(() => {
+    try { if((global.location.hash||'').indexOf('type=recovery') >= 0) return 'reset_set'; } catch(e){}
+    return 'checking';
+  });   // checking | login | loading | ready | error | reset_request | reset_set
   const [email, setEmail] = useState('');
   const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');               // 🆕 ยืนยันรหัสใหม่ (reset_set)
   const [msg, setMsg] = useState(null);             // {ok, text}
   const [busy, setBusy] = useState(false);
   const [errDetail, setErrDetail] = useState('');
@@ -9627,13 +9668,21 @@ function CloudGate(){
       setPhase('ready');
     } catch(e){ setErrDetail(String((e && e.message) || e)); setPhase('error'); }
   };
-  useEffect(() => { (async () => {
-    try {
-      if(!SB || !SB.isConfigured()){ setErrDetail('Supabase ไม่พร้อม (config/เน็ต/CDN)'); setPhase('error'); return; }
-      const u = await SB.getUser();
-      if(u) bootLoad(); else setPhase('login');
-    } catch(e){ setErrDetail(String((e && e.message) || e)); setPhase('error'); }
-  })(); }, []);
+  useEffect(() => {
+    let recovering = false;
+    // 🆕 supabase-js อาจ fire PASSWORD_RECOVERY หลัง parse hash → บังคับเข้าโหมดตั้งรหัสใหม่ (กัน login ทับ)
+    try { if(SB && SB.onRecovery) SB.onRecovery(() => { recovering = true; setPhase('reset_set'); }); } catch(e){}
+    (async () => {
+      try {
+        if(!SB || !SB.isConfigured()){ setErrDetail('Supabase ไม่พร้อม (config/เน็ต/CDN)'); setPhase('error'); return; }
+        // มาจากลิงก์รีเซ็ต → รอตั้งรหัสใหม่ ไม่ต้อง bootLoad
+        try { if((global.location.hash||'').indexOf('type=recovery') >= 0 || (SB.isRecoveryMode && SB.isRecoveryMode())){ setPhase('reset_set'); return; } } catch(_r){}
+        const u = await SB.getUser();
+        if(recovering) return;   // recovery event มาแล้ว — ปล่อยให้ตั้งรหัสใหม่
+        if(u) bootLoad(); else setPhase('login');
+      } catch(e){ setErrDetail(String((e && e.message) || e)); setPhase('error'); }
+    })();
+  }, []);
 
   // 🔒 login เท่านั้น — ไม่มีสมัครในแอป (ออกไอดีผ่านส่วนกลาง Supabase Dashboard · server ปิดรับสมัครด้วย)
   const doAuth = async () => {
@@ -9663,6 +9712,36 @@ function CloudGate(){
     } finally { setBusy(false); }
   };
 
+  // 🆕 ลืมรหัสผ่าน — ส่งอีเมลลิงก์รีเซ็ต
+  const doResetRequest = async () => {
+    if(busy) return;
+    if(!email.trim()){ setMsg({ ok:false, text:'กรอกอีเมลบัญชีก่อน' }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await SB.resetPasswordForEmail(email.trim());
+      // ไม่บอกว่าอีเมลมีจริงไหม (กัน enumeration) — ตอบเหมือนกันทุกกรณี
+      if(!r.ok){ setMsg({ ok:false, text:'❌ ' + (r.error || 'ส่งไม่สำเร็จ') }); return; }
+      setMsg({ ok:true, text:'✅ ส่งลิงก์รีเซ็ตไปที่อีเมลแล้ว (ถ้ามีบัญชีนี้) — เปิดอีเมลแล้วคลิกลิงก์เพื่อตั้งรหัสใหม่' });
+    } finally { setBusy(false); }
+  };
+
+  // 🆕 ตั้งรหัสผ่านใหม่ (หลังคลิกลิงก์จากอีเมล — อยู่ใน session recovery)
+  const doSetNewPassword = async () => {
+    if(busy) return;
+    if(!pw || pw.length < 6){ setMsg({ ok:false, text:'รหัสใหม่อย่างน้อย 6 ตัว' }); return; }
+    if(pw !== pw2){ setMsg({ ok:false, text:'รหัสใหม่ 2 ช่องไม่ตรงกัน' }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await SB.updatePassword(pw);
+      if(!r.ok){ setMsg({ ok:false, text:'❌ ' + (r.error || 'ตั้งรหัสไม่สำเร็จ') + ' — ลิงก์อาจหมดอายุ ขอลิงก์ใหม่' }); return; }
+      setPw(''); setPw2('');
+      // ล้าง hash recovery ออกจาก URL แล้วเข้าแอป (session ใหม่ล็อกอินอยู่แล้ว)
+      try { global.history.replaceState(null, '', global.location.pathname + global.location.search); } catch(_h){}
+      setMsg({ ok:true, text:'✅ ตั้งรหัสใหม่สำเร็จ — กำลังเข้าระบบ' });
+      bootLoad();
+    } finally { setBusy(false); }
+  };
+
   if(phase === 'ready') return h(MainShell);
 
   const shellBg = 'min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-600 via-purple-600 to-purple-800 p-4';
@@ -9684,6 +9763,50 @@ function CloudGate(){
           onClick:()=>{ setErrDetail(''); setPhase('checking'); setTimeout(()=>{ SB.getUser().then(u => u ? bootLoad() : setPhase('login')).catch(e => { setErrDetail(String(e)); setPhase('error'); }); }, 100); } },
           '🔄 ลองใหม่')));
   }
+  // 🆕 phase === 'reset_request' — ลืมรหัสผ่าน: ส่งลิงก์รีเซ็ต
+  if(phase === 'reset_request'){
+    return h('div', { className: shellBg },
+      h('div', { className:'bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm' },
+        h('div', { className:'text-center mb-5' },
+          h('div', { className:'text-4xl mb-2' }, '🔑'),
+          h('div', { className:'font-bold text-xl' }, 'ลืมรหัสผ่าน'),
+          h('div', { className:'text-xs text-gray-500 mt-1' }, 'ใส่อีเมลบัญชี → ระบบส่งลิงก์รีเซ็ตไปให้')),
+        h('input', { type:'email', value:email, placeholder:'อีเมลบัญชี', autoComplete:'username',
+          onChange:e=>setEmail(e.target.value),
+          onKeyDown:e=>{ if(e.key === 'Enter' && !busy) doResetRequest(); },
+          className:'w-full px-4 py-3 border-2 rounded-lg mb-3 text-sm' }),
+        msg && h('div', { className:'text-xs mb-3 ' + (msg.ok ? 'text-green-600' : 'text-red-500') }, msg.text),
+        h('button', { disabled:busy, onClick:()=>doResetRequest(),
+          className:'w-full py-3 bg-indigo-600 text-white rounded-lg font-bold mb-2 disabled:opacity-50' },
+          busy ? 'กำลังส่ง...' : '📧 ส่งลิงก์รีเซ็ต'),
+        h('button', { onClick:()=>{ setMsg(null); setPhase('login'); },
+          className:'w-full py-2 text-gray-500 text-sm' }, '← กลับไปเข้าสู่ระบบ')));
+  }
+  // 🆕 phase === 'reset_set' — ตั้งรหัสผ่านใหม่ (มาจากลิงก์อีเมล)
+  if(phase === 'reset_set'){
+    return h('div', { className: shellBg },
+      h('div', { className:'bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm' },
+        h('div', { className:'text-center mb-5' },
+          h('div', { className:'text-4xl mb-2' }, '🔒'),
+          h('div', { className:'font-bold text-xl' }, 'ตั้งรหัสผ่านใหม่'),
+          h('div', { className:'text-xs text-gray-500 mt-1' }, 'ใส่รหัสผ่านใหม่ที่จะใช้เข้าระบบ')),
+        h('input', { type:'password', value:pw, placeholder:'รหัสผ่านใหม่ (อย่างน้อย 6 ตัว)', autoComplete:'new-password',
+          onChange:e=>setPw(e.target.value),
+          className:'w-full px-4 py-3 border-2 rounded-lg mb-3 text-sm' }),
+        h('input', { type:'password', value:pw2, placeholder:'ยืนยันรหัสผ่านใหม่', autoComplete:'new-password',
+          onChange:e=>setPw2(e.target.value),
+          onKeyDown:e=>{ if(e.key === 'Enter' && !busy) doSetNewPassword(); },
+          className:'w-full px-4 py-3 border-2 rounded-lg mb-3 text-sm' }),
+        msg && h('div', { className:'text-xs mb-3 ' + (msg.ok ? 'text-green-600' : 'text-red-500') }, msg.text),
+        h('button', { disabled:busy, onClick:()=>doSetNewPassword(),
+          className:'w-full py-3 bg-indigo-600 text-white rounded-lg font-bold mb-2 disabled:opacity-50' },
+          busy ? 'กำลังบันทึก...' : '💾 บันทึกรหัสใหม่'),
+        // 🆕 ทางออกกันติดหน้านี้ถ้าลิงก์หมดอายุ (P2-B) — ล้าง hash + กลับ login
+        h('button', { onClick:()=>{ setMsg(null); setPw(''); setPw2('');
+            try { global.history.replaceState(null, '', global.location.pathname + global.location.search); } catch(_h){}
+            setPhase('login'); },
+          className:'w-full py-2 text-gray-500 text-sm' }, '← กลับไปเข้าสู่ระบบ')));
+  }
   // phase === 'login'
   return h('div', { className: shellBg },
     h('div', { className:'bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm' },
@@ -9702,6 +9825,10 @@ function CloudGate(){
       h('button', { disabled:busy, onClick:()=>doAuth(),
         className:'w-full py-3 bg-indigo-600 text-white rounded-lg font-bold mb-2 disabled:opacity-50' },
         busy ? 'กำลังเชื่อมต่อ...' : 'เข้าสู่ระบบ Cloud'),
+      // 🆕 ลืมรหัสผ่าน — self-service reset ผ่านอีเมล
+      h('button', { onClick:()=>{ setMsg(null); setPhase('reset_request'); },
+        className:'w-full py-1.5 text-indigo-600 hover:text-indigo-800 text-xs font-medium mb-1' },
+        'ลืมรหัสผ่าน?'),
       setupMode
         ? h('button', { disabled:busy, onClick:()=>doSetup(),
             className:'w-full py-2 border-2 border-dashed border-indigo-300 text-indigo-600 rounded-lg text-sm font-semibold disabled:opacity-50' },
