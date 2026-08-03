@@ -6654,6 +6654,17 @@ function reducer(s, a){
       }
       return { ...s, suppliers: sups };
     }
+    // 🆕 นำเข้าลูกค้า (Ecount) — pattern เดียวกับ IMPORT_SUPPLIERS
+    case 'IMPORT_CUSTOMERS': {
+      // a.data = [customer, ...] — merge โดย id (ซ้ำ=อัปเดตทับ field ที่มา, ไม่ซ้ำ=เพิ่ม)
+      let custs = [...(s.customers||[])];
+      for(const c of a.data){
+        const idx = custs.findIndex(x => x.id === c.id);
+        if(idx >= 0) custs[idx] = { ...custs[idx], ...c };
+        else custs.push(c);
+      }
+      return { ...s, customers: custs };
+    }
 
     // ---------- Unit presets (master list) ----------
     case 'ADD_UNIT_PRESET':    return { ...s, unitPresets:[...(s.unitPresets||[]), a.data] };
@@ -53136,13 +53147,16 @@ function NewSIModal({ state, dispatch, user, onClose }){
   const customer = state.customers.find(c => c.id === customerId);
 
   // sync due date when customer selected
+  //   🆕 แก้ 2 บั๊ก: (1) credit||30 → ลูกค้าเงินสด (credit=0) กลายเป็นเครดิต 30 วัน · (2) นับจากวันนี้ ไม่ใช่วันที่บนใบกำกับ
   useEffect(() => {
     if(customer){
-      const d = new Date();
-      d.setDate(d.getDate() + (customer.credit||30));
+      const _cd = (customer.credit == null || customer.credit === '') ? 30 : (Number(customer.credit) || 0);
+      // คิดเป็น UTC ล้วน — ถ้าใช้ new Date(x+'T00:00:00') (local TZ) แล้ว toISOString() วันจะเพี้ยนไป 1 วันในไทย (UTC+7)
+      const d = new Date((invDate || getToday()) + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + _cd);
       setDueDate(d.toISOString().slice(0,10));
     }
-  }, [customerId]);
+  }, [customerId, invDate]);
 
   const filteredItems = useMemo(() =>
     !itemSearch ? (state.items||[]).filter(i => i.active !== false).slice(0,20)
@@ -53187,6 +53201,16 @@ function NewSIModal({ state, dispatch, user, onClose }){
     const lock = state.settings?.periodLockUntil;
     if(lock && String(invDate) < String(lock)){
       return alert(`📅 งวด ≤ ${lock} ถูกปิดแล้ว — ออกใบกำกับวันที่ ${invDate} ไม่ได้`);
+    }
+    // 🆕 เลขผู้เสียภาษีผู้ซื้อต้องครบ 13 หลัก (ม.86/4) — ข้อมูลนำเข้าจากระบบเดิมบางรายเป็นรหัสเก่า/มีขีด/ไม่ครบ
+    //    ไม่บล็อก (ขายให้บุคคลธรรมดา/ไม่จด VAT ได้) แต่ต้องเตือนก่อน ไม่งั้นลูกค้าใช้เครดิตภาษีซื้อไม่ได้ → ต้องออกใบใหม่
+    {
+      const _tid = String(customer?.taxId || '').replace(/[-\s]/g, '');
+      if(!/^\d{13}$/.test(_tid)){
+        if(!window.confirm(`⚠️ เลขผู้เสียภาษีของ "${customer?.name||'-'}" ไม่ครบ 13 หลัก (${customer?.taxId || 'ว่าง'})\n\n`
+          + 'ใบกำกับภาษีเต็มรูปต้องมีเลข 13 หลักของผู้ซื้อ — ถ้าออกแบบนี้ ลูกค้าจะใช้เครดิตภาษีซื้อไม่ได้ (ต้องออกใบใหม่)\n\n'
+          + 'แก้เลขภาษีที่ข้อมูลลูกค้าก่อน หรือยืนยันออกต่อ (กรณีขายให้บุคคลธรรมดา/ผู้ไม่จด VAT)?')) return;
+      }
     }
     savingRef.current = true;
     setTimeout(() => { savingRef.current = false; }, 3000);  // ปลดล็อกเผื่อ error
@@ -53293,11 +53317,15 @@ function NewSIModal({ state, dispatch, user, onClose }){
             h('div', { className:'flex-1' },
               h(Combobox, { value:customerId, onChange:setCustomerId,
                 options: state.customers||[], getKey:c=>c.id,
-                getLabel:c=>c.name, placeholder:'— เลือก — (พิมพ์ค้นหาได้)',
+                getLabel:c=>c.name, placeholder:'— เลือก — (พิมพ์ชื่อ/เลขภาษี/รหัส)',
+                // 🆕 ลูกค้าหลักร้อย-พันราย: ค้นด้วยเลขภาษี/รหัสได้ + ชื่อบริษัทเดียวมีหลายสาขา ต้องแยกออก
+                getSearchText: c => [c.name, c.taxId, c.extCode, c.branchCode].filter(Boolean).join(' '),
                 renderOption: c => h('div', null,
                   h('div', { className:'font-medium' }, c.name),
                   h('div', { className:'text-[10px] text-gray-500' },
-                    `Tax: ${c.taxId||'-'} · เครดิต ${c.credit||0} วัน`))
+                    `Tax: ${c.taxId||'-'}`,
+                    c.branchCode ? ` · ${c.branchCode === '00000' ? 'สนง.ใหญ่' : 'สาขา ' + c.branchCode}` : '',
+                    ` · เครดิต ${c.credit||0} วัน`))
               })),
             h('button', { type:'button', onClick:()=>setShowAddCust(true), title:'เพิ่มลูกค้าใหม่',
               className:'px-2.5 py-2 bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded whitespace-nowrap' }, '➕ ใหม่')),
@@ -54132,6 +54160,7 @@ function printSalesInvoice(si, state){
       <div><b>${c?.name||'-'}</b></div>
       <div>${c?.address||'-'}</div>
       <div>เลขประจำตัวผู้เสียภาษี: <b>${c?.taxId||'-'}</b></div>
+      <div>${c?.branchCode ? (String(c.branchCode) === '00000' ? 'สำนักงานใหญ่' : 'สาขาที่ ' + c.branchCode) : ''}</div>
     </div>
   </div>
   <div style="display:flex;justify-content:space-between;margin-bottom:4mm;font-size:10pt">
@@ -56144,8 +56173,9 @@ function EcountImportModal({ state, dispatch, onClose }){
         const j = JSON.parse(rd.result);
         const items = j.items || (Array.isArray(j) ? j : []);
         const suppliers = j.suppliers || [];
-        if(!items.length && !suppliers.length){ setFileErr('ไฟล์นี้ไม่มี items หรือ suppliers'); return; }
-        setData({ items, suppliers });
+        const customers = j.customers || [];   // 🆕 นำเข้าลูกค้าด้วย (เดิมตกหล่นทั้งที่มีในไฟล์)
+        if(!items.length && !suppliers.length && !customers.length){ setFileErr('ไฟล์นี้ไม่มี items / suppliers / customers'); return; }
+        setData({ items, suppliers, customers });
       } catch(e){ setFileErr('อ่านไฟล์ไม่ได้ (ต้องเป็น .json): ' + (e && e.message || e)); }
     };
     rd.onerror = () => setFileErr('เปิดไฟล์ไม่สำเร็จ');
@@ -56154,26 +56184,47 @@ function EcountImportModal({ state, dispatch, onClose }){
 
   const all = (data && data.items) || [];
   const supAll = (data && data.suppliers) || [];
+  const custRaw = (data && data.customers) || [];
+  // 🆕 คัดกรองลูกค้า: ไฟล์ migration ใส่ "ทุกคู่ค้า" ลงทั้ง suppliers และ customers (convert_parties.py)
+  //    → ลิสต์ลูกค้ามี supplier/บัญชีภายใน/ชื่อสาขาตัวเองปนมา → ถ้าเผลอเลือกตอนออกใบกำกับ = ออกบิลให้ตัวเอง (รายได้+VAT เกินจริง)
+  //    เกณฑ์: รหัสลูกค้าฝั่ง Ecount ขึ้นต้น CS · ที่เหลือ (SP/SU/BT/UM/ตัวเลข) = คู่ค้า/บัญชีภายใน
+  const _isRealCustomer = (c) => String(c.extCode || '').toUpperCase().startsWith('CS');
+  const [custRealOnly, setCustRealOnly] = useState(true);
+  const custAll = custRealOnly ? custRaw.filter(_isRealCustomer) : custRaw;
+  const custSkipped = custRaw.length - custAll.length;
   const coded = all.filter(i => !String(i.code||'').startsWith('MIG-'));
   const migs  = all.filter(i => String(i.code||'').startsWith('MIG-'));
   const [useCoded, setUseCoded] = useState(true);
   const [useMigs, setUseMigs]   = useState(false);
   const [useSups, setUseSups]   = useState(true);
+  const [useCusts, setUseCusts] = useState(true);   // 🆕
   const existing = new Set((state.items||[]).map(i => String(i.code||'').toLowerCase()).filter(Boolean));
   const supExisting = new Set((state.suppliers||[]).map(sp => sp.id));
+  const custExisting = new Set((state.customers||[]).map(c => c.id));   // 🆕
   const chosen = [...(useCoded ? coded : []), ...(useMigs ? migs : [])];
   const dupCount = chosen.filter(i => existing.has(String(i.code||'').toLowerCase())).length;
   const supChosen = useSups ? supAll : [];
   const supDup = supChosen.filter(sp => supExisting.has(sp.id)).length;
+  const custChosen = useCusts ? custAll : [];        // 🆕
+  const custDup = custChosen.filter(c => custExisting.has(c.id)).length;
 
   const run = () => {
-    if(!chosen.length && !supChosen.length){ alert('ยังไม่ได้เลือกชุดข้อมูล'); return; }
+    if(!chosen.length && !supChosen.length && !custChosen.length){ alert('ยังไม่ได้เลือกชุดข้อมูล'); return; }
     const lines = [];
     if(chosen.length) lines.push(`สินค้า ${chosen.length} (ใหม่ ${chosen.length - dupCount} · ทับ ${dupCount})`);
     if(supChosen.length) lines.push(`supplier ${supChosen.length} (ใหม่ ${supChosen.length - supDup} · ทับ ${supDup})`);
+    if(custChosen.length) lines.push(`ลูกค้า ${custChosen.length} (ใหม่ ${custChosen.length - custDup} · ทับ ${custDup})`);
     if(!window.confirm(`นำเข้า:\n• ${lines.join('\n• ')}\n\nข้อมูลจะบันทึกขึ้น cloud อัตโนมัติ`)) return;
+    // 🆕 กันนำเข้าซ้ำรอบ 2 ล้างของที่พนักงานกรอกเอง — ตัด field ที่เป็นค่าว่างในไฟล์ออกก่อน merge
+    //    (ไฟล์ migration ใส่ contact/phone/email เป็น "" มาเกือบทุกราย → merge ตรงๆ จะทับของที่กรอกไว้แล้ว)
+    const _stripEmpty = (o) => {
+      const out = {};
+      for(const k in o){ const v = o[k]; if(v === '' || v === null || v === undefined) continue; out[k] = v; }
+      return out;
+    };
     if(chosen.length) dispatch({ type:'IMPORT_ITEMS', data: chosen });
-    if(supChosen.length) dispatch({ type:'IMPORT_SUPPLIERS', data: supChosen });
+    if(supChosen.length) dispatch({ type:'IMPORT_SUPPLIERS', data: supChosen.map(_stripEmpty) });
+    if(custChosen.length) dispatch({ type:'IMPORT_CUSTOMERS', data: custChosen.map(_stripEmpty) });
     alert(`✅ นำเข้าเรียบร้อย — ${lines.join(' · ')}`);
     onClose();
   };
@@ -56214,11 +56265,29 @@ function EcountImportModal({ state, dispatch, onClose }){
         h('div', null,
           h('div', { className:'font-semibold text-sm' }, `🏢 Supplier / เจ้าหนี้ทั้งหมดจากระบบเดิม — ${supAll.length} ราย`),
           h('div', { className:'text-xs text-gray-500' }, 'รวมเจ้าหนี้ทุกประเภท (วัตถุดิบ + ค่าใช้จ่าย เช่น ค่าเช่า/IT) · มีเลขภาษีครบส่วนใหญ่'))),
+      custRaw.length > 0 && h('div', { className:'bg-purple-50 border border-purple-200 rounded p-3 space-y-2' },
+        h('label', { className:'flex items-start gap-2 cursor-pointer' },
+          h('input', { type:'checkbox', checked:useCusts, onChange:e=>setUseCusts(e.target.checked), className:'mt-1' }),
+          h('div', null,
+            h('div', { className:'font-semibold text-sm' }, `👥 ลูกค้า — ${custAll.length} ราย`),
+            h('div', { className:'text-xs text-gray-500' }, 'ใช้ตอนออกใบกำกับภาษีขาย/ขายส่ง'))),
+        h('label', { className:'flex items-start gap-2 cursor-pointer pl-6 border-t border-purple-200 pt-2' },
+          h('input', { type:'checkbox', checked:custRealOnly, onChange:e=>setCustRealOnly(e.target.checked), className:'mt-1' }),
+          h('div', null,
+            h('div', { className:'text-sm font-medium text-purple-900' }, 'เฉพาะลูกค้าจริง (รหัส CS) — แนะนำ'),
+            h('div', { className:'text-xs text-gray-600' },
+              'ไฟล์จากระบบเดิมใส่ ', h('b', null, 'คู่ค้าทุกรายลงทั้งช่อง supplier และลูกค้า'),
+              ' → ถ้าไม่กรอง จะมี supplier / บัญชีภายใน / ชื่อสาขาตัวเอง ปนอยู่ในลิสต์ลูกค้า',
+              custSkipped > 0 && h('span', { className:'text-red-600 font-medium' }, ` · กรองออก ${custSkipped} ราย`)))),
+        !custRealOnly && h('div', { className:'text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2' },
+          '⚠️ นำเข้าทั้งหมด = เสี่ยงเลือกผิดตอนออกใบกำกับ (ออกบิลให้สาขาตัวเอง/คู่ค้า) → รายได้+VAT ขายเกินจริง')),
       h('div', { className:'text-xs text-gray-500' },
-        `เลือกแล้ว: สินค้า ${chosen.length}` + (dupCount ? ` (ทับ ${dupCount})` : '') + ` · supplier ${supChosen.length}` + (supDup ? ` (ทับ ${supDup})` : '')),
+        `เลือกแล้ว: สินค้า ${chosen.length}` + (dupCount ? ` (ทับ ${dupCount})` : '')
+        + ` · supplier ${supChosen.length}` + (supDup ? ` (ทับ ${supDup})` : '')
+        + ` · ลูกค้า ${custChosen.length}` + (custDup ? ` (ทับ ${custDup})` : '')),
       h('div', { className:'flex gap-2 pt-3 border-t' },
-        h(Button, { variant:'primary', onClick:run, disabled:!chosen.length && !supChosen.length },
-          `📦 นำเข้า (สินค้า ${chosen.length} · supplier ${supChosen.length})`),
+        h(Button, { variant:'primary', onClick:run, disabled:!chosen.length && !supChosen.length && !custChosen.length },
+          `📦 นำเข้า (สินค้า ${chosen.length} · supplier ${supChosen.length} · ลูกค้า ${custChosen.length})`),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'))));
 }
 
