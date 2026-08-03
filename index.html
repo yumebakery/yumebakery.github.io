@@ -6573,7 +6573,20 @@ function reducer(s, a){
     case 'DELETE_SUPPLIER':  return { ...s, suppliers:(s.suppliers||[]).filter(x => x.id!==a.data) };
     case 'ADD_CUSTOMER':     return { ...s, customers:[...(s.customers||[]), a.data] };
     case 'UPDATE_CUSTOMER':  return { ...s, customers:(s.customers||[]).map(x => x.id===a.data.id ? a.data : x) };
-    case 'DELETE_CUSTOMER':  return { ...s, customers:(s.customers||[]).filter(x => x.id!==a.data) };
+    // 🆕 กันลบลูกค้าที่เคยออกใบกำกับ/บันทึกขาย — เอกสารภาษีต้องตามรอยผู้ซื้อได้ (ม.87 เก็บ 5 ปี)
+    //   ใบที่ออกหลังมี customerSnapshot จะพิมพ์ได้ถูกอยู่แล้ว แต่ลบทิ้ง = ตามรอย/ทวงหนี้/ออกใบลดหนี้ไม่ได้
+    case 'DELETE_CUSTOMER': {
+      const _cid = a.data;
+      // หมายเหตุ: salesLight (บันทึกขายสาขา) ไม่ผูก customerId → เช็คเฉพาะ salesInvoices พอ
+      const _siCnt = (s.salesInvoices||[]).filter(i => i.customerId === _cid).length;
+      if(_siCnt > 0){
+        const _c = (s.customers||[]).find(x => x.id === _cid);
+        alert(`⛔ ลบ "${_c?.name || _cid}" ไม่ได้ — มีใบกำกับภาษีอ้างอิงอยู่ ${_siCnt} ใบ\n\n`
+          + `เอกสารภาษีต้องเก็บย้อนหลัง 5 ปี — ถ้าเลิกค้าขายแล้วให้แก้ชื่อเป็น "(เลิกใช้) ..." แทนการลบ`);
+        return s;
+      }
+      return { ...s, customers:(s.customers||[]).filter(x => x.id!==_cid) };
+    }
 
     // ---------- Item groups ----------
     case 'ADD_ITEM_GROUP':    return { ...s, itemGroups:[...(s.itemGroups||[]), a.data] };
@@ -9208,9 +9221,11 @@ function executeApprovedAction(req, state, dispatch, user){
       break;
     }
     case 'delete_si': {
+      // 🆕 P0: เดิมแค่ติดป้าย paymentStatus:'cancelled' — ไม่ set voided/ไม่คืนสต๊อก/ไม่กลับรายการ JE
+      //    → ใบที่ "ลบ" แล้วยังเป็นรายได้+VAT+ลูกหนี้ค้างในงบและรายงานภาษี · ใช้ VOID_SALES_INV ที่ทำครบแทน
       const si = state.salesInvoices?.find(x => x.id === req.entityId);
-      if(si) dispatch({ type:'UPDATE_SALES_INV', data:{ ...si,
-        paymentStatus:'cancelled', cancelledBy:user.username, cancelledAt:Date.now() }});
+      if(si) dispatch({ type:'VOID_SALES_INV', data:{ siId: si.id,
+        reason: req.reason || req.note || 'อนุมัติคำขอยกเลิกใบกำกับ', by: user.username }});
       break;
     }
     // 🆕 cancel/reverse executors (Phase A) — reducer ทำเรื่องคืน bank + reverse JE + audit log
@@ -52928,6 +52943,15 @@ const {
   BEDateInput,
 } = global.ERP;
 
+// 🆕 ข้อมูลผู้ซื้อของใบกำกับ — ใช้ snapshot ที่ freeze ไว้ตอนออกใบเป็นหลัก (เอกสารกฎหมาย ห้ามเปลี่ยนย้อนหลัง)
+//   ใบเก่าที่ออกก่อนมี snapshot → fallback ไป look-up สดเหมือนเดิม (backward-compat ไม่ต้อง migration)
+function siBuyer(state, si){
+  if(si && si.customerSnapshot) return si.customerSnapshot;
+  const c = ((state && state.customers)||[]).find(x => x.id === (si && si.customerId));
+  if(c) return c;
+  return { name: (si && si.customerName) || '', taxId:'', branchCode:'', address:'', phone:'' };
+}
+
 // ---------- Main ----------
 function SalesFullModule({ state, dispatch }){
   const user = state.currentUser;
@@ -52936,7 +52960,7 @@ function SalesFullModule({ state, dispatch }){
       h('div', { className:'font-bold text-red-800' }, '🚫 ต้องเข้าจาก HQ เท่านั้น'));
   }
   const [tab, setTab] = useState('dashboard');
-  const unpaidCount = (state.salesInvoices||[]).filter(i => (i.paymentStatus||'unpaid') !== 'paid').length;
+  const unpaidCount = (state.salesInvoices||[]).filter(i => !i.voided && (i.paymentStatus||'unpaid') !== 'paid').length;
   const pendingSlips = (state.salesPayments||[]).filter(p => !p.slip).length;
 
   return h('div', null,
@@ -52975,7 +52999,7 @@ function SalesFullModule({ state, dispatch }){
 function SDashboard({ state }){
   const today = getToday();
   const ym = today.slice(0,7);
-  const sis = state.salesInvoices || [];
+  const sis = (state.salesInvoices || []).filter(i => !i.voided);   // 🆕 ใบที่ยกเลิกไม่นับเป็นยอดขาย/VAT/ลูกหนี้
   const monthSI = sis.filter(i => i.invDate?.slice(0,7) === ym);
   const totalThisMonth = monthSI.reduce((s,i) => s + (i.netTotal||0), 0);
   const unpaid = sis.filter(i => (i.paymentStatus||'unpaid') !== 'paid');
@@ -53040,9 +53064,13 @@ function SIList({ state, dispatch, user }){
     if(filter !== 'all') list = list.filter(i => (i.paymentStatus||'unpaid') === filter);
     if(search){
       const q = search.toLowerCase();
-      list = list.filter(i =>
-        (i.siNumber||'').toLowerCase().includes(q) ||
-        state.customers.find(c => c.id === i.customerId)?.name.toLowerCase().includes(q));
+      // 🆕 ใช้ชื่อ/เลขภาษี ณ วันออกใบ (siBuyer) + กัน crash: เดิม ?.name.toLowerCase() กันแค่ find ไม่เจอ
+      //    ถ้าลูกค้ามีระเบียนแต่ไม่มีชื่อ (ข้อมูลนำเข้า) → .toLowerCase() ของ undefined = ทั้งหน้าพัง
+      list = list.filter(i => {
+        if((i.siNumber||'').toLowerCase().includes(q)) return true;
+        const b = siBuyer(state, i);
+        return String(b.name||'').toLowerCase().includes(q) || String(b.taxId||'').includes(q);
+      });
     }
     return list.sort((a,b) => (b.invDate||'').localeCompare(a.invDate||''));
   }, [state.salesInvoices, state.customers, filter, search, dr.startDate, dr.endDate]);
@@ -53084,7 +53112,7 @@ function SIList({ state, dispatch, user }){
             ),
             h('tbody', { className:'divide-y' },
               filtered.map(i => {
-                const c = state.customers.find(x => x.id === i.customerId);
+                const c = siBuyer(state, i);   // 🆕 ชื่อผู้ซื้อ ณ วันออกใบ (ไม่โชว์ id ดิบถ้าลูกค้าถูกแก้/ลบ)
                 const st = i.paymentStatus || 'unpaid';
                 const [lbl, clr] = SI_STATUS[st] || [st, 'bg-gray-100'];
                 const remain = (i.netTotal||0) - (i.paidAmount||0);
@@ -53249,6 +53277,15 @@ function NewSIModal({ state, dispatch, user, onClose }){
       id: genId('si'),
       siNumber, invDate, dueDate,
       customerId, customerName: customer?.name,
+      // 🆕 snapshot ข้อมูลผู้ซื้อ ณ วันออกใบกำกับ — ใบกำกับภาษีเป็นเอกสารทางกฎหมาย ห้ามเปลี่ยนย้อนหลัง
+      //   เดิมพิมพ์ใบ/ทำรายงานภาษี โดย look-up ลูกค้าสดจาก state → แก้/ลบลูกค้าทีหลัง = ใบเก่าและ ภ.พ.30 ย้อนหลังเปลี่ยนเนื้อหา
+      customerSnapshot: customer ? {
+        name: customer.name || '',
+        taxId: customer.taxId || '',
+        branchCode: customer.branchCode || '',
+        address: customer.address || '',
+        phone: customer.phone || '',
+      } : null,
       branch: sourceBranch,
       priceMode,
       lines: valid.map((l,idx) => ({
@@ -53468,7 +53505,7 @@ function NewSIModal({ state, dispatch, user, onClose }){
 
 // ---------- SI Detail ----------
 function SIDetailModal({ si, state, dispatch, user, onClose, onReceive }){
-  const c = state.customers.find(x => x.id === si.customerId);
+  const c = siBuyer(state, si);   // 🆕 snapshot ผู้ซื้อ ณ วันออกใบ
   const remain = (si.netTotal||0) - (si.paidAmount||0);
   const pays = (state.salesPayments||[]).filter(p => p.siId === si.id);
   const st = si.paymentStatus || 'unpaid';
@@ -53654,7 +53691,7 @@ function ReceivePaymentModal({ si, state, dispatch, user, onClose }){
 // ---------- AR Receive tab (quick receive from list) ----------
 function ARReceiveTab({ state, dispatch, user }){
   const unpaid = (state.salesInvoices||[])
-    .filter(i => (i.paymentStatus||'unpaid') !== 'paid')
+    .filter(i => !i.voided && (i.paymentStatus||'unpaid') !== 'paid')   // 🆕 ใบที่ยกเลิกไม่ใช่ลูกหนี้
     .sort((a,b) => (a.dueDate||'').localeCompare(b.dueDate||''));
   const [receivingSI, setReceivingSI] = useState(null);
 
@@ -53697,7 +53734,7 @@ function ARReceiveTab({ state, dispatch, user }){
 function ARAgingReport({ state }){
   const today = getToday();
   const unpaid = (state.salesInvoices||[])
-    .filter(i => (i.paymentStatus||'unpaid') !== 'paid');
+    .filter(i => !i.voided && (i.paymentStatus||'unpaid') !== 'paid');   // 🆕 ใบที่ยกเลิกไม่ใช่ลูกหนี้
 
   const buckets = { current:{ label:'ยังไม่ครบกำหนด', items:[], sum:0 },
     d1_30:{ label:'1-30 วัน', items:[], sum:0 },
@@ -53798,11 +53835,12 @@ function ARAgingReport({ state }){
 function SalesVATByInvReport({ state }){
   const dr = useDateRange(31);
   const rows = useMemo(() => {
+    // 🆕 P0: ไม่นับใบที่ยกเลิก — เดิมรายงานนี้ไม่กรอง voided ขณะที่ ภ.พ.30 กรอง → ยื่นภาษีขายเกิน
     const list = (state.salesInvoices||[]).filter(i =>
-      inDateRange(i.invDate, dr.startDate, dr.endDate)
+      !i.voided && inDateRange(i.invDate, dr.startDate, dr.endDate)
     ).sort((a,b) => (a.invDate||'').localeCompare(b.invDate||''));
     return list.map(i => {
-      const c = state.customers.find(x => x.id === i.customerId);
+      const c = siBuyer(state, i);   // 🆕 รายงานภาษีขายต้องใช้ข้อมูล ณ วันออกใบ
       const vatRate = (i.lines||[]).some(l => (l.vatRate||0) > 0) ? 7 : 0;
       const total = (i.subtotal||0) + (i.vat||0);
       const vatableBase = vatRate > 0 ? (i.subtotal||0) : 0;
@@ -53888,7 +53926,7 @@ function SalesVATByPayReport({ state }){
     return pays.map(p => {
       const si = (state.salesInvoices||[]).find(i => i.id === p.siId);
       if(!si) return null;
-      const c = state.customers.find(x => x.id === si.customerId);
+      const c = siBuyer(state, si);   // 🆕 snapshot ผู้ซื้อ
       const portion = (si.netTotal||0) > 0 ? p.amount/si.netTotal : 1;
       const total = (si.subtotal||0) * portion + (si.vat||0) * portion;
       const vatRate = (si.lines||[]).some(l => (l.vatRate||0) > 0) ? 7 : 0;
@@ -54087,7 +54125,7 @@ function autoPostSalesReceive(pay, si, bank, state, dispatch, user){
 
 // ==================== PRINT ====================
 function printSalesInvoice(si, state){
-  const c = state.customers.find(x => x.id === si.customerId);
+  const c = siBuyer(state, si);   // 🆕 พิมพ์ใบกำกับด้วยข้อมูล ณ วันออกใบ (แก้/ลบลูกค้าทีหลังไม่กระทบใบเก่า)
   const company = state.company || {};
   // ⭐ ใช้ข้อมูลของสาขาที่ขายเป็นหัวบิล (ไม่ใช่ company HQ ทุกครั้ง)
   const sellerBranch = (state.branches||[]).find(b => b.id === (si.branch || state.currentBranch));
@@ -54146,13 +54184,13 @@ function printSalesInvoice(si, state){
 </div>
 <div class="sheet">
   <h1>ใบกำกับภาษี / ใบส่งของ</h1>
-  <div class="sub">(Tax Invoice / Delivery Note) — ต้นฉบับ</div>
+  <div class="sub">(Tax Invoice / Delivery Note) — ${si.voided ? '<b style="color:#c00">*** ยกเลิกแล้ว / CANCELLED ***</b>' : 'ต้นฉบับ'}</div>
   <div class="info">
     <div class="box">
       <div class="label">ผู้ขาย / Seller</div>
       <div><b>${sellerName}</b></div>
       <div>${sellerAddr}</div>
-      <div>เลขประจำตัวผู้เสียภาษี: <b>${sellerTaxId}</b>${sellerBranchCode?` (สาขา <b>${sellerBranchCode}</b>)`:''}</div>
+      <div>เลขประจำตัวผู้เสียภาษี: <b>${sellerTaxId}</b>${sellerBranchCode?` (<b>${String(sellerBranchCode)==='00000'?'สำนักงานใหญ่':'สาขาที่ '+sellerBranchCode}</b>)`:''}</div>
       ${sellerPhone?`<div>โทร: ${sellerPhone}</div>`:''}
     </div>
     <div class="box">
