@@ -3157,6 +3157,17 @@ Object.assign(global.ERP, {
     } catch(e){ return null; }
   }
 
+  // 🆕 SESSION-PER-DEVICE: ตัด "ใครล็อกอิน/อยู่สาขาไหน" ออกก่อนขึ้น cloud ทุกเส้นทาง
+  //   identity เป็นของเครื่อง ไม่ใช่ข้อมูลบริษัท — ถ้าติดไปด้วย เครื่องอื่นโหลดมาแล้วกลายเป็น user คนนั้น (ข้ามหน้า login)
+  function _stripSession(state){
+    try {
+      if(state && (state.currentUser || state.currentBranch !== undefined)){
+        return Object.assign({}, state, { currentUser: null, currentBranch: null });
+      }
+    } catch(e){}
+    return state;
+  }
+
   // ---- push snapshot: upsert '<dev>:latest' ทุกครั้ง + '<dev>:<วันที่>' (daily) ----
   async function pushSnapshot(state, opts){
     opts = opts || {};
@@ -3164,13 +3175,14 @@ Object.assign(global.ERP, {
     var u = await getUser(); if(!u) return { ok:false, error:'ยังไม่ได้เข้าสู่ระบบ cloud' };
     var dev = deviceId();
     var today = new Date().toISOString().slice(0,10);
-    var json; try { json = JSON.stringify(state); } catch(e){ return { ok:false, error:'state serialize ไม่ได้' }; }
+    var _snapState = _stripSession(state);   // 🆕 manual/pre_restore backup ก็ห้ามมี identity ติดไป
+    var json; try { json = JSON.stringify(_snapState); } catch(e){ return { ok:false, error:'state serialize ไม่ได้' }; }
     var base = {
       device_id: dev, device_label: opts.label || null,
       app_version: (state && state.version) || null,
       saved_at: new Date().toISOString(),
       by_user: opts.byUser || null,
-      state: state, bytes: json.length,
+      state: _snapState, bytes: json.length,
     };
     // 🔒 P0-1: pre_restore/manual = จุดสำรองถาวร → id เอกลักษณ์ (ห้ามใช้ :latest ไม่งั้นโดน autoPush ทับใน 3 นาที = safety copy พัง)
     var kind = opts.kind || 'latest';
@@ -3323,12 +3335,15 @@ Object.assign(global.ERP, {
       try { await loadCloudState(); } catch(e){ return { ok:false, error:'ยังเชื่อม cloud ไม่ได้: ' + (e && e.message || e) }; }
     }
     var today = new Date().toISOString().slice(0,10);
-    var json; try { json = JSON.stringify(state); } catch(e){ return { ok:false, error:'serialize fail' }; }
+    // 🆕 SESSION-PER-DEVICE: currentUser/currentBranch = ของ "เครื่องนี้" ไม่ใช่ข้อมูลบริษัท → ห้าม push ขึ้น cloud
+    //    เดิม push ทั้งก้อน → เครื่องอื่นโหลดมาแล้วกลายเป็น user คนล่าสุดที่ล็อกอิน (ข้ามหน้า login เลย)
+    var _pushState = _stripSession(state);
+    var json; try { json = JSON.stringify(_pushState); } catch(e){ return { ok:false, error:'serialize fail' }; }
     var row = {
       device_id: deviceId(), kind: 'latest',
       app_version: (state && state.version) || null,
       saved_at: new Date().toISOString(),
-      by_user: byUser || null, state: state, bytes: json.length,
+      by_user: byUser || null, state: _pushState, bytes: json.length,
     };
     try {
       var res;
@@ -8585,27 +8600,63 @@ const MENU_ITEMS = [
 ];
 
 // ==================== MAIN SHELL ====================
+// 🆕 SESSION-PER-DEVICE: state 2 ก้อนต่างกัน "แค่ session" ไหม (currentUser/currentBranch)
+//   reducer สร้าง object ใหม่เฉพาะ slice ที่เปลี่ยนจริง → เทียบ reference ระดับ key บนสุดได้แม่นยำและถูก
+//   ใช้กันยิง push เปล่าขึ้น cloud (payload หลัง strip เหมือนเดิมเป๊ะ) ที่ไปหมุน token → เครื่องอื่นโดน conflict-reload
+function _onlySessionChanged(a, b){
+  if(a === b) return true;
+  if(!a || !b) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if(ka.length !== kb.length) return false;
+  for(let i = 0; i < ka.length; i++){
+    const k = ka[i];
+    if(k === 'currentUser' || k === 'currentBranch') continue;
+    if(a[k] !== b[k]) return false;
+  }
+  return true;
+}
+
 function MainShell(){
   const [state, dispatch] = useReducer(reducer, null, () => {
     // ☁️ cloud-only: CloudGate โหลด state จาก Supabase ไว้ให้แล้ว (null = บริษัทใหม่ → INIT สด · push ขึ้น cloud ตอน dispatch แรก)
     const cb = global.__ERP_CLOUD_BOOT;
-    if(cb) return cb.state || INIT_STATE;
+    if(cb){
+      const base = cb.state || INIT_STATE;
+      // 🆕 SESSION-PER-DEVICE: ห้ามรับ currentUser จาก cloud (เป็นของเครื่องอื่น) → ทุกเครื่องต้องล็อกอินเอง
+      //    (กันแถว cloud เก่าที่ยังมี currentUser ค้างอยู่ด้วย) · สาขาจำต่อเครื่องผ่าน localStorage
+      let devBranch = null;
+      try { devBranch = global.localStorage.getItem('erp_v5__deviceBranch'); } catch(_g){}
+      const okBranch = devBranch && (base.branches||[]).some(b => b.id === devBranch);
+      return { ...base, currentUser: null,
+        currentBranch: okBranch ? devBranch : (base.currentBranch || INIT_STATE.currentBranch) };
+    }
     return loadState();   // โหมดเดิม (cloudOnly ปิด): localStorage
   });
   const [bootstrapping, setBootstrapping] = useState(false);
 
   // Persist state (debounced) + expose state getter ให้ async helpers
   const _firstSaveRef = R.useRef(true);
+  const _prevStateRef = R.useRef(null);
   useEffect(() => {
     global.ERP.__getState = () => state;
+    const _prev = _prevStateRef.current;
+    _prevStateRef.current = state;
     // ☁️ P1-1: boot จาก cloud — state รอบแรกคือของที่เพิ่งโหลดมา ไม่มีอะไรเปลี่ยน → ห้าม push
     //    (ไม่งั้นแค่เปิดแอป/แท็บดูเฉยๆ ก็ rotate token → เครื่องอื่นที่ทำงานอยู่โดน conflict + เสียงานก้อนล่าสุด)
     if(_firstSaveRef.current){
       _firstSaveRef.current = false;
       if(global.__ERP_CLOUD_BOOT && global.__ERP_CLOUD_BOOT.state) return;   // บริษัทใหม่ (state=null→INIT) ยัง push ตามเดิม
     }
+    // 🆕 SESSION-PER-DEVICE: ล็อกอิน/ออก/สลับสาขา ไม่เปลี่ยนข้อมูลบริษัท (session ถูก strip ก่อน push อยู่แล้ว)
+    //    → ห้าม push เปล่า ไม่งั้นหมุน saved_at token → ทุกเครื่องที่เปิดอยู่โดน conflict + reload + ต้องล็อกอินใหม่
+    if(_prev && _onlySessionChanged(_prev, state)) return;
     saveState(state);
   }, [state]);
+
+  // 🆕 SESSION-PER-DEVICE: จำสาขาที่เลือกไว้ "ต่อเครื่อง" (ไม่ขึ้น cloud → ไม่ไปเปลี่ยนสาขาเครื่องอื่น)
+  useEffect(() => {
+    try { if(state.currentBranch) global.localStorage.setItem('erp_v5__deviceBranch', state.currentBranch); } catch(_s){}
+  }, [state.currentBranch]);
 
   // After login, preload role's modules
   useEffect(() => {
