@@ -3510,7 +3510,7 @@ const { STORAGE_KEY, genId, getToday, LZ } = global.ERP;
 
 // ==================== INITIAL STATE ====================
 const INIT_STATE = {
-  version: 27,
+  version: 28,
   currentUser: null,
   currentBranch: 'b1',
 
@@ -3894,7 +3894,7 @@ const INIT_STATE = {
     { id:'ac_office_eq', label:'🖨️ อุปกรณ์สำนักงาน',           code:'1660', usefulLifeYears:5,  rate:20,   method:'straight-line', isCapEx:true, isFixed:true, builtin:true },
     { id:'ac_software',  label:'💾 Software / License',       code:'1730', usefulLifeYears:5,  rate:20,   method:'straight-line', isCapEx:true, isFixed:false, builtin:true },
     { id:'ac_kitchen',   label:'🍳 อุปกรณ์ครัว',                code:'1635', usefulLifeYears:5,  rate:20,   method:'straight-line', isCapEx:true, isFixed:true, builtin:true },
-    { id:'ac_deposit',   label:'💰 เงินมัดจำ / ค่าประกัน',       code:'1310', usefulLifeYears:0,  rate:0,    method:'none',         isCapEx:true, isFixed:false, builtin:true },
+    { id:'ac_deposit',   label:'💰 เงินประกัน / มัดจำสถานที่',    code:'1710', usefulLifeYears:0,  rate:0,    method:'none',         isCapEx:true, isFixed:false, builtin:true },
     { id:'ac_leasehold', label:'🔑 สิทธิการเช่า',              code:'1720', usefulLifeYears:0,  rate:0,    method:'straight-line', isCapEx:true, isFixed:false, builtin:true },
   ],
 
@@ -4180,6 +4180,19 @@ const INIT_STATE = {
     { id:'1600', code:'1600', name:'ที่ดิน อาคาร และอุปกรณ์ (ราคาทุน)', type:'asset',   normal:'debit'  },
     { id:'4200', code:'4200', name:'กำไรจากการจำหน่ายทรัพย์สิน',        type:'revenue', normal:'credit' },
     { id:'5420', code:'5420', name:'ขาดทุนจากการจำหน่ายทรัพย์สิน',      type:'expense', normal:'debit'  },
+    // 🆕 บัญชีทรัพย์สินรายหมวด — assetCategories อ้าง code พวกนี้อยู่แล้วแต่ COA ไม่มี → ทุกอย่างเคยตกไป 1600 ก้อนเดียว
+    { id:'1610', code:'1610', name:'อาคารและสิ่งปลูกสร้าง',        type:'asset', normal:'debit' },
+    { id:'1620', code:'1620', name:'คอมพิวเตอร์และอุปกรณ์',        type:'asset', normal:'debit' },
+    { id:'1630', code:'1630', name:'เครื่องจักร',                  type:'asset', normal:'debit' },
+    { id:'1635', code:'1635', name:'อุปกรณ์ครัว',                  type:'asset', normal:'debit' },
+    { id:'1640', code:'1640', name:'ยานพาหนะ',                    type:'asset', normal:'debit' },
+    { id:'1650', code:'1650', name:'เครื่องตกแต่งและเฟอร์นิเจอร์',   type:'asset', normal:'debit' },
+    { id:'1660', code:'1660', name:'อุปกรณ์สำนักงาน',              type:'asset', normal:'debit' },
+    { id:'1720', code:'1720', name:'สิทธิการเช่า',                 type:'asset', normal:'debit' },
+    { id:'1730', code:'1730', name:'Software / License',          type:'asset', normal:'debit' },
+    // 🆕 เงินประกัน/มัดจำสถานที่ = สินทรัพย์ไม่หมุนเวียนอื่น (ไม่ใช่ PP&E ไม่คิดค่าเสื่อม)
+    //    เดิมหมวด ac_deposit ใช้ 1310 ซึ่งชนกับ "เงินมัดจำจ่ายล่วงหน้า (supplier)" → กระทบยอดแยกกันไม่ได้
+    { id:'1710', code:'1710', name:'เงินประกัน / เงินมัดจำระยะยาว', type:'asset', normal:'debit' },
   ],
   journalEntries: [],
   bankAccounts: [],
@@ -4211,6 +4224,26 @@ function _checkDateLock(s, date, label){
     }
   }
   return null;
+}
+
+// 🆕 RTV ที่จัดซื้อยังไม่ตัดสินใจ ผูกกับ INV ใบนี้ไหม (ของคืนไปแล้วแต่ AP ยังเต็ม → ห้ามจ่าย)
+function _pendingRtvForInv(s, invId){
+  if(!invId) return [];
+  const inv = (s.invoices||[]).find(i => i.id === invId);
+  const grIds = inv ? ((inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : [])) : [];
+  return (s.returns||[]).filter(r =>
+    (r.rtvStatus === 'pending_decision' || r.rtvStatus === 'pending') &&
+    (r.linkedINV === invId || (r.grId && grIds.includes(r.grId))));
+}
+function _blockIfPendingRtv(s, invId){
+  const pend = _pendingRtvForInv(s, invId);
+  if(pend.length === 0) return null;
+  const amt = pend.reduce((t,r) => t + (Number(r.totalValue)||0), 0);
+  alert('⛔ จ่ายบิลนี้ยังไม่ได้ — มีของคืน (RTV) ที่จัดซื้อยังไม่ตัดสินใจ ' + pend.length + ' ใบ'
+    + '\n• ' + pend.map(r => (r.rtvNumber||r.id) + ' · ' + (Number(r.totalValue)||0).toLocaleString('th-TH')).join('\n• ')
+    + '\n\nมูลค่าที่คืนไปแล้วรวม ' + amt.toLocaleString('th-TH') + ' บาท'
+    + '\n\nให้จัดซื้อกด "ตัดสินใจ" (ส่งเคลม / ตัดยอด / ขอเงินคืน) ก่อน แล้วค่อยจ่าย');
+  return s;
 }
 
 function reducer(s, a){
@@ -5753,6 +5786,11 @@ function reducer(s, a){
     case 'ADD_PAY': {
       const locked = _checkDateLock(s, a.data.date, 'จ่ายเงิน');
       if(locked) return locked;
+      // 🆕 กันจ่ายเต็มทั้งที่คืนของไปแล้วแต่จัดซื้อยังไม่ตัดสินใจ (ระบบจ่ายตามที่รับจริง)
+      {
+        const _b = _blockIfPendingRtv(s, a.data.invId || a.data.invoiceId);
+        if(_b) return _b;
+      }
       // 🆕 PIPV-C: generate pvNumber (ใบสำคัญจ่าย) — ออกทุกครั้งที่ post payment (รวม partial)
       // ถ้า approvalStatus='pending' หรือ status='cancelled' → ยังไม่ออก PV
       const isPosted = (a.data.approvalStatus || 'approved') === 'approved'
@@ -5761,7 +5799,7 @@ function reducer(s, a){
       let seqPv = s.seq?.pv || 0;
       if(isPosted && !payment.pvNumber){
         seqPv += 1;
-        const d = new Date(payment.date || getToday());
+        const d = new Date(payment.payDate || payment.date || getToday());   // 🆕 เลข PV อิงเดือนที่จ่ายจริง
         const ym = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
         payment = { ...payment, pvNumber: `PV-${ym}-${String(seqPv).padStart(4,'0')}` };
       }
@@ -5770,6 +5808,15 @@ function reducer(s, a){
         seq:{ ...s.seq, pay:s.seq.pay+1, pv: seqPv } };
     }
     case 'UPDATE_PAY': {
+      // 🆕 เงินออกจริงที่สเต็ปนี้ (อนุมัติจ่าย) ไม่ใช่ ADD_PAY → ต้อง guard RTV ที่นี่ด้วย
+      //    เคส: ขอจ่ายผ่านแล้ว → คลังคืนของทีหลัง → อนุมัติ = จ่ายเต็มทั้งที่ของคืนไปแล้ว
+      if((a.data.approvalStatus || '') === 'approved'){
+        const _prev = (s.payments||[]).find(x => x.id === a.data.id);
+        if(!_prev || _prev.approvalStatus !== 'approved'){   // เพิ่งเปลี่ยนเป็นอนุมัติ
+          const _b = _blockIfPendingRtv(s, a.data.invId || a.data.invoiceId);
+          if(_b) return _b;
+        }
+      }
       // 🆕 PIPV-C: ถ้า approvalStatus เป็น 'approved' และยังไม่มี pvNumber → gen
       let payment = a.data;
       let seqPv = s.seq?.pv || 0;
@@ -5777,7 +5824,7 @@ function reducer(s, a){
         && (payment.status || 'posted') !== 'cancelled' && !payment.voided;
       if(isPosted && !payment.pvNumber){
         seqPv += 1;
-        const d = new Date(payment.date || getToday());
+        const d = new Date(payment.payDate || payment.date || getToday());   // 🆕 เลข PV อิงเดือนที่จ่ายจริง
         const ym = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
         payment = { ...payment, pvNumber: `PV-${ym}-${String(seqPv).padStart(4,'0')}` };
       }
@@ -7005,7 +7052,9 @@ function reducer(s, a){
       if(_gl < 0)       _lines.push(_line('5420', -_gl, 0, _isScrap ? 'ขาดทุนตัดจำหน่าย' : 'ขาดทุนจำหน่าย'));
       if(_gl > 0)       _lines.push(_line('4200', 0, _gl, 'กำไรจำหน่ายทรัพย์สิน'));
       if(_vat > 0)      _lines.push(_line('2200', 0, _vat, 'ภาษีขาย (จำหน่ายทรัพย์สิน)'));
-      _lines.push(_line('1600', 0, _cost, `ตัดราคาทุน ${_as.code||_as.name}`));
+      // 🆕 เครดิตบัญชีเดียวกับตอนซื้อ (ตั้งหนี้ DR ตามหมวด 1610/1620/1635…) — เดิม hardcode 1600 → 1600 ติดลบ + 16xx ค้างถาวร
+      const _dispCat = (s.assetCategories||[]).find(c => c.id === _as.categoryId);
+      _lines.push(_line((_dispCat && _dispCat.code) || '1600', 0, _cost, `ตัดราคาทุน ${_as.code||_as.name}`));
 
       const _td = _lines.reduce((t,l)=>t+l.debit,0), _tc = _lines.reduce((t,l)=>t+l.credit,0);
       const _seqJe = (s.seq?.je||1);
@@ -7052,19 +7101,21 @@ function reducer(s, a){
       // Dr: ค่าเสื่อมราคา / Cr: ค่าเสื่อมสะสม per asset
       for(const e of entries){
         totalDep += Number(e.depAmount)||0;
+        // 🆕 ติดสาขาของทรัพย์สินลงทุก line — เดิมไม่ใส่ branchId → P&L รายสาขาเทค่าเสื่อมลง HQ ทั้งก้อน (กำไรสาขาสูงเกินจริง)
+        const _br = e.branch || ((s.assets||[]).find(x => x.id === e.assetId)||{}).branch || null;
         lines.push({
           accountId: e.accExpenseAcct || '5410', accountCode: e.accExpenseAcct || '5410',
           account: e.accExpenseAcct || '5410',
           accountName: 'ค่าเสื่อมราคา',
           debit: Number(e.depAmount)||0, credit: 0,
-          assetId: e.assetId, period,
+          assetId: e.assetId, period, branchId: _br,
         });
         lines.push({
           accountId: e.accAccumDepAcct || '1659', accountCode: e.accAccumDepAcct || '1659',
           account: e.accAccumDepAcct || '1659',
           accountName: 'ค่าเสื่อมสะสม',
           debit: 0, credit: Number(e.depAmount)||0,
-          assetId: e.assetId, period,
+          assetId: e.assetId, period, branchId: _br,
         });
       }
       const je = {
@@ -8267,6 +8318,29 @@ function _migrateStateOnce(s){
     if(!coa.find(a => a.code === '3900'))
       coa.push({ id:'3900', code:'3900', name:'ยอดยกมา (Opening Balance Equity)', type:'equity', normal:'credit' });
     return { ...s, version: 27, chartOfAccounts: coa };
+  }
+  // 🆕 v27 → v28: บัญชีทรัพย์สินรายหมวด (assetCategories อ้าง code พวกนี้แต่ COA ไม่มี → ตกไป 1600 หมด)
+  //   + แยกเงินประกัน/มัดจำสถานที่เป็น 1710 (เดิมใช้ 1310 ชนกับมัดจำจ่ายล่วงหน้า supplier)
+  if(s.version === 27){
+    const coa = [...(s.chartOfAccounts||[])];
+    const need = [
+      { id:'1610', code:'1610', name:'อาคารและสิ่งปลูกสร้าง',        type:'asset', normal:'debit' },
+      { id:'1620', code:'1620', name:'คอมพิวเตอร์และอุปกรณ์',        type:'asset', normal:'debit' },
+      { id:'1630', code:'1630', name:'เครื่องจักร',                  type:'asset', normal:'debit' },
+      { id:'1635', code:'1635', name:'อุปกรณ์ครัว',                  type:'asset', normal:'debit' },
+      { id:'1640', code:'1640', name:'ยานพาหนะ',                    type:'asset', normal:'debit' },
+      { id:'1650', code:'1650', name:'เครื่องตกแต่งและเฟอร์นิเจอร์',   type:'asset', normal:'debit' },
+      { id:'1660', code:'1660', name:'อุปกรณ์สำนักงาน',              type:'asset', normal:'debit' },
+      { id:'1710', code:'1710', name:'เงินประกัน / เงินมัดจำระยะยาว', type:'asset', normal:'debit' },
+      { id:'1720', code:'1720', name:'สิทธิการเช่า',                 type:'asset', normal:'debit' },
+      { id:'1730', code:'1730', name:'Software / License',          type:'asset', normal:'debit' },
+    ];
+    for(const acc of need){ if(!coa.find(a => a.code === acc.code)) coa.push(acc); }
+    // ย้ายหมวด "เงินมัดจำ/ค่าประกัน" จาก 1310 → 1710 (ทรัพย์สินที่ลงไปแล้วยังอ้าง code เดิมใน JE — ไม่ย้อนแก้ JE เก่า)
+    const cats = (s.assetCategories||[]).map(c =>
+      (c.id === 'ac_deposit' && c.code === '1310')
+        ? { ...c, code:'1710', label:'💰 เงินประกัน / มัดจำสถานที่' } : c);
+    return { ...s, version: 28, chartOfAccounts: coa, assetCategories: cats };
   }
   // 🆕 v20 → v21: Wrong Transfer COA — เพิ่ม account 1180 + 5395
   if(s.version === 20){
@@ -13784,7 +13858,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
       note:`รอจัดซื้อตัดสินใจ · ${reason}`+(totalValue>=10000?' · มูลค่าสูง':'') }});
 
     if(printAfterSubmit){
-      // เรียก print หลัง state อัปเดต (เล็กน้อย)
+      // 🆕 ตอนนี้ยังไม่ผ่านจัดซื้อ → พิมพ์ได้แต่ขึ้นหัว "ร่าง — รอจัดซื้ออนุมัติ" (กัน supplier เซ็นรับใบที่ยังไม่มีใครตัดสิน)
       setTimeout(() => printRTV(rtv, state, sup), 200);
     }
 
@@ -13896,7 +13970,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
         h('label', { className:'flex items-center gap-2 text-xs text-blue-900 pt-1 border-t border-blue-200' },
           h('input', { type:'checkbox', checked: printAfterSubmit,
             onChange:e=>setPrintAfterSubmit(e.target.checked) }),
-          h('span', null, '🖨️ พิมพ์ใบคืนสินค้าทันทีหลังบันทึก (สำหรับ supplier เซ็นรับ)'))
+          h('span', null, '🖨️ พิมพ์ใบคืนสินค้าทันทีหลังบันทึก (จะได้ใบ "ร่าง" — ตัวจริงพิมพ์หลังจัดซื้ออนุมัติ)'))
       ),
 
       (!hasAny || !reason.trim() || !grId) && h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 text-xs text-amber-800' },
@@ -13953,6 +14027,8 @@ function printRTV(rtv, state, sup){
 <body>
   <div style="text-align:center">
     <h1>ใบคืนสินค้า / Return to Vendor</h1>
+    ${(rtv.rtvStatus === 'pending_decision' || rtv.rtvStatus === 'pending')
+      ? '<div style="color:#c00;font-weight:bold;font-size:14pt;margin:4px 0">*** ร่าง — รอจัดซื้ออนุมัติ (ยังไม่ใช่เอกสารตัวจริง) ***</div>' : ''}
     <div>${company} ${company2 ? '· ' + company2 : ''}</div>
   </div>
 
@@ -37248,12 +37324,17 @@ function CreateINVModal({ gr, state, dispatch, user, onClose, onDone }){
 
   // ⭐ RTV ของ GR นี้ที่เปิดก่อน INV (linkedINV === null) แต่ยังไม่ปิด/ไม่ได้ชดเชย
   //    🆕 ข้าม method='replacement' (พักหนี้ไว้ — INV ต้องเต็ม รอ supplier ส่งของใหม่)
+  // 🆕 RTV ที่จัดซื้อ "ยังไม่ตัดสินใจ" ต้องไม่ถูกตั้งหนี้แทน — เดิมหน้านี้ set rtvStatus เองได้ (closed/credit_received)
+  //    = คนตั้งหนี้ (บัญชี) กลายเป็นคนชี้ขาดว่าเคลมหรือตัดยอด และข้าม approval r_decide_rtv ของจัดซื้อ
+  const rtvsPendingDecision = (state.returns||[]).filter(r =>
+    r.grId === gr.id && (r.rtvStatus === 'pending_decision' || r.rtvStatus === 'pending'));
   const rtvsBeforeINV = (state.returns||[]).filter(r =>
     r.grId === gr.id && !r.linkedINV &&
     r.method !== 'replacement' &&
     r.rtvStatus !== 'closed' &&
     r.rtvStatus !== 'replacement_received' &&
-    r.rtvStatus !== 'await_replacement'
+    r.rtvStatus !== 'await_replacement' &&
+    r.rtvStatus !== 'pending_decision' && r.rtvStatus !== 'pending'
   );
   // RTV ที่ได้ชดเชยแล้ว (จะ list ไว้ใน hint แต่ไม่หัก amount)
   const rtvsReplaced = (state.returns||[]).filter(r =>
@@ -37446,6 +37527,12 @@ function CreateINVModal({ gr, state, dispatch, user, onClose, onDone }){
   }, [/* rates/bases change triggered via updateWHTLine which sets whtAmount too */]);
 
   const save = () => {
+    // 🆕 มีของคืน (RTV) ที่จัดซื้อยังไม่ตัดสินใจ → ห้ามตั้งหนี้ (ไม่งั้นคนตั้งหนี้กลายเป็นคนชี้ขาดเคลม/ตัดยอด แทนจัดซื้อ + ข้ามอนุมัติ)
+    if(rtvsPendingDecision.length > 0){
+      return alert('⛔ ตั้งหนี้ยังไม่ได้ — GR นี้มีของคืน (RTV) ที่จัดซื้อยังไม่ตัดสินใจ ' + rtvsPendingDecision.length + ' ใบ\n'
+        + rtvsPendingDecision.map(r => '• ' + (r.rtvNumber||r.id) + ' · ' + fmtCur(r.totalValue||0)).join('\n')
+        + '\n\nให้จัดซื้อไปที่ "📋 รายการต้องตัดสินใจ" → กด ⚙️ ตัดสินใจ (ส่งเคลม / ตัดยอด / ขอเงินคืน) และผ่านการอนุมัติก่อน');
+    }
     if(poNotFull){
       if(!confirm(`⚠️ PO ${po.poNumber} ยังรับไม่ครบ (${poStatus.receivedLines}/${poStatus.totalLines} lines)\n\nถ้าตั้งหนี้ตอนนี้ ส่วนที่ยังไม่รับต้องตั้งหนี้เพิ่มอีกใบทีหลัง\n\nยืนยันเปิด INV นี้หรือไม่?`)) return;
     }
@@ -38874,11 +38961,15 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
     const po = (state.pos||[]).find(p => p.id === poId);
     return po ? (po.lines||[]).some(l => l.shortStatus === 'pending_decision' || l.shortStatus === 'wait_extra') : false;
   };
+  // 🆕 ตัด GR ที่มีของคืน (RTV) ค้างรอจัดซื้อตัดสินใจ (เหมือน Combined INV)
+  const _grPendingRtv = (grId) => (state.returns||[]).some(r =>
+    r.grId === grId && (r.rtvStatus === 'pending_decision' || r.rtvStatus === 'pending'));
   const availableGRs = useMemo(() =>
     (state.grs||[]).filter(g =>
       g.supplierId === supplierId && !g.invoiceId && !g.isReplacement && !_poDecisionPending(g.poId)
+      && !_grPendingRtv(g.id)
     ).sort((a,b) => (a.grDate||'').localeCompare(b.grDate||'')),
-    [state.grs, supplierId, state.pos]);
+    [state.grs, supplierId, state.pos, state.returns]);
 
   const toggleGR = (gr) => {
     const exists = selectedGRs.includes(gr.id);
@@ -39274,14 +39365,19 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
     const po = (state.pos||[]).find(p => p.id === poId);
     return po ? (po.lines||[]).some(l => l.shortStatus === 'pending_decision' || l.shortStatus === 'wait_extra') : false;
   };
+  // 🆕 ตัด GR ที่มีของคืน (RTV) ค้างรอจัดซื้อตัดสินใจ — ไม่งั้นตั้งหนี้เต็มยอดทั้งที่ของคืนไปแล้ว
+  //    และ DECIDE_RTV จะแก้ไม่ได้ด้วย เพราะ rtv.linkedINV ยัง null → หักเครดิตไม่เข้า
+  const _grHasPendingRtv = (grId) => (state.returns||[]).some(r =>
+    r.grId === grId && (r.rtvStatus === 'pending_decision' || r.rtvStatus === 'pending'));
   const availableGRs = useMemo(() =>
     (state.grs||[]).filter(g =>
       g.supplierId === supplierId &&
       !g.invoiceId &&
       !g.isReplacement &&  // ไม่รวม replacement GR
-      !_poDecisionPendingC(g.poId)
+      !_poDecisionPendingC(g.poId) &&
+      !_grHasPendingRtv(g.id)
     ).sort((a,b) => (a.grDate||'').localeCompare(b.grDate||'')),
-    [state.grs, supplierId, state.pos]);
+    [state.grs, supplierId, state.pos, state.returns]);
 
   const toggleGR = (id) => setSelectedGRs(selectedGRs.includes(id)
     ? selectedGRs.filter(x => x !== id)
@@ -42113,6 +42209,8 @@ function printRTV(rtv, state){
 
   const body = `<div class="sheet">
   <h1>ใบลดหนี้ / Credit Note · ใบคืนของ</h1>
+    ${(rtv.rtvStatus === 'pending_decision' || rtv.rtvStatus === 'pending')
+      ? '<div style="color:#c00;font-weight:bold;font-size:14pt;margin:4px 0">*** ร่าง — รอจัดซื้ออนุมัติ (ยังไม่ใช่เอกสารตัวจริง) ***</div>' : ''}
   <div class="sub">เลขที่ ${rtv.rtvNumber} ${linkedInv ? `· อ้างอิง INV ${linkedInv.invNumber}` : ''}</div>
   <div class="info">
     <div class="box"><div class="label">ผู้คืน</div>
@@ -42173,7 +42271,7 @@ function autoPostPayment(pay, inv, bank, state, dispatch, user){
   const jeNumber = `JE-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(seq).padStart(4,'0')}`;
 
   dispatch({ type:'ADD_JE', data:{
-    id: genId('je'), jeNumber, date: pay.date,
+    id: genId('je'), jeNumber, date: pay.payDate || pay.date,   // 🆕 ลง GL ตามวันจ่ายจริง ไม่ใช่วันที่ขอ
     description: `จ่ายชำระ ${inv.invNumber}`,
     source:'payment', sourceId: pay.id, sourceRef: inv.invNumber,
     lines, totalDebit: pay.amount, totalCredit: pay.amount,
@@ -46954,7 +47052,10 @@ function DisposeAssetModal({ asset, state, dispatch, user, onClose }){
   if(gl<0)          pv.push({ code:'5420', name:nameOf('5420'), dr:-gl, cr:0 });
   if(gl>0)          pv.push({ code:'4200', name:nameOf('4200'), dr:0, cr:gl });
   if(vat>0)         pv.push({ code:'2200', name:nameOf('2200'), dr:0, cr:vat });
-  pv.push({ code:'1600', name:nameOf('1600'), dr:0, cr:cost });
+  // 🆕 preview ให้ตรงกับ JE จริง (เครดิตตามหมวดทรัพย์สิน)
+  const _pvCat = (state.assetCategories||[]).find(c => c.id === asset.categoryId);
+  const _pvCode = (_pvCat && _pvCat.code) || '1600';
+  pv.push({ code:_pvCode, name:nameOf(_pvCode), dr:0, cr:cost });
   const tdr = +pv.reduce((t,l)=>t+l.dr,0).toFixed(2), tcr = +pv.reduce((t,l)=>t+l.cr,0).toFixed(2);
 
   // ค่าเสื่อมตามทฤษฎีถึงวันจำหน่าย — เตือนถ้ายัง post ไม่ครบ (NBV จริงอาจต่ำกว่า)
@@ -51416,7 +51517,12 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
         if(sent){ gatedCount++; gatedTotal += Number(pay.amount)||0; continue; }
       }
       const updatedPay = {
-        ...pay, date,
+        // 🆕 อย่าทับ "วันที่นัดจ่าย" ที่ตอนขออนุมัติคีย์ไว้ด้วยวันที่ผู้อนุมัติกด
+        //    (จัดซื้อดูวันนี้เพื่อไปตอบ supplier — เดิมเปลี่ยนเงียบตอนอนุมัติ) · เก็บวันที่อนุมัติแยกไว้
+        // วันที่ขอ (pay.date) คงไว้ให้จัดซื้อเห็น · วันจ่ายจริง = วันอนุมัติ → payDate
+        //   (WHT/AP/ภ.พ.30 อ่าน p.payDate || p.date อยู่แล้ว — ถ้าไม่ใส่ จะยื่นภาษีผิดเดือน)
+        ...pay, date: pay.date || date,
+        payDate: date,
         method: 'transfer',
         bankId, bankName: bank?.name||'', bankNumber: bank?.accountNumber||'',
         approvalStatus:'approved',
