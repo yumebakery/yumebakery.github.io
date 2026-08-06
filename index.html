@@ -4227,14 +4227,20 @@ function _checkDateLock(s, date, label){
 }
 
 // 🆕 RTV ที่จัดซื้อยังไม่ตัดสินใจ ผูกกับ INV ใบนี้ไหม (ของคืนไปแล้วแต่ AP ยังเต็ม → ห้ามจ่าย)
+const _RTV_TERMINAL = ['closed','cancelled','replacement_received','credit_received','refund_received'];
 function _pendingRtvForInv(s, invId){
   if(!invId) return [];
   const inv = (s.invoices||[]).find(i => i.id === invId);
   const grIds = inv ? ((inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : [])) : [];
-  return (s.returns||[]).filter(r =>
-    (r.rtvStatus === 'pending_decision' || r.rtvStatus === 'pending') &&
-    (r.linkedINV === invId || (r.grId && grIds.includes(r.grId))));
+  return (s.returns||[]).filter(r => {
+    const st = r.rtvStatus || 'pending';   // RTV เก่าไม่มีสถานะ = ถือว่ายังค้าง (ทั้งระบบตีความแบบนี้)
+    if(_RTV_TERMINAL.includes(st)) return false;   // ปิดเคสแล้วเท่านั้นถึงจ่ายได้
+    return r.linkedINV === invId || (r.grId && grIds.includes(r.grId));
+  });
 }
+// ให้ UI เช็คก่อน dispatch ได้ (reducer เป็นแค่ backstop — ตัวเรียกต้องหยุดเองไม่งั้นเงินออกแต่ payment ไม่อัปเดต)
+global.ERP = global.ERP || {};
+global.ERP.pendingRtvForInv = function(state, invId){ try { return _pendingRtvForInv(state, invId); } catch(e){ return []; } };
 function _blockIfPendingRtv(s, invId){
   const pend = _pendingRtvForInv(s, invId);
   if(pend.length === 0) return null;
@@ -9314,6 +9320,14 @@ function executeApprovedAction(req, state, dispatch, user){
       const pay = state.payments.find(x => x.id === p.payId);
       const inv = pay ? state.invoices.find(i => i.id === pay.invId) : null;
       if(!pay || !inv) break;
+      // 🆕 หยุดก่อนตัดเงิน — executor นี้จ่ายจริงตอนอนุมัติครบ step (ยอด ≥100k)
+      {
+        const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, pay.invId || pay.invoiceId);
+        if(_pr.length > 0){
+          alert('⛔ จ่ายไม่ได้ — บิล ' + (inv.invNumber||'') + ' มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\nให้จัดซื้อปิดเคสของคืนก่อน');
+          break;
+        }
+      }
       const bank = p.bankId ? state.bankAccounts.find(b => b.id === p.bankId) : null;
       const purchaseMod = global.ERP.MODULES.purchase;
       // 🆕 PIPV-C: pvNumber จะ auto-gen ใน UPDATE_PAY reducer ถ้า approvalStatus='approved' และยังไม่มี
@@ -51516,6 +51530,16 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
         const sent = requestPayApproval({ pay, inv, bankId, slip:null, state, dispatch, user });
         if(sent){ gatedCount++; gatedTotal += Number(pay.amount)||0; continue; }
       }
+      // 🆕 หยุดที่ตัวเรียก — reducer alert+return s อย่างเดียวไม่พอ (dispatch ตัวถัดไปจะตัดเงิน/ลง JE ต่อ ทั้งที่ payment ไม่อัปเดต)
+      {
+        const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, pay.invId || pay.invoiceId);
+        if(_pr.length > 0){
+          alert('⛔ ข้าม ' + ((inv && inv.invNumber) || 'บิลนี้') + ' — มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\n'
+            + _pr.map(function(r){ return '• ' + (r.rtvNumber||r.id); }).join('\n')
+            + '\n\nให้จัดซื้อปิดเคสของคืนก่อน จึงจะอนุมัติจ่ายบิลนี้ได้');
+          continue;
+        }
+      }
       const updatedPay = {
         // 🆕 อย่าทับ "วันที่นัดจ่าย" ที่ตอนขออนุมัติคีย์ไว้ด้วยวันที่ผู้อนุมัติกด
         //    (จัดซื้อดูวันนี้เพื่อไปตอบ supplier — เดิมเปลี่ยนเงียบตอนอนุมัติ) · เก็บวันที่อนุมัติแยกไว้
@@ -51616,6 +51640,15 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
   const confirm_ = () => {
     if(!inv) return alert('ไม่พบ INV');
     if(method === 'transfer' && !bankId) return alert('เลือกบัญชีที่ใช้โอน');
+    // 🆕 หยุดก่อนตัดเงิน (reducer guard อย่างเดียวไม่พอ — dispatch ตัวถัดไปยังตัดเงิน/ลง JE)
+    {
+      const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, pay.invId || pay.invoiceId);
+      if(_pr.length > 0){
+        return alert('⛔ อนุมัติจ่ายไม่ได้ — มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\n'
+          + _pr.map(function(r){ return '• ' + (r.rtvNumber||r.id); }).join('\n')
+          + '\n\nให้จัดซื้อปิดเคสของคืนก่อน จึงจะจ่ายบิลนี้ได้');
+      }
+    }
     const bank = bankId ? banks.find(b => b.id === bankId) : null;
 
     // 🆕 F1 (CRITICAL): ยอด ≥100,000 ต้องผ่าน approval engine (manager→GM) — ห้ามจ่ายทันที
