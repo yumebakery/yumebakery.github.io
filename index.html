@@ -3326,6 +3326,19 @@ Object.assign(global.ERP, {
     return { state: res.data.state, savedAt: res.data.saved_at };
   }
 
+  // 🆕 เช็คว่ามีเครื่องอื่นบันทึกข้อมูลใหม่หรือยัง (เทียบ saved_at กับ token ที่เราถืออยู่)
+  //   ใช้ทำแถบ "มีข้อมูลใหม่ — กดอัปเดต" · เบามาก (ดึงแค่ 2 คอลัมน์ ไม่ดึง state ทั้งก้อน)
+  async function checkCloudChanged(){
+    var sb = _sb();
+    if(!sb || !_hasRow || !_tok || _conflict) return { changed:false };
+    try {
+      var res = await sb.from('erp_state_snapshots').select('saved_at, by_user').eq('id', CLOUD_ID).maybeSingle();
+      if(res.error || !res.data) return { changed:false };
+      var t = res.data.saved_at;
+      return { changed: !!(t && t !== _tok), savedAt: t, byUser: res.data.by_user || null };
+    } catch(e){ return { changed:false }; }
+  }
+
   // push state ขึ้น cloud พร้อม optimistic token check (saved_at) — {ok} | {ok:false, conflict:true} | {ok:false, error}
   async function pushCloudState(state, byUser){
     var sb = _sb(); if(!sb) return { ok:false, error:'Supabase ยังไม่พร้อม' };
@@ -3405,8 +3418,16 @@ Object.assign(global.ERP, {
         else { _pushTimer = setTimeout(_flushCloudPush, 200); }   // มีของใหม่ระหว่าง push → ตามอีกรอบ
       } else if(r.conflict){
         _dirty = false; _pendingState = null;
+        // 🆕 สำรอง state ที่ยังไม่ทัน push ไว้ใน localStorage ก่อน reload — กันงานหายเงียบ (กู้ได้ที่ ตั้งค่า)
         try {
-          alert('⛔ มีเครื่องอื่นบันทึกข้อมูลไปก่อน — หน้านี้จะโหลดข้อมูลล่าสุดใหม่\n(การแก้ไขล่าสุดบนหน้านี้ที่ยังไม่ทันบันทึกจะหาย เพื่อไม่ให้ทับของเครื่องอื่น)');
+          global.localStorage.setItem('erp_v5__conflict_pending',
+            JSON.stringify({ ts: Date.now(), by: u || null, state: st }));
+        } catch(_bk){}
+        try {
+          alert('⛔ มีเครื่องอื่นบันทึกข้อมูลไปก่อน\n\n'
+            + 'หน้านี้จะโหลดข้อมูลล่าสุดใหม่ (ไม่ต้องล็อกอินซ้ำ)\n'
+            + '⚠️ รายการที่เพิ่งกดบันทึกล่าสุดบนเครื่องนี้อาจยังไม่ขึ้น — ตรวจแล้วคีย์ซ้ำถ้าไม่เจอ\n\n'
+            + '💡 กันไม่ให้เกิดบ่อย: เมื่อขึ้นแถบ "มีข้อมูลใหม่" ด้านบน ให้กดอัปเดตก่อนคีย์งานต่อ');
         } catch(_a){}
         try { global.location.reload(); } catch(_r){}
       } else {
@@ -3466,7 +3487,7 @@ Object.assign(global.ERP, {
     // ☁️☁️ cloud-only mode (Supabase = source of truth)
     isCloudOnly: isCloudOnly, loadCloudState: loadCloudState,
     pushCloudState: pushCloudState, scheduleCloudPush: scheduleCloudPush,
-    cloudSaveStatus: cloudSaveStatus,
+    cloudSaveStatus: cloudSaveStatus, checkCloudChanged: checkCloudChanged,
     _debug: { cfg: _cfg, client: _sb },
   };
 })(window);
@@ -8651,7 +8672,19 @@ function MainShell(){
       let devBranch = null;
       try { devBranch = global.localStorage.getItem('erp_v5__deviceBranch'); } catch(_g){}
       const okBranch = devBranch && (base.branches||[]).some(b => b.id === devBranch);
-      return { ...base, currentUser: null,
+      // 🆕 จำ session ของ "เครื่องนี้" (localStorage ไม่ขึ้น cloud) → refresh/โหลดหน้าใหม่ ไม่ต้องล็อกอินซ้ำ
+      //    หมดอายุ 12 ชม. นับจากโหลดหน้าล่าสุด (เครื่องสาขาใช้ร่วมกัน — ไม่ค้าง session ข้ามวัน)
+      let devUser = null;
+      try {
+        const _raw = global.localStorage.getItem('erp_v5__deviceSession');
+        if(_raw){
+          const _s = JSON.parse(_raw);
+          if(_s && _s.userId && _s.ts && (Date.now() - _s.ts) < 12*60*60*1000){
+            devUser = (base.users||[]).find(u => u.id === _s.userId && u.active !== false) || null;
+          }
+        }
+      } catch(_su){}
+      return { ...base, currentUser: devUser,
         currentBranch: okBranch ? devBranch : (base.currentBranch || INIT_STATE.currentBranch) };
     }
     return loadState();   // โหมดเดิม (cloudOnly ปิด): localStorage
@@ -8681,6 +8714,15 @@ function MainShell(){
   useEffect(() => {
     try { if(state.currentBranch) global.localStorage.setItem('erp_v5__deviceBranch', state.currentBranch); } catch(_s){}
   }, [state.currentBranch]);
+
+  // 🆕 จำ session ต่อเครื่อง → refresh แล้วไม่ต้องล็อกอินใหม่ · กด "ออก" = ลบทิ้ง (คนถัดไปต้องล็อกอินเอง)
+  useEffect(() => {
+    try {
+      if(state.currentUser) global.localStorage.setItem('erp_v5__deviceSession',
+        JSON.stringify({ userId: state.currentUser.id, ts: Date.now() }));
+      else global.localStorage.removeItem('erp_v5__deviceSession');
+    } catch(_ss){}
+  }, [state.currentUser?.id]);
 
   // After login, preload role's modules
   useEffect(() => {
@@ -8743,6 +8785,8 @@ function AppShell({ state, dispatch }){
   return h('div', { className:'min-h-screen bg-slate-50 flex flex-col' },
     // Top nav
     h(TopBar, { state, dispatch, user, currentBranch, setActiveTab }),
+    // 🆕 แจ้งเมื่อเครื่องอื่นบันทึกข้อมูลใหม่ (งานข้ามแผนก เช่น จัดซื้อเปิด PO → คลังเห็นรายการรอรับของ)
+    h(CloudUpdateBanner, null),
 
     h('div', { className:'flex-1 flex' },
       // Sidebar
@@ -9460,6 +9504,38 @@ function CloudSaveBadge(){
     h('span', null, icon),
     // สถานะเสี่ยง (ชนกัน/เซฟไม่ขึ้น) โชว์คำเสมอ — คนหน้าร้านบนมือถือต้องรู้ว่ายังไม่เซฟ · สถานะปกติซ่อนคำบนจอเล็ก
     h('span', { className: critical ? 'inline' : 'hidden sm:inline' }, text));
+}
+
+// 🆕 แถบ "มีข้อมูลใหม่จากเครื่องอื่น" — cloud-only โหลด state แค่ตอนเปิดแอป → งานข้ามแผนกไม่ขึ้นจนกว่าจะ refresh
+//   (เช่น จัดซื้อเปิด PO แล้วคลังยังไม่เห็นรายการรอรับของ) · poll เบาๆ ทุก 20 วิ เทียบแค่ timestamp ไม่ดึงข้อมูลทั้งก้อน
+//   กดอัปเดต = โหลดหน้าใหม่ (session จำต่อเครื่องแล้ว → ไม่ต้องล็อกอินซ้ำ)
+function CloudUpdateBanner(){
+  const SB = global.ERP.SBSync;
+  const [info, setInfo] = useState(null);   // { byUser }
+  useEffect(() => {
+    if(!SB || !SB.checkCloudChanged || !SB.isCloudOnly || !SB.isCloudOnly()) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const st = SB.cloudSaveStatus ? SB.cloudSaveStatus() : {};
+        if(st.dirty || st.pushing || st.conflict) return;   // เรากำลังมีของค้าง — ยังไม่ต้องชวนอัปเดต
+        const r = await SB.checkCloudChanged();
+        if(alive && r && r.changed) setInfo({ byUser: r.byUser });
+      } catch(_e){}
+    };
+    const t = setInterval(tick, 20000);
+    const t0 = setTimeout(tick, 5000);
+    return () => { alive = false; clearInterval(t); clearTimeout(t0); };
+  }, []);
+  if(!info) return null;
+  return h('div', { className:'bg-amber-100 border-b-2 border-amber-300 px-4 py-2 flex items-center justify-center gap-3 text-sm' },
+    h('span', null, '🔄 มีข้อมูลใหม่จากเครื่องอื่น',
+      info.byUser ? h('span', { className:'text-gray-600' }, ` (โดย ${info.byUser})`) : null,
+      ' — หน้านี้ยังเป็นข้อมูลเก่า'),
+    h('button', { onClick:()=>{ try { global.location.reload(); } catch(_r){} },
+      className:'px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-bold text-xs' },
+      '⬇️ อัปเดตข้อมูล'),
+    h('button', { onClick:()=>setInfo(null), className:'text-gray-500 text-xs underline' }, 'ไว้ก่อน'));
 }
 
 function TopBar({ state, dispatch, user, currentBranch, setActiveTab }){
