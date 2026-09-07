@@ -3176,8 +3176,10 @@ Object.assign(global.ERP, {
   //   identity เป็นของเครื่อง ไม่ใช่ข้อมูลบริษัท — ถ้าติดไปด้วย เครื่องอื่นโหลดมาแล้วกลายเป็น user คนนั้น (ข้ามหน้า login)
   function _stripSession(state){
     try {
-      if(state && (state.currentUser || state.currentBranch !== undefined)){
-        return Object.assign({}, state, { currentUser: null, currentBranch: null });
+      if(state && (state.currentUser || state.currentBranch !== undefined || state.__fromCloudPull)){
+        var o = Object.assign({}, state, { currentUser: null, currentBranch: null });
+        delete o.__fromCloudPull;   // 🆕 marker ภายในของการดึงข้อมูล — ไม่ต้องขึ้น cloud
+        return o;
       }
     } catch(e){}
     return state;
@@ -9295,7 +9297,7 @@ function MainShell(){
 
   // Persist state (debounced) + expose state getter ให้ async helpers
   const _firstSaveRef = R.useRef(true);
-  const _skipSaveRef = R.useRef(false);   // 🆕 กัน push ย้อนกลับหลังดึงข้อมูลจาก cloud
+  const _skipSaveRef = R.useRef(null);    // 🆕 เก็บ "ตัว state ก้อนที่ดึงมาจาก cloud" ไว้เทียบ (ไม่ใช้ boolean — กันชนจังหวะ)
   const _prevStateRef = R.useRef(null);
   useEffect(() => {
     global.ERP.__getState = () => state;
@@ -9312,7 +9314,12 @@ function MainShell(){
     if(_prev && _onlySessionChanged(_prev, state)) return;
     // 🆕 state ก้อนนี้ "เพิ่งดึงมาจาก cloud" → ห้าม push กลับ
     //    ไม่งั้นแค่สลับหน้าก็หมุน saved_at token → เครื่องอื่นที่เปิดอยู่โดน conflict เป็นทอด ๆ
-    if(_skipSaveRef.current){ _skipSaveRef.current = false; return; }
+    //    เทียบด้วย object identity ไม่ใช่ boolean — ถ้าใช้ boolean แล้วผู้ใช้บันทึกอะไรคาบเกี่ยวจังหวะ
+    //    การบันทึกของ "ผู้ใช้" จะถูกกินธงไปแทน = ข้อมูลที่เพิ่งคีย์/นำเข้าไม่ถูก push ขึ้น cloud
+    if(_skipSaveRef.current && state.__fromCloudPull === _skipSaveRef.current){
+      _skipSaveRef.current = null; return;
+    }
+    _skipSaveRef.current = null;
     saveState(state);
   }, [state]);
 
@@ -9340,9 +9347,11 @@ function MainShell(){
       const mig = global.ERP.migrateState;
       const next = mig ? mig(cs) : cs;
       // session เป็นของ "เครื่องนี้" ไม่ได้อยู่บน cloud → ต้องคงไว้ ไม่งั้นเด้งออกจากระบบ
-      _skipSaveRef.current = true;
-      dispatch({ type:'IMPORT_STATE', data:{ ...next,
-        currentUser: state.currentUser, currentBranch: state.currentBranch } });
+      // ต้องสร้าง object เดียวกับที่ reducer จะคืน ไม่ได้ → ใช้ marker บน payload แทน
+      const _payload = { ...next, currentUser: state.currentUser,
+        currentBranch: state.currentBranch, __fromCloudPull: Date.now() };
+      _skipSaveRef.current = _payload.__fromCloudPull;
+      dispatch({ type:'IMPORT_STATE', data:_payload });
       return true;
     } catch(_rf){ return false; }
     finally { _refreshingRef.current = false; }
