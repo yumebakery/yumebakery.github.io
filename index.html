@@ -9295,6 +9295,7 @@ function MainShell(){
 
   // Persist state (debounced) + expose state getter ให้ async helpers
   const _firstSaveRef = R.useRef(true);
+  const _skipSaveRef = R.useRef(false);   // 🆕 กัน push ย้อนกลับหลังดึงข้อมูลจาก cloud
   const _prevStateRef = R.useRef(null);
   useEffect(() => {
     global.ERP.__getState = () => state;
@@ -9309,8 +9310,44 @@ function MainShell(){
     // 🆕 SESSION-PER-DEVICE: ล็อกอิน/ออก/สลับสาขา ไม่เปลี่ยนข้อมูลบริษัท (session ถูก strip ก่อน push อยู่แล้ว)
     //    → ห้าม push เปล่า ไม่งั้นหมุน saved_at token → ทุกเครื่องที่เปิดอยู่โดน conflict + reload + ต้องล็อกอินใหม่
     if(_prev && _onlySessionChanged(_prev, state)) return;
+    // 🆕 state ก้อนนี้ "เพิ่งดึงมาจาก cloud" → ห้าม push กลับ
+    //    ไม่งั้นแค่สลับหน้าก็หมุน saved_at token → เครื่องอื่นที่เปิดอยู่โดน conflict เป็นทอด ๆ
+    if(_skipSaveRef.current){ _skipSaveRef.current = false; return; }
     saveState(state);
   }, [state]);
+
+  // 🆕 รีเฟรชข้อมูลจาก cloud "ในที่" — ไม่โหลดหน้าใหม่ จึงไม่หลุด login และไม่ต้องรอโหลดแอป 3MB ใหม่
+  //    ใช้ตอนสลับหน้า/เมนู และตอนกดปุ่มในแถบแจ้งเตือน
+  const _refreshingRef = R.useRef(false);
+  const refreshFromCloud = R.useCallback(async (opts) => {
+    const SB = global.ERP.SBSync;
+    if(!SB || !SB.isCloudOnly || !SB.isCloudOnly() || !SB.loadCloudState) return false;
+    if(_refreshingRef.current) return false;
+    // มีของค้างยังไม่ได้เซฟ → ห้ามดึงทับ (งานที่เพิ่งคีย์จะหาย)
+    const st = SB.cloudSaveStatus ? SB.cloudSaveStatus() : {};
+    if(st.dirty || st.pushing || st.conflict) return false;
+    _refreshingRef.current = true;
+    try {
+      if(!(opts && opts.force)){
+        const chk = SB.checkCloudChanged ? await SB.checkCloudChanged() : null;
+        if(!chk || !chk.changed) return false;      // ไม่มีอะไรใหม่ → ไม่ต้องดึง
+      }
+      const cloud = await SB.loadCloudState();
+      const cs = cloud && cloud.state;
+      if(!cs) return false;
+      // แอปเก่ากว่าข้อมูล → ห้ามเอามาใช้ (migration ย้อนจะทับข้อมูลรุ่นใหม่)
+      if(Number(cs.version||0) > Number(INIT_STATE.version||0)) return false;
+      const mig = global.ERP.migrateState;
+      const next = mig ? mig(cs) : cs;
+      // session เป็นของ "เครื่องนี้" ไม่ได้อยู่บน cloud → ต้องคงไว้ ไม่งั้นเด้งออกจากระบบ
+      _skipSaveRef.current = true;
+      dispatch({ type:'IMPORT_STATE', data:{ ...next,
+        currentUser: state.currentUser, currentBranch: state.currentBranch } });
+      return true;
+    } catch(_rf){ return false; }
+    finally { _refreshingRef.current = false; }
+  }, [state.currentUser, state.currentBranch]);
+  R.useEffect(() => { global.ERP.__refreshFromCloud = refreshFromCloud; }, [refreshFromCloud]);
 
   // 🆕 SESSION-PER-DEVICE: จำสาขาที่เลือกไว้ "ต่อเครื่อง" (ไม่ขึ้น cloud → ไม่ไปเปลี่ยนสาขาเครื่องอื่น)
   useEffect(() => {
@@ -9361,6 +9398,19 @@ function AppShell({ state, dispatch }){
     () => MENU_ITEMS.filter(m => m.showIf(user, state, state.currentBranch)),
     [user, state.currentBranch, state.branches]
   );
+
+  // 🆕 เปลี่ยนหน้า = ดึงข้อมูลล่าสุดจาก cloud ให้อัตโนมัติ (ในที่ ไม่โหลดหน้าใหม่ → ไม่หลุด login)
+  //    เดิมข้อมูลโหลดตอน boot ครั้งเดียว → เปิดค้างทั้งวันจะเห็นของเก่า ต้องกดโหลดหน้าใหม่เอง
+  //    ถ้ามีของค้างยังไม่ได้เซฟ หรือ cloud ไม่มีอะไรใหม่ → ข้าม (ไม่ทับงานที่คีย์อยู่)
+  const _lastPullRef = R.useRef(0);
+  useEffect(() => {
+    const fn = global.ERP.__refreshFromCloud;
+    if(!fn) return;
+    const now = Date.now();
+    if(now - _lastPullRef.current < 3000) return;   // กันกดสลับหน้ารัว ๆ
+    _lastPullRef.current = now;
+    fn();
+  }, [activeTab]);
 
   // ถ้า activeTab ปัจจุบันหายไป (เช่น GM สลับสาขาจาก HQ → store, tab จัดซื้อหาย) → fallback dashboard
   useEffect(() => {
@@ -10173,7 +10223,12 @@ function CloudUpdateBanner(){
     h('span', null, '🔄 มีข้อมูลใหม่จากเครื่องอื่น',
       info.byUser ? h('span', { className:'text-gray-600' }, ` (โดย ${info.byUser})`) : null,
       ' — หน้านี้ยังเป็นข้อมูลเก่า'),
-    h('button', { onClick:()=>{ try { global.location.reload(); } catch(_r){} },
+    h('button', { onClick:async ()=>{
+        // 🆕 ดึงข้อมูลในที่ ไม่ reload ทั้งหน้า → ไม่หลุด login และไม่ต้องรอโหลดแอปใหม่
+        const fn = global.ERP.__refreshFromCloud;
+        if(fn){ const ok = await fn({ force:true }); if(ok){ setInfo(null); return; } }
+        try { global.location.reload(); } catch(_r){}
+      },
       className:'px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-bold text-xs' },
       '⬇️ อัปเดตข้อมูล'),
     h('button', { onClick:()=>setInfo(null), className:'text-gray-500 text-xs underline' }, 'ไว้ก่อน'));
