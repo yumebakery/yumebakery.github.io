@@ -1760,6 +1760,67 @@ function useDateRange(defaultDays){
   return { startDate, setStartDate, endDate, setEndDate };
 }
 
+// ==================== 📄 แบ่งหน้า (Pagination) ====================
+// ปัญหา: หน้ารายการ render ทุกแถวพร้อมกัน — 300-1,400 แถวทำให้กดเข้าหน้าแล้วค้าง
+// วิธี: ตัดเป็นหน้าละ 50 (ปรับได้) render เฉพาะหน้าที่ดูอยู่ · ข้อมูลอยู่ในเครื่องแล้ว
+//       การเปลี่ยนหน้าจึงไม่ต้องโหลดใหม่ · อยากดูเก่ากว่าช่วงที่ตั้งไว้ = ขยับช่วงวันที่เอา
+function usePaged(rows, pageSize){
+  const size = pageSize || 50;
+  const [page, setPage] = useState(1);
+  const list = rows || [];
+  const total = list.length;
+  const pages = Math.max(1, Math.ceil(total / size));
+  // ถ้าตัวกรองเปลี่ยนจนจำนวนหน้าลดลง → เด้งกลับหน้าที่มีอยู่จริง (กันหน้าว่าง)
+  useEffect(() => { setPage(p => Math.min(p, pages)); }, [pages]);
+  // เปลี่ยนชุดข้อมูล (กรอง/ค้นหา/ช่วงวัน) → กลับหน้า 1
+  const _sig = total + '|' + ((list[0] && (list[0].id || list[0].code)) || '');
+  useEffect(() => { setPage(1); }, [_sig]);
+  const cur = Math.min(page, pages);
+  const from = (cur - 1) * size;
+  const shown = total > size ? list.slice(from, from + size) : list;
+  return { page: cur, setPage, pages, total, size, shown,
+           from: total ? from + 1 : 0, to: Math.min(from + size, total) };
+}
+
+// แถบเลขหน้า — ซ่อนเองถ้ามีหน้าเดียว
+function Pager({ pg, label }){
+  if(!pg || pg.pages <= 1){
+    return pg && pg.total > 0
+      ? h('div', { className:'px-3 py-2 text-xs text-gray-500 border-t bg-gray-50' },
+          `ทั้งหมด ${pg.total.toLocaleString()} ${label || 'รายการ'}`)
+      : null;
+  }
+  const { page, pages, setPage } = pg;
+  // แสดงเลขหน้าแบบย่อ: 1 … 4 5 [6] 7 8 … 20
+  const nums = [];
+  const push = (n) => { if(!nums.includes(n) && n >= 1 && n <= pages) nums.push(n); };
+  push(1); push(2);
+  for(let i = page - 2; i <= page + 2; i++) push(i);
+  push(pages - 1); push(pages);
+  nums.sort((a,b) => a - b);
+  const btn = (n) => h('button', { key:'p'+n, onClick:()=>setPage(n),
+    className: cls('min-w-[32px] px-2 py-1 rounded text-xs border',
+      n === page ? 'bg-blue-600 text-white border-blue-600 font-bold'
+                 : 'bg-white hover:bg-gray-100 border-gray-300') }, String(n));
+  const items = [];
+  let prev = 0;
+  for(const n of nums){
+    if(prev && n - prev > 1) items.push(h('span', { key:'g'+n, className:'text-gray-400 px-1' }, '…'));
+    items.push(btn(n)); prev = n;
+  }
+  return h('div', { className:'flex items-center justify-between gap-2 px-3 py-2 border-t bg-gray-50 flex-wrap' },
+    h('div', { className:'text-xs text-gray-600' },
+      `แสดง ${pg.from.toLocaleString()}-${pg.to.toLocaleString()} จาก ${pg.total.toLocaleString()} ${label || 'รายการ'}`),
+    h('div', { className:'flex items-center gap-1' },
+      h('button', { onClick:()=>setPage(Math.max(1, page-1)), disabled: page <= 1,
+        className: cls('px-2 py-1 rounded text-xs border bg-white border-gray-300',
+          page <= 1 ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-100') }, '‹ ก่อนหน้า'),
+      ...items,
+      h('button', { onClick:()=>setPage(Math.min(pages, page+1)), disabled: page >= pages,
+        className: cls('px-2 py-1 rounded text-xs border bg-white border-gray-300',
+          page >= pages ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-100') }, 'ถัดไป ›')));
+}
+
 function DateRangeBar({ startDate, setStartDate, endDate, setEndDate, showAll, label }){
   const today = () => {
     const d = new Date();
@@ -2071,7 +2132,15 @@ function Combobox({ value, onChange, options, placeholder, disabled, className, 
         className:'w-full px-3 py-2 border-b text-sm outline-none' }),
       h('div', { ref:listRef, className:'overflow-y-auto max-h-48' },
         filtered.length === 0
-          ? h('div', { className:'px-3 py-2 text-xs text-gray-400' }, `ไม่พบ "${q}"`)
+          // 🆕 แยกให้ชัดว่า "ยังไม่มีข้อมูลในระบบ" ≠ "ค้นไม่เจอ" — เดิมขึ้น ไม่พบ "" เหมือนกันหมด
+          //    ทำให้แยกไม่ออกว่าข้อมูลไม่ได้เข้าระบบ หรือแค่พิมพ์ผิด
+          ? (options.length === 0
+              ? h('div', { className:'px-3 py-3 text-xs text-amber-800 bg-amber-50' },
+                  h('div', { className:'font-semibold' }, '⚠️ ยังไม่มีข้อมูลในระบบเลย'),
+                  h('div', { className:'text-[11px] mt-0.5 text-amber-700' },
+                    'ไม่ใช่พิมพ์ผิด — รายการนี้ยังว่าง ต้องนำเข้า/เพิ่มข้อมูลก่อน'))
+              : h('div', { className:'px-3 py-2 text-xs text-gray-500' },
+                  `ไม่พบ "${q}" · มีทั้งหมด ${options.length.toLocaleString()} รายการ`))
           : shown.map((o, idx) => {
               const k = getKey ? getKey(o) : (o.id||o.v||o.value);
               const selected = value === k;
@@ -3035,7 +3104,7 @@ Object.assign(global.ERP, {
   // UI atoms
   SB, Modal, Spinner, Button, Combobox,
   // Date range helpers
-  useDateRange, DateRangeBar, inDateRange, exportCSV,
+  useDateRange, DateRangeBar, usePaged, Pager, inDateRange, exportCSV,
   // Business helpers
   getPOReceiveStatus, genDocNumber,
   getExpiryAlerts, getLowStockAlerts, collectOperationalAlerts,
@@ -10932,6 +11001,7 @@ const {
   resolveDisplayUnit,
   useDateRange, DateRangeBar, inDateRange,
   BEDateInput,
+  usePaged, Pager,
 } = global.ERP;
 
 // 🆕 Y3: หน้าแจ้งไม่มีสิทธิ์ (กันเข้าถึง tab อ่อนไหวผ่าน URL/state)
@@ -11440,6 +11510,7 @@ function LowStockDetailModal({ state, user, onClose, setTab }){
   }, [state.items, state.pos, state.suppliers, search, hidePOed, user, branchIds.join(',')]);
 
   const noPO = rows.filter(r => r.pendingPOs.length === 0).length;
+  const pg = usePaged(rows, 50);
 
   return h(Modal, { isOpen:true, title:`📉 สินค้าที่ต่ำกว่าขั้นต่ำ (${rows.length} รายการ)`, onClose, size:'xl' },
     h('div', { className:'space-y-3' },
@@ -11470,7 +11541,7 @@ function LowStockDetailModal({ state, user, onClose, setTab }){
             rows.length === 0
               ? h('tr', null, h('td', { colSpan:6, className:'px-3 py-8 text-center text-gray-500' },
                   '✅ ไม่มีสินค้าต่ำกว่าขั้นต่ำ'))
-              : rows.map((r,idx) => {
+              : pg.shown.map((r,idx) => {
                   const i = r.item;
                   return h('tr', { key:idx, className: cls('hover:bg-gray-50',
                     r.pendingPOs.length === 0 && 'bg-red-50') },
@@ -11509,7 +11580,8 @@ function LowStockDetailModal({ state, user, onClose, setTab }){
                               ? h('div', { className:'text-[10px] text-orange-600' }, '⚠️ ยังต่ำ')
                               : h('div', { className:'text-[10px] text-green-600' }, '✓ พอ'))));
                 }))
-        )),
+        ),
+        h(Pager, { pg, label:'รายการ' })),
 
       h('div', { className:'flex justify-end gap-2 pt-3 border-t' },
         h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'))));
@@ -11530,6 +11602,8 @@ function ExpiryDetailModal({ state, user, onClose, setTab }){
     const filt = (arr) => arr.filter(l => isSuperUser(user) || branchIds.includes(l.branch));
     return [...filt(e.expired), ...filt(e.warning), ...filt(e.soon)];
   }, [state.fifoLayers, state.items, scope, user, branchIds.join(',')]);
+
+  const pg = usePaged(all, 50);
 
   return h(Modal, { isOpen:true, title:`⏰ สินค้าใกล้/หมดอายุ (${all.length} lots)`, onClose, size:'xl' },
     h('div', { className:'space-y-3' },
@@ -11552,7 +11626,7 @@ function ExpiryDetailModal({ state, user, onClose, setTab }){
             all.length === 0
               ? h('tr', null, h('td', { colSpan:6, className:'px-3 py-8 text-center text-gray-500' },
                   '✅ ไม่มีสินค้าหมดอายุ'))
-              : all.map(l => {
+              : pg.shown.map(l => {
                   const expClass = l.daysLeft < 0 ? 'text-red-700 font-bold' :
                     l.daysLeft <= 7 ? 'text-orange-700 font-bold' :
                     l.daysLeft <= 30 ? 'text-yellow-700' : '';
@@ -11571,7 +11645,8 @@ function ExpiryDetailModal({ state, user, onClose, setTab }){
                       l.daysLeft <= 7 ? `⏰ เหลือ ${l.daysLeft} วัน` :
                       `⌛ เหลือ ${l.daysLeft} วัน`));
                 }))
-        )),
+        ),
+        h(Pager, { pg, label:'lot' })),
 
       h('div', { className:'flex justify-end gap-2 pt-3 border-t' },
         h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'))));
@@ -11634,6 +11709,8 @@ function OverviewTab({ state, user }){
 
   const counts = { all:0, received:0, partial:0, pending:0 };
   for(const r of rows){ counts.all++; counts[r.receiveStatus]++; }
+
+  const pg = usePaged(rows, 50);
 
   const STATUS_LBL = {
     pending:  ['⏳ รอรับ',       'bg-yellow-100 text-yellow-800'],
@@ -11701,7 +11778,7 @@ function OverviewTab({ state, user }){
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'RTV'),
               )),
             h('tbody', { className:'divide-y' },
-              rows.map(r => {
+              pg.shown.map(r => {
                 const sup = state.suppliers.find(s => s.id === r.po.supplierId);
                 const dest = getBranch(state, r.po.destinationBranch);
                 const [lbl, clr] = STATUS_LBL[r.receiveStatus];
@@ -11730,7 +11807,8 @@ function OverviewTab({ state, user }){
                       )))));
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบสั่งซื้อ' })
         )
   );
 }
@@ -11784,6 +11862,9 @@ function IncomingTab({ state, dispatch, user, pos, tos }){
   });
   const filteredTOs = !q ? tos : tos.filter(t =>
     (t.toNumber||'').toLowerCase().includes(q) || (t.trNumber||'').toLowerCase().includes(q));
+
+  const pgPO = usePaged(filteredPOs, 50);
+  const pgTO = usePaged(filteredTOs, 50);
 
   if(pos.length === 0 && tos.length === 0 && pendingReplRTVs.length === 0){
     return h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
@@ -11839,7 +11920,7 @@ function IncomingTab({ state, dispatch, user, pos, tos }){
         h('h3', { className:'font-bold text-gray-800' }, `🛍️ จากจัดซื้อ (PO) — ${filteredPOs.length} ใบ`),
       ),
       h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
-        filteredPOs.map(po => {
+        pgPO.shown.map(po => {
           const sup = state.suppliers.find(s => s.id === po.supplierId);
           const dest = getBranch(state, po.destinationBranch);
           const today = getToday();
@@ -11898,7 +11979,8 @@ function IncomingTab({ state, dispatch, user, pos, tos }){
               '📥 รับของ'),
           );
         })
-      )
+      ),
+      h(Pager, { pg:pgPO, label:'ใบสั่งซื้อ (PO)' })
     ),
 
     // TO section
@@ -11907,7 +11989,7 @@ function IncomingTab({ state, dispatch, user, pos, tos }){
         h('h3', { className:'font-bold text-gray-800' }, `🔀 จากโอนสาขา (TO) — ${filteredTOs.length} ใบ`),
       ),
       h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
-        filteredTOs.map(to => {
+        pgTO.shown.map(to => {
           const from = getBranch(state, to.fromBranch);
           const dest = getBranch(state, to.toBranch);
           const pending = (to.lines||[]).filter(l => (l.receivedQty||0) < l.qty).length;
@@ -11933,7 +12015,8 @@ function IncomingTab({ state, dispatch, user, pos, tos }){
               '📥 รับของ'),
           );
         })
-      )
+      ),
+      h(Pager, { pg:pgTO, label:'ใบโอน (TO)' })
     ),
 
     receivingPO && h(ReceiveFromPOModal, { po:receivingPO, state, dispatch, user,
@@ -12861,6 +12944,7 @@ function StockListTab({ state, user }){
   const totalValue = rows.reduce((s,r) => s + r.value, 0);
   const totalQty = rows.reduce((s,r) => s + r.stock, 0);
   const lowStock = rows.filter(r => r.stock < (r.minStock||0)).length;
+  const pg = usePaged(rows, 50);
 
   return h('div', null,
     h('div', { className: cls('grid gap-3 mb-4', showValue ? 'grid-cols-2 md:grid-cols-4' : 'grid-cols-3') },
@@ -12945,7 +13029,7 @@ function StockListTab({ state, user }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                rows.map(r => {
+                pg.shown.map(r => {
                   const low = r.stock < (r.minStock||0);
                   const zero = r.stock === 0;
                   const neg = r.stock < 0;
@@ -12989,7 +13073,8 @@ function StockListTab({ state, user }){
                 })
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'รายการสินค้า' })
         )
   );
 }
@@ -13088,6 +13173,9 @@ function LotsTab({ state, dispatch }){
   const expandAll  = () => setExpanded(Object.fromEntries(grouped.map(g => [g.itemId, true])));
   const collapseAll= () => setExpanded({});
 
+  const pgG = usePaged(grouped, 50);
+  const pgF = usePaged(filteredLots, 50);
+
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-4 flex flex-wrap items-center gap-2' },
       h('select', { value:branchFilter, onChange:e=>setBranchFilter(e.target.value),
@@ -13131,13 +13219,14 @@ function LotsTab({ state, dispatch }){
           h('div', { className:'space-y-2' },
             h('div', { className:'bg-blue-50 border border-blue-200 rounded-lg p-2 text-xs text-blue-800' },
               '🔄 FEFO → FIFO · กลุ่มตามสินค้า · คลิกแต่ละชื่อเพื่อดู lots ทั้งหมด'),
-            grouped.map(g => h(LotItemGroupCard, {
+            pgG.shown.map(g => h(LotItemGroupCard, {
               key:g.itemId, group:g,
               expanded:expanded[g.itemId],
               onToggle:()=>setExpanded(s => ({ ...s, [g.itemId]: !s[g.itemId] })),
               state, today,
               onEdit: setEditLayer
-            }))
+            })),
+            h(Pager, { pg:pgG, label:'สินค้า' })
           )
         : // ====== Flat table (เดิม) ======
           h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
@@ -13157,7 +13246,7 @@ function LotsTab({ state, dispatch }){
                     h('th', { className:'px-3 py-2 text-center text-xs font-medium' }, 'หมดอายุ'),
                     h('th', { className:'px-3 py-2 text-center text-xs font-medium' }, 'จัดการ'))),
                 h('tbody', { className:'divide-y' },
-                  filteredLots.map(l => {
+                  pgF.shown.map(l => {
                     const item = state.items.find(i => i.id === l.itemId);
                     const branch = state.branches.find(b => b.id === l.branch);
                     let expClass = '';
@@ -13186,7 +13275,8 @@ function LotsTab({ state, dispatch }){
                           className:'px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded' },
                           '✏️ แก้/แยก')));
                   })))
-            )
+            ),
+            h(Pager, { pg:pgF, label:'lot' })
           ),
 
     editLayer && h(EditLotModal, {
@@ -13476,6 +13566,8 @@ function MovementsTab({ state, user, dispatch }){
     return [...list].sort((a,b) => (b.date||'').localeCompare(a.date||''));
   }, [state.movements, state.items, branchFilter, typeFilter, search, dr.startDate, dr.endDate]);
 
+  const pg = usePaged(rows, 50);
+
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-4 space-y-2' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' }),
@@ -13517,7 +13609,7 @@ function MovementsTab({ state, user, dispatch }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                rows.map(m => {
+                pg.shown.map(m => {
                   const item = state.items.find(i => i.id === m.itemId);
                   const branch = state.branches.find(b => b.id === m.branch);
                   const [typeLabel, typeClr] = MOVE_TYPE_LABEL[m.type] || [m.type, 'bg-gray-100'];
@@ -13558,7 +13650,8 @@ function MovementsTab({ state, user, dispatch }){
                 })
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'รายการเคลื่อนไหว' })
         )
   );
 }
@@ -13598,10 +13691,9 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
   // 🆕 CT: ถ้ามาจาก picker → ติ๊กรายการล่วงหน้า เลยซ่อน filter bar
   const isPickedMode = !!(pickedItemIds && pickedItemIds.size > 0);
 
-  if(!canAdjust){
-    return h('div', { className:'bg-red-50 border border-red-200 rounded p-6 text-sm text-red-800' },
-      '🚫 ไม่มีสิทธิ์นับสต๊อก — ต้องมี permission: stock.list.adjust');
-  }
+  // 🆕 FIX: ย้ายเช็คสิทธิ์ไปหลัง hooks ทั้งหมด — เดิม return ก่อน usePaged
+  //    จำนวน hooks ไม่เท่ากันระหว่าง render = React crash จอขาว
+  const _noPerm = !canAdjust;
 
   const branch = state.branches.find(b => b.id === branchId);
   // 🆕 ใช้ master list (state.storageLocations) แทน branch.locations — กันพิมพ์ผิด
@@ -13698,6 +13790,11 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
   const totalDeltaPositive = enteredItems.filter(e => e.delta > 0).length;
   const totalDeltaNegative = enteredItems.filter(e => e.delta < 0).length;
   const totalNoChange = enteredItems.filter(e => Math.abs(e.delta) < 0.001).length;
+
+  const pg = usePaged(items, 50);
+
+  if(_noPerm) return h('div', { className:'bg-red-50 border border-red-200 rounded p-6 text-sm text-red-800' },
+    '🚫 ไม่มีสิทธิ์นับสต๊อก — ต้องมี permission: stock.list.adjust');
 
   const commitAll = () => {
     if(totalEntered === 0) return alert('ยังไม่ได้กรอกผลนับสำหรับสินค้าใด');
@@ -13935,7 +14032,7 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
             items.length === 0
               ? h('tr', null, h('td', { colSpan:6, className:'px-3 py-8 text-center text-gray-500' },
                   '— ไม่พบสินค้าตามตัวกรอง —'))
-              : items.map(r => {
+              : pg.shown.map(r => {
                   const i = r.item;
                   const ranked = r.ranked;
                   const e1 = counts[i.id]?.[0];
@@ -14019,7 +14116,8 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
                 })
           )
         )
-      )
+      ),
+      h(Pager, { pg, label:'รายการนับ' })
     )
   );
 }
@@ -14247,6 +14345,7 @@ function GRHistoryTab({ state, user, dispatch }){
   }, [state.grs, branchFilter, search, dr.startDate, dr.endDate, user, branchIds.join(',')]);
 
   const totalValue = rows.reduce((s,g) => s + (g.totalValue||g.totalCost||0), 0);
+  const pg = usePaged(rows, 50);
 
   return h('div', null,
     h('div', { className: cls('grid gap-3 mb-4', showValue ? 'grid-cols-2 md:grid-cols-3' : 'grid-cols-2') },
@@ -14290,7 +14389,7 @@ function GRHistoryTab({ state, user, dispatch }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                rows.map(g => {
+                pg.shown.map(g => {
                   const sup = state.suppliers.find(s => s.id === g.supplierId);
                   const br = state.branches.find(b => b.id === g.branch);
                   const hasRTV = (state.returns||[]).some(r => r.grId === g.id);
@@ -14354,7 +14453,8 @@ function GRHistoryTab({ state, user, dispatch }){
                 })
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบรับของ (GR)' })
         ),
 
     detail && h(GRViewModal, { gr:detail, state, onClose:()=>setDetail(null) }),
@@ -14474,6 +14574,8 @@ function RTVTab({ state, dispatch, user }){
     return [...list].sort((a,b) => (b.rtvDate||'').localeCompare(a.rtvDate||''));
   }, [state.returns, dr.startDate, dr.endDate, user, branchIds.join(','), activeOnly]);
 
+  const pg = usePaged(rtvs, 50);
+
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex items-center gap-3 flex-wrap' },
       h('label', { className:'flex items-center gap-1.5 text-sm cursor-pointer' },
@@ -14537,7 +14639,7 @@ function RTVTab({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              rtvs.map(r => {
+              pg.shown.map(r => {
                 const sup = state.suppliers.find(s => s.id === r.supplierId);
                 const gr = state.grs.find(g => g.id === r.grId);
                 // 🆕 U11: badge สถานะ RTV
@@ -14571,7 +14673,8 @@ function RTVTab({ state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบคืนของ (RTV)' })
         ),
 
     showNew && h(NewRTVModal, { state, dispatch, user, onClose:()=>setShowNew(false) }),
@@ -15401,6 +15504,8 @@ function MovementMatrixTab({ state, user, dispatch }){
     });
   }, [drill, rows]);
 
+  const pg = usePaged(rows, 50);
+
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 space-y-2' },
       h('div', { className:'flex gap-2 items-center flex-wrap' },
@@ -15452,7 +15557,7 @@ function MovementMatrixTab({ state, user, dispatch }){
                       h('th', { key:d+'cl', className:'px-2 py-1 text-right font-bold border-r-2' }, 'เหลือ'),
                     ]))),
             h('tbody', { className:'divide-y' },
-              rows.map(r => h('tr', { key:r.item.id, className:'hover:bg-yellow-50' },
+              pg.shown.map(r => h('tr', { key:r.item.id, className:'hover:bg-yellow-50' },
                 h('td', { className:'px-2 py-1 sticky left-0 bg-white hover:bg-yellow-50 border-r-2 whitespace-nowrap' },
                   h('span', { className:'font-mono text-[10px] text-gray-500' }, r.item.code), ' ',
                   h('span', { className:'font-medium' }, r.item.name)),
@@ -15480,7 +15585,8 @@ function MovementMatrixTab({ state, user, dispatch }){
                       onClick: c.outTot ? ()=>clickCell('out', null) : undefined }, fmtCell(c.outTot)),
                     h('td', { key:d+'cl', className: cls('px-2 py-1 text-right font-bold border-r-2', c.close<0?'text-red-600':'text-blue-700') }, fmtCell(c.close)),
                   ];
-                })))))),
+                }))))),
+          h(Pager, { pg, label:'สินค้า' })),
 
     // drilldown popup
     drill && (() => {
@@ -15695,6 +15801,8 @@ function ReportsTab({ state, user }){
   // Only show items with activity or nonzero balance — filter option
   const [showZero, setShowZero] = useState(false);
   const displayData = data.filter(d => showZero || d.hasActivity || d.startBalance !== 0 || d.endBalance !== 0);
+  // แบ่งหน้าเฉพาะตอน render — export CSV ยังใช้ displayData ทั้งชุด
+  const pg = usePaged(displayData, 50);
 
   // CSV export
   const exportCSV = () => {
@@ -15876,8 +15984,11 @@ function ReportsTab({ state, user }){
         ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
             'ไม่มีข้อมูลในช่วงนี้')
         : mode === 'daily'
-          ? h(DailyMatrix,    { data:displayData, dateList, state, onItemClick:setPopupItem, branchFilter, startDate, endDate })
-          : h(SummaryReport,  { data:displayData, state, onItemClick:setPopupItem, branchFilter, startDate, endDate }),
+          ? h(DailyMatrix,    { data:pg.shown, dateList, state, onItemClick:setPopupItem, branchFilter, startDate, endDate })
+          : h(SummaryReport,  { data:pg.shown, state, onItemClick:setPopupItem, branchFilter, startDate, endDate }),
+
+    loaded && displayData.length > 0 && h('div', { className:'bg-white rounded-lg shadow mt-2 overflow-hidden' },
+      h(Pager, { pg, label:'สินค้า' })),
 
     popupItem && h(ItemMovementPopup, {
       item: popupItem.item, state,
@@ -16038,6 +16149,7 @@ function ItemMovementPopup({ item, state, branchFilter, startDate, endDate, onCl
 
   const totalIn  = movs.filter(m => (m.qty||0) > 0).reduce((s,m) => s + m.qty, 0);
   const totalOut = movs.filter(m => (m.qty||0) < 0).reduce((s,m) => s + Math.abs(m.qty), 0);
+  const pg = usePaged(movs, 50);
 
   return h(Modal, { isOpen:true, title:`📜 เคลื่อนไหว: ${item.name}`, onClose, size:'xl' },
     h('div', { className:'space-y-3' },
@@ -16076,7 +16188,7 @@ function ItemMovementPopup({ item, state, branchFilter, startDate, endDate, onCl
                   )
                 ),
                 h('tbody', { className:'divide-y' },
-                  movs.map(m => {
+                  pg.shown.map(m => {
                     const [typeLabel, typeClr] = MOVE_TYPE_LABEL[m.type] || [m.type, 'bg-gray-100'];
                     const link = resolveLink(m);
                     const branch = state.branches.find(b => b.id === m.branch);
@@ -16106,7 +16218,8 @@ function ItemMovementPopup({ item, state, branchFilter, startDate, endDate, onCl
                   })
                 )
               )
-            )
+            ),
+            h(Pager, { pg, label:'รายการเคลื่อนไหว' })
           ),
 
       h('div', { className:'flex gap-2 pt-3 border-t' },
@@ -16200,6 +16313,7 @@ function OutgoingReportTab({ state, user }){
   }, [state.movements, state.items, state.transferOrders, state.branches, fromBranch, fromDate, toDate, user, branchIds.join(',')]);
 
   const fromBranchObj = state.branches.find(b => b.id === fromBranch);
+  const pg = usePaged(items, 50);
 
   const doExport = () => {
     const csv = [['สินค้า','รหัส', ...colHeaders.map(c => c.l), 'รวมจำนวน','มูลค่ารวม']];
@@ -16267,7 +16381,7 @@ function OutgoingReportTab({ state, user }){
                 h('th', { className:'px-2 py-2 text-right text-xs bg-blue-50' }, 'รวม'),
                 h('th', { className:'px-2 py-2 text-right text-xs bg-green-50' }, 'มูลค่า'))),
             h('tbody', { className:'divide-y' },
-              items.map((r,idx) => h('tr', { key:idx, className:'hover:bg-gray-50' },
+              pg.shown.map((r,idx) => h('tr', { key:idx, className:'hover:bg-gray-50' },
                 h('td', { className:'px-3 py-1.5 text-sm font-medium' }, r.item?.name||'-'),
                 h('td', { className:'px-2 py-1.5 text-xs font-mono text-gray-500' }, r.item?.code||''),
                 ...colHeaders.map(c => {
@@ -16287,7 +16401,8 @@ function OutgoingReportTab({ state, user }){
                   fmtNum(items.reduce((s,r) => s + (r.dests[c.k]?.qty||0), 0)))),
                 h('td', { className:'px-2 py-2 text-right bg-blue-100' }, fmtNum(grandTotalQty)),
                 h('td', { className:'px-2 py-2 text-right bg-green-100 text-green-800' }, fmtCur(grandTotalValue)))
-            )))
+            )),
+          h(Pager, { pg, label:'รายการสินค้า' }))
   );
 }
 
@@ -16366,6 +16481,7 @@ function ScrapTab({ state, dispatch, user }){
   const showValue = global.ERP.canSeeStockValue(user, state);
 
   const canCreate = hasPerm(user,'stock','list','adjust') || isSuperUser(user);
+  const pg = usePaged(filtered, 50);
 
   return h('div', null,
     // 🆕 UAT (staff-store): banner pending scrap ในจอ "ตัดของเสีย" นี้ด้วย — เพิ่งกดบันทึกแล้วลิสต์ว่าง = นึกว่าพัง · filter เฉพาะสาขา
@@ -16407,7 +16523,7 @@ function ScrapTab({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              filtered.map(s => h('tr', { key:s.id, className:'hover:bg-gray-50' },
+              pg.shown.map(s => h('tr', { key:s.id, className:'hover:bg-gray-50' },
                 h('td', { className:'px-3 py-2 font-mono text-xs' }, s.scrapNumber),
                 h('td', { className:'px-3 py-2 text-center text-xs' }, fmtDate(s.date)),
                 h('td', { className:'px-3 py-2 text-sm' }, s.reason),
@@ -16416,7 +16532,8 @@ function ScrapTab({ state, dispatch, user }){
                 h('td', { className:'px-3 py-2 text-xs text-gray-600' }, s.by),
                 h('td', { className:'px-3 py-2 text-center' },
                   h(Button, { variant:'secondary', size:'sm', onClick:()=>setDetail(s) }, 'ดู')))))
-          )),
+          ),
+          h(Pager, { pg, label:'ใบตัดของเสีย' })),
 
     showNew && h(NewScrapModal, { state, dispatch, user, branchId:branch, onClose:()=>setShowNew(false) }),
     detail && h(ScrapDetailModal, { scrap:detail, state, onClose:()=>setDetail(null) })
@@ -16719,6 +16836,8 @@ function ScrapReportTab({ state, user }){
   const prodDefectRows = Object.values(prodByDefect).sort((a,b) => b.qty - a.qty);
   const prodTotalQty = prodWaste.reduce((s,w) => s + w.qty, 0);
 
+  const pgItems = usePaged(itemRows, 50);
+
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' })),
@@ -16761,7 +16880,7 @@ function ScrapReportTab({ state, user }){
             showValue && h('th', { className:'px-3 py-1.5 text-right text-xs' }, 'มูลค่ารวม'),
             h('th', { className:'px-3 py-1.5 text-left text-xs' }, 'เหตุผลที่พบ'))),
         h('tbody', { className:'divide-y' },
-          itemRows.map(r => {
+          pgItems.shown.map(r => {
             const it = state.items.find(x => x.id === r.itemId);
             return h('tr', { key:r.itemId },
               h('td', { className:'px-3 py-1.5' }, it?.name || r.itemId),
@@ -16771,7 +16890,8 @@ function ScrapReportTab({ state, user }){
               showValue && h('td', { className:'px-3 py-1.5 text-right text-red-700 font-mono' }, fmtCur(r.totalLoss)),
               h('td', { className:'px-3 py-1.5 text-xs text-gray-600' },
                 Array.from(r.reasons).join(', ')));
-          })))),
+          }))),
+      h(Pager, { pg:pgItems, label:'สินค้า' })),
 
     // By reason
     reasonRows.length > 0 && h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
@@ -16846,13 +16966,15 @@ function StockByLocationTab({ state, user }){
   const [typeFilter, setTypeFilter] = useState('all');
   const showValue = canSeeStockValue(user, state);
 
-  if(multiBranches.length === 0){
-    return h('div', { className:'bg-yellow-50 border border-yellow-200 rounded-lg p-6' },
+  // 🆕 FIX: ย้าย early return นี้ไปไว้ "หลัง hooks ทั้งหมด" (ดูตัวแปร _noMultiBranch ด้านล่าง)
+  //    เดิม return ก่อน usePaged → จำนวน hooks ต่างกันระหว่าง render = React crash จอขาว
+  const _noMultiBranch = multiBranches.length === 0;
+  const _noMultiBranchView = () =>
+    h('div', { className:'bg-yellow-50 border border-yellow-200 rounded-lg p-6' },
       h('div', { className:'font-bold text-yellow-900' }, '📍 ไม่มีสาขาที่ตั้งเป็น Multi-Warehouse'),
       h('div', { className:'text-sm text-yellow-700 mt-1' },
         'ไปที่ ', h('b', null, 'ตั้งค่า → 🏢 องค์กร → 🏢 สาขา'),
         ' → เลือกสาขา → ตั้ง "รูปแบบคลัง" เป็น 🔵 Multi'));
-  }
 
   const branch = state.branches.find(b => b.id === branchId);
   const isMulti = isMultiWarehouse(state, branchId);
@@ -16914,11 +17036,14 @@ function StockByLocationTab({ state, user }){
   }
   const locStats = Object.entries(byLocStats).map(([id,s]) => ({ id, ...s }));
 
+  const pg = usePaged(rows, 50);
+
   const typeColor = (t) => t==='raw' ? 'bg-blue-100 text-blue-800' :
                           t==='wip' ? 'bg-amber-100 text-amber-800' :
                           t==='fg'  ? 'bg-green-100 text-green-800' :
                           'bg-gray-100 text-gray-700';
 
+  if(_noMultiBranch) return _noMultiBranchView();   // 🆕 เช็คหลัง hooks ครบแล้ว
   return h('div', null,
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 mb-3 text-sm text-blue-800' },
       '📍 ดูสต๊อกแยกตามคลังย่อย — ใช้กับสาขา ', h('b', null, 'Multi-Warehouse'),
@@ -16973,7 +17098,7 @@ function StockByLocationTab({ state, user }){
                   showValue && h('th', { className:'px-3 py-2 text-right text-xs' }, 'มูลค่า'),
                   h('th', { className:'px-3 py-2 text-center text-xs' }, 'Lot'))),
               h('tbody', { className:'divide-y' },
-                rows.map((r,i) => {
+                pg.shown.map((r,i) => {
                   // 🆕 DU resolver: ใช้ locType + dept → fallback displayUnit → auto
                   const userDept = user?.departmentIds?.[0];
                   const resolved = resolveDisplayUnit(r.item, { locType: r.locType, dept: userDept });
@@ -17004,7 +17129,8 @@ function StockByLocationTab({ state, user }){
                     h('td', { className:'px-3 py-1.5 text-center text-xs text-gray-500' },
                       r.layers.length, ' lot'));
                 }))
-              ))
+              )),
+          h(Pager, { pg, label:'รายการ' })
             )
   );
 }
@@ -17028,6 +17154,8 @@ function StockCountHistoryTab({ state, user }){
     if(branchFilter !== '__all__') list = list.filter(s => s.branch === branchFilter);
     return [...list].sort((a,b) => (b.countedAt||0) - (a.countedAt||0));
   }, [state.stockCounts, branchFilter, dr.startDate, dr.endDate, allowedBranches]);
+
+  const pg = usePaged(sessions, 50);
 
   return h('div', { className:'space-y-3' },
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800' },
@@ -17065,7 +17193,7 @@ function StockCountHistoryTab({ state, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              sessions.map(sc => h('tr', { key:sc.id, className:'hover:bg-gray-50' },
+              pg.shown.map(sc => h('tr', { key:sc.id, className:'hover:bg-gray-50' },
                 h('td', { className:'px-3 py-2 font-mono text-xs text-blue-700 font-semibold' }, sc.sessionNumber||sc.ref),
                 h('td', { className:'px-3 py-2 text-xs' }, fmtDate(sc.date)),
                 h('td', { className:'px-3 py-2 text-xs' }, sc.branchName||sc.branch),
@@ -17082,7 +17210,8 @@ function StockCountHistoryTab({ state, user }){
                   h(Button, { variant:'secondary', size:'sm', onClick:()=>setDetail(sc) }, 'ดู')),
               ))
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบนับสต๊อก' })
         ),
 
     detail && h(StockCountDetailModal, { sc:detail, state, onClose:()=>setDetail(null) })
@@ -17125,6 +17254,8 @@ function StockCountDetailModal({ sc, state, onClose }){
     return map;
   }, [state.movements, sc, fromTs, toTs]);
 
+  const pg = usePaged(sc.lines || [], 50);
+
   return h(Modal, { isOpen:true, title:`🗂️ ${sc.sessionNumber || 'การนับสต๊อก'}`, onClose, size:'xl' },
     h('div', { className:'space-y-4' },
       // Header info
@@ -17164,7 +17295,7 @@ function StockCountDetailModal({ sc, state, onClose }){
             )
           ),
           h('tbody', { className:'divide-y' },
-            (sc.lines||[]).map((l,i) => {
+            pg.shown.map((l,i) => {
               const item = state.items.find(it => it.id === l.itemId);
               // สต๊อกครั้งก่อน — ใช้ priorSession ถ้ามี item นั้นใน prior, ไม่งั้นใช้ prevQty ของ session นี้
               //   (prevQty บันทึกตอนนับ = สต๊อกที่ระบบจำได้ ณ ตอนนับ)
@@ -17176,7 +17307,7 @@ function StockCountDetailModal({ sc, state, onClose }){
               const shouldBe = basePrev + ms.in - ms.out;
               const diff = l.delta;  // = countedQty - prevQty
               return h('tr', { key:l.itemId, className:'hover:bg-gray-50' },
-                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, i+1),
+                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, pg.from + i),
                 h('td', { className:'px-2 py-1.5' },
                   h('div', { className:'font-medium text-sm' }, l.itemName||item?.name),
                   h('div', { className:'text-[10px] text-gray-500 font-mono' }, l.itemCode||item?.code||'')),
@@ -17209,7 +17340,8 @@ function StockCountDetailModal({ sc, state, onClose }){
                 h('span', { className:'text-green-700' }, `+${fmtNum(sc.totalExtra||0)}`))
             )
           )
-        )
+        ),
+        h(Pager, { pg, label:'รายการ' })
       ),
 
       h('div', { className:'flex gap-2 pt-3 border-t' },
@@ -17222,6 +17354,7 @@ function StockCountDetailModal({ sc, state, onClose }){
 }
 
 function MovementListModal({ itemId, mvs, label, item, onClose }){
+  const pg = usePaged(mvs || [], 50);
   return h(Modal, { isOpen:true, title:`${label==='รับเข้า'?'📥':'📤'} ${label}: ${item?.name||itemId}`, onClose, size:'lg' },
     h('div', { className:'space-y-3' },
       h('div', { className:'text-xs text-gray-600' },
@@ -17240,7 +17373,7 @@ function MovementListModal({ itemId, mvs, label, item, onClose }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                mvs.map((m,i) => h('tr', { key:i, className:'hover:bg-gray-50' },
+                pg.shown.map((m,i) => h('tr', { key:i, className:'hover:bg-gray-50' },
                   h('td', { className:'px-3 py-2 text-xs' }, fmtDate(m.date)),
                   h('td', { className:'px-3 py-2 text-xs font-mono' }, m.type||'-'),
                   h('td', { className:'px-3 py-2 text-xs font-mono text-blue-700' }, m.ref||'-'),
@@ -17250,7 +17383,8 @@ function MovementListModal({ itemId, mvs, label, item, onClose }){
                   h('td', { className:'px-3 py-2 text-xs text-gray-600' }, m.note||'-')
                 ))
               )
-            )
+            ),
+            h(Pager, { pg, label:'รายการเคลื่อนไหว' })
           ),
       h('div', { className:'flex gap-2 pt-2 border-t' },
         h(Button, { variant:'secondary', onClick:onClose }, 'ปิด')
@@ -17368,11 +17502,20 @@ function ItemPickerModal({ state, user, onCancel, onConfirm }){
     return list.sort((a,b) => (a.code||'').localeCompare(b.code||''));
   }, [state.items, search, typeFilter]);
 
+  const pg = usePaged(items, 50);
+
   const toggleItem = (id) => {
     setPicked(p => { const n = new Set(p); if(n.has(id)) n.delete(id); else n.add(id); return n; });
   };
+  // เลือกทั้งหมด = เฉพาะแถวในหน้าปัจจุบัน (ที่ติ๊กหน้าอื่นไว้ยังอยู่)
+  const pageAllChecked = pg.shown.length > 0 && pg.shown.every(i => picked.has(i.id));
   const toggleAll = () => {
-    setPicked(p => p.size === items.length ? new Set() : new Set(items.map(i => i.id)));
+    setPicked(p => {
+      const n = new Set(p);
+      if(pageAllChecked) pg.shown.forEach(i => n.delete(i.id));
+      else               pg.shown.forEach(i => n.add(i.id));
+      return n;
+    });
   };
   const confirmPick = () => {
     if(picked.size === 0) return alert('เลือกรายการอย่างน้อย 1 ตัว');
@@ -17415,7 +17558,7 @@ function ItemPickerModal({ state, user, onCancel, onConfirm }){
         ),
         h('button', { type:'button', onClick:toggleAll,
           className:'text-xs bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded' },
-          picked.size === items.length ? 'ยกเลิกทั้งหมด' : 'เลือกทั้งหมด'),
+          pageAllChecked ? 'ยกเลิกทั้งหมด (หน้านี้)' : 'เลือกทั้งหมด (หน้านี้)'),
       ),
 
       // Stats
@@ -17427,7 +17570,7 @@ function ItemPickerModal({ state, user, onCancel, onConfirm }){
       h('div', { className:'border rounded-lg max-h-96 overflow-y-auto bg-white' },
         items.length === 0
           ? h('div', { className:'p-8 text-center text-gray-500 text-sm' }, 'ไม่พบรายการ')
-          : items.map(it => {
+          : pg.shown.map(it => {
               const cur = typeof it.stockByBranch?.[branchId] === 'number'
                 ? it.stockByBranch[branchId]
                 : Number(it.stockByBranch?.[branchId]?._total||0);
@@ -17444,6 +17587,8 @@ function ItemPickerModal({ state, user, onCancel, onConfirm }){
               );
             })
       ),
+
+      h(Pager, { pg, label:'รายการสินค้า' }),
 
       // Action buttons
       h('div', { className:'flex gap-2 pt-3 border-t' },
@@ -17475,6 +17620,7 @@ const {
   Modal, Button, SB, deductFIFO,
   unitsForPurpose, findItemUnit, toBaseQty, getBaseUnit,
   useDateRange, DateRangeBar, inDateRange,
+  usePaged, Pager,
 } = global.ERP;
 
 // ==================== MAIN ====================
@@ -17953,6 +18099,7 @@ function TRList({ trs, state, dispatch, user }){
   let filtered = trs.filter(t => inDateRange(t.trDate, dr.startDate, dr.endDate));
   if(filter !== 'all') filtered = filtered.filter(t => t.status === filter);
   const sorted = [...filtered].sort((a,b) => (b.trDate||'').localeCompare(a.trDate||''));
+  const pg = usePaged(sorted, 50);
 
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
@@ -17984,7 +18131,7 @@ function TRList({ trs, state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              sorted.map(tr => {
+              pg.shown.map(tr => {
                 const from = getBranch(state, tr.fromBranch);
                 const to   = getBranch(state, tr.toBranch);
                 const [label, clr] = TR_STATUS_MAP[tr.status] || [tr.status,'bg-gray-100'];
@@ -18026,7 +18173,8 @@ function TRList({ trs, state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบขอโอน (TR)' })
         ),
 
     detail && h(TRDetailModal, { tr:detail, state, dispatch, user, onClose:()=>setDetail(null) })
@@ -18981,6 +19129,7 @@ function TOList({ tos, state, dispatch, user }){
   let filtered = tos.filter(t => inDateRange(t.toDate, dr.startDate, dr.endDate));
   if(filter !== 'all') filtered = filtered.filter(t => t.status === filter);
   const sorted = [...filtered].sort((a,b) => (b.toDate||'').localeCompare(a.toDate||''));
+  const pg = usePaged(sorted, 50);
 
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
@@ -19012,7 +19161,7 @@ function TOList({ tos, state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              sorted.map(to => {
+              pg.shown.map(to => {
                 const [label, clr] = TO_STATUS_MAP[to.status] || [to.status,'bg-gray-100'];
                 return h('tr', { key:to.id, className:'hover:bg-gray-50' },
                   h('td', { className:'px-3 py-2 font-mono text-xs text-cyan-700 font-semibold' }, to.toNumber),
@@ -19031,7 +19180,8 @@ function TOList({ tos, state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบโอนออก (TO)' })
         ),
 
     detail && h(TODetailModal, { to:detail, state, dispatch, user, onClose:()=>setDetail(null) })
@@ -19256,8 +19406,10 @@ function TransferReconcileTab({ state, user }){
   }, [state.transferOrders, state.transferRequests, state.grs, state.items, state.branches,
       dr.startDate, dr.endDate, filter, search, myBranch, canSeeAll]);
 
+  // ❗ นับจาก rows ทั้งชุด (ไม่ใช่ pg.shown) — ตัวเลขบนปุ่มกรองต้องนับทั้งหมด
   const counts = { all:0, ok:0, mismatch:0, pending:0 };
   for(const r of rows){ counts.all++; counts[r.status]++; }
+  const pg = usePaged(rows, 50);
 
   const STATUS_LBL = {
     ok:       ['✅ ตรง',          'bg-green-100 text-green-700'],
@@ -19285,7 +19437,7 @@ function TransferReconcileTab({ state, user }){
     rows.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' }, 'ไม่มีข้อมูล')
       : h('div', { className:'space-y-3' },
-          rows.map(r => h('div', { key:r.to.id,
+          pg.shown.map(r => h('div', { key:r.to.id,
             className: cls('bg-white rounded-lg shadow border-l-4',
               r.status === 'mismatch' ? 'border-orange-500' : r.status === 'pending' ? 'border-yellow-500' : 'border-green-500') },
             h('div', { className:'px-4 py-2 flex justify-between items-center border-b' },
@@ -19333,7 +19485,10 @@ function TransferReconcileTab({ state, user }){
               '⚠️ ', h('b', null, 'รับ ≠ ส่ง'),
               ' — ตรวจสอบของจริง · ถ้า', h('b', null, 'รับเกิน'), ' = ปลายทางได้เกิน ตัดสต๊อกต้นทางเพิ่ม manual · ถ้า',
               h('b', null, 'รับขาด'), ' = ของหายระหว่างทาง บันทึก adjust ที่ต้นทาง')
-          ))));
+          )),
+          h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+            h(Pager, { pg, label:'ใบโอน (TO)' }))
+        ));
 }
 
 // ==================== REGISTER ====================
@@ -19362,7 +19517,8 @@ const {
   getBranch, isHQ, isSuperUser, hasPerm, getAllowedBranches,
   Modal, Button, deductFIFO,
   unitsForPurpose, findItemUnit, toBaseQty, getBaseUnit,
-  useDateRange, DateRangeBar, inDateRange,
+  useDateRange, DateRangeBar, inDateRange, exportCSV,
+  usePaged, Pager,
   getBranchLines, findLine, getBranchLocations, findLocation,
   getMainStorage, getFGStorage, getDefaultLocationId,
   getStockAtLocation, getStockAtBranch,
@@ -20305,6 +20461,9 @@ function PlanTab({ state, dispatch, user, branchId, boms }){
 
   const totalRecommend = rows.reduce((s,r) => s + r.remaining, 0);
 
+  // 📄 แบ่งหน้า — ยอดรวม/shortage/BulkPlan ยังคิดจาก rows ทั้งชุด (ห้ามใช้ pg.shown)
+  const pg = usePaged(rows, 50);
+
   // 🔍 Plan Shortage — รวมวัตถุดิบที่จะใช้ตามแพลน vs สต๊อกคงเหลือ
   const shortage = useMemo(() => {
     const need = {}; // itemId → required qty
@@ -20389,7 +20548,7 @@ function PlanTab({ state, dispatch, user, branchId, boms }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              rows.map(({ fg, plan, expected, onHand, recommended, alreadyPlannedQty, remaining, availableBoms }) => {
+              pg.shown.map(({ fg, plan, expected, onHand, recommended, alreadyPlannedQty, remaining, availableBoms }) => {
                 const isEditing = editing[fg.id] !== undefined;
                 const editVal = isEditing ? editing[fg.id] : expected;
                 return h('tr', { key:fg.id, className: cls('hover:bg-gray-50', remaining > 0 && 'bg-yellow-50') },
@@ -20457,7 +20616,8 @@ function PlanTab({ state, dispatch, user, branchId, boms }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'สินค้า' })
         ),
 
     showBulkPlan && h(BulkPlanModal, { state, dispatch, user, branchId,
@@ -21730,10 +21890,14 @@ function OrdersTab({ state, dispatch, user, branchId, boms, orders }){
     || ((a.priority ?? 9e14) - (b.priority ?? 9e14))
     || (a.createdAt||0) - (b.createdAt||0));
 
+  // 📄 แบ่งหน้า — ยกเลิกหมู่/จำนวนที่เลือก ยังอิง sorted ทั้งชุด (ห้ามใช้ pg.shown)
+  const pg = usePaged(sorted, 50);
+
   // 🆕 Selection helpers
   const cancellableStatuses = ['planned','materials_issued','producing','produced','blocked'];
   const isCancellable = (o) => cancellableStatuses.includes(o.status);
-  const cancellableInList = sorted.filter(isCancellable);
+  // "เลือกทั้งหมด" = เฉพาะแถวในหน้าปัจจุบันที่ยกเลิกได้ (ไม่งั้นข้ามหน้าแล้วติ๊กไม่ติด)
+  const cancellableInList = pg.shown.filter(isCancellable);
   const selectedIds = Object.keys(selected).filter(id => selected[id]);
   const selectedOrders = sorted.filter(o => selected[o.id]);
   const allCancellableSelected = cancellableInList.length > 0 &&
@@ -21839,7 +22003,7 @@ function OrdersTab({ state, dispatch, user, branchId, boms, orders }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              sorted.map(o => {
+              pg.shown.map(o => {
                 const line = findLine(state, branchId, o.lineId);
                 const outputs = o.outputs && o.outputs.length ? o.outputs : [{
                   productId: o.productId, productName: o.productName,
@@ -21905,7 +22069,8 @@ function OrdersTab({ state, dispatch, user, branchId, boms, orders }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ออเดอร์ผลิต' })
         ),
 
     showNew && h(NewOrderModal, { boms, state, dispatch, user, branchId, onClose:()=>setShowNew(false) }),
@@ -26722,6 +26887,9 @@ function IssueTab({ state, dispatch, user, branchId, issues }){
   const filtered = [...issues].filter(i => inDateRange(i.date, dr.startDate, dr.endDate))
     .sort((a,b) => (b.date||'').localeCompare(a.date||'') || (b.createdAt||0) - (a.createdAt||0));
 
+  // 📄 แบ่งหน้า — ตัวเลข "ใบเบิก N ฉบับ" ยังนับจาก filtered ทั้งชุด
+  const pg = usePaged(filtered, 50);
+
   return h('div', { className:'space-y-3' },
     h('div', { className:'bg-white rounded-lg shadow p-3' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' })
@@ -26749,7 +26917,7 @@ function IssueTab({ state, dispatch, user, branchId, issues }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              filtered.map(iss => {
+              pg.shown.map(iss => {
                 const line = findLine(state, branchId, iss.lineId);
                 const src = findLocation(state, branchId, iss.sourceLocId);
                 const dst = findLocation(state, branchId, iss.destLocId);
@@ -26768,7 +26936,8 @@ function IssueTab({ state, dispatch, user, branchId, issues }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบเบิก' })
         ),
 
     showNew && h(NewIssueModal, { state, dispatch, user, branchId, onClose:()=>setShowNew(false) }),
@@ -27145,6 +27314,9 @@ function BOMTab({ state, dispatch, user, branchId, boms }){
   });
   if(lineFilter !== 'all') filtered = filtered.filter(b => b.lineId === lineFilter);
 
+  // 📄 แบ่งหน้า — ตัวนับ "x/y สูตร" ยังนับจาก filtered ทั้งชุด
+  const pg = usePaged(filtered, 50);
+
   // เช็คว่ามี demo seed อยู่แล้วไหม
   const hasDemoSeed = (state.boms||[]).some(b => b.name?.endsWith('[DEMO]'));
 
@@ -27209,12 +27381,15 @@ function BOMTab({ state, dispatch, user, branchId, boms }){
 
     filtered.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' }, 'ยังไม่มี BOM ในเงื่อนไขนี้')
-      : h('div', { className:'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3' },
-          filtered.map(b => h(BOMCard, { key:b.id, bom:b, state, branchId, canEdit, canDelete,
-            onEdit:()=>{ setEdit(b); setShowModal(true); },
-            onDuplicate: canCreate ? () => duplicateBom(b, state, dispatch) : null,
-            onDelete:()=>{ if(confirm(`ลบ BOM "${b.name||getPrimaryOutput(b)?.productName}"?`)) dispatch({ type:'DELETE_BOM', data:b.id }); }
-          }))
+      : h('div', null,
+          h('div', { className:'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3' },
+            pg.shown.map(b => h(BOMCard, { key:b.id, bom:b, state, branchId, canEdit, canDelete,
+              onEdit:()=>{ setEdit(b); setShowModal(true); },
+              onDuplicate: canCreate ? () => duplicateBom(b, state, dispatch) : null,
+              onDelete:()=>{ if(confirm(`ลบ BOM "${b.name||getPrimaryOutput(b)?.productName}"?`)) dispatch({ type:'DELETE_BOM', data:b.id }); }
+            }))),
+          h('div', { className:'bg-white rounded-lg shadow overflow-hidden mt-3' },
+            h(Pager, { pg, label:'สูตร BOM' }))
         ),
 
     showModal && h(BOMEditModal, { bom:edit, state, dispatch, branchId, onClose:()=>setShowModal(false) }),
@@ -29351,6 +29526,10 @@ function POSImportTab({ state, dispatch, user, branchId }){
   const [delimiter, setDelimiter] = useState('auto');
   const [parsed, setParsed] = useState(null);
 
+  // 📄 แบ่งหน้าตาราง preview — ยอดสรุป (parsed.total*) คำนวณตอน parse จากทุกแถว
+  //    และ apply() ยังใช้ parsed.rows ทั้งชุด (ห้ามใช้ pgPreview.shown)
+  const pgPreview = usePaged(parsed ? parsed.rows : [], 50);
+
   const branches = (state.branches || []);
   const allItems = state.items || [];
   const history = state.posImports || [];
@@ -29707,7 +29886,8 @@ function POSImportTab({ state, dispatch, user, branchId }){
         h('div', null, h('div', { className:'text-xs text-gray-500' }, 'ขาย'), h('div', { className:'font-bold text-purple-700' }, fmtNum(parsed.totalSold))),
       ),
 
-      h('div', { className:'bg-white border rounded overflow-hidden overflow-x-auto max-h-96 overflow-y-auto' },
+      h('div', { className:'bg-white border rounded overflow-hidden' },
+        h('div', { className:'overflow-x-auto max-h-96 overflow-y-auto' },
         h('table', { className:'w-full text-xs' },
           h('thead', { className:'bg-gray-50 border-b sticky top-0' },
             h('tr', null,
@@ -29723,7 +29903,7 @@ function POSImportTab({ state, dispatch, user, branchId }){
             )
           ),
           h('tbody', { className:'divide-y' },
-            parsed.rows.map((r,i) => {
+            pgPreview.shown.map((r,i) => {
               const inStock = r.item ? getStockAtBranch(r.item, targetBranch) : null;
               return h('tr', { key:i, className: cls(!r.matched && 'bg-red-50') },
                 h('td', { className:'px-2 py-1 text-center' }, r.matched ? '✓' : '⚠️'),
@@ -29741,6 +29921,8 @@ function POSImportTab({ state, dispatch, user, branchId }){
             })
           )
         )
+        ),
+        h(Pager, { pg: pgPreview, label:'แถวข้อมูล' })
       ),
 
       parsed.matched < parsed.total && h('div', { className:'bg-orange-50 border border-orange-200 rounded p-2 text-xs text-orange-800' },
@@ -30050,6 +30232,11 @@ function POSMaterialCheckTab({ state, dispatch, user, branchId }){
     return report.rows.filter(r => r.variancePct !== null && Math.abs(r.variancePct) >= varThreshold);
   };
 
+  // 📄 แบ่งหน้า — ยอดรวม (report.totalCost / totalVarCost) และ Export CSV
+  //    ยังคิดจากผลลัพธ์ทั้งชุด (filteredRows) ไม่ใช่แค่หน้าที่แสดง
+  const pgVar  = usePaged(filteredRows(report), 50);
+  const pgSale = usePaged(report ? report.saleLines : [], 50);
+
   const exportReport = () => {
     if(!report) return;
     const rows = filteredRows(report);
@@ -30217,7 +30404,7 @@ function POSMaterialCheckTab({ state, dispatch, user, branchId }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              report.saleLines.map((s,i) =>
+              pgSale.shown.map((s,i) =>
                 h('tr', { key:i, className:'hover:bg-gray-50' },
                   h('td', { className:'px-2 py-1' },
                     h('div', { className:'font-medium' }, s.fgName),
@@ -30231,7 +30418,8 @@ function POSMaterialCheckTab({ state, dispatch, user, branchId }){
                 )
               )
             )
-          )
+          ),
+          h(Pager, { pg: pgSale, label:'สินค้า (FG)' })
         )
       ),
 
@@ -30247,7 +30435,8 @@ function POSMaterialCheckTab({ state, dispatch, user, branchId }){
         varThreshold > 0 && h('span', { className:'text-indigo-600' }, `(${vrows.length}/${report.rows.length} แถว)`),
       ),
 
-      report.rows.length > 0 && h('div', { className:'bg-white border rounded overflow-hidden overflow-x-auto max-h-[28rem] overflow-y-auto' },
+      report.rows.length > 0 && h('div', { className:'bg-white border rounded overflow-hidden' },
+        h('div', { className:'overflow-x-auto max-h-[28rem] overflow-y-auto' },
         h('table', { className:'w-full text-xs' },
           h('thead', { className:'bg-gray-50 border-b sticky top-0' },
             h('tr', null,
@@ -30263,7 +30452,7 @@ function POSMaterialCheckTab({ state, dispatch, user, branchId }){
             )
           ),
           h('tbody', { className:'divide-y' },
-            vrows.map((r,i) =>
+            pgVar.shown.map((r,i) =>
               h('tr', { key:i, className:'hover:bg-gray-50' },
                 h('td', { className:'px-2 py-1' },
                   h('div', { className:'font-medium' }, r.itemName),
@@ -30295,7 +30484,8 @@ function POSMaterialCheckTab({ state, dispatch, user, branchId }){
               h('td', { className:'px-2 py-1 text-right text-purple-800' }, fmtCur(report.totalCost)),
             )
           )
-        )
+        )),
+        h(Pager, { pg: pgVar, label:'วัตถุดิบ' })
       ),
 
       report.rows.length === 0 && h('div', { className:'bg-gray-50 border rounded p-4 text-center text-sm text-gray-500' },
@@ -30429,6 +30619,9 @@ function LineStockTab({ state, dispatch, user, branchId }){
     neg: filteredItems.filter(r => r.isNeg).length,
     has: filteredItems.filter(r => r.qty > 0).length,
   }), [filteredItems]);
+
+  // 📄 แบ่งหน้า — KPI ด้านบน + ขอเติม TR + บันทึกผลนับ ยังอิง filteredItems/counts ทั้งชุด
+  const pgItems = usePaged(filteredItems, 50);
 
   // ===== Quick request TR =====
   const openRequestTR = () => {
@@ -30601,7 +30794,7 @@ function LineStockTab({ state, dispatch, user, branchId }){
         ? h('div', { className:'p-6 text-center text-gray-500 text-sm' },
             '— ไม่พบสินค้าในไลน์นี้ —')
         : h('div', { className:'divide-y' },
-            filteredItems.map(r => {
+            pgItems.shown.map(r => {
               const i = r.item;
               const ranked = global.ERP.getStockUnitsRanked(i);
               const defUnit = ranked[0]?.unit?.name || i.issueUnit || '';
@@ -30649,7 +30842,8 @@ function LineStockTab({ state, dispatch, user, branchId }){
                   e && h('button', { onClick:()=>clearCount(i.id),
                     className:'ml-2 text-red-500 text-xs' }, '×'))
               );
-            }))),
+            })),
+      filteredItems.length > 0 && h(Pager, { pg: pgItems, label:'รายการสินค้า' })),
 
     // ===== TR Request Modal =====
     showRequestTR && h(StockShortageModal, {
@@ -32644,6 +32838,9 @@ function FlowTrackerTab({ state, dispatch, user, branchId, boms, orders }){
     return groups;
   }, [dayOrders, state.productionOrders]);
 
+  // 📄 แบ่งหน้า — ตัวนับ "N กลุ่ม · M ออเดอร์" ยังนับจากทั้งวัน
+  const pg = usePaged(groupedRows, 50);
+
   return h('div', { className:'space-y-3' },
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-900' },
       '🚦 ', h('b', null, 'ติดตามการผลิตรายวัน'),
@@ -32671,8 +32868,10 @@ function FlowTrackerTab({ state, dispatch, user, branchId, boms, orders }){
           h('div', { className:'text-4xl mb-2' }, '🌱'),
           h('div', { className:'font-bold' }, 'ไม่มีออเดอร์ในวันที่เลือก'))
       : h('div', { className:'space-y-2' },
-          groupedRows.map((g,i) => h(OrderFlowCard, { key:i, group:g, state, user,
-            onOpenOp: (order, op, opState) => setOpTarget({ order, op, opState }) }))),
+          pg.shown.map((g,i) => h(OrderFlowCard, { key:((g.master&&g.master.id)||(g.sub&&g.sub.id)||(g.order&&g.order.id)||i), group:g, state, user,
+            onOpenOp: (order, op, opState) => setOpTarget({ order, op, opState }) })),
+          h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+            h(Pager, { pg, label:'กลุ่มออเดอร์' }))),
 
     opTarget && h(OpFlowDetailModal, {
       order: opTarget.order, op: opTarget.op, opState: opTarget.opState,
@@ -33152,6 +33351,9 @@ function YieldReport({ state, branchId, inRange }){
   const totalQty = rows.reduce((s,r) => s + r.qty, 0);
   const totalValue = rows.reduce((s,r) => s + r.totalValue, 0);
 
+  // 📄 แบ่งหน้า — ยอดรวม/มูลค่ารวม + tfoot คิดจาก rows ทั้งชุด (ห้ามใช้ pg.shown)
+  const pg = usePaged(rows, 50);
+
   return h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
     h('div', { className:'p-2 bg-blue-50 border-b text-xs text-blue-800' },
       `📦 ผลผลิตรวม: ${fmtNum(totalQty)} หน่วย · ${rows.length} รายการ · ${movs.length} movements · มูลค่ารวม `,
@@ -33169,7 +33371,7 @@ function YieldReport({ state, branchId, inRange }){
                 'COG/หน่วย ⓘ'),
               h('th', { className:'px-3 py-2 text-right text-xs' }, 'มูลค่ารวม (COG)'))),
           h('tbody', { className:'divide-y' },
-            rows.map(r => h('tr', { key:r.itemId, className:'hover:bg-gray-50' },
+            pg.shown.map(r => h('tr', { key:r.itemId, className:'hover:bg-gray-50' },
               h('td', { className:'px-3 py-2' },
                 h('div', { className:'font-medium' }, r.item?.name || r.itemId),
                 h('div', { className:'text-[10px] text-gray-500 font-mono' }, r.item?.code||'')),
@@ -33181,7 +33383,8 @@ function YieldReport({ state, branchId, inRange }){
           h('tfoot', { className:'bg-gray-50 border-t-2' },
             h('tr', null,
               h('td', { colSpan:4, className:'px-3 py-2 text-right font-medium' }, 'รวม:'),
-              h('td', { className:'px-3 py-2 text-right font-bold text-blue-700' }, fmtCur(totalValue))))));
+              h('td', { className:'px-3 py-2 text-right font-bold text-blue-700' }, fmtCur(totalValue))))),
+    rows.length > 0 && h(Pager, { pg, label:'รายการสินค้า' }));
 }
 
 function MaterialsUsedReport({ state, branchId, inRange }){
@@ -33200,6 +33403,9 @@ function MaterialsUsedReport({ state, branchId, inRange }){
   }).sort((a,b) => b.qty - a.qty);
   const totalCost = rows.reduce((s,r) => s + r.qty * (r.item?.costPrice||0), 0);
 
+  // 📄 แบ่งหน้า — มูลค่ารวมด้านบนคิดจาก rows ทั้งชุด
+  const pg = usePaged(rows, 50);
+
   return h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
     h('div', { className:'p-2 bg-amber-50 border-b text-xs text-amber-800' },
       `🌾 ใช้วัตถุดิบรวม ${rows.length} รายการ · มูลค่ารวม ${fmtCur(totalCost)}`),
@@ -33213,14 +33419,15 @@ function MaterialsUsedReport({ state, branchId, inRange }){
               h('th', { className:'px-3 py-2 text-right text-xs' }, '# ครั้ง'),
               h('th', { className:'px-3 py-2 text-right text-xs' }, 'มูลค่า'))),
           h('tbody', { className:'divide-y' },
-            rows.map(r => h('tr', { key:r.itemId },
+            pg.shown.map(r => h('tr', { key:r.itemId },
               h('td', { className:'px-3 py-2' },
                 h('div', { className:'font-medium' }, r.item?.name || r.itemId),
                 h('div', { className:'text-[10px] text-gray-500 font-mono' }, r.item?.code||'')),
               h('td', { className:'px-3 py-2 text-right font-medium' },
                 fmtNum(r.qty), ' ', r.item?.issueUnit||''),
               h('td', { className:'px-3 py-2 text-right text-xs' }, r.count),
-              h('td', { className:'px-3 py-2 text-right' }, fmtCur(r.qty * (r.item?.costPrice||0))))))));
+              h('td', { className:'px-3 py-2 text-right' }, fmtCur(r.qty * (r.item?.costPrice||0))))))),
+    rows.length > 0 && h(Pager, { pg, label:'วัตถุดิบ' }));
 }
 
 function WasteReport({ state, branchId, inRange }){
@@ -33254,6 +33461,8 @@ function WasteReport({ state, branchId, inRange }){
     }
   }
   const totalQty = wasteRows.reduce((s,r) => s + r.qty, 0);
+  // 📄 แบ่งหน้าตารางรายละเอียด — ยอดรวม/สรุปตาม defect คิดจาก wasteRows ทั้งชุด
+  const pgWaste = usePaged(wasteRows, 50);
   const byDefect = {};
   for(const r of wasteRows){
     const d = (state.defects||[]).find(x => x.id === r.defectId);
@@ -33298,7 +33507,7 @@ function WasteReport({ state, branchId, inRange }){
             h('th', { className:'px-3 py-2 text-right' }, 'qty'),
             h('th', { className:'px-3 py-2 text-left' }, 'หมายเหตุ'))),
         h('tbody', { className:'divide-y' },
-          wasteRows.slice(0,50).map((r,i) => {
+          pgWaste.shown.map((r,i) => {
             const d = (state.defects||[]).find(x => x.id === r.defectId);
             return h('tr', { key:i },
               h('td', { className:'px-3 py-2 font-mono text-xs' }, r.orderNumber),
@@ -33307,7 +33516,8 @@ function WasteReport({ state, branchId, inRange }){
               h('td', { className:'px-3 py-2 text-xs' }, d?.label || r.defectId),
               h('td', { className:'px-3 py-2 text-right font-medium' }, fmtNum(r.qty)),
               h('td', { className:'px-3 py-2 text-xs text-gray-600' }, r.note || '-'));
-          })))));
+          }))),
+      h(Pager, { pg: pgWaste, label:'รายการของเสีย' })));
 }
 
 function CountLossReport({ state, branchId, inRange }){
@@ -33331,6 +33541,9 @@ function CountLossReport({ state, branchId, inRange }){
   const totalGain = rows.reduce((s,r) => s + r.gain, 0);
   const totalLossValue = rows.reduce((s,r) => s + r.loss * (r.item?.costPrice||0), 0);
 
+  // 📄 แบ่งหน้า — ยอดขาด/เกิน/มูลค่าของหาย คิดจาก rows ทั้งชุด
+  const pg = usePaged(rows, 50);
+
   return h('div', { className:'space-y-2' },
     h('div', { className:'bg-red-50 border border-red-200 rounded p-2 text-sm text-red-900' },
       `📋 จากการนับสต๊อก · ขาด ${fmtNum(totalLoss)} · เกิน ${fmtNum(totalGain)} · มูลค่าของหาย ${fmtCur(totalLossValue)}`),
@@ -33347,7 +33560,7 @@ function CountLossReport({ state, branchId, inRange }){
                 h('th', { className:'px-3 py-2 text-right' }, 'Net'),
                 h('th', { className:'px-3 py-2 text-right' }, 'มูลค่าที่หาย'))),
             h('tbody', { className:'divide-y' },
-              rows.map(r => h('tr', { key:r.itemId },
+              pg.shown.map(r => h('tr', { key:r.itemId },
                 h('td', { className:'px-3 py-2' },
                   h('div', { className:'font-medium' }, r.item?.name || r.itemId),
                   h('div', { className:'text-[10px] text-gray-500 font-mono' }, r.item?.code||'')),
@@ -33359,7 +33572,8 @@ function CountLossReport({ state, branchId, inRange }){
                   style:{ color: r.net < 0 ? '#dc2626' : r.net > 0 ? '#16a34a' : '#999' } },
                   r.net > 0 ? '+' : '', fmtNum(r.net)),
                 h('td', { className:'px-3 py-2 text-right text-red-700 font-medium' },
-                  r.loss > 0 ? fmtCur(r.loss * (r.item?.costPrice||0)) : '-')))))));
+                  r.loss > 0 ? fmtCur(r.loss * (r.item?.costPrice||0)) : '-'))))),
+            h(Pager, { pg, label:'รายการสินค้า' })));
 }
 
 function LotTraceReport({ state, branchId, inRange }){
@@ -33394,12 +33608,15 @@ function LotTraceReport({ state, branchId, inRange }){
     return { layer, order, item, materials };
   });
 
+  // 📄 แบ่งหน้า — ตัวนับ LOT ด้านบนยังนับจาก rows ทั้งชุด
+  const pg = usePaged(rows, 50);
+
   return h('div', { className:'space-y-2' },
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-sm text-blue-900' },
       `🏷 ${rows.length} LOT ผลิตในช่วงนี้ · เชื่อมโยง LOT FG ↔ วัตถุดิบที่ใช้`),
     rows.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-6 text-center text-gray-500' }, '— ไม่มีข้อมูล —')
-      : rows.map(r =>
+      : pg.shown.map(r =>
           h('details', { key:r.layer.id, className:'bg-white rounded-lg shadow overflow-hidden' },
             h('summary', { className:'cursor-pointer p-3 hover:bg-gray-50 flex items-center justify-between' },
               h('div', null,
@@ -33414,7 +33631,9 @@ function LotTraceReport({ state, branchId, inRange }){
                 : h('ul', { className:'space-y-1' },
                     r.materials.map((m,i) => h('li', { key:i },
                       '• ', m.name, ' ', h('b', null, fmtNum(m.qty)), ' ', m.unit||'',
-                      m.batchSeq && h('span', { className:'text-purple-700 ml-1' }, '(B', m.batchSeq, ')'))))))));
+                      m.batchSeq && h('span', { className:'text-purple-700 ml-1' }, '(B', m.batchSeq, ')'))))))),
+    rows.length > 0 && h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+      h(Pager, { pg, label:'LOT' })));
 }
 
 function LotCostReport({ state, branchId, inRange }){
@@ -33449,6 +33668,9 @@ function LotCostReport({ state, branchId, inRange }){
     all: s.all + r.totalCost,
   }), { cog:0, col:0, oh:0, all:0 });
 
+  // 📄 แบ่งหน้า — COG/COL/OH รวมด้านบนคิดจาก rows ทั้งชุด
+  const pg = usePaged(rows, 50);
+
   return h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
     h('div', { className:'p-2 bg-purple-50 border-b text-sm text-purple-900' },
       `💰 ต้นทุนต่อ LOT — ${rows.length} lots · `,
@@ -33473,7 +33695,7 @@ function LotCostReport({ state, branchId, inRange }){
               h('th', { className:'px-3 py-2 text-right' }, 'รวม'),
               h('th', { className:'px-3 py-2 text-right' }, '/หน่วย'))),
           h('tbody', { className:'divide-y' },
-            rows.map(r => h('tr', { key:r.layer.id, className:'hover:bg-gray-50' },
+            pg.shown.map(r => h('tr', { key:r.layer.id, className:'hover:bg-gray-50' },
               h('td', { className:'px-3 py-2 font-mono text-xs' }, r.layer.lot),
               h('td', { className:'px-3 py-2 text-xs' }, r.item?.name || '-'),
               h('td', { className:'px-3 py-2 text-right text-xs' }, fmtNum(r.layer.qty)),
@@ -33481,7 +33703,8 @@ function LotCostReport({ state, branchId, inRange }){
               h('td', { className:'px-3 py-2 text-right text-xs text-gray-400 italic' }, fmtCur(r.colLabor)),
               h('td', { className:'px-3 py-2 text-right text-xs' }, fmtCur(r.ohCost)),
               h('td', { className:'px-3 py-2 text-right font-bold' }, fmtCur(r.totalCost)),
-              h('td', { className:'px-3 py-2 text-right text-xs text-blue-700 font-mono' }, fmtCur(r.unitCost)))))));
+              h('td', { className:'px-3 py-2 text-right text-xs text-blue-700 font-mono' }, fmtCur(r.unitCost)))))),
+    rows.length > 0 && h(Pager, { pg, label:'LOT' }));
 }
 
 function VarianceReportTab({ state, dispatch, user, branchId }){
@@ -33600,6 +33823,9 @@ function VarianceReportTab({ state, dispatch, user, branchId }){
   }
   const orderRows = [...byOrder.values()].sort((a,b) => (b.plannedDate||'').localeCompare(a.plannedDate||''));
 
+  // 📄 แบ่งหน้า — สถิติด้านบน + Export CSV ยังคิดจาก entries ทั้งชุด (ห้ามใช้ pg.shown)
+  const pg = usePaged(orderRows, 50);
+
   const exportCsv = () => {
     const out = [['วันที่','Order','สินค้า','ขั้น','ตัวแปร','target','actual','variance','%','status']];
     for(const e of entries){
@@ -33644,7 +33870,7 @@ function VarianceReportTab({ state, dispatch, user, branchId }){
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
           'ไม่มีข้อมูล verification ในช่วงนี้')
       : h('div', { className:'space-y-2' },
-          orderRows.map(grp => h('div', { key:grp.orderNumber,
+          pg.shown.map(grp => h('div', { key:grp.orderNumber,
             className:'bg-white rounded-lg shadow overflow-hidden' },
             h('div', { className:'bg-purple-50 border-b px-3 py-2 flex items-center justify-between flex-wrap gap-1' },
               h('div', null,
@@ -33679,7 +33905,9 @@ function VarianceReportTab({ state, dispatch, user, branchId }){
                   h('td', { className:'px-2 py-1 text-center' },
                     e.status === 'pass' ? '✅' : e.isOff ? '⚠️' : '—')))
               )))
-          ))
+          ),
+          h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+            h(Pager, { pg, label:'ออเดอร์' })))
   );
 }
 
@@ -34166,8 +34394,10 @@ global.ERP.registerModule('sales-light', { main: SalesLightModule });
 const {
   h, useState, useMemo, cls, fmtCur, fmtNum, fmtDate, getToday, getBranch,
   isSuperUser, getAllowedBranches, getBaseUnit, calcBomCost,
-  useDateRange, DateRangeBar, inDateRange, Button,
+  useDateRange, DateRangeBar, inDateRange, Button, usePaged, Pager,
 } = global.ERP;
+
+const EMPTY_ROWS = [];   // อ้างอิงคงที่ กัน re-render โดยไม่จำเป็นตอนยังไม่ได้เลือกสินค้า
 
 // helper — วันคงเหลือจากวันนี้ถึง date (อาจติดลบถ้าเลย)
 function daysUntil(dateStr){
@@ -34302,8 +34532,10 @@ function ExpiryReport({ state, user, allowedBranches }){
     return list;
   }, [state.fifoLayers, state.items, branchFilter, threshold, branchIds.join(','), user]);
 
+  // ⚠️ ยอดรวม/นับ = คิดจาก rows ทั้งชุด (ไม่ใช่เฉพาะหน้าที่แสดง)
   const totalValue = rows.reduce((s,r) => s + r.value, 0);
   const expiredCount = rows.filter(r => r.dleft < 0).length;
+  const pg = usePaged(rows, 50);
 
   const doExport = () => exportCSV(`expiry-${getToday()}.csv`, [
     ['LOT','สินค้า','รหัส','สาขา','คงเหลือ','หน่วย','วันหมดอายุ','เหลือ(วัน)','มูลค่า'],
@@ -34355,7 +34587,7 @@ function ExpiryReport({ state, user, allowedBranches }){
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'เหลือ'),
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'มูลค่า'))),
             h('tbody', { className:'divide-y' },
-              rows.map((r,i) => {
+              pg.shown.map((r,i) => {
                 const sev = r.dleft < 0 ? 'bg-red-50' : r.dleft <= 7 ? 'bg-orange-50' : r.dleft <= 30 ? 'bg-yellow-50' : '';
                 const clr = r.dleft < 0 ? 'text-red-700 font-bold' : r.dleft <= 7 ? 'text-orange-700 font-medium' : 'text-gray-700';
                 return h('tr', { key:i, className:sev },
@@ -34373,7 +34605,8 @@ function ExpiryReport({ state, user, allowedBranches }){
             h('tfoot', { className:'bg-gray-50 border-t-2' },
               h('tr', null,
                 h('td', { colSpan:6, className:'px-3 py-2 text-right font-medium' }, 'รวมมูลค่า:'),
-                h('td', { className:'px-3 py-2 text-right font-bold text-amber-700' }, fmtCur(totalValue))))))
+                h('td', { className:'px-3 py-2 text-right font-bold text-amber-700' }, fmtCur(totalValue))))),
+          h(Pager, { pg, label:'ล็อต' }))
   );
 }
 
@@ -34488,8 +34721,10 @@ function CostDeviationReport({ state, user, allowedBranches }){
       .sort((a,b) => Math.abs(b.dev) - Math.abs(a.dev));
   }, [state.productionOrders, state.boms, branchFilter, dr.startDate, dr.endDate, branchIds.join(','), user]);
 
+  // ⚠️ ยอดรวม = คิดจาก rows ทั้งชุด (ไม่ใช่เฉพาะหน้าที่แสดง)
   const tot = rows.reduce((s,r) => ({ exp:s.exp+r.expected, act:s.act+r.actual }), { exp:0, act:0 });
   const totDev = tot.act - tot.exp;
+  const pg = usePaged(rows, 50);
 
   const doExport = () => exportCSV(`cost-deviation-${getToday()}.csv`, [
     ['Order','สินค้า','วันที่','ต้นทุนตาม BOM','ต้นทุนจริง','ส่วนต่าง','ส่วนต่าง %'],
@@ -34531,7 +34766,7 @@ function CostDeviationReport({ state, user, allowedBranches }){
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'ส่วนต่าง'),
                 h('th', { className:'px-3 py-2 text-right text-xs' }, '%'))),
             h('tbody', { className:'divide-y' },
-              rows.map((r,i) => {
+              pg.shown.map((r,i) => {
                 const pct = Math.abs(r.devPct);
                 const clr = pct > 10 ? 'text-red-700 font-bold' : pct > 5 ? 'text-orange-700 font-medium'
                   : r.dev < 0 ? 'text-green-700' : 'text-gray-700';
@@ -34547,7 +34782,8 @@ function CostDeviationReport({ state, user, allowedBranches }){
                   h('td', { className: cls('px-3 py-2 text-right text-xs', clr) },
                     (r.devPct > 0 ? '+' : '') + r.devPct.toFixed(1) + '%',
                     pct > 10 && h('span', { className:'ml-1' }, '⚠️')));
-              })))),
+              }))),
+          h(Pager, { pg, label:'ใบสั่งผลิต' })),
 
     h('div', { className:'text-[11px] text-gray-500 italic' },
       '💡 ส่วนต่าง + = ใช้วัตถุดิบมากกว่าสูตร (สูญเสีย/ตวงเกิน) · − = ประหยัดกว่าสูตร · 🟥 >10% ควรตรวจสอบ')
@@ -34580,6 +34816,7 @@ function TransferSummaryReport({ state, user, allowedBranches }){
   }, [state.transferOrders, dr.startDate, dr.endDate, branchIds.join(','), user]);
 
   const branchesInvolved = allowedBranches;
+  const listPg = usePaged(list, 50);   // แบ่งหน้าเฉพาะ "รายการ TO" · matrix + totVal ยังคิดจาก list ทั้งชุด
 
   const doExport = () => exportCSV(`transfer-summary-${getToday()}.csv`, [
     ['TO','วันที่','จาก','ถึง','มูลค่า','สถานะ'],
@@ -34639,7 +34876,7 @@ function TransferSummaryReport({ state, user, allowedBranches }){
             h('th', { className:'px-3 py-2 text-right text-xs' }, 'มูลค่า'),
             h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'))),
         h('tbody', { className:'divide-y' },
-          list.map(t => {
+          listPg.shown.map(t => {
             const [stLbl, stClr] = TO_ST[t.status] || [t.status, 'text-gray-600'];
             return h('tr', { key:t.id, className:'hover:bg-gray-50' },
               h('td', { className:'px-3 py-2 font-mono text-xs text-cyan-700' }, t.toNumber),
@@ -34648,7 +34885,8 @@ function TransferSummaryReport({ state, user, allowedBranches }){
                 `${getBranch(state,t.fromBranch)?.name||'-'} → ${getBranch(state,t.toBranch)?.name||'-'}`),
               h('td', { className:'px-3 py-2 text-right' }, fmtCur(t.totalCost||0)),
               h('td', { className: cls('px-3 py-2 text-center text-xs', stClr) }, stLbl));
-          })))),
+          }))),
+      h(Pager, { pg: listPg, label:'ใบโอน' })),
 
     list.length === 0 && h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
       '— ไม่มีการโอนสาขาในช่วงนี้ —')
@@ -34695,7 +34933,9 @@ function SlowMovingReport({ state, user, allowedBranches }){
     return out;
   }, [state.fifoLayers, state.movements, state.items, branchFilter, idleDays, branchIds.join(','), user]);
 
+  // ⚠️ ยอดรวมมูลค่าจม = คิดจาก rows ทั้งชุด (ไม่ใช่เฉพาะหน้าที่แสดง)
   const totalValue = rows.reduce((s,r) => s + r.value, 0);
+  const pg = usePaged(rows, 50);
   const doExport = () => exportCSV(`slow-moving-${getToday()}.csv`, [
     ['สินค้า','รหัส','สาขา','คงเหลือ','เคลื่อนไหวออกล่าสุด','ค้าง(วัน)','มูลค่า'],
     ...rows.map(r => [r.item?.name||r.itemId, r.item?.code||'',
@@ -34734,7 +34974,7 @@ function SlowMovingReport({ state, user, allowedBranches }){
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'ค้าง'),
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'มูลค่าจม'))),
             h('tbody', { className:'divide-y' },
-              rows.map((r,i) => {
+              pg.shown.map((r,i) => {
                 const sev = r.idle >= 180 ? 'bg-red-50' : r.idle >= 90 ? 'bg-orange-50' : '';
                 return h('tr', { key:i, className:sev },
                   h('td', { className:'px-3 py-2' },
@@ -34751,7 +34991,8 @@ function SlowMovingReport({ state, user, allowedBranches }){
             h('tfoot', { className:'bg-gray-50 border-t-2' },
               h('tr', null,
                 h('td', { colSpan:5, className:'px-3 py-2 text-right font-medium' }, 'รวมมูลค่าจม:'),
-                h('td', { className:'px-3 py-2 text-right font-bold text-orange-700' }, fmtCur(totalValue)))))),
+                h('td', { className:'px-3 py-2 text-right font-bold text-orange-700' }, fmtCur(totalValue))))),
+          h(Pager, { pg, label:'รายการค้างสต็อก' })),
 
     h('div', { className:'text-[11px] text-gray-500 italic' },
       '💡 "ออกล่าสุด" = movement ขาออก (ขาย/เบิกใช้/โอนออก/ตัดเสีย) ครั้งล่าสุด · 🟥 ≥180 วัน = ควรพิจารณาระบาย/ตัดขาย')
@@ -34802,6 +35043,9 @@ function StockCardReport({ state, user, allowedBranches }){
     });
     return { item, opening, rows, closing: bal };
   }, [itemId, branchId, state.movements, state.items, dr.startDate, dr.endDate]);
+
+  // แบ่งหน้าเฉพาะแถวเคลื่อนไหว · ยอดยกมา/ยกไป + running balance คิดจากทั้งช่วงเหมือนเดิม
+  const pg = usePaged(card ? card.rows : EMPTY_ROWS, 50);
 
   const doExport = () => {
     if(!card) return;
@@ -34865,7 +35109,7 @@ function StockCardReport({ state, user, allowedBranches }){
                 h('td', { className:'px-3 py-1.5 text-right font-bold' }, fmtNum(card.opening))),
               card.rows.length === 0
                 ? h('tr', null, h('td', { colSpan:6, className:'px-3 py-4 text-center text-gray-400 text-xs' }, '— ไม่มีเคลื่อนไหวในช่วงนี้ —'))
-                : card.rows.map((r,i) => h('tr', { key:i, className:'hover:bg-gray-50' },
+                : pg.shown.map((r,i) => h('tr', { key:i, className:'hover:bg-gray-50' },
                     h('td', { className:'px-3 py-1.5 text-xs' }, fmtDate(r.m.date)),
                     h('td', { className:'px-3 py-1.5 text-xs' }, TYPE_LABEL[r.m.type] || r.m.type),
                     h('td', { className:'px-3 py-1.5 text-xs font-mono text-blue-700' }, r.m.ref||'-'),
@@ -34874,7 +35118,8 @@ function StockCardReport({ state, user, allowedBranches }){
                     h('td', { className:'px-3 py-1.5 text-right text-xs font-medium' }, fmtNum(r.balance)))),
               h('tr', { className:'bg-blue-50 font-bold' },
                 h('td', { colSpan:5, className:'px-3 py-2 text-right' }, 'ยอดยกไป:'),
-                h('td', { className:'px-3 py-2 text-right text-blue-700' }, fmtNum(card.closing))))))
+                h('td', { className:'px-3 py-2 text-right text-blue-700' }, fmtNum(card.closing))))),
+          h(Pager, { pg, label:'รายการเคลื่อนไหว' }))
   );
 }
 
@@ -35128,6 +35373,7 @@ const {
   Modal, Button,
   unitsForPurpose, findItemUnit, toBaseQty, resolveToBase, getBaseUnit,
   useDateRange, DateRangeBar, inDateRange, exportCSV,
+  usePaged, Pager,
   BEDateInput,
 } = global.ERP;
 
@@ -35663,6 +35909,9 @@ function POList({ state, dispatch, user }){
     });
   }, [state.pos, state.suppliers, filter, search, dr.startDate, dr.endDate]);
 
+  // 📄 แบ่งหน้า — render เฉพาะหน้าที่ดูอยู่ (ยอด/ตัวนับยังอิง filtered ทั้งชุด)
+  const pg = usePaged(filtered, 50);
+
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' }),
@@ -35703,7 +35952,7 @@ function POList({ state, dispatch, user }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                filtered.map(p => {
+                pg.shown.map(p => {
                   const [label, clr] = PO_STATUS[p.status] || [p.status, 'bg-gray-100'];
                   const sup = state.suppliers.find(s => s.id === p.supplierId);
                   const dest = getBranch(state, p.destinationBranch);
@@ -35776,7 +36025,8 @@ function POList({ state, dispatch, user }){
                 })
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบสั่งซื้อ (PO)' })
         ),
 
     showNew && h(NewPOModal, { state, dispatch, user, onClose:()=>setShowNew(false) }),
@@ -35991,6 +36241,12 @@ function NewPOModal({ state, dispatch, user, onClose }){
       // Row 1: Supplier + Destination
       h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
         h(Field, { label:'Supplier *' },
+          // 🆕 บอกตรง ๆ ถ้าระบบยังไม่มีข้อมูลผู้ขาย (เดิมกดเปิดแล้วว่างเปล่า ไม่รู้ว่าเพราะอะไร)
+          ((state.suppliers||[]).filter(s => s.active !== false).length === 0)
+            && h('div', { className:'mb-1 text-xs bg-amber-50 border border-amber-300 rounded p-2 text-amber-900' },
+                 h('b', null, '⚠️ ยังไม่มีผู้ขายในระบบ'),
+                 ' — ไปที่ ตั้งค่า → 📥 นำเข้าข้อมูล เพื่อนำเข้ารายชื่อผู้ขายก่อน',
+                 ' หรือกดปุ่ม ➕ ข้าง ๆ เพื่อเพิ่มทีละราย'),
           h('div', { className:'flex gap-1 items-start' },
             h('div', { className:'flex-1' },
               h(global.ERP.Combobox, {
@@ -38032,6 +38288,9 @@ function GRList({ state, dispatch, user }){
     return [...list].sort((a,b) => (b.grDate||'').localeCompare(a.grDate||''));
   }, [state.grs, filter, dr.startDate, dr.endDate]);
 
+  // 📄 แบ่งหน้า
+  const pg = usePaged(filtered, 50);
+
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' }),
@@ -38064,7 +38323,7 @@ function GRList({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              filtered.map(g => {
+              pg.shown.map(g => {
                 const sup = state.suppliers.find(s => s.id === g.supplierId);
                 return h('tr', { key:g.id, className:'hover:bg-gray-50' },
                   h('td', { className:'px-3 py-2 font-mono text-xs text-green-700 font-semibold' }, g.grNumber),
@@ -38084,7 +38343,8 @@ function GRList({ state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบรับของ (GR)' })
         ),
 
     detail && h(GRDetailModal, { gr:detail, state, dispatch, user, onClose:()=>setDetail(null) })
@@ -39652,6 +39912,9 @@ function INVList({ state, dispatch, user }){
     };
   }, [state.invoices]);
 
+  // 📄 แบ่งหน้า — KPI ค้างจ่าย/ใบค้าง ด้านบนยังคิดจาก state.invoices ทั้งชุด (ไม่ใช่หน้าที่ดูอยู่)
+  const pg = usePaged(filtered, 50);
+
   return h('div', null,
     h('div', { className:'grid grid-cols-2 gap-3 mb-4' },
       h('div', { className:'bg-white rounded-lg shadow p-4 border-l-4 border-red-500' },
@@ -39709,7 +39972,7 @@ function INVList({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              filtered.map(i => {
+              pg.shown.map(i => {
                 const [label, clr] = INV_STATUS[i.paymentStatus] || [i.paymentStatus, 'bg-gray-100'];
                 const sup = state.suppliers.find(s => s.id === i.supplierId);
                 const supName = sup?.name || i.supplierNameFreeform || '-';
@@ -39752,7 +40015,8 @@ function INVList({ state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบตั้งหนี้ (INV)' })
         ),
 
     detail && h(INVDetailModal, { inv:detail, state, dispatch, user, onClose:()=>setDetail(null) }),
@@ -43518,6 +43782,14 @@ function PettyCashTab({ state, dispatch, user }){
   });
   const canManage = hasPerm(user,'accounting','payment','approve') || hasPerm(user,'accounting','payment','create') || isSuperUser(user);
 
+  // 📄 แบ่งหน้า 3 ตารางที่ยาวได้ — ⚠️ balance / openTotal / txns.length ยังคิดจากทั้งชุด (ห้ามใช้ pg.shown)
+  const reimbursedAdv = advances.filter(a => a.status === 'reimbursed');
+  const depositRows = (state.deposits||[]).slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  const ledgerRows = txns.slice().reverse();
+  const pgReimb  = usePaged(reimbursedAdv, 50);
+  const pgDep    = usePaged(depositRows, 50);
+  const pgLedger = usePaged(ledgerRows, 50);
+
   return h('div', { className:'space-y-4' },
     // 🆕 D2-6: มัดจำรอจ่าย ย้ายไป PaymentCenter → แสดงแค่ banner redirect
     pendingPayDeps.length > 0 && h('div', { className:'bg-amber-50 border-2 border-amber-400 rounded-lg p-3' },
@@ -43572,13 +43844,13 @@ function PettyCashTab({ state, dispatch, user }){
     // 🆕 ประวัติเบิกคืน — มีปุ่มยกเลิกเบิกคืน (ผ่าน approval)
     h('details', { className:'bg-white rounded-lg shadow p-3' },
       h('summary', { className:'cursor-pointer font-bold text-sm text-gray-700' },
-        `💸 ประวัติเบิกคืน (${advances.filter(a => a.status === 'reimbursed').length})`),
+        `💸 ประวัติเบิกคืน (${reimbursedAdv.length})`),
       h('table', { className:'w-full text-sm mt-2' },
         h('thead', { className:'bg-gray-50 border-b' },
           h('tr', null, ['วันจ่าย','เลขที่','ผู้สำรองจ่าย','ค่าใช้จ่าย','จำนวน','อ้างอิง','จัดการ'].map(x =>
             h('th', { key:x, className:'px-3 py-2 text-left text-xs' }, x)))),
         h('tbody', { className:'divide-y' },
-          advances.filter(a => a.status === 'reimbursed').map(a => h('tr', { key:a.id },
+          pgReimb.shown.map(a => h('tr', { key:a.id },
             h('td', { className:'px-3 py-2 text-xs' }, fmtDate(a.reimburseDate||a.date)),
             h('td', { className:'px-3 py-2 font-mono text-xs text-amber-800' }, a.advNumber),
             h('td', { className:'px-3 py-2 text-sm' }, a.payerName),
@@ -43603,7 +43875,8 @@ function PettyCashTab({ state, dispatch, user }){
                   }
                 },
                 className:'text-xs px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded' },
-                '✖ ยกเลิกเบิกคืน')))))) ),
+                '✖ ยกเลิกเบิกคืน')))))),
+      h(Pager, { pg:pgReimb, label:'รายการเบิกคืน' })),
 
     // 🆕 มัดจำ supplier — มีปุ่มยกเลิก (ต้อง used=0)
     (state.deposits||[]).length > 0 && h('details', { className:'bg-white rounded-lg shadow p-3' },
@@ -43614,7 +43887,7 @@ function PettyCashTab({ state, dispatch, user }){
           h('tr', null, ['วันที่','เลขที่','Supplier','PO','ยอด','ใช้แล้ว','คงเหลือ','สถานะ','จัดการ'].map(x =>
             h('th', { key:x, className:'px-3 py-2 text-left text-xs' }, x)))),
         h('tbody', { className:'divide-y' },
-          (state.deposits||[]).slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).map(d => {
+          pgDep.shown.map(d => {
             const sup = state.suppliers.find(s => s.id === d.supplierId);
             const remain = (d.amount||0) - (d.used||0);
             const stColor = d.status==='cancelled'?'bg-gray-200 text-gray-600'
@@ -43651,7 +43924,8 @@ function PettyCashTab({ state, dispatch, user }){
                   '✖ ยกเลิก'),
                 (d.used||0) > 0.01 && d.status === 'open' && h('span', { className:'text-[10px] text-gray-400' },
                   'ใช้แล้ว ยกเลิกไม่ได้')));
-          })))),
+          }))),
+      h(Pager, { pg:pgDep, label:'รายการมัดจำ' })),
 
     // ---- ledger เงินสดย่อย ----
     h('details', { className:'bg-white rounded-lg shadow p-3' },
@@ -43662,7 +43936,7 @@ function PettyCashTab({ state, dispatch, user }){
           h('tr', null, ['วันที่','ประเภท','อ้างอิง','รายละเอียด','จำนวน','จัดการ'].map(x =>
             h('th', { key:x, className:'px-3 py-2 text-left text-xs' }, x)))),
         h('tbody', { className:'divide-y' },
-          txns.slice().reverse().map(t => h('tr', { key:t.id, className: t.reversed?'opacity-50':'' },
+          pgLedger.shown.map(t => h('tr', { key:t.id, className: t.reversed?'opacity-50':'' },
             h('td', { className:'px-3 py-2 text-xs' }, fmtDate(t.date)),
             h('td', { className:'px-3 py-2 text-xs' },
               t.type==='topup'?'➕ เติม':t.type==='expense'?'➖ จ่าย':t.type==='reverse'?'🔄 ยกเลิก':'⚙️ ปรับ',
@@ -43690,7 +43964,8 @@ function PettyCashTab({ state, dispatch, user }){
                   }
                 },
                 className:'text-xs px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded' },
-                '✖ ยกเลิก')))))) ),
+                '✖ ยกเลิก')))))),
+      h(Pager, { pg:pgLedger, label:'รายการเงินสดย่อย' })),
 
     topup && h(PettyTopupModal, { state, dispatch, user, onClose:()=>setTopup(false) }),
     payDeposit && h(ApproveDepositPayModal, { deposit:payDeposit, state, dispatch, user,
@@ -44115,9 +44390,13 @@ function PaymentList({ state, dispatch, user }){
       .sort((a,b) => (b.date||'').localeCompare(a.date||'')),
     [state.payments, dr.startDate, dr.endDate]);
 
+  // ⚠️ ยอดรวม/เดือนนี้ คิดจาก pays ทั้งชุดเสมอ (ห้ามเปลี่ยนเป็น pg.shown — ตัวเลขเงินจะผิด)
   const total = pays.reduce((s,p) => s + (p.amount||0), 0);
   const thisMonth = pays.filter(p => p.date?.slice(0,7) === getToday().slice(0,7));
   const thisMonthTotal = thisMonth.reduce((s,p) => s + (p.amount||0), 0);
+
+  // 📄 แบ่งหน้า
+  const pg = usePaged(pays, 50);
 
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
@@ -44150,7 +44429,7 @@ function PaymentList({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              pays.map(p => {
+              pg.shown.map(p => {
                 const inv = state.invoices.find(i => i.id === p.invId);
                 const sup = state.suppliers.find(s => s.id === p.supplierId);
                 return h('tr', { key:p.id, className:'hover:bg-gray-50' },
@@ -44163,7 +44442,8 @@ function PaymentList({ state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบจ่ายเงิน (PV)' })
         )
   );
 }
@@ -45447,6 +45727,9 @@ function LowStockTab({ state, user, dispatch }){
     setPlanMap({});
   };
 
+  // 📄 แบ่งหน้า — ที่ติ๊กไว้เก็บใน planMap (คงอยู่ข้ามหน้า) · checkedCount/สร้าง PO ยังอิง lowItems ทั้งชุด
+  const pg = usePaged(lowItems, 50);
+
   return h('div', null,
     h('div', { className:'bg-orange-50 border border-orange-200 rounded p-3 mb-3 text-sm text-orange-800' },
       '⚠️ สินค้าที่สต๊อกต่ำกว่า Min — แก้ Min/Max ได้เลย (✏️) · ติ๊ก ✓ + ปรับจำนวน/supplier → กดสร้าง PO อัตโนมัติ (group by supplier)'),
@@ -45475,7 +45758,7 @@ function LowStockTab({ state, user, dispatch }){
                   h('th', { className:'px-2 py-2 text-right text-xs w-24' }, 'ราคา/หน่วย'),
                   h('th', { className:'px-2 py-2 text-right text-xs' }, 'รวม'))),
               h('tbody', { className:'divide-y' },
-                lowItems.map(li => {
+                pg.shown.map(li => {
                   const plan = getPlan(li);
                   const sups = itemSuppliers(li.item);
                   const selectedSup = sups.find(s => s.supplierId === plan.supplierId);
@@ -45532,7 +45815,8 @@ function LowStockTab({ state, user, dispatch }){
                     h('td', { className:'px-2 py-2 text-right font-medium' },
                       plan.checked ? fmtCur(lineTotal) : '-'));
                 })
-              ))))
+              )),
+            h(Pager, { pg, label:'สินค้าต่ำกว่า Min' })))
   );
 }
 
@@ -45562,7 +45846,11 @@ function RTVViewTab({ state, dispatch, user }){
     return list.sort((a,b) => (b.rtvDate||'').localeCompare(a.rtvDate||''));
   }, [state.returns, state.suppliers, dr.startDate, dr.endDate, search, statusFilter]);
 
+  // ⚠️ มูลค่ารวม คิดจาก rows ทั้งชุด (ไม่ใช่หน้าที่ดูอยู่)
   const totalValue = rows.reduce((s,r) => s + (r.totalValue||0), 0);
+
+  // 📄 แบ่งหน้า
+  const pg = usePaged(rows, 50);
 
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 space-y-2' },
@@ -45596,7 +45884,7 @@ function RTVViewTab({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'))),
             h('tbody', { className:'divide-y' },
-              rows.map(r => {
+              pg.shown.map(r => {
                 const sup = state.suppliers.find(s => s.id === r.supplierId);
                 const st = r.rtvStatus || 'pending';
                 const stLbl = st==='pending'?'⏳ รอ':st==='credit_received'?'💳 รับเครดิต':st==='replacement_received'?'📦 รับชดเชย':'✅ ปิด';
@@ -45615,7 +45903,8 @@ function RTVViewTab({ state, dispatch, user }){
                       h(Button, { variant:'secondary', size:'sm', onClick:()=>setDetail(r) }, 'ดู'),
                       h(Button, { variant:'primary', size:'sm', onClick:()=>printRTV(r, state) }, '🖨️'))));
               })
-            ))),
+            )),
+          h(Pager, { pg, label:'ใบคืนของ (RTV)' })),
     detail && h(SimpleRTVDetail, { rtv:detail, state, onClose:()=>setDetail(null) })
   );
 }
@@ -45834,6 +46123,9 @@ function ReportPriceCompare({ state, pos, dr }){
 
   const items = itemIds.map(id => state.items.find(i => i.id === id)).filter(Boolean);
 
+  // 📄 แบ่งหน้า — ต้องเรียกก่อน early-return ด้านล่าง (กฎ hooks) · Export CSV ยังออกจาก items ทั้งชุด
+  const pg = usePaged(items, 50);
+
   const doExport = () => {
     const rows = [];
     const hdr = ['รหัส','ชื่อสินค้า','หน่วย'];
@@ -45889,7 +46181,7 @@ function ReportPriceCompare({ state, pos, dr }){
             )
           ),
           h('tbody', { className:'divide-y' },
-            items.map(item => {
+            pg.shown.map(item => {
               const prices = {};
               for(const sid of supplierIds){
                 const entries = data[item.id]?.[sid] || [];
@@ -45933,7 +46225,8 @@ function ReportPriceCompare({ state, pos, dr }){
             })
           )
         )
-      )
+      ),
+      h(Pager, { pg, label:'สินค้า' })
     )
   );
 }
@@ -46102,6 +46395,9 @@ function ReportByItem({ state, pos, grs, dr }){
     exportCSV(`purchase-by-item-${dr.startDate}_${dr.endDate}.csv`, rows);
   };
 
+  // 📄 แบ่งหน้า — ตัวนับ `${data.length} สินค้า` + Export CSV ยังอิง data ทั้งชุด
+  const pg = usePaged(data, 50);
+
   return h('div', null,
     h('div', { className:'flex justify-between items-center mb-3' },
       h('div', { className:'text-sm text-gray-600' }, `${data.length} สินค้า`),
@@ -46128,7 +46424,7 @@ function ReportByItem({ state, pos, grs, dr }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                data.map(d => {
+                pg.shown.map(d => {
                   const it = state.items.find(i => i.id === d.itemId);
                   const remaining = d.orderedQty - d.receivedQty;
                   return h('tr', { key:d.itemId, className:'hover:bg-gray-50' },
@@ -46150,7 +46446,8 @@ function ReportByItem({ state, pos, grs, dr }){
                 })
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'สินค้า' })
         )
   );
 }
@@ -46732,6 +47029,7 @@ const {
   getBranch, isHQ, isSuperUser, hasPerm,
   Modal, Button, Combobox,
   useDateRange, DateRangeBar, inDateRange, exportCSV,
+  usePaged, Pager,
   getPOReceiveStatus,
   BEDateInput,
   // MES R3
@@ -46980,6 +47278,7 @@ function AssetRegisterTab({ state, dispatch, user }){
     (a.name||'').toLowerCase().includes(search.toLowerCase()) ||
     (a.code||'').toLowerCase().includes(search.toLowerCase()));
   filtered = filtered.sort((a,b) => (b.acquireDate||'').localeCompare(a.acquireDate||''));
+  const pg = usePaged(filtered, 50);
 
   // KPIs
   const totalCost = assets.reduce((s,a) => s + (Number(a.acquireCost)||0), 0);
@@ -47079,7 +47378,7 @@ function AssetRegisterTab({ state, dispatch, user }){
                   h('th', { className:'px-3 py-2 text-center text-xs' }, ''),
                 )),
               h('tbody', { className:'divide-y' },
-                filtered.map(a => {
+                pg.shown.map(a => {
                   const cat = cats.find(c => c.id === a.categoryId);
                   const branch = state.branches.find(b => b.id === a.branch);
                   const dep = computeAccumulatedDep(a, today);
@@ -47124,7 +47423,8 @@ function AssetRegisterTab({ state, dispatch, user }){
                 })
               )
             )
-          )),
+          ),
+          h(Pager, { pg, label:'ทรัพย์สิน' })),
 
     showModal && h(AssetEditModal, { asset:edit, state, dispatch, user,
       seedFromInv, seedFromLine,
@@ -48152,6 +48452,7 @@ function ApprovalRequestsTab({ state, dispatch, user }){
     if(scopeFilter !== 'all') list = list.filter(r => r.entityScope === scopeFilter);
     return list.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
   }, [state.approvalRequests, dr.startDate, dr.endDate, statusFilter, actionFilter, scopeFilter]);
+  const pg = usePaged(requests, 50);
 
   // 🆕 Approval expiry — pending ที่เก่ากว่า N วัน นับเป็น expired (computed at render)
   const expiryDays = Number(state.settings?.approvalExpiryDays ?? 30);
@@ -48268,7 +48569,7 @@ function ApprovalRequestsTab({ state, dispatch, user }){
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
           'ไม่พบคำขออนุมัติในเงื่อนไขนี้')
       : h('div', { className:'space-y-2' },
-          requests.map(req => {
+          pg.shown.map(req => {
             const cur = getCurrentStep && getCurrentStep(req);
             const canApprove = req.status === 'pending' && cur &&
               req.requestedBy !== user.username && canApproveStep && canApproveStep(cur, user, req.entityScope);
@@ -48331,7 +48632,9 @@ function ApprovalRequestsTab({ state, dispatch, user }){
                 h(Button, { variant:'success', size:'sm', onClick:()=>onApprove(req) }, '✅ อนุมัติ'),
                 h(Button, { variant:'danger', size:'sm', onClick:()=>onReject(req) }, '❌ ปฏิเสธ'))
             );
-          }))
+          }),
+          h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+            h(Pager, { pg, label:'คำขออนุมัติ' })))
   );
 }
 
@@ -48350,6 +48653,7 @@ function ActionLogTab({ state, user }){
   const [q, setQ] = useState('');
   const [byUser, setByUser] = useState('');
   const dr = useDateRange(7);
+  const pg = usePaged(rows, 50);
 
   const load = async () => {
     if(!SB || !SB.queryAudit){ setErr('ยังไม่ได้เชื่อม cloud'); return; }
@@ -48422,7 +48726,7 @@ create policy "audit insert" on erp_audit_log for insert to authenticated with c
               h('tr', null, ['เวลา','ผู้ทำ','การกระทำ','อ้างอิง','จำนวนเงิน','สาขา'].map(x =>
                 h('th', { key:x, className:'px-3 py-2 text-left text-xs' }, x)))),
             h('tbody', { className:'divide-y' },
-              rows.map(r => h('tr', { key:r.id, className:'hover:bg-gray-50' },
+              pg.shown.map(r => h('tr', { key:r.id, className:'hover:bg-gray-50' },
                 h('td', { className:'px-3 py-1.5 text-xs whitespace-nowrap' },
                   new Date(r.ts).toLocaleString('th-TH')),
                 h('td', { className:'px-3 py-1.5 text-xs' }, r.by_name || r.by_user || '-'),
@@ -48434,7 +48738,8 @@ create policy "audit insert" on erp_audit_log for insert to authenticated with c
                 h('td', { className:'px-3 py-1.5 font-mono text-xs text-blue-700' }, r.ref || '-'),
                 h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' },
                   r.amount != null ? fmtCur(r.amount) : '-'),
-                h('td', { className:'px-3 py-1.5 text-xs text-gray-500' }, r.branch || '-'))))))
+                h('td', { className:'px-3 py-1.5 text-xs text-gray-500' }, r.branch || '-'))))),
+            h(Pager, { pg, label:'รายการ' }))
   );
 }
 
@@ -48612,6 +48917,7 @@ function AuditLogTab({ state, dispatch, user }){
                         || String(ev.title||'').toLowerCase().includes(q)))
       .sort((a,b) => (b.at||0) - (a.at||0));
   }, [state.invoices, state.payments, state.approvalRequests, state.auditLog, dr.startDate, dr.endDate, filter, userFilter, refSearch]);
+  const pg = usePaged(events, 50);
 
   const colorMap = {
     amber: 'bg-amber-50 border-amber-200 text-amber-900',
@@ -48687,7 +48993,7 @@ function AuditLogTab({ state, dispatch, user }){
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
           'ไม่มี audit event ในช่วงนี้')
       : h('div', { className:'space-y-2' },
-          events.map((ev,i) => h('div', { key:i,
+          pg.shown.map((ev,i) => h('div', { key:i,
             className: cls('border rounded-lg p-3', colorMap[ev.color]||colorMap.gray) },
             h('div', { className:'flex items-start justify-between' },
               h('div', { className:'flex-1' },
@@ -48700,7 +49006,9 @@ function AuditLogTab({ state, dispatch, user }){
                 '🔍 เปิด INV')),
             ev.changes && ev.changes.length > 0 && h('div', { className:'mt-2 space-y-0.5' },
               ev.changes.map((c,j) => h('div', { key:j, className:'text-xs font-mono pl-4' }, '• ', c))))
-          )),
+          ),
+          h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+            h(Pager, { pg, label:'เหตุการณ์' }))),
 
     detail && INVDetailModal && h(INVDetailModal, { inv:detail, state, dispatch, user, onClose:()=>setDetail(null) })
   );
@@ -48919,6 +49227,7 @@ function VATByInvoiceReport({ state }){
       });
     return [...invRows, ...cnRows].sort((a,b) => (a.i.invDate||'').localeCompare(b.i.invDate||''));
   }, [state.invoices, state.suppliers, state.supplierMemos, state.returns, dr.startDate, dr.endDate]);
+  const pg = usePaged(rows, 50);
 
   const totals = rows.reduce((acc, r) => ({
     total: acc.total + r.total,
@@ -48978,8 +49287,8 @@ function VATByInvoiceReport({ state }){
         h('tbody', { className:'divide-y' },
           rows.length === 0
             ? h('tr', null, h('td', { colSpan:12, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
-            : rows.map((r, idx) => h('tr', { key:r.i.id, className:'hover:bg-gray-50' },
-                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, idx+1),
+            : pg.shown.map((r, idx) => h('tr', { key:r.i.id, className:'hover:bg-gray-50' },
+                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, pg.from + idx),
                 h('td', { className:'px-2 py-1.5 text-xs' }, fmtDate(r.i.invDate)),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs text-red-700' }, r.i.invNumber),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs' }, r.i.supInvNumber||'-'),
@@ -49010,7 +49319,8 @@ function VATByInvoiceReport({ state }){
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableTotal)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)))
             ])
-        )))
+        )),
+      h(Pager, { pg, label:'รายการ' }))
   );
 }
 
@@ -49048,6 +49358,7 @@ function VATByPaymentReport({ state }){
       };
     }).filter(Boolean);
   }, [state.payments, state.invoices, state.suppliers, dr.startDate, dr.endDate]);
+  const pg = usePaged(rows, 50);
 
   const totals = rows.reduce((acc, r) => ({
     total: acc.total + r.total,
@@ -49102,8 +49413,8 @@ function VATByPaymentReport({ state }){
         h('tbody', { className:'divide-y' },
           rows.length === 0
             ? h('tr', null, h('td', { colSpan:11, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
-            : rows.map((r, idx) => h('tr', { key:r.p.id, className:'hover:bg-gray-50' },
-                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, idx+1),
+            : pg.shown.map((r, idx) => h('tr', { key:r.p.id, className:'hover:bg-gray-50' },
+                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, pg.from + idx),
                 h('td', { className:'px-2 py-1.5 text-xs' }, fmtDate(r.p.date)),
                 h('td', { className:'px-2 py-1.5 text-xs' }, r.bank,
                   r.bankAcc && h('span', { className:'text-[10px] text-gray-500 block' }, r.bankAcc)),
@@ -49128,7 +49439,8 @@ function VATByPaymentReport({ state }){
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableTotal)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)))
             ])
-        )))
+        )),
+      h(Pager, { pg, label:'รายการจ่าย' }))
   );
 }
 
@@ -49196,6 +49508,7 @@ function ExpenseByInvoiceReport({ state }){
 
     return mapped.sort((a,b) => (b.i.invDate||'').localeCompare(a.i.invDate||''));
   }, [state.invoices, state.suppliers, state.payments, dr.startDate, dr.endDate, filterStatus, filterSource, filterSupplier, searchText]);
+  const pg = usePaged(rows, 50);
 
   const totals = rows.reduce((acc, r) => ({
     amount: acc.amount + r.amount,
@@ -49313,9 +49626,9 @@ function ExpenseByInvoiceReport({ state }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                rows.map((r, idx) =>
+                pg.shown.map((r, idx) =>
                   h('tr', { key:r.i.id, className:'hover:bg-gray-50' },
-                    h('td', { className:'px-2 py-1.5 text-center text-gray-500' }, idx+1),
+                    h('td', { className:'px-2 py-1.5 text-center text-gray-500' }, pg.from + idx),
                     h('td', { className:'px-2 py-1.5' }, fmtDate(r.i.invDate)),
                     h('td', { className:'px-2 py-1.5 font-mono text-blue-700 font-semibold' }, r.i.invNumber),
                     h('td', { className:'px-2 py-1.5 font-mono text-gray-600' }, r.i.supInvNumber || '-'),
@@ -49359,7 +49672,8 @@ function ExpenseByInvoiceReport({ state }){
                 )
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'INV' })
         )
   );
 }
@@ -49619,6 +49933,7 @@ function GLByAccountTab({ state, dispatch, user }){
     const totCr = rows.reduce((s,r) => s + r.cr_, 0);
     return { acct, debitNormal, opening, rows, closing: bal, totDr, totCr };
   }, [acctCode, state.journalEntries, coa, dr.startDate, dr.endDate]);
+  const pg = usePaged(ledger ? ledger.rows : [], 50);
 
   const doPrint = () => {
     if(!ledger) return;
@@ -49706,7 +50021,7 @@ function GLByAccountTab({ state, dispatch, user }){
                 h('td', { className:'px-3 py-1.5 text-right font-bold' }, fmtCur(ledger.opening))),
               ledger.rows.length === 0
                 ? h('tr', null, h('td', { colSpan:6, className:'px-3 py-4 text-center text-gray-400 text-xs' }, '— ไม่มีรายการในช่วงนี้ —'))
-                : ledger.rows.map((r,i) => h('tr', { key:i, className:'hover:bg-gray-50' },
+                : pg.shown.map((r,i) => h('tr', { key:i, className:'hover:bg-gray-50' },
                     h('td', { className:'px-3 py-1.5 text-xs' }, fmtDate(r.je.date)),
                     h('td', { className:'px-3 py-1.5 text-xs font-mono text-blue-700' }, r.je.jeNumber||'-'),
                     h('td', { className:'px-3 py-1.5 text-xs' }, r.line.description||r.je.description||'-'),
@@ -49718,7 +50033,8 @@ function GLByAccountTab({ state, dispatch, user }){
                 h('td', { colSpan:3, className:'px-3 py-2 text-right' }, 'รวม / ยกไป:'),
                 h('td', { className:'px-3 py-2 text-right' }, fmtCur(ledger.totDr)),
                 h('td', { className:'px-3 py-2 text-right' }, fmtCur(ledger.totCr)),
-                h('td', { className:'px-3 py-2 text-right text-blue-700' }, fmtCur(ledger.closing))))))
+                h('td', { className:'px-3 py-2 text-right text-blue-700' }, fmtCur(ledger.closing))))),
+            h(Pager, { pg, label:'รายการ' }))
   );
 }
 
@@ -49739,6 +50055,7 @@ function JETab({ state, dispatch, user }){
     if(filter === 'posted') list = list.filter(j => j.status === 'posted');
     return [...list].sort((a,b) => (b.date||'').localeCompare(a.date||''));
   }, [state.journalEntries, filter, dr.startDate, dr.endDate]);
+  const pg = usePaged(filtered, 50);
 
   const totals = filtered.reduce((acc,j) => ({
     dr: acc.dr + (j.totalDebit||0), cr: acc.cr + (j.totalCredit||0)
@@ -49784,7 +50101,7 @@ function JETab({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              filtered.map(j => h('tr', { key:j.id, className:'hover:bg-gray-50' },
+              pg.shown.map(j => h('tr', { key:j.id, className:'hover:bg-gray-50' },
                 h('td', { className:'px-3 py-2 font-mono text-xs text-blue-700 font-semibold' }, j.jeNumber),
                 h('td', { className:'px-3 py-2 text-xs' }, fmtDate(j.date)),
                 h('td', { className:'px-3 py-2 text-sm' }, j.description),
@@ -49846,7 +50163,8 @@ function JETab({ state, dispatch, user }){
                 h('td', { colSpan:2 }),
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'JE' })
         ),
 
     showNew && h(NewJEModal, { state, dispatch, user, onClose:()=>setShowNew(false) }),
@@ -50348,6 +50666,8 @@ function COATab({ state, dispatch, user }){
   const [edit, setEdit] = useState(null);
   const accounts = state.chartOfAccounts || [];
   const canEdit = hasPerm(user, 'accounting','coa','edit');
+  const sortedAccounts = accounts.sort((a,b) => (a.code||'').localeCompare(b.code||''));
+  const pg = usePaged(sortedAccounts, 200);   // 🆕 ผังบัญชีไม่มีช่องค้นหา + จำนวนไม่มาก ดูรวดเดียวสะดวกกว่า
 
   return h('div', null,
     h('div', { className:'flex justify-between items-center mb-3' },
@@ -50368,7 +50688,7 @@ function COATab({ state, dispatch, user }){
           )
         ),
         h('tbody', { className:'divide-y' },
-          accounts.sort((a,b) => (a.code||'').localeCompare(b.code||'')).map(a => {
+          pg.shown.map(a => {
             const type = ACCOUNT_TYPES.find(t => t.v === a.type);
             return h('tr', { key:a.id, className:'hover:bg-gray-50' },
               h('td', { className:'px-3 py-2 font-mono text-sm' }, a.code),
@@ -50389,7 +50709,8 @@ function COATab({ state, dispatch, user }){
             );
           })
         )
-      )
+      ),
+      h(Pager, { pg, label:'บัญชี' })
     ),
 
     showModal && h(COAModal, { account:edit, dispatch, onClose:()=>setShowModal(false) })
@@ -50725,6 +51046,7 @@ function WHTReport({ state }){
     }
     return result.sort((a,b) => (b.whtDate||'').localeCompare(a.whtDate||''));
   }, [state.invoices, state.suppliers, state.payments, dr.startDate, dr.endDate]);
+  const pg = usePaged(rows, 50);
 
   // 🆕 A7: "ยอดสำหรับยื่น" นับเฉพาะแถวที่หักจริงแล้ว (จ่าย/มีใบรับรอง) — pending (ยังไม่จ่าย) ยังไม่มีภาระนำส่ง กันยื่นเกิน/ซ้ำ
   const filingRows = rows.filter(r => !r.pending);
@@ -50805,13 +51127,15 @@ function WHTReport({ state }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                rows.map((r, idx) => {
+                pg.shown.map((r, _i) => {
+                  const idx = pg.from - 1 + _i;   // ลำดับจริงในชุดเต็ม (กันเลขแถว/การจับกลุ่มเพี้ยน)
                   const formTag = `ภ.ง.ด.${r.form}`;
                   // grouping: continued = บรรทัดเดียวกับก่อนหน้า (ถ้า cert เดียวกัน)
                   const prev = rows[idx-1];
                   const sameInv = prev && prev.inv.id === r.inv.id;
                   const sameCert = prev && prev.certNumber === r.certNumber;
-                  const isContinued = sameInv && sameCert;
+                  // 🆕 แถวแรกของแต่ละหน้าต้องแสดงข้อมูลเต็ม ไม่ใช่ '↳ ต่อจากแถวก่อน' (แถวนั้นอยู่คนละหน้า)
+                  const isContinued = _i > 0 && sameInv && sameCert;
                   return h('tr', { key:`${r.inv.id}_${r.idx}`,
                     className: cls('hover:bg-gray-50', isContinued && 'bg-pink-50/30') },
                     h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, idx+1),
@@ -50863,7 +51187,8 @@ function WHTReport({ state }){
                 )
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'บรรทัด WHT' })
         )
   );
 }
@@ -51519,6 +51844,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
       return (b.createdAt||0) - (a.createdAt||0);
     });
   }, [state.invoices, state.payments, state.suppliers, search, statusFilter, dr.startDate, dr.endDate]);
+  const pg = usePaged(rows, 50);
 
   const STATUS_LBL = {
     unpaid:           ['🔴 ยังไม่จ่าย',      'bg-red-100 text-red-700'],
@@ -51621,7 +51947,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
               )),
             h('tbody', { className:'divide-y' },
-              rows.map(i => {
+              pg.shown.map(i => {
                 const sup = state.suppliers.find(s => s.id === i.supplierId);
                 // รองรับทั้ง grId (single) และ grIds[] (combined)
                 const linkedGRIds = (i.grIds && i.grIds.length > 0) ? i.grIds
@@ -51725,7 +52051,8 @@ function INVAllOverviewTab({ state, dispatch, user }){
                     h('span', { className: cls('px-2 py-0.5 rounded text-xs font-medium', clr) }, lbl)));
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'PI' })
         ),
     detail && INVDetailModal && h(INVDetailModal, { inv:detail, state, dispatch, user, onClose:()=>setDetail(null) }),
     poDetail && PODetailModal && h(PODetailModal, { po:poDetail, state, dispatch, user, onClose:()=>setPoDetail(null) }),
@@ -52331,6 +52658,7 @@ function PayApprovalTab({ state, dispatch, user }){
 
   const pending = (state.payments||[]).filter(p => p.approvalStatus === 'pending')
     .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+  const pgPending = usePaged(pending, 50);
 
   const reject = (pay) => {
     const reason = prompt(`ปฏิเสธคำขอจ่าย ${fmtCur(pay.amount)}?\n\nเหตุผล:`);
@@ -52344,8 +52672,12 @@ function PayApprovalTab({ state, dispatch, user }){
 
   const toggleSel = (id) => setSelectedIds(selectedIds.includes(id)
     ? selectedIds.filter(x => x !== id) : [...selectedIds, id]);
-  const allSelected = pending.length > 0 && selectedIds.length === pending.length;
-  const toggleAll = () => setSelectedIds(allSelected ? [] : pending.map(p => p.id));
+  // เลือกทั้งหมด = เฉพาะแถวในหน้าปัจจุบัน (ที่เลือกไว้หน้าอื่นยังคงอยู่)
+  const pageIds = pgPending.shown.map(p => p.id);
+  const allSelected = pageIds.length > 0 && pageIds.every(id => selectedIds.includes(id));
+  const toggleAll = () => setSelectedIds(allSelected
+    ? selectedIds.filter(x => !pageIds.includes(x))
+    : Array.from(new Set([...selectedIds, ...pageIds])));
   const selectedPays = pending.filter(p => selectedIds.includes(p.id));
   const selectedTotal = selectedPays.reduce((s,p) => s + (p.amount||0), 0);
 
@@ -52435,8 +52767,9 @@ function PayApprovalTab({ state, dispatch, user }){
   const historyPays = useMemo(() =>
     (state.payments||[]).filter(p => p.approvalStatus && p.approvalStatus !== 'pending')
       .sort((a,b) => (b.approvedAt||b.rejectedAt||0) - (a.approvedAt||a.rejectedAt||0))
-      .slice(0, 300)
+      
   , [state.payments]);
+  const pgHistory = usePaged(historyPays, 50);
 
   return h('div', null,
     h('div', { className:'flex gap-2 mb-3 flex-wrap' },
@@ -52472,7 +52805,7 @@ function PayApprovalTab({ state, dispatch, user }){
                   h('th', { className:'px-3 py-2 text-center text-xs' }, 'พิมพ์')
                 )),
               h('tbody', { className:'divide-y' },
-                historyPays.map(p => {
+                pgHistory.shown.map(p => {
                   const inv = state.invoices.find(i => i.id === p.invId);
                   const sup = state.suppliers.find(s => s.id === p.supplierId);
                   const ts = p.approvedAt || p.rejectedAt;
@@ -52502,7 +52835,8 @@ function PayApprovalTab({ state, dispatch, user }){
                         className:'text-[10px] px-1.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded' },
                         '+PI'))
                   );
-                })))
+                }))),
+            h(Pager, { pg: pgHistory, label:'ประวัติอนุมัติ' })
             )
       )
     ,
@@ -52516,7 +52850,7 @@ function PayApprovalTab({ state, dispatch, user }){
     subTab === 'waiting' && pending.length > 0 && h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex items-center gap-2 flex-wrap' },
       h('label', { className:'flex items-center gap-1 text-sm' },
         h('input', { type:'checkbox', checked:allSelected, onChange:toggleAll }),
-        h('span', null, `เลือกทั้งหมด (${pending.length})`)),
+        h('span', null, `เลือกทั้งหมดในหน้านี้ (${pageIds.length})`)),
       selectedIds.length > 0 && h('span', { className:'text-sm text-blue-700' },
         h('b', null, selectedIds.length), ' รายการ · รวม ',
         h('b', { className:'text-red-700' }, fmtCur(selectedTotal))),
@@ -52547,7 +52881,7 @@ function PayApprovalTab({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              pending.map(p => {
+              pgPending.shown.map(p => {
                 const inv = state.invoices.find(i => i.id === p.invId);
                 const sup = state.suppliers.find(s => s.id === p.supplierId);
                 const checked = selectedIds.includes(p.id);
@@ -52576,7 +52910,8 @@ function PayApprovalTab({ state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg: pgPending, label:'คำขอจ่าย' })
         )),
     approveTarget && h(ApprovePaymentModal, {
       pay:approveTarget, state, dispatch, user,
@@ -53182,6 +53517,7 @@ function RTVManageTab({ state, dispatch, user }){
   };
 
   const rows = tab === 'active' ? active : (tab === 'archive' ? archived : []);
+  const pg = usePaged(rows, 50);
 
   return h('div', null,
     h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-3 mb-3 text-sm text-indigo-800' },
@@ -53262,7 +53598,7 @@ function RTVManageTab({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              rows.map(r => {
+              pg.shown.map(r => {
                 const sup = state.suppliers.find(s => s.id === r.supplierId);
                 const inv = r.linkedINV ? state.invoices.find(i => i.id === r.linkedINV) : null;
                 const st = r.rtvStatus || 'pending';
@@ -53315,7 +53651,8 @@ function RTVManageTab({ state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'RTV' })
         ),
 
     detail && h(RTVDetailPanel, { rtv:detail, state, onClose:()=>setDetail(null) })
@@ -53348,6 +53685,7 @@ function SupplierMemoTab({ state, dispatch, user }){
     if(typeFilter !== 'all') list = list.filter(m => m.type === typeFilter);
     return [...list].sort((a,b) => (b.date||'').localeCompare(a.date||''));
   }, [state.supplierMemos, filter, typeFilter]);
+  const pg = usePaged(memos, 50);
 
   // สรุป
   const summary = useMemo(() => {
@@ -53416,7 +53754,7 @@ function SupplierMemoTab({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'))),
             h('tbody', { className:'divide-y' },
-              memos.map(m => {
+              pg.shown.map(m => {
                 const sup = state.suppliers.find(s => s.id === m.supplierId);
                 const refPo = m.refPoId ? state.pos.find(p => p.id === m.refPoId) : null;
                 const refInv = m.refInvId ? state.invoices.find(i => i.id === m.refInvId) : null;
@@ -53522,7 +53860,8 @@ function SupplierMemoTab({ state, dispatch, user }){
                       '💬 ', (m.reasonNote||'').slice(0,20)),
                     m.awaitDocNote && h('div', { className:'text-[10px] text-amber-700 mt-1', title: m.awaitDocNote },
                       '🔔 ', (m.awaitDocNote||'').slice(0,20))));
-              })))),
+              }))),
+          h(Pager, { pg, label:'Memo' })),
 
     showCreate && CDMModal && h(CDMModal, { state, dispatch, user, onClose:()=>setShowCreate(false) }),
     applyMemo && h(ApplyCNMemoModal, { memo: applyMemo, state, dispatch, user,
@@ -53860,6 +54199,7 @@ function RTVDetailPanel({ rtv, state, onClose }){
 // ================================================================
 function TaxInvPendingTab({ invs, state, setDetail, setTaxInvEntry, includeUnpaid, setIncludeUnpaid }){
   const today = new Date();
+  const pg = usePaged(invs, 50);
 
   return h('div', null,
     // 🆕 F3 — toggle paid only vs all (รวม unpaid)
@@ -53903,7 +54243,7 @@ function TaxInvPendingTab({ invs, state, setDetail, setTaxInvEntry, includeUnpai
             )
           ),
           h('tbody', { className:'divide-y' },
-            invs.map(inv => {
+            pg.shown.map(inv => {
               const sup = state.suppliers.find(s => s.id === inv.supplierId);
               const lastPay = (state.payments||[])
                 .filter(p => p.invId === inv.id || p.invoiceIds?.includes(inv.id))
@@ -53938,7 +54278,8 @@ function TaxInvPendingTab({ invs, state, setDetail, setTaxInvEntry, includeUnpai
             })
           )
         )
-      )
+      ),
+      h(Pager, { pg, label:'INV รอ Tax INV' })
     )
   );
 }
@@ -54164,6 +54505,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
 
 function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selectedIds, setSelectedIds }){
   const canVoid = user && (isSuperUser(user) || hasPerm(user,'purchase','inv','delete'));
+  const pg = usePaged(invs, 50);
   const voidINV = (i) => {
     const reason = prompt(`❌ ยกเลิก/ลบ INV ${i.invNumber} ทั้งใบ?\n\nเหตุผล (เช่น "คีย์ผิด" / "คืนของทั้งล็อต ไม่ต้องจ่าย"):`, '');
     if(reason === null) return;
@@ -54179,9 +54521,13 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
   const toggle = (id) => setSelectedIds(selectedIds.includes(id)
     ? selectedIds.filter(x => x !== id) : [...selectedIds, id]);
   // 🆕 บิลที่ถูก hold เพราะของคืนยังไม่เคลียร์ — โชว์ในคิวได้ แต่เลือกจ่ายไม่ได้
-  const selectable = invs.filter(i => !i.rtvHoldPayment);
-  const allChecked = selectable.length > 0 && selectedIds.length === selectable.length;
-  const toggleAll = () => setSelectedIds(allChecked ? [] : selectable.map(i => i.id));
+  // เลือกทั้งหมด = เฉพาะแถวในหน้าปัจจุบัน (บิลที่ถูกพักจ่ายยังเลือกไม่ได้เหมือนเดิม)
+  const selectable = pg.shown.filter(i => !i.rtvHoldPayment);
+  const selectableIds = selectable.map(i => i.id);
+  const allChecked = selectable.length > 0 && selectableIds.every(id => selectedIds.includes(id));
+  const toggleAll = () => setSelectedIds(allChecked
+    ? selectedIds.filter(x => !selectableIds.includes(x))
+    : Array.from(new Set([...selectedIds, ...selectableIds])));
 
   return h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
     h('table', { className:'w-full text-sm' },
@@ -54199,7 +54545,7 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
         )
       ),
       h('tbody', { className:'divide-y' },
-        invs.map(i => {
+        pg.shown.map(i => {
           const sup = state.suppliers.find(s => s.id === i.supplierId);
           const remain = (i.netPayable||0) - (i.paidAmount||0);
           const overdue = i.dueDate < today;
@@ -54241,7 +54587,8 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
           );
         })
       )
-    )
+    ),
+    h(Pager, { pg, label:'INV รอจ่าย' })
   );
 }
 
@@ -54290,6 +54637,7 @@ function PayHistory({ payments, state, dr, dispatch, user }){
   const total = payments.filter(p => !p.reversed).reduce((s,p) => s + (p.amount||0), 0);
   const reversedCount = payments.filter(p => p.reversed).length;
   const [taxInvEntry, setTaxInvEntry] = useState(null);
+  const pg = usePaged(payments, 50);
 
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
@@ -54321,7 +54669,7 @@ function PayHistory({ payments, state, dr, dispatch, user }){
                 )
               ),
               h('tbody', { className:'divide-y' },
-                payments.map(p => {
+                pg.shown.map(p => {
                   const inv = state.invoices.find(i => i.id === p.invId) ||
                               state.invoices.find(i => p.invoiceIds?.includes(i.id));
                   const sup = state.suppliers.find(s => s.id === p.supplierId);
@@ -54388,7 +54736,8 @@ function PayHistory({ payments, state, dr, dispatch, user }){
                 })
               )
             )
-          )
+          ),
+          h(Pager, { pg, label:'รายการจ่าย' })
         ),
 
     taxInvEntry && h(TaxInvEntryModal, {
@@ -54417,6 +54766,7 @@ const {
   getBranch, isHQ, hasPerm,
   Modal, Button, Combobox,
   useDateRange, DateRangeBar, inDateRange, exportCSV,
+  usePaged, Pager,
   toBaseQty, getBaseUnit, unitsForPurpose, deductFIFO,
   BEDateInput,
 } = global.ERP;
@@ -54553,6 +54903,9 @@ function SIList({ state, dispatch, user }){
     return list.sort((a,b) => (b.invDate||'').localeCompare(a.invDate||''));
   }, [state.salesInvoices, state.customers, filter, search, dr.startDate, dr.endDate]);
 
+  // 📄 แบ่งหน้า — render เฉพาะหน้าที่ดูอยู่ (ตัวกรอง/ยอดยังคิดจาก filtered ทั้งชุด)
+  const pg = usePaged(filtered, 50);
+
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' })
@@ -54589,7 +54942,7 @@ function SIList({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              filtered.map(i => {
+              pg.shown.map(i => {
                 const c = siBuyer(state, i);   // 🆕 ชื่อผู้ซื้อ ณ วันออกใบ (ไม่โชว์ id ดิบถ้าลูกค้าถูกแก้/ลบ)
                 const st = i.paymentStatus || 'unpaid';
                 const [lbl, clr] = SI_STATUS[st] || [st, 'bg-gray-100'];
@@ -54619,7 +54972,8 @@ function SIList({ state, dispatch, user }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'ใบกำกับ' })
         ),
     showNew && h(NewSIModal, { state, dispatch, user, onClose:()=>setShowNew(false) }),
     detail && h(SIDetailModal, { si:detail, state, dispatch, user,
@@ -55175,6 +55529,8 @@ function ARReceiveTab({ state, dispatch, user }){
     .filter(i => !i.voided && (i.paymentStatus||'unpaid') !== 'paid')   // 🆕 ใบที่ยกเลิกไม่ใช่ลูกหนี้
     .sort((a,b) => (a.dueDate||'').localeCompare(b.dueDate||''));
   const [receivingSI, setReceivingSI] = useState(null);
+  // 📄 แบ่งหน้า — จำนวนใบค้างทั้งหมดยังนับจาก unpaid ทั้งชุด
+  const pg = usePaged(unpaid, 50);
 
   return h('div', null,
     h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-3 mb-3 text-sm text-indigo-800' },
@@ -55192,7 +55548,7 @@ function ARReceiveTab({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'คงเหลือ'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'))),
             h('tbody', { className:'divide-y' },
-              unpaid.map(i => {
+              pg.shown.map(i => {
                 const c = state.customers.find(x => x.id === i.customerId);
                 const remain = (i.netTotal||0) - (i.paidAmount||0);
                 const overdue = i.dueDate < getToday();
@@ -55205,7 +55561,8 @@ function ARReceiveTab({ state, dispatch, user }){
                   h('td', { className:'px-3 py-2 text-center' },
                     h(Button, { variant:'success', size:'sm', onClick:()=>setReceivingSI(i) }, '💰 รับชำระ')));
               }))
-          )),
+          ),
+          h(Pager, { pg, label:'ใบค้างรับชำระ' })),
     receivingSI && h(ReceivePaymentModal, { si:receivingSI, state, dispatch, user,
       onClose:()=>setReceivingSI(null) })
   );
@@ -55246,6 +55603,7 @@ function ARAgingReport({ state }){
   for(const i of unpaid){
     const remain = (i.netTotal||0) - (i.paidAmount||0);
     if(!byCust[i.customerId]) byCust[i.customerId] = {
+      id: i.customerId,   // ให้ usePaged มี signature คงที่ (เด้งกลับหน้า 1 เมื่อชุดข้อมูลเปลี่ยน)
       customer: state.customers.find(c => c.id === i.customerId),
       total:0, count:0, overdue:0 };
     byCust[i.customerId].total += remain;
@@ -55254,6 +55612,8 @@ function ARAgingReport({ state }){
   }
   const custRows = Object.values(byCust).sort((a,b) => b.total - a.total);
   const totalRemain = Object.values(buckets).reduce((s,b) => s + b.sum, 0);
+  // 📄 แบ่งหน้าเฉพาะตารางรายลูกค้า — bucket KPI / ยอดรวม / Export ยังคิดจาก unpaid+custRows ทั้งชุด
+  const pg = usePaged(custRows, 50);
 
   const exportAging = () => {
     const csv = [['Customer','Tax ID','ทั้งหมด','ยังไม่ครบ','1-30','31-60','61-90','>90']];
@@ -55300,14 +55660,15 @@ function ARAgingReport({ state }){
         h('tbody', { className:'divide-y' },
           custRows.length === 0
             ? h('tr', null, h('td', { colSpan:4, className:'px-3 py-6 text-center text-gray-500' }, '✅ ไม่มีลูกหนี้ค้าง'))
-            : custRows.map((cr,idx) => h('tr', { key:idx, className:'hover:bg-gray-50' },
+            : pg.shown.map((cr,idx) => h('tr', { key:(cr.customer && cr.customer.id) || ('r'+idx), className:'hover:bg-gray-50' },
                 h('td', { className:'px-3 py-2' }, cr.customer?.name||'-'),
                 h('td', { className:'px-3 py-2 text-center text-xs' }, cr.count),
                 h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(cr.total)),
                 h('td', { className: cls('px-3 py-2 text-right',
                   cr.overdue > 0 ? 'text-red-600 font-bold' : 'text-gray-400') }, fmtCur(cr.overdue))))
         )
-      ))
+      ),
+      h(Pager, { pg, label:'ลูกค้า' }))
   );
 }
 
@@ -55327,7 +55688,7 @@ function SalesVATByInvReport({ state }){
       const vatableBase = vatRate > 0 ? (i.subtotal||0) : 0;
       const vatAmt = i.vat || 0;
       const vatableTotal = vatableBase + vatAmt;
-      return { i, customerName: c?.name || '-', taxId: c?.taxId || '-',
+      return { id: i.id, i, customerName: c?.name || '-', taxId: c?.taxId || '-',
         total, vatableBase, vatAmt, vatableTotal, wht: i.whtAmount||0 };
     });
   }, [state.salesInvoices, state.customers, dr.startDate, dr.endDate]);
@@ -55335,6 +55696,8 @@ function SalesVATByInvReport({ state }){
     total:a.total+r.total, vatableBase:a.vatableBase+r.vatableBase,
     vatAmt:a.vatAmt+r.vatAmt, vatableTotal:a.vatableTotal+r.vatableTotal, wht:a.wht+r.wht
   }), {total:0, vatableBase:0, vatAmt:0, vatableTotal:0, wht:0});
+  // 📄 แบ่งหน้าเฉพาะการแสดงผล — totals + Export CSV ยังคิดจาก rows ทั้งชุด (ตัวเลขภาษีห้ามเหลือแค่หน้าเดียว)
+  const pg = usePaged(rows, 50);
 
   const exportRows = () => {
     const csv = [['#','วันที่','SI','ลูกค้า','เลขผู้เสียภาษี','ยอดรวม','ฐาน VAT','VAT','รวม VATable','WHT']];
@@ -55373,8 +55736,8 @@ function SalesVATByInvReport({ state }){
         h('tbody', { className:'divide-y' },
           rows.length === 0
             ? h('tr', null, h('td', { colSpan:10, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
-            : rows.map((r,idx) => h('tr', { key:r.i.id, className:'hover:bg-gray-50' },
-                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, idx+1),
+            : pg.shown.map((r,idx) => h('tr', { key:r.i.id, className:'hover:bg-gray-50' },
+                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, pg.from + idx),
                 h('td', { className:'px-2 py-1.5 text-xs' }, fmtDate(r.i.invDate)),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs text-blue-700' }, r.i.siNumber),
                 h('td', { className:'px-2 py-1.5 text-xs' }, r.customerName),
@@ -55389,12 +55752,13 @@ function SalesVATByInvReport({ state }){
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs text-red-600' },
                   r.wht > 0 ? fmtCur(r.wht) : '-'))).concat([
               h('tr', { key:'t', className:'bg-gray-100 font-bold border-t-2' },
-                h('td', { colSpan:5, className:'px-2 py-2 text-right text-xs' }, 'รวม:'),
+                h('td', { colSpan:5, className:'px-2 py-2 text-right text-xs' }, 'รวมทั้งหมด:'),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-blue-700' }, fmtCur(totals.total)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableBase)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-green-700' }, fmtCur(totals.vatAmt)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableTotal)),
-                h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)))])))));
+                h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)))]))),
+      h(Pager, { pg, label:'ใบกำกับ' })));
 }
 
 // ---------- Sales VAT by Payment Received (ภาษีขายตามวันรับเงิน) ----------
@@ -55413,7 +55777,7 @@ function SalesVATByPayReport({ state }){
       const vatRate = (si.lines||[]).some(l => (l.vatRate||0) > 0) ? 7 : 0;
       const vatableBase = vatRate > 0 ? (si.subtotal||0) * portion : 0;
       const vatAmt = (si.vat||0) * portion;
-      return { p, si, customerName: c?.name || '-', taxId: c?.taxId || '-',
+      return { id: p.id, p, si, customerName: c?.name || '-', taxId: c?.taxId || '-',
         total, vatableBase, vatAmt, vatableTotal: vatableBase + vatAmt,
         wht: (si.whtAmount||0) * portion,
         bank: p.bankName || (p.method==='cash' ? 'เงินสด' : p.method||'-'),
@@ -55425,6 +55789,8 @@ function SalesVATByPayReport({ state }){
     total:a.total+r.total, vatableBase:a.vatableBase+r.vatableBase,
     vatAmt:a.vatAmt+r.vatAmt, vatableTotal:a.vatableTotal+r.vatableTotal, wht:a.wht+r.wht
   }), {total:0, vatableBase:0, vatAmt:0, vatableTotal:0, wht:0});
+  // 📄 แบ่งหน้าเฉพาะการแสดงผล — totals + Export CSV ยังคิดจาก rows ทั้งชุด
+  const pg = usePaged(rows, 50);
 
   const exportRows = () => {
     const csv = [['#','วันรับ','บัญชี','SI','ลูกค้า','เลขผู้เสียภาษี','ยอดรวม','ฐาน VAT','VAT','รวม VATable','WHT']];
@@ -55463,8 +55829,8 @@ function SalesVATByPayReport({ state }){
         h('tbody', { className:'divide-y' },
           rows.length === 0
             ? h('tr', null, h('td', { colSpan:11, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
-            : rows.map((r,idx) => h('tr', { key:r.p.id },
-                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, idx+1),
+            : pg.shown.map((r,idx) => h('tr', { key:r.p.id },
+                h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, pg.from + idx),
                 h('td', { className:'px-2 py-1.5 text-xs' }, fmtDate(r.p.date)),
                 h('td', { className:'px-2 py-1.5 text-xs' }, r.bank),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs text-blue-700' },
@@ -55481,16 +55847,18 @@ function SalesVATByPayReport({ state }){
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs text-red-600' },
                   r.wht > 0 ? fmtCur(r.wht) : '-'))).concat([
               h('tr', { key:'t', className:'bg-gray-100 font-bold border-t-2' },
-                h('td', { colSpan:6, className:'px-2 py-2 text-right text-xs' }, 'รวม:'),
+                h('td', { colSpan:6, className:'px-2 py-2 text-right text-xs' }, 'รวมทั้งหมด:'),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.total)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableBase)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-green-700' }, fmtCur(totals.vatAmt)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableTotal)),
-                h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)))])))));
+                h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)))]))),
+      h(Pager, { pg, label:'รายการรับชำระ' })));
 }
 
 function CustomersMiniList({ state, dispatch, user }){
   const cs = state.customers || [];
+  const pg = usePaged(cs, 50);   // 📄 แบ่งหน้า — ลูกค้าหลักร้อย-พันราย
   return h('div', null,
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 mb-3 text-sm text-blue-800' },
       '💡 เพิ่ม/แก้ไขลูกค้า ที่ ', h('b', null, 'Settings → 🛒 Customers')),
@@ -55505,13 +55873,14 @@ function CustomersMiniList({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'ที่อยู่'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'เครดิต'))),
             h('tbody', { className:'divide-y' },
-              cs.map(c => h('tr', { key:c.id },
+              pg.shown.map(c => h('tr', { key:c.id },
                 h('td', { className:'px-3 py-2' }, c.name),
                 h('td', { className:'px-3 py-2 text-xs font-mono' }, c.taxId||'-'),
                 h('td', { className:'px-3 py-2 text-xs' }, c.address||'-'),
                 h('td', { className:'px-3 py-2 text-center text-xs' }, `${c.credit||0} วัน`)))
             )
-          ))
+          ),
+          h(Pager, { pg, label:'ลูกค้า' }))
   );
 }
 
@@ -55738,6 +56107,7 @@ const {
   ROLE_LABEL, fmtCur, fmtNum, resolveToBase, getBaseUnit,
   POSITION_OPTIONS, APPROVAL_ACTIONS,
   getBranchLines, getBranchLocations, findLine,
+  usePaged, Pager,
 } = global.ERP;
 
 // ตัวเลือกสีไลน์ผลิต (Tailwind)
@@ -56300,10 +56670,13 @@ function suggestBranchCode(state, branch){
 function UsersSettings({ state, dispatch }){
   const [showModal, setShowModal] = useState(false);
   const [edit, setEdit] = useState(null);
+  const users = state.users || [];
+  // 📄 แบ่งหน้าละ 50 — ยอดนับด้านบนยังคิดจาก users ทั้งชุด (ไม่ใช่เฉพาะหน้านี้)
+  const pg = usePaged(users, 50);
 
   return h('div', null,
     h('div', { className:'flex justify-between items-center mb-3' },
-      h('div', { className:'text-sm text-gray-600' }, `${(state.users||[]).length} ผู้ใช้`),
+      h('div', { className:'text-sm text-gray-600' }, `${users.length} ผู้ใช้`),
       h(Button, { variant:'primary', size:'sm', onClick:()=>{ setEdit(null); setShowModal(true); } }, '+ เพิ่มผู้ใช้')
     ),
 
@@ -56321,7 +56694,7 @@ function UsersSettings({ state, dispatch }){
           )
         ),
         h('tbody', { className:'divide-y' },
-          (state.users||[]).map(u => {
+          pg.shown.map(u => {
             const branch = state.branches.find(b => b.id===u.branch);
             const perms = getUserPerms(u);
             const permCount = Object.values(perms).filter(Boolean).length;
@@ -56353,7 +56726,8 @@ function UsersSettings({ state, dispatch }){
             );
           })
         )
-      )
+      ),
+      h(Pager, { pg, label:'ผู้ใช้' })
     ),
 
     showModal && h(UserEditModal, { user:edit, state, dispatch, onClose:()=>setShowModal(false) })
@@ -56917,6 +57291,8 @@ function ItemsSettings({ state, dispatch }){
   }, [state.items, typeFilter, tagFilter, search]);
 
   const types = state.itemTypes || [];
+  // 📄 แบ่งหน้าละ 50 — filtered ยังเป็นชุดเต็มหลังกรอง (ตัวเลข x/y ด้านบนใช้ชุดเต็ม)
+  const pg = usePaged(filtered, 50);
 
   return h('div', null,
     h('div', { className:'flex justify-between items-center mb-3 flex-wrap gap-2' },
@@ -56960,7 +57336,7 @@ function ItemsSettings({ state, dispatch }){
             )
           ),
           h('tbody', { className:'divide-y' },
-            filtered.map(i => {
+            pg.shown.map(i => {
               const totalStock = Object.values(i.stockByBranch||{}).reduce((a,b)=>a+(b||0),0);
               const type = types.find(t => t.id === i.type);
               const typeClr = {blue:'bg-blue-100 text-blue-700', purple:'bg-purple-100 text-purple-700',
@@ -57005,7 +57381,8 @@ function ItemsSettings({ state, dispatch }){
             })
           )
         )
-      )
+      ),
+      h(Pager, { pg, label:'รายการสินค้า' })
     ),
 
     showModal && h(ItemEditModal, { item:edit, state, dispatch, onClose:()=>setShowModal(false) }),
@@ -57499,6 +57876,9 @@ function StorageLocationsSettings({ state, dispatch }){
     return m;
   }, [state.items]);
 
+  // 📄 แบ่งหน้าละ 50 — ยอด "รายการทั้งหมด"/"ใช้งานในสินค้า" ยังคิดจาก list ทั้งชุด
+  const pg = usePaged(list, 50);
+
   const add = () => {
     const t = newLoc.trim();
     if(!t) return;
@@ -57551,7 +57931,9 @@ function StorageLocationsSettings({ state, dispatch }){
                 h('th', { className:'px-3 py-2 text-center text-xs font-medium w-32' }, 'มีสินค้า'),
                 h('th', { className:'px-3 py-2 text-center text-xs font-medium w-32' }, 'จัดการ'))),
             h('tbody', { className:'divide-y' },
-              list.map((loc, idx) => {
+              pg.shown.map((loc, i) => {
+                // idx = ลำดับจริงใน list ทั้งชุด (ไม่ใช่ลำดับในหน้านี้) — แก้ชื่อ/ลบจะได้ตรงแถว
+                const idx = (pg.total ? pg.from - 1 : 0) + i;
                 const used = usageMap[loc] || 0;
                 return h('tr', { key:loc, className:'hover:bg-gray-50' },
                   h('td', { className:'px-3 py-2' },
@@ -57577,7 +57959,8 @@ function StorageLocationsSettings({ state, dispatch }){
                         className:'px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded text-xs' }, '✏️ แก้'),
                       h('button', { onClick:()=>remove(loc),
                         className:'px-2 py-1 bg-red-100 hover:bg-red-200 text-red-800 rounded text-xs' }, '🗑'))));
-              })))
+              }))),
+      h(Pager, { pg, label:'ตำแหน่ง' })
     )
   );
 }
@@ -58219,6 +58602,8 @@ function TagsSection({ state, dispatch }){
   }, [state.items, state.itemTags]);
 
   const filtered = search ? allTags.filter(t => t.toLowerCase().includes(search.toLowerCase())) : allTags;
+  // 📄 แบ่งหน้าละ 50 — ยอด "รวม N tags" ท้ายหน้ายังนับจาก allTags ทั้งชุด
+  const pg = usePaged(filtered, 50);
 
   const add = () => {
     const t = newTag.trim();
@@ -58272,7 +58657,7 @@ function TagsSection({ state, dispatch }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              filtered.map(t => {
+              pg.shown.map(t => {
                 const used = (state.items||[]).filter(i => (i.tags||[]).includes(t));
                 const isEditing = editOld === t;
                 return h('tr', { key:t, className:'hover:bg-gray-50' },
@@ -58303,7 +58688,8 @@ function TagsSection({ state, dispatch }){
                 );
               })
             )
-          )
+          ),
+          h(Pager, { pg, label:'tag' })
         ),
 
     h('div', { className:'mt-2 text-xs text-gray-500' },
@@ -58358,7 +58744,7 @@ const CUSTOMER_FIELDS = [
 
 function SuppliersSettings({ state, dispatch }){
   return h(PartyTable, {
-    title:'Suppliers', data: state.suppliers || [], dispatch,
+    title:'Suppliers', pagerLabel:'ผู้ขาย', data: state.suppliers || [], dispatch,
     addAction:'ADD_SUPPLIER', updateAction:'UPDATE_SUPPLIER', deleteAction:'DELETE_SUPPLIER',
     fields: SUPPLIER_FIELDS,
   });
@@ -58366,21 +58752,40 @@ function SuppliersSettings({ state, dispatch }){
 
 function CustomersSettings({ state, dispatch }){
   return h(PartyTable, {
-    title:'Customers', data: state.customers || [], dispatch,
+    title:'Customers', pagerLabel:'ลูกค้า', data: state.customers || [], dispatch,
     addAction:'ADD_CUSTOMER', updateAction:'UPDATE_CUSTOMER', deleteAction:'DELETE_CUSTOMER',
     fields: CUSTOMER_FIELDS,
   });
 }
 
-function PartyTable({ title, data, dispatch, addAction, updateAction, deleteAction, fields }){
+function PartyTable({ title, pagerLabel, data, dispatch, addAction, updateAction, deleteAction, fields }){
   const [showModal, setShowModal] = useState(false);
   const [edit, setEdit] = useState(null);
+  // 🆕 ช่องค้นหา — 1,400 ราย แบ่งหน้าอย่างเดียวยังหาไม่เจอ (ต้องเปิดทีละ 28 หน้า)
+  const [q, setQ] = useState('');
+  const rows = useMemo(() => {
+    const t = q.trim().toLowerCase();
+    if(!t) return data;
+    return (data||[]).filter(d =>
+      (fields||[]).some(f => String(d[f.k] != null ? d[f.k] : '').toLowerCase().includes(t))
+      || String(d.extCode||'').toLowerCase().includes(t));
+  }, [data, q, fields]);
+  // 📄 แบ่งหน้าละ 50 · ยอดนับหัวตารางใช้ชุดที่กรองแล้ว
+  const pg = usePaged(rows, 50);
 
   return h('div', null,
-    h('div', { className:'flex justify-between items-center mb-3' },
-      h('div', { className:'text-sm text-gray-600' }, `${data.length} ${title}`),
+    h('div', { className:'flex justify-between items-center mb-3 gap-2 flex-wrap' },
+      h('div', { className:'flex items-center gap-2 flex-1 min-w-[240px]' },
+        h('input', { type:'search', value:q, onChange:e=>setQ(e.target.value),
+          placeholder:`🔍 ค้นหา ${title} — ชื่อ / รหัส / เลขผู้เสียภาษี / เบอร์`,
+          className:'flex-1 px-3 py-1.5 border-2 rounded text-sm' }),
+        h('div', { className:'text-sm text-gray-600 whitespace-nowrap' },
+          q ? `พบ ${rows.length.toLocaleString()} จาก ${data.length.toLocaleString()}`
+            : `${data.length.toLocaleString()} ${title}`)),
       h(Button, { variant:'primary', size:'sm', onClick:()=>{ setEdit(null); setShowModal(true); } }, `+ เพิ่ม`)
     ),
+    (q && rows.length === 0) && h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
+      `ไม่พบ "${q}" ใน ${data.length.toLocaleString()} ${title}`),
     data.length===0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' }, `ยังไม่มี ${title}`)
       : h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
@@ -58392,7 +58797,7 @@ function PartyTable({ title, data, dispatch, addAction, updateAction, deleteActi
               )
             ),
             h('tbody', { className:'divide-y' },
-              data.map(d =>
+              pg.shown.map(d =>
                 h('tr', { key:d.id, className:'hover:bg-gray-50' },
                   fields.slice(0,5).map(f =>
                     h('td', { key:f.k, className: cls('px-3 py-2 text-sm', f.mono && 'font-mono text-xs') }, d[f.k] || '-')
@@ -58408,7 +58813,8 @@ function PartyTable({ title, data, dispatch, addAction, updateAction, deleteActi
                 )
               )
             )
-          )
+          ),
+          h(Pager, { pg, label: pagerLabel || title })
         ),
 
     showModal && h(PartyEditModal, { title, party:edit, fields, dispatch, addAction, updateAction, existing:data, onClose:()=>setShowModal(false) })
