@@ -3573,6 +3573,22 @@ Object.assign(global.ERP, {
     if(_pushTimer) clearTimeout(_pushTimer);
     _pushTimer = setTimeout(_flushCloudPush, 1500);
   }
+  // 🆕 บังคับบันทึกขึ้น cloud "เดี๋ยวนี้" แล้วรอผลจริง — ใช้กับงานก้อนใหญ่ที่พลาดไม่ได้ (นำเข้าข้อมูล)
+  //    ไม่พึ่ง debounce/ธงใด ๆ · คืน {ok} หรือ {ok:false, conflict|error}
+  async function pushNow(state, byUser){
+    if(_pushTimer){ clearTimeout(_pushTimer); _pushTimer = null; }
+    // ถ้ามีรอบก่อนค้างอยู่ รอให้จบก่อน (สูงสุด 20 วิ)
+    for(var i=0; i<100 && _pushing; i++){ await new Promise(function(r){ setTimeout(r, 200); }); }
+    _pushing = true;
+    try {
+      var r = await pushCloudState(state, byUser);
+      if(r && r.ok){ _pendingState = null; _dirty = false; _lastCloudErr = null; }
+      return r;
+    } catch(e){
+      return { ok:false, error:(e && e.message) || String(e) };
+    } finally { _pushing = false; }
+  }
+
   function _flushCloudPush(){
     try { if(global.__erpRestoring) return; } catch(e){}   // 🔒 P1-4: กำลังกู้คืน — ห้าม push ทับ
     if(_pushing){ _pushTimer = setTimeout(_flushCloudPush, 800); return; }   // รอรอบก่อนจบ
@@ -3748,7 +3764,7 @@ Object.assign(global.ERP, {
     deviceId: deviceId,
     // ☁️☁️ cloud-only mode (Supabase = source of truth)
     isCloudOnly: isCloudOnly, loadCloudState: loadCloudState,
-    pushCloudState: pushCloudState, scheduleCloudPush: scheduleCloudPush,
+    pushCloudState: pushCloudState, scheduleCloudPush: scheduleCloudPush, pushNow: pushNow,
     cloudSaveStatus: cloudSaveStatus, checkCloudChanged: checkCloudChanged,
     _debug: { cfg: _cfg, client: _sb },
   };
@@ -58126,6 +58142,7 @@ function EcountImportModal({ state, dispatch, onClose }){
   const custChosen = useCusts ? custAll : [];        // 🆕
   const custDup = custChosen.filter(c => custExisting.has(c.id)).length;
 
+  const [saving, setSaving] = useState(false);
   const run = () => {
     if(!chosen.length && !supChosen.length && !custChosen.length){ alert('ยังไม่ได้เลือกชุดข้อมูล'); return; }
     const lines = [];
@@ -58143,6 +58160,31 @@ function EcountImportModal({ state, dispatch, onClose }){
     if(chosen.length) dispatch({ type:'IMPORT_ITEMS', data: chosen });
     if(supChosen.length) dispatch({ type:'IMPORT_SUPPLIERS', data: supChosen.map(_stripEmpty) });
     if(custChosen.length) dispatch({ type:'IMPORT_CUSTOMERS', data: custChosen.map(_stripEmpty) });
+    // 🆕 บังคับบันทึกขึ้น cloud ทันทีแล้ว "รอผลจริง" ก่อนบอกว่าสำเร็จ
+    //    เดิมพึ่งการบันทึกอัตโนมัติแบบหน่วงเวลา ถ้าพลาด (เช่นเปลี่ยนหน้าทันที / เครื่องอื่นบันทึกชน)
+    //    ข้อมูลจะหายเงียบ ๆ ทั้งที่จอขึ้นว่าสำเร็จ — งานนำเข้าเป็นก้อนใหญ่ พลาดแล้วเสียเวลามาก
+    const SB = global.ERP.SBSync;
+    if(SB && SB.pushNow && SB.isCloudOnly && SB.isCloudOnly()){
+      setSaving(true);
+      setTimeout(async () => {
+        const st = (global.ERP.__getState && global.ERP.__getState()) || null;
+        const r = st ? await SB.pushNow(st, 'import') : { ok:false, error:'อ่าน state ไม่ได้' };
+        setSaving(false);
+        if(r && r.ok){
+          alert(`✅ นำเข้าและบันทึกขึ้น cloud เรียบร้อย\n${lines.join('\n')}\n\nข้อมูลอยู่บนระบบแล้ว โหลดหน้าใหม่ก็ยังอยู่`);
+          onClose();
+        } else if(r && r.conflict){
+          alert('⛔ บันทึกไม่สำเร็จ — มีเครื่องอื่นบันทึกข้อมูลไปก่อน\n\n'
+            + 'ข้อมูลที่เพิ่งนำเข้ายังไม่ขึ้นระบบ\n'
+            + 'ให้ปิดแท็บ/เครื่องอื่นที่เปิดค้างอยู่ แล้วโหลดหน้านี้ใหม่ และนำเข้าอีกครั้ง');
+        } else {
+          alert('⛔ บันทึกขึ้น cloud ไม่สำเร็จ — ข้อมูลที่นำเข้ายังไม่ถูกบันทึก\n\n'
+            + ((r && r.error) || 'ไม่ทราบสาเหตุ')
+            + '\n\nตรวจอินเทอร์เน็ตแล้วลองนำเข้าใหม่');
+        }
+      }, 400);   // เผื่อให้ reducer อัปเดต state เสร็จก่อนอ่าน
+      return;
+    }
     alert(`✅ นำเข้าเรียบร้อย — ${lines.join(' · ')}`);
     onClose();
   };
@@ -58215,8 +58257,10 @@ function EcountImportModal({ state, dispatch, onClose }){
         + ` · supplier ${supChosen.length}` + (supDup ? ` (ทับ ${supDup})` : '')
         + ` · ลูกค้า ${custChosen.length}` + (custDup ? ` (ทับ ${custDup})` : '')),
       h('div', { className:'flex gap-2 pt-3 border-t' },
-        h(Button, { variant:'primary', onClick:run, disabled:!chosen.length && !supChosen.length && !custChosen.length },
-          `📦 นำเข้า (สินค้า ${chosen.length} · supplier ${supChosen.length} · ลูกค้า ${custChosen.length})`),
+        h(Button, { variant:'primary', onClick:run,
+          disabled: saving || (!chosen.length && !supChosen.length && !custChosen.length) },
+          saving ? '⏳ กำลังบันทึกขึ้น cloud… อย่าเพิ่งปิดหน้านี้'
+                 : `📦 นำเข้า (สินค้า ${chosen.length} · supplier ${supChosen.length} · ลูกค้า ${custChosen.length})`),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'))));
 }
 
