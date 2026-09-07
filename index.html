@@ -2420,6 +2420,88 @@ const POSITION_OPTIONS = [
 ];
 
 // Action labels + default scope map
+// ==================== 📜 บรรยาย action เป็นภาษาคน (ใช้กับ Audit Log) ====================
+// 209 action types — ใช้ verb+entity เป็นฐาน แล้ว override เฉพาะตัวที่ต้องอธิบายเป็นพิเศษ
+const _ACT_VERB = {
+  ADD:'สร้าง', NEW:'สร้าง', CREATE:'สร้าง', UPDATE:'แก้ไข', EDIT:'แก้ไข', SET:'ตั้งค่า',
+  DELETE:'ลบ', REMOVE:'ลบ', VOID:'ยกเลิก', CANCEL:'ยกเลิก', REVERSE:'กลับรายการ',
+  APPROVE:'อนุมัติ', REJECT:'ปฏิเสธ', POST:'ลงบัญชี', IMPORT:'นำเข้า', APPLY:'ใช้',
+  RECEIVE:'รับ', ISSUE:'เบิก', CONSUME:'ตัด', DEDUCT:'ตัด', ADJUST:'ปรับ', TRANSFER:'โอน',
+  LOGIN:'เข้าสู่ระบบ', LOGOUT:'ออกจากระบบ', SETTLE:'เคลียร์', LINK:'ผูก', DECIDE:'ตัดสินใจ',
+  RESTORE:'กู้คืน', RESET:'ล้าง', MANUAL:'ทำเอง', BULK:'ทำหลายรายการ', SPLIT:'แยก', MERGE:'รวม',
+};
+const _ACT_ENTITY = {
+  PO:'ใบสั่งซื้อ', GR:'ใบรับของ', INV:'ใบตั้งหนี้', PI:'ใบตั้งหนี้', PAY:'การจ่ายเงิน',
+  PAYMENT:'การจ่ายเงิน', RTV:'ใบคืนของ', SI:'ใบกำกับขาย', SALES:'การขาย', ITEM:'สินค้า',
+  ITEMS:'สินค้า', SUPPLIER:'ผู้ขาย', SUPPLIERS:'ผู้ขาย', CUSTOMER:'ลูกค้า', CUSTOMERS:'ลูกค้า',
+  BOM:'สูตรผลิต', JE:'รายการบัญชี', BANK:'บัญชีธนาคาร', USER:'ผู้ใช้', BRANCH:'สาขา',
+  STOCK:'สต๊อก', COUNT:'การนับสต๊อก', TO:'ใบโอนสาขา', TRANSFER:'การโอน', ASSET:'ทรัพย์สิน',
+  DEPOSIT:'มัดจำ', MEMO:'ใบลดหนี้/เพิ่มหนี้', PETTY:'เงินสดย่อย', ADVANCE:'สำรองจ่าย',
+  PROD:'คำสั่งผลิต', PRODUCTION:'การผลิต', ORDER:'คำสั่งผลิต', ACCOUNT:'ผังบัญชี',
+  APPROVAL:'คำขออนุมัติ', RULE:'กฎอนุมัติ', SCRAP:'ของเสีย', DEFECT:'ของเสีย', QC:'การตรวจคุณภาพ',
+  FIFO:'ต้นทุน FIFO', LAYER:'ชั้นต้นทุน', SETTING:'ตั้งค่า', SETTINGS:'ตั้งค่า', RECIPE:'สูตร',
+};
+// override สำหรับ action ที่บอกด้วย verb+entity ไม่พอ
+const _ACT_LABEL = {
+  ADD_PAY:'ขอเบิกจ่าย', UPDATE_PAY:'แก้ไข/อนุมัติการจ่าย', ADD_RTV:'บันทึกคืนของ',
+  DECIDE_RTV:'ตัดสินใจวิธีจัดการของคืน', ADD_REPLACEMENT_GR:'รับของชดเชย',
+  APPLY_CN_MEMO:'ใช้เครดิตหักบิล', RECEIVE_CN_DOC:'บันทึกได้รับใบลดหนี้',
+  MANUAL_CLEAR_CN:'ปิดใบลดหนี้โดยไม่มีเอกสาร', SETTLE_REFUND:'รับเงินคืนจาก supplier',
+  POST_DEPRECIATION:'ลงค่าเสื่อมประจำงวด', DISPOSE_ASSET:'จำหน่ายทรัพย์สิน',
+  IMPORT_STATE:'โหลด/กู้คืนข้อมูลทั้งชุด', ADD_APPROVAL_REQUEST:'ส่งคำขออนุมัติ',
+  UPDATE_APPROVAL_REQUEST:'ตัดสินคำขออนุมัติ', ADJUST_STOCK:'ปรับสต๊อกเอง',
+  DEDUCT_FIFO_LAYERS:'ตัดต้นทุนสินค้า', CONSUME_PRODUCTION_MATERIALS:'เบิกวัตถุดิบเข้าผลิต',
+  ADD_POS_IMPORT:'นำเข้ายอดขาย POS', VOID_POS_IMPORT:'ยกเลิกยอดขาย POS',
+  POST_RTV_CREDIT_ON_PI:'ลงบัญชีเครดิตจากของคืน',
+};
+// action ที่ไม่ต้องบันทึก (เกิดถี่มาก/ไม่ใช่การกระทำของคน)
+const _ACT_SKIP = { LOGIN:1, LOGOUT:1, SET_BRANCH:1, ADD_AUDIT_LOG:1, APPEND_AUDIT_LOG:1 };
+
+function describeAction(action, state){
+  const t = String((action && action.type) || '');
+  if(!t || _ACT_SKIP[t]) return null;
+  let label = _ACT_LABEL[t];
+  if(!label){
+    const parts = t.split('_');
+    const verb = _ACT_VERB[parts[0]] || '';
+    const rest = parts.slice(1);
+    let ent = '';
+    for(const p of rest){ if(_ACT_ENTITY[p]){ ent = _ACT_ENTITY[p]; break; } }
+    if(!ent && rest.length) ent = rest.join(' ').toLowerCase();
+    label = (verb ? verb + ' ' : '') + (ent || t);
+  }
+  const d = (action && action.data) || {};
+  const pick = (o, keys) => { for(const k of keys){ if(o && o[k]) return String(o[k]); } return ''; };
+  const src = (d && typeof d === 'object' && !Array.isArray(d)) ? d : {};
+  const REFK = ['poNumber','grNumber','invNumber','rtvNumber','memoNumber','jeNumber',
+    'siNumber','toNumber','advNumber','pvNumber','importNumber','code','name','ref','id'];
+  let ref = pick(src, REFK);
+  // หลาย action ห่อเอกสารไว้อีกชั้น เช่น { gr:{grNumber} } — มองลงไป 1 ชั้น
+  if(!ref){
+    for(const wk of ['gr','inv','po','rtv','si','to','pay','memo','order','item','asset','deposit','txn','rtvUpdate']){
+      if(src[wk] && typeof src[wk] === 'object'){ ref = pick(src[wk], REFK); if(ref) break; }
+    }
+  }
+  if(!ref && typeof d === 'string') ref = d;   // action ที่ส่ง id มาตรง ๆ เช่น DELETE_CUSTOMER
+  let amount = null;
+  const AMTK = ['amount','total','totalValue','netPayable','totalAmount','netTotal','depAmount'];
+  for(const k of AMTK){
+    if(src[k] != null && !isNaN(Number(src[k]))){ amount = Number(src[k]); break; }
+  }
+  if(amount == null){
+    for(const wk of ['gr','inv','po','rtv','si','to','pay','memo']){
+      if(src[wk] && typeof src[wk] === 'object'){
+        for(const k of AMTK){ if(src[wk][k] != null && !isNaN(Number(src[wk][k]))){ amount = Number(src[wk][k]); break; } }
+        if(amount != null) break;
+      }
+    }
+  }
+  let n = null;
+  if(Array.isArray(action.data)) n = action.data.length;
+  return { action:t, label, ref: ref ? ref.slice(0,80) : null, amount,
+    count: n, reason: (src.reason || src.note || src.cancelReason || null) };
+}
+
 // 🆕 FIX: rtv.method ไม่เคยถูกเขียนที่ไหนเลย (legacy) — โค้ดที่เช็ค method==='replacement'
 //    จึงเป็น dead condition ทำให้ปุ่ม/guard ที่พึ่งมันไม่ทำงาน · ใช้ตัวนี้แทนทุกที่
 function isReplacementRTV(r){
@@ -2895,7 +2977,7 @@ global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
   // React bits
   R, h, useState, useEffect, useMemo, useCallback, useRef, useReducer, createContext, useContext, Fragment,
-  isReplacementRTV,
+  isReplacementRTV, describeAction,
   // Constants
   STORAGE_KEY, LEGACY_KEY, APP_VERSION, MODULES, MODULE_FILES, ROLE_SCOPE, LZ,
   PERM_TREE, PERM_ACTION_LABEL, PERM_MODULE_LABEL, ROLE_DEFAULT_PERMS, QUICK_PROFILES,
@@ -3458,6 +3540,99 @@ Object.assign(global.ERP, {
       _retryTimer = setTimeout(_flushCloudPush, 10000);
     });
   }
+  // ==================== 📜 AUDIT LOG (ตารางแยก append-only) ====================
+  // เก็บ "ทุกการกระทำ" ในตาราง erp_audit_log — ไม่ปนในก้อน state หลัก
+  //   เหตุผล: state ถูกเขียนทับทั้งก้อนทุกครั้งที่บันทึก ถ้าใส่ประวัติปนไปด้วย
+  //   ก้อนจะโตเรื่อย ๆ จน push ช้า + ถูกตัดทิ้งเมื่อเกินเพดาน = ประวัติหาย
+  //   ตารางแยกให้สิทธิ์แค่ insert/select (ไม่มี update/delete) → แก้ย้อนหลังไม่ได้ = หลักฐานเชื่อถือได้
+  var AUDIT_TABLE = 'erp_audit_log';
+  var _auditBuf = [];
+  var _auditTimer = null;
+  var _auditTableOk = null;    // null=ยังไม่รู้ · true=มีตาราง · false=ยังไม่ได้สร้าง
+  var _auditDropped = 0;
+  var AUDIT_LS_KEY = 'erp_v5__auditPending';
+
+  function auditStatus(){
+    return { tableOk: _auditTableOk, pending: _auditBuf.length, dropped: _auditDropped, table: AUDIT_TABLE };
+  }
+
+  function _auditSaveLocal(){
+    try {
+      if(_auditBuf.length) global.localStorage.setItem(AUDIT_LS_KEY, JSON.stringify(_auditBuf.slice(-500)));
+      else global.localStorage.removeItem(AUDIT_LS_KEY);
+    } catch(_e){}
+  }
+  function _auditLoadLocal(){
+    try {
+      var raw = global.localStorage.getItem(AUDIT_LS_KEY);
+      if(raw){ var arr = JSON.parse(raw); if(Array.isArray(arr) && arr.length) _auditBuf = arr.concat(_auditBuf); }
+    } catch(_e){}
+  }
+
+  async function flushAudit(){
+    if(_auditTimer){ clearTimeout(_auditTimer); _auditTimer = null; }
+    if(!_auditBuf.length) return { ok:true, sent:0 };
+    var sb = _sb(); if(!sb) return { ok:false, error:'ยังไม่พร้อม' };
+    if(_auditTableOk === false) return { ok:false, error:'ยังไม่ได้สร้างตาราง' };
+    var batch = _auditBuf.splice(0, 200);
+    try {
+      var res = await sb.from(AUDIT_TABLE).insert(batch);
+      if(res.error){
+        var m = String(res.error.message || '');
+        if(/does not exist|schema cache|relation .* does not/i.test(m)){
+          _auditTableOk = false;            // ยังไม่ได้สร้างตาราง — หยุดยิง เก็บไว้ในเครื่องก่อน
+          _auditBuf = batch.concat(_auditBuf); _auditSaveLocal();
+          return { ok:false, error:'ยังไม่ได้สร้างตาราง ' + AUDIT_TABLE };
+        }
+        _auditBuf = batch.concat(_auditBuf);  // ยิงไม่สำเร็จ → คืนเข้าคิว ลองใหม่รอบหน้า
+        _auditSaveLocal();
+        return { ok:false, error:m };
+      }
+      _auditTableOk = true;
+      _auditSaveLocal();
+      return { ok:true, sent:batch.length };
+    } catch(e){
+      _auditBuf = batch.concat(_auditBuf); _auditSaveLocal();
+      return { ok:false, error:(e && e.message) || String(e) };
+    }
+  }
+
+  function logAudit(entry){
+    if(!entry) return;
+    if(_auditBuf.length > 5000){ _auditDropped++; return; }   // กันหน่วยความจำบวมถ้า cloud ล่มยาว
+    _auditBuf.push(entry);
+    if(_auditBuf.length >= 40){ flushAudit(); return; }
+    if(!_auditTimer) _auditTimer = setTimeout(function(){ flushAudit(); }, 4000);
+  }
+
+  // อ่านประวัติจาก cloud (สำหรับหน้า Audit Log)
+  async function queryAudit(opts){
+    opts = opts || {};
+    var sb = _sb(); if(!sb) return { rows:[], error:'ยังไม่พร้อม' };
+    try {
+      var q = sb.from(AUDIT_TABLE).select('*').order('ts', { ascending:false }).limit(opts.limit || 300);
+      if(opts.from) q = q.gte('ts', opts.from);
+      if(opts.to) q = q.lte('ts', opts.to);
+      if(opts.byUser) q = q.eq('by_user', opts.byUser);
+      if(opts.action) q = q.eq('action', opts.action);
+      if(opts.search) q = q.or('ref.ilike.%' + opts.search + '%,label.ilike.%' + opts.search + '%');
+      var res = await q;
+      if(res.error){
+        var m = String(res.error.message||'');
+        if(/does not exist|schema cache/i.test(m)) _auditTableOk = false;
+        return { rows:[], error:m };
+      }
+      _auditTableOk = true;
+      return { rows: res.data || [] };
+    } catch(e){ return { rows:[], error:(e && e.message)||String(e) }; }
+  }
+
+  _auditLoadLocal();
+  try {
+    global.addEventListener('beforeunload', function(){ try { _auditSaveLocal(); } catch(_e){} });
+    global.addEventListener('visibilitychange', function(){ if(global.document && global.document.hidden) flushAudit(); });
+  } catch(_e){}
+
   function cloudSaveStatus(){
     return { cloudOnly: isCloudOnly(), dirty: _dirty, pushing: _pushing, conflict: _conflict,
              lastSaveAt: _lastCloudSaveAt || null, error: _lastCloudErr, token: _tok };
@@ -3499,6 +3674,7 @@ Object.assign(global.ERP, {
     resetPasswordForEmail: resetPasswordForEmail, updatePassword: updatePassword,
     onRecovery: onRecovery, isRecoveryMode: isRecoveryMode,
     pushSnapshot: pushSnapshot, autoPush: autoPush, listSnapshots: listSnapshots,
+    logAudit: logAudit, flushAudit: flushAudit, queryAudit: queryAudit, auditStatus: auditStatus, AUDIT_TABLE: AUDIT_TABLE,
     restoreToLocal: restoreToLocal, syncStatus: syncStatus, setAutoSync: setAutoSync,
     deviceId: deviceId,
     // ☁️☁️ cloud-only mode (Supabase = source of truth)
@@ -9295,6 +9471,32 @@ function MainShell(){
   });
   const [bootstrapping, setBootstrapping] = useState(false);
 
+  // 🆕 📜 บันทึก "ทุกการกระทำ" — ครอบ dispatch ไว้ชั้นเดียว จึงเก็บได้ครบทุก action ที่ผ่านระบบ
+  //    ส่งเข้าตารางแยก erp_audit_log (append-only) ไม่ปนในก้อน state → ก้อนไม่บวม ประวัติไม่ถูกตัด
+  const _rawDispatch = dispatch;
+  const dispatchLogged = R.useCallback((action) => {
+    try {
+      const SB = global.ERP.SBSync;
+      if(SB && SB.logAudit && global.ERP.describeAction){
+        const cur = (global.ERP.__getState && global.ERP.__getState()) || {};
+        const d = global.ERP.describeAction(action, cur);
+        if(d){
+          const u = cur.currentUser;
+          SB.logAudit({
+            ts: new Date().toISOString(),
+            action: d.action, label: d.label, ref: d.ref,
+            amount: d.amount, by_user: u && u.username || null,
+            by_name: (u && (u.name || u.username)) || null,
+            branch: cur.currentBranch || null,
+            device: (SB.deviceId && SB.deviceId()) || null,
+            detail: (d.count != null || d.reason) ? { count:d.count, reason:d.reason } : null,
+          });
+        }
+      }
+    } catch(_la){}
+    _rawDispatch(action);
+  }, [_rawDispatch]);
+
   // Persist state (debounced) + expose state getter ให้ async helpers
   const _firstSaveRef = R.useRef(true);
   const _skipSaveRef = R.useRef(null);    // 🆕 เก็บ "ตัว state ก้อนที่ดึงมาจาก cloud" ไว้เทียบ (ไม่ใช้ boolean — กันชนจังหวะ)
@@ -9393,7 +9595,7 @@ function MainShell(){
     );
   }
 
-  return h(AppShell, { state, dispatch });
+  return h(AppShell, { state, dispatch: dispatchLogged });
 }
 
 // ==================== APP SHELL ====================
@@ -46620,6 +46822,7 @@ function AccountingModule({ state, dispatch }){
         { k:'expCat',  label:'📝 ค่าใช้จ่ายตามประเภท' },
         { k:'expByInv', label:'📋 รายจ่ายตาม INV (Reconcile)' },
         { k:'audit',    label:'📜 Audit Log (ประวัติการแก้)' },
+        { k:'actlog',   label:'🧾 ประวัติทุกการกระทำ' },
         { k:'approvals',label:'📋 คำขออนุมัติ (ทั้งหมด)' },
       ]},
   ];
@@ -46727,6 +46930,7 @@ function AccountingModule({ state, dispatch }){
     tab==='expCat'    && h(ExpenseByCategory, { state }),
     tab==='expByInv'  && h(ExpenseByInvoiceReport, { state }),
     tab==='audit'     && h(AuditLogTab, { state, dispatch, user }),
+    tab==='actlog'    && h(ActionLogTab, { state, user }),
     tab==='approvals' && h(ApprovalRequestsTab, { state, dispatch, user }),
     tab==='assets'    && h(AssetRegisterTab, { state, dispatch, user }),
     tab==='assetSched'&& h(AssetDepreciationScheduleReport, { state }),
@@ -48134,6 +48338,106 @@ function ApprovalRequestsTab({ state, dispatch, user }){
 // ================================================================
 // 📜 AUDIT LOG TAB — ประวัติการแก้ไข/ยกเลิก/อนุมัติ รวมศูนย์
 // ================================================================
+
+// ================================================================
+// 🧾 ประวัติทุกการกระทำ — อ่านจากตารางแยก erp_audit_log (append-only บน cloud)
+// ================================================================
+function ActionLogTab({ state, user }){
+  const SB = global.ERP.SBSync;
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [q, setQ] = useState('');
+  const [byUser, setByUser] = useState('');
+  const dr = useDateRange(7);
+
+  const load = async () => {
+    if(!SB || !SB.queryAudit){ setErr('ยังไม่ได้เชื่อม cloud'); return; }
+    setBusy(true); setErr('');
+    const r = await SB.queryAudit({
+      from: dr.startDate ? dr.startDate + 'T00:00:00Z' : null,
+      to:   dr.endDate ? dr.endDate + 'T23:59:59Z' : null,
+      byUser: byUser || null, search: q.trim() || null, limit: 500 });
+    setBusy(false);
+    if(r.error){ setErr(r.error); setRows([]); return; }
+    setRows(r.rows || []);
+  };
+  useEffect(() => { load(); }, [dr.startDate, dr.endDate, byUser]);
+
+  const st = (SB && SB.auditStatus) ? SB.auditStatus() : {};
+  const needSetup = st.tableOk === false || /does not exist|schema cache/i.test(err||'');
+  const SQL = `create table if not exists erp_audit_log (
+  id bigserial primary key,
+  ts timestamptz not null default now(),
+  action text not null,
+  label text, ref text, amount numeric,
+  by_user text, by_name text, branch text, device text,
+  detail jsonb
+);
+create index if not exists erp_audit_log_ts_idx on erp_audit_log (ts desc);
+create index if not exists erp_audit_log_user_idx on erp_audit_log (by_user);
+alter table erp_audit_log enable row level security;
+create policy "audit read"   on erp_audit_log for select to authenticated using (true);
+create policy "audit insert" on erp_audit_log for insert to authenticated with check (true);`;
+
+  return h('div', null,
+    h('div', { className:'bg-slate-50 border border-slate-200 rounded p-3 mb-3 text-sm text-slate-700' },
+      '🧾 บันทึก ', h('b', null, 'ทุกการกระทำ'), ' ที่ผ่านระบบ — ใครทำอะไร เมื่อไหร่ กับเอกสารไหน · ',
+      'เก็บในตารางแยกบน cloud ที่ ', h('b', null, 'แก้ย้อนหลังไม่ได้'), ' (มีสิทธิ์แค่เพิ่มกับอ่าน)',
+      st.pending > 0 && h('span', { className:'text-amber-700' }, ` · รอส่งขึ้น cloud ${st.pending} รายการ`)),
+
+    needSetup && h('div', { className:'bg-amber-50 border-2 border-amber-300 rounded p-3 mb-3 text-sm' },
+      h('div', { className:'font-bold text-amber-900 mb-1' }, '⚠️ ยังไม่ได้สร้างตารางเก็บประวัติบน Supabase'),
+      h('div', { className:'text-xs text-amber-900 mb-2' },
+        'ระบบกำลังเก็บประวัติไว้ในเครื่องชั่วคราว (สูงสุด 500 รายการ) — เปิด Supabase → SQL Editor → วางคำสั่งนี้แล้วกด Run ครั้งเดียว จากนั้นประวัติจะไหลขึ้น cloud เอง'),
+      h('textarea', { readOnly:true, value:SQL, rows:10,
+        onClick:e=>e.target.select(),
+        className:'w-full text-[11px] font-mono bg-white border rounded p-2' })),
+
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex flex-wrap gap-2 items-end' },
+      h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' }),
+      h('input', { type:'text', value:q, onChange:e=>setQ(e.target.value),
+        onKeyDown:e=>{ if(e.key==='Enter') load(); },
+        placeholder:'ค้นเลขเอกสาร / รายการ', className:'px-3 py-1.5 border-2 rounded text-sm' }),
+      h('select', { value:byUser, onChange:e=>setByUser(e.target.value),
+        className:'px-3 py-1.5 border-2 rounded text-sm' },
+        h('option', { value:'' }, 'ทุกคน'),
+        (state.users||[]).map(u => h('option', { key:u.id, value:u.username }, u.name || u.username))),
+      h(Button, { variant:'primary', size:'sm', onClick:load }, busy ? 'กำลังโหลด…' : '🔍 ค้นหา'),
+      rows.length > 0 && h(Button, { variant:'secondary', size:'sm', onClick:()=>{
+        const csv = [['เวลา','ผู้ทำ','การกระทำ','อ้างอิง','จำนวนเงิน','สาขา','action']];
+        rows.forEach(r => csv.push([r.ts, r.by_name||r.by_user||'', r.label||'', r.ref||'',
+          r.amount!=null?r.amount:'', r.branch||'', r.action]));
+        exportCSV(`action-log-${getToday()}.csv`, csv);
+      }}, '⬇️ CSV')),
+
+    err && !needSetup && h('div', { className:'bg-red-50 border border-red-200 rounded p-2 text-sm text-red-700 mb-3' }, '❌ ', err),
+
+    rows.length === 0
+      ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
+          busy ? 'กำลังโหลด…' : 'ไม่พบประวัติในช่วงที่เลือก')
+      : h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+          h('table', { className:'w-full text-sm' },
+            h('thead', { className:'bg-gray-50 border-b' },
+              h('tr', null, ['เวลา','ผู้ทำ','การกระทำ','อ้างอิง','จำนวนเงิน','สาขา'].map(x =>
+                h('th', { key:x, className:'px-3 py-2 text-left text-xs' }, x)))),
+            h('tbody', { className:'divide-y' },
+              rows.map(r => h('tr', { key:r.id, className:'hover:bg-gray-50' },
+                h('td', { className:'px-3 py-1.5 text-xs whitespace-nowrap' },
+                  new Date(r.ts).toLocaleString('th-TH')),
+                h('td', { className:'px-3 py-1.5 text-xs' }, r.by_name || r.by_user || '-'),
+                h('td', { className:'px-3 py-1.5 text-sm' }, r.label || r.action,
+                  r.detail && r.detail.reason && h('div', { className:'text-[11px] text-gray-500' },
+                    '💬 ', String(r.detail.reason).slice(0,90)),
+                  r.detail && r.detail.count != null && h('span', { className:'text-[11px] text-gray-500' },
+                    ` (${r.detail.count} รายการ)`)),
+                h('td', { className:'px-3 py-1.5 font-mono text-xs text-blue-700' }, r.ref || '-'),
+                h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' },
+                  r.amount != null ? fmtCur(r.amount) : '-'),
+                h('td', { className:'px-3 py-1.5 text-xs text-gray-500' }, r.branch || '-'))))))
+  );
+}
+
 function AuditLogTab({ state, dispatch, user }){
   const dr = useDateRange(30);
   const [filter, setFilter] = useState('all'); // all | edit_inv | void_inv | reverse_pay | approval
