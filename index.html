@@ -5524,6 +5524,91 @@ function reducer(s, a){
         auditLog };
     }
 
+    // 🆕 supplier เปลี่ยนใจ: เดิมตกลง "ใช้บิลเดิม + ใบลดหนี้" แต่ภายหลังบอกว่าจะส่งของมาเติมแทน
+    //    และจะไม่ออกใบลดหนี้ → ต้องถอนการหัก CN ออก แล้วกลับไปสถานะ "รอ supplier ส่งเพิ่ม"
+    //    เดิมทำได้ทางเดียวคือยกเลิกใบตั้งหนี้ทั้งใบ (UNDO_SHORT_DECISION บล็อกถ้ามี PI แล้ว)
+    //    ซึ่งพังมากถ้าจ่ายเงินไปแล้ว — ตัวนี้ถอนเฉพาะส่วน CN ใบตั้งหนี้/ภาษีซื้อยังอยู่เหมือนเดิม
+    // a.data: { poId, lineIdx, reason, by }
+    case 'REVERT_CN_TO_DELIVERY': {
+      const { poId, lineIdx, reason, by } = a.data;
+      const po = (s.pos||[]).find(p => p.id === poId);
+      if(!po){ alert('ไม่พบ PO'); return s; }
+      const line = (po.lines||[])[lineIdx];
+      if(!line){ alert('ไม่พบรายการใน PO'); return s; }
+      if(line.shortStatus !== 'decided_keep_inv_cn'){
+        alert('รายการนี้ไม่ได้อยู่ในสถานะ "ใช้บิลเดิม + รอใบลดหนี้"'); return s;
+      }
+      const memo = line.cnMemoId ? (s.supplierMemos||[]).find(m => m.id === line.cnMemoId) : null;
+      if(!memo){ alert('ไม่พบใบลดหนี้ที่ผูกกับรายการนี้'); return s; }
+      if(memo.status === 'cancelled'){ alert('ใบลดหนี้นี้ถูกยกเลิกไปแล้ว'); return s; }
+      // ถ้าได้เอกสารจริงจาก supplier มาแล้ว = เครดิตเกิดขึ้นจริง ห้ามถอนเงียบ ๆ
+      if(memo.supMemoNumber || memo.docStatus === 'received'){
+        alert(`⛔ ถอนไม่ได้ — บันทึกไว้แล้วว่าได้รับใบลดหนี้เลขที่ ${memo.supMemoNumber||'-'}\n\n`
+          + 'ถ้า supplier จะส่งของแทนจริง ต้องให้เขายกเลิกใบลดหนี้นั้นก่อน\n'
+          + 'แล้วค่อยลบเลขเอกสารออกจากระบบ');
+        return s;
+      }
+      const _net = Number(memo.appliedAmount || memo.netAmount) || 0;
+
+      let invoices = s.invoices || [];
+      let journalEntries = s.journalEntries || [];
+      let seqJe = s.seq?.je || 0;
+
+      // 1) ถอนการหักออกจากใบตั้งหนี้ (ถ้าเคยหักไปแล้ว) → หนี้กลับขึ้นมาเท่าเดิม
+      if(memo.status === 'applied_await_doc' && memo.refInvId){
+        const inv = invoices.find(i => i.id === memo.refInvId);
+        if(inv){
+          const _newNet = (inv.netPayable||0) + _net;
+          const _remain = _newNet - (inv.paidAmount||0);
+          invoices = invoices.map(i => i.id === inv.id ? { ...i,
+            netPayable: _newNet,
+            creditApplied: Math.max(0, (i.creditApplied||0) - _net),
+            memoApplied: (i.memoApplied||[]).filter(x => x.memoId !== memo.id),
+            paymentStatus: _remain <= 0.01 ? 'paid' : ((i.paidAmount||0) > 0 ? 'partial' : 'unpaid'),
+          } : i);
+        }
+        // 2) กลับรายการ JE ที่ลงตอนหัก CN
+        const origJe = journalEntries.find(j => j.id === memo.applyJeId);
+        if(origJe && !origJe.reversed && !origJe.voidedReversal){
+          seqJe += 1;
+          const d = new Date();
+          const suf = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(seqJe).padStart(4,'0')}`;
+          journalEntries = journalEntries.map(j => j.id === origJe.id ? { ...j, reversed:true } : j);
+          journalEntries = [...journalEntries, {
+            ...origJe,
+            id: 'je_cnrevert_' + Date.now().toString(36) + Math.random().toString(36).slice(2,5),
+            jeNumber: 'JE-VOID-' + (origJe.jeNumber||''), date: getToday(),
+            description: `ถอนการหักใบลดหนี้ ${memo.memoNumber} — supplier จะส่งของแทน`,
+            refType: 'cn_auto_revert', source: 'cn_auto_revert',
+            voidedReversal: true, reversed: false,
+            lines: (origJe.lines||[]).map(l => ({ ...l, debit:l.credit||0, credit:l.debit||0 })),
+            totalDebit: origJe.totalCredit||0, totalCredit: origJe.totalDebit||0,
+            createdAt: Date.now(), postedAt: Date.now(), postedBy: by,
+          }];
+        }
+      }
+
+      // 3) ยกเลิกใบลดหนี้ + 4) กลับไปสถานะรอของ
+      const supplierMemos = (s.supplierMemos||[]).map(m => m.id === memo.id
+        ? { ...m, status:'cancelled', cancelledAt:Date.now(), cancelledBy:by,
+            cancelReason: `supplier จะส่งของแทนใบลดหนี้ — ${reason||'-'}` } : m);
+      const newLines = (po.lines||[]).map((l, i) => i === lineIdx
+        ? { ...l, shortStatus:'wait_extra', cnMemoId:null,
+            cnRevertedAt: Date.now(), cnRevertedBy: by, cnRevertReason: reason||'',
+            decidedBy: by, decidedAt: Date.now(),
+            decisionReason: `กลับเป็นรอของ (เดิมใช้บิลเดิม+CN) — ${reason||'-'}` } : l);
+
+      return { ...s,
+        pos: (s.pos||[]).map(p => p.id === poId ? { ...p, lines:newLines, status:'partial' } : p),
+        supplierMemos, invoices, journalEntries,
+        seq: { ...s.seq, je: seqJe },
+        auditLog: [...(s.auditLog||[]), { id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,4),
+          ts:Date.now(), type:'cn_revert_to_delivery', by, entityId: poId, entityRef: po.poNumber,
+          amount: _net,
+          note: `line ${lineIdx+1}: ถอนใบลดหนี้ ${memo.memoNumber} (${_net.toFixed(2)}) — supplier จะส่งของแทน · ${reason||''}` }],
+      };
+    }
+
     case 'APPLY_CN_MEMO': {
       const { memoId, invId, amount, by } = a.data;
       const memo = (s.supplierMemos||[]).find(m => m.id === memoId);
@@ -36786,6 +36871,36 @@ function ShortDecisionTab({ state, dispatch, user }){
     })).filter(x => x.pendingLines.length > 0)
   , [state.pos]);
 
+  // 🆕 line ที่ตัดสินไป "ใช้บิลเดิม + รอใบลดหนี้" แล้ว แต่ยังไม่ได้เอกสาร
+  //    เผื่อ supplier เปลี่ยนใจมาส่งของแทน → จัดซื้อต้องกลับคำได้โดยไม่ต้องยกเลิกใบตั้งหนี้
+  const posAwaitCn = useMemo(() =>
+    (state.pos||[]).map(po => ({
+      po,
+      cnLines: (po.lines||[])
+        .map((l, idx) => ({ l, idx }))
+        .filter(x => {
+          if(x.l.shortStatus !== 'decided_keep_inv_cn' || !x.l.cnMemoId) return false;
+          const m = (state.supplierMemos||[]).find(y => y.id === x.l.cnMemoId);
+          return !!m && m.status !== 'cancelled' && !m.supMemoNumber;
+        }),
+    })).filter(x => x.cnLines.length > 0)
+  , [state.pos, state.supplierMemos]);
+
+  const revertCn = (po, idx) => {
+    const l = po.lines[idx];
+    const m = (state.supplierMemos||[]).find(y => y.id === l.cnMemoId) || {};
+    const amt = Number(m.appliedAmount || m.netAmount) || 0;
+    const reason = prompt(
+      `supplier เปลี่ยนใจ จะส่งของมาเติมแทนการออกใบลดหนี้?\n\n`
+      + `ระบบจะ: ยกเลิกใบลดหนี้ ${m.memoNumber||''} (${fmtCur(amt)})\n`
+      + `   · ถอนยอดที่หักออกจากใบตั้งหนี้ → หนี้กลับขึ้นมาเท่าเดิม\n`
+      + `   · กลับเป็นสถานะ "รอ supplier ส่งเพิ่ม" → คลังรับของต่อได้เลย ไม่ต้องเปิด PO ใหม่\n\n`
+      + `เหตุผล / ใครแจ้งมา:`, '');
+    if(reason === null) return;
+    if(!reason.trim()) return alert('ต้องระบุเหตุผล');
+    dispatch({ type:'REVERT_CN_TO_DELIVERY', data:{ poId:po.id, lineIdx:idx, reason:reason.trim(), by:user.username }});
+  };
+
   // 🆕 RTV-2: RTV ที่รอตัดสินใจ
   const rtvPending = useMemo(() =>
     (state.returns||[]).filter(r => r.rtvStatus === 'pending_decision')
@@ -36871,6 +36986,37 @@ function ShortDecisionTab({ state, dispatch, user }){
                   );
                 })));
           })),
+
+    posAwaitCn.length > 0 && h('div', { className:'mt-5' },
+      h('h3', { className:'text-lg font-bold mb-2' },
+        '💳 ใช้บิลเดิม — รอใบลดหนี้จาก supplier (', posAwaitCn.reduce((n,x)=>n+x.cnLines.length,0), ')'),
+      h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 mb-2 text-xs text-blue-900' },
+        'ถ้า supplier เปลี่ยนใจ ', h('b', null, 'จะส่งของมาเติมแทนการออกใบลดหนี้'),
+        ' → กดปุ่มด้านขวาเพื่อกลับเป็น "รอส่งเพิ่ม" ระบบจะถอนยอดที่หักไว้คืนให้ ',
+        'และคลังรับของต่อได้เลยโดยไม่ต้องเปิด PO ใหม่'),
+      h('div', { className:'space-y-3' },
+        posAwaitCn.map(({ po, cnLines }) => {
+          const sup = state.suppliers.find(x => x.id === po.supplierId);
+          return h('div', { key:po.id, className:'bg-white rounded-lg shadow p-3' },
+            h('div', { className:'font-bold mb-2' },
+              h('span', { className:'font-mono text-blue-700' }, po.poNumber), ' · ', sup?.name || '-'),
+            h('div', { className:'space-y-1' },
+              cnLines.map(({ l, idx }) => {
+                const it = state.items.find(x => x.id === l.itemId);
+                const m = (state.supplierMemos||[]).find(y => y.id === l.cnMemoId) || {};
+                const amt = Number(m.appliedAmount || m.netAmount) || 0;
+                return h('div', { key:idx, className:'bg-purple-50 border border-purple-200 rounded p-2 flex items-center justify-between gap-2' },
+                  h('div', null,
+                    h('span', { className:'font-medium text-sm' }, it?.name || l.itemId),
+                    h('span', { className:'text-xs text-gray-600 ml-2' },
+                      'ขาด ', fmtNum(l.shortQty||0), ' · ใบลดหนี้ ',
+                      h('b', { className:'text-purple-800' }, m.memoNumber||'-'), ' ', fmtCur(amt),
+                      m.status === 'applied_await_doc' && h('span', { className:'text-green-700' }, ' · หักจากบิลแล้ว')),
+                    m.awaitDocNote && h('div', { className:'text-[10px] text-gray-600 mt-0.5' }, '📝 ', m.awaitDocNote)),
+                  hasPerm(user, 'purchase', 'po', 'edit') && h(Button, { variant:'secondary', size:'sm', onClick:()=>revertCn(po, idx) },
+                    '🔄 supplier จะส่งของแทน'));
+              })));
+        }))),
 
     decideLine && h(ShortDecisionModal, { po: decideLine.po, lineIdx: decideLine.lineIdx,
       state, dispatch, user, onClose: ()=>setDecideLine(null) }),
