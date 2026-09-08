@@ -125,13 +125,37 @@ function fmtNum(n){
   if(n===null||n===undefined||isNaN(n)) return '0';
   return Number(n).toLocaleString('th-TH');
 }
+// 📅 รูปแบบวันที่มาตรฐานของทั้งระบบ = ตัวเลขล้วน วว/ดด/ปป (ปี พ.ศ. 2 หลัก) เช่น 07/09/69
+//    (เดิมเป็น "7 ก.ย. 69" — user ขอเป็นตัวเลขล้วน อ่าน/เทียบเร็วกว่าในตาราง)
+//    ⚠️ ถ้าที่ไหน "ต้องการชื่อเดือนไทย" จริง ๆ (หัวใบกำกับภาษี/เอกสารพิมพ์) ให้ใช้ fmtDateTH()
+//       ห้ามแก้ fmtDate กลับ — เอกสารพิมพ์แต่ละใบมี thDate() ของตัวเองอยู่แล้ว (sales-full / purchase)
+const _TH_MON_SHORT = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+function _splitISODate(s){
+  if(!s) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  return m ? m : null;
+}
 function fmtDate(s){
   if(!s) return '-';
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  const m = _splitISODate(s);
   if(!m) return s;
-  const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
-  const y = (parseInt(m[1])+543).toString().slice(-2);
-  return `${parseInt(m[3])} ${months[parseInt(m[2])-1]} ${y}`;
+  const be = parseInt(m[1], 10) + 543;
+  return `${m[3]}/${m[2]}/${String(be % 100).padStart(2,'0')}`;
+}
+// วว/ดด/ปปปป (พ.ศ. เต็ม) — ใช้ตรงที่ปีต้องไม่กำกวม เช่น ช่องเลือกวันที่ / หัวรายงาน
+function fmtDateFull(s){
+  if(!s) return '-';
+  const m = _splitISODate(s);
+  if(!m) return s;
+  return `${m[3]}/${m[2]}/${parseInt(m[1], 10) + 543}`;
+}
+// รูปแบบเดิม "7 ก.ย. 69" (ชื่อเดือนไทยย่อ) — สงวนไว้ให้เอกสาร/หัวข้อที่ต้องอ่านเป็นคำ
+function fmtDateTH(s){
+  if(!s) return '-';
+  const m = _splitISODate(s);
+  if(!m) return s;
+  const y = (parseInt(m[1], 10) + 543).toString().slice(-2);
+  return `${parseInt(m[3], 10)} ${_TH_MON_SHORT[parseInt(m[2], 10) - 1]} ${y}`;
 }
 // 🆕 ทรัพย์สิน: แปลงจำนวนวันคงเหลือ → ปี/เดือน/วัน อ่านง่าย (ใช้กับ warranty countdown ในทะเบียนทรัพย์สิน)
 function fmtDurDays(days){
@@ -1659,7 +1683,9 @@ function BEDateInput({ value, onChange, className, placeholder, disabled }){
     return () => document.removeEventListener('mousedown', close);
   }, []);
 
-  const display = value ? fmtDateBE(value) : (placeholder || 'เลือกวันที่');
+  // 📅 แสดงเป็นตัวเลขล้วนให้ตรงกับ fmtDate ที่ใช้ในตาราง/รายงาน แต่โชว์ปี พ.ศ. เต็ม
+  //    (ช่องกรอกวันที่ = จุดที่ปีต้องไม่กำกวม · ปฏิทินด้านล่างก็โชว์ปี พ.ศ. เต็มเหมือนกัน)
+  const display = value ? fmtDateFull(value) : (placeholder || 'เลือกวันที่');
 
   // Build grid of days for current viewYM
   const firstDay = new Date(viewYM.y, viewYM.m, 1);
@@ -3067,7 +3093,7 @@ Object.assign(global.ERP, {
   WHT_CATEGORIES, WHT_SUB5_TYPES, WHT_SECTION_LABELS, genWHNumber, buildWHTCerts,
   findDupSupInv, consumeSupplierCredit,
   // Helpers
-  genId, getToday, fmtCur, fmtNum, fmtDate, fmtDurDays, cls,
+  genId, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, getBaseUnit, findItemUnit, toBaseQty, unitsForPurpose,
   getStockUnitsRanked, getAllUnitsRanked, formatQtyMulti, multiUnitsToBase,
@@ -5429,7 +5455,15 @@ function reducer(s, a){
         date: data.date, refPoId: data.refPoId, refInvId: data.refInvId,
         amount: data.amount, vatAmount: data.vatAmount, netAmount: data.netAmount,
         supMemoNumber: data.supMemoNumber, supMemoImage: data.supMemoImage,
+        // 🆕 FIX(P0): ไม่เคยเก็บ supMemoDate → memo หายจากรายงานภาษีซื้อถาวร
+        //    (ทั้ง 2 รายงานกรองด้วย supMemoNumber && supMemoDate) ทั้งที่ JE หัก 1150 ไปแล้ว
+        //    = GL กับ ภ.พ.30 ไม่ตรงกัน · fallback เป็นวันที่เอกสารถ้าไม่ได้กรอก
+        supMemoDate: data.supMemoDate || data.date,
         reason: data.reason, reasonNote: data.reasonNote,
+        // 🆕 เก็บ metadata ที่จอ CN ส่งมา (เดิม whitelist ตัดทิ้งหมด)
+        //    noRefInvReason สำคัญ: เป็นเหตุผลบังคับกรอกเมื่อไม่อ้างอิง INV — ถ้าตัดทิ้ง = หลักฐานหาย
+        priceMode: data.priceMode, grossEntered: data.grossEntered,
+        vatMismatch7: data.vatMismatch7, noRefInvReason: data.noRefInvReason,
         disposition: data.disposition, applyToInvId: data.applyToInvId,
         jeId: je.id, jeNumber, status: data.disposition === 'apply_now' ? 'applied' : 'open',
         createdBy: data.by, createdAt: Date.now(),
@@ -9577,6 +9611,33 @@ const {
   canSeeStockValue, usePersistedTab,
 } = global.ERP;
 
+// ==================== SHELL LAYOUT CSS ====================
+// 🧷 ทำให้แถบบน + เมนูซ้ายค้างที่เดิม โดยล็อกความสูงเปลือกแอป = 1 หน้าจอ
+//    100dvh = ความสูงจริงบนมือถือ (กันแถบ URL ของ Safari/Chrome กินพื้นที่จนปุ่มล่างหาย)
+//    บรรทัด 100vh อยู่ก่อนเป็น fallback ให้เบราว์เซอร์เก่าที่ไม่รู้จัก dvh
+//    @media print: ปลดล็อกกลับเป็นเอกสารยาว ไม่งั้น Ctrl+P จะได้แค่ส่วนที่เห็นบนจอ
+const SHELL_CSS = [
+  '.erp-shell{height:100vh;height:100dvh}',
+  '@media print{',
+  '  .erp-shell{height:auto!important;overflow:visible!important;display:block!important}',
+  '  .erp-shell-head,.erp-sidebar,.erp-mobile-nav{display:none!important}',
+  '  .erp-body{display:block!important;overflow:visible!important;min-height:0!important}',
+  '  .erp-main{overflow:visible!important;padding:0!important}',
+  '}',
+].join('\n');
+
+function injectShellCSS(){
+  try {
+    if(!global.document || document.getElementById('erp-shell-css')) return;
+    const st = document.createElement('style');
+    st.id = 'erp-shell-css';
+    st.textContent = SHELL_CSS;
+    (document.head || document.documentElement).appendChild(st);
+  } catch(_e){}
+}
+
+injectShellCSS();   // ใส่ทันทีที่โหลดไฟล์ (mount() เรียกซ้ำได้ — กันไว้กรณี render จากทางอื่น)
+
 // ==================== MENU DEFINITION ====================
 // แต่ละ tab ผูกกับ module name + เงื่อนไขการแสดง
 // branch.features = { stock, transfer, production, salesLight, salesFull } ปิด feature ต่อสาขา
@@ -9830,18 +9891,28 @@ function AppShell({ state, dispatch }){
     return () => document.removeEventListener('focusin', onFocusIn);
   }, []);
 
-  return h('div', { className:'min-h-screen bg-slate-50 flex flex-col' },
-    // Top nav
-    h(TopBar, { state, dispatch, user, currentBranch, setActiveTab }),
-    // 🆕 แจ้งเมื่อเครื่องอื่นบันทึกข้อมูลใหม่ (งานข้ามแผนก เช่น จัดซื้อเปิด PO → คลังเห็นรายการรอรับของ)
-    h(CloudUpdateBanner, null),
+  // 🧷 LAYOUT: ล็อกความสูง shell = 1 หน้าจอ แล้วให้ <main> เป็นตัวเลื่อนแทนทั้งหน้า
+  //   → แถบบน (TopBar/แจ้งเตือน/เมนูมือถือ) + เมนูซ้าย "ค้างที่เดิม" ไม่เลื่อนตามเนื้อหา
+  //   → แถบแท็บในโมดูลที่ใส่ sticky top-0 จะเกาะขอบบนพื้นที่เนื้อหาได้ทันที (เดิม main เป็น overflow-x-auto
+  //     ที่ไม่มีความสูงจำกัด → sticky ข้างในไม่เคยทำงาน)
+  //   → มือถือ: sidebar ยังซ่อน (hidden md:block) แต่มี MobileNav แถบเลื่อนแนวนอนแทน — ไม่บังเนื้อหา
+  //   → สั่งพิมพ์: .erp-shell/.erp-main ถูกปลดล็อกใน @media print (ดู SHELL_CSS) จะได้พิมพ์ยาวทั้งหน้า
+  return h('div', { className:'erp-shell bg-slate-50 flex flex-col overflow-hidden' },
+    h('div', { className:'erp-shell-head shrink-0' },
+      // Top nav
+      h(TopBar, { state, dispatch, user, currentBranch, setActiveTab }),
+      // 🆕 แจ้งเมื่อเครื่องอื่นบันทึกข้อมูลใหม่ (งานข้ามแผนก เช่น จัดซื้อเปิด PO → คลังเห็นรายการรอรับของ)
+      h(CloudUpdateBanner, null),
+      // 📱 เมนูหลักสำหรับจอแคบ (sidebar ซ่อนอยู่) — ค้างบนเหมือนกัน
+      h(MobileNav, { items:visibleMenu, active:activeTab, onChange:setActiveTab })
+    ),
 
-    h('div', { className:'flex-1 flex' },
+    h('div', { className:'erp-body flex-1 flex min-h-0' },
       // Sidebar
       h(Sidebar, { items:visibleMenu, active:activeTab, onChange:setActiveTab, state }),
 
-      // Main content
-      h('main', { className:'flex-1 p-4 md:p-6 overflow-x-auto' },
+      // Main content — ตัวเลื่อนจริงของแอป
+      h('main', { className:'erp-main flex-1 min-w-0 overflow-auto p-4 md:p-6' },
         h(ContentArea, { activeTab, state, dispatch })
       )
     ),
@@ -10634,6 +10705,8 @@ function TopBar({ state, dispatch, user, currentBranch, setActiveTab }){
   const allowedBranches = getAllowedBranches(user, state);
   const canSwitch = allowedBranches.length > 1;
 
+  // 🧷 อยู่ในกลุ่มหัวที่ไม่เลื่อนอยู่แล้ว — คง sticky top-0 z-30 ไว้เพื่อรักษาลำดับชั้นเดิม
+  //    (z-30 < Modal z-50 < Combobox/ปฏิทิน z-10000 — อย่าขยับค่านี้)
   return h('header', { className:'bg-white border-b shadow-sm sticky top-0 z-30' },
     h('div', { className:'flex items-center justify-between px-4 md:px-6 py-2.5' },
       // Logo + branch
@@ -10700,8 +10773,10 @@ function TopBar({ state, dispatch, user, currentBranch, setActiveTab }){
 }
 
 // ==================== SIDEBAR ====================
+// 🧷 ค้างที่เดิมเวลาเลื่อนหน้า: ตัวมันสูงเท่าแถวเนื้อหา (flex stretch) + เลื่อนในตัวเองถ้าเมนูยาวเกินจอ
+//    (จอแคบยังซ่อนไว้เหมือนเดิม — ใช้ MobileNav แทน ไม่งั้นเมนูกินพื้นที่จนอ่านเนื้อหาไม่ได้)
 function Sidebar({ items, active, onChange, state }){
-  return h('nav', { className:'w-52 bg-white border-r min-h-full hidden md:block' },
+  return h('nav', { className:'erp-sidebar w-52 shrink-0 bg-white border-r overflow-y-auto hidden md:block' },
     h('div', { className:'p-2 space-y-0.5' },
       items.map(it =>
         h('button', {
@@ -10722,6 +10797,30 @@ function Sidebar({ items, active, onChange, state }){
     h('div', { className:'p-3 mx-2 mt-4 bg-blue-50 rounded-lg text-xs text-blue-800' },
       h('div', { className:'font-bold mb-1' }, 'ℹ️ โหมดปัจจุบัน'),
       h('div', null, isHQ(state, state.currentBranch) ? 'สำนักงานใหญ่ — ครบทุกฟีเจอร์' : 'สาขา — ผลิต/คลัง/โอน/ขาย')
+    )
+  );
+}
+
+// ==================== MOBILE NAV (จอแคบ) ====================
+// 📱 จอ < md เดิมไม่มีเมนูเลย (sidebar เป็น hidden md:block) → สลับโมดูลไม่ได้
+//    ใส่แถบเลื่อนแนวนอนไว้ในกลุ่มหัวที่ค้างอยู่ — เตี้ย ไม่ทับเนื้อหา และเลื่อนดูเมนูครบทุกอัน
+function MobileNav({ items, active, onChange }){
+  if(!items || items.length === 0) return null;
+  return h('div', { className:'erp-mobile-nav md:hidden bg-white border-b overflow-x-auto' },
+    h('div', { className:'flex gap-1 px-2 py-1.5 w-max' },
+      items.map(it =>
+        h('button', {
+          key: it.key,
+          onClick: () => onChange(it.key),
+          className: cls(
+            'flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition',
+            active===it.key ? 'bg-blue-600 text-white shadow' : 'bg-gray-100 text-gray-700'
+          )
+        },
+          h('span', null, it.icon),
+          h('span', null, it.label)
+        )
+      )
     )
   );
 }
@@ -11084,6 +11183,7 @@ function CloudGate(){
 
 // ==================== MOUNT ====================
 function mount(rootEl){
+  injectShellCSS();   // 🧷 style ของเปลือกแอป (sticky shell + print override)
   // React 18 — ใช้ createRoot
   const root = ReactDOM.createRoot(rootEl);
   const cloudOnly = !!(global.ERP.SBSync && global.ERP.SBSync.isCloudOnly && global.ERP.SBSync.isCloudOnly());
@@ -35600,11 +35700,25 @@ const INV_STATUS = {
   partial: ['จ่ายบางส่วน','bg-amber-100 text-amber-800'],
   paid:    ['จ่ายแล้ว',   'bg-green-100 text-green-700'],
 };
+// 🆕 1.1: ชุดช่องทางการชำระเดียวทั้งระบบ — ใช้ทั้งตอน "ตั้งหนี้" (แผนจะจ่ายทางไหน = inv.payMethod)
+//   และตอน "จ่ายจริง" (pay.method) เพื่อดึงรายงานเทียบกันได้
+//   ⚠️ ต้องมี 'transfer' อยู่ (โค้ดจ่ายเงินเช็ค method==='transfer' เพื่อบังคับเลือกบัญชีธนาคาร/ตัดยอดแบงก์)
+// วิธีจ่ายที่ "จ่ายจริง" ผ่านระบบได้ — ตัดยอดธนาคาร/ลง JE ครบ
 const PAY_METHODS = [
-  { v:'transfer', label:'โอนธนาคาร' },
-  { v:'cash',     label:'เงินสด' },
-  { v:'cheque',   label:'เช็ค' },
-  { v:'other',    label:'อื่นๆ' },
+  { v:'transfer',   label:'โอนธนาคาร' },
+  { v:'cash',       label:'เงินสด' },
+  { v:'cheque',     label:'เช็ค' },
+  { v:'other',      label:'อื่นๆ' },
+];
+// 🆕 "ตั้งใจจ่ายทางไหน" ตอนตั้งหนี้ — เป็นข้อมูลสำหรับวางแผน/ดึงรายงาน ยังไม่ใช่การจ่ายจริง
+//    มีเงินสดย่อย/บัตร เพิ่มเข้ามาได้ เพราะแค่บันทึกความตั้งใจ ไม่ได้ตัดเงิน
+//    ⚠️ ห้ามเอา list นี้ไปใช้ในจอจ่ายเงินจริง — 2 วิธีนี้ยังไม่มี money-path (ไม่ตัดเงินสดย่อย/ไม่ลง JE บัตร)
+const PAY_INTENT_METHODS = [
+  ...PAY_METHODS.slice(0, 2),
+  { v:'petty_cash', label:'เงินสดย่อย' },
+  PAY_METHODS[2],
+  { v:'card',       label:'บัตรเครดิต/เดบิต' },
+  PAY_METHODS[3],
 ];
 
 // ==================== MAIN ====================
@@ -36176,6 +36290,10 @@ function NewPOModal({ state, dispatch, user, onClose }){
   const fileRef = useRef(null);
   // 🆕 schedule editor — เลข line index ที่กำลังแก้ schedule
   const [editScheduleIdx, setEditScheduleIdx] = useState(null);
+  // 🆕 FIX-3.1: แผงยืนยันคำเตือนก่อนสร้าง PO (แทน native confirm ซ้อนชั้น)
+  //   { submit:bool, warnings:[{key,title,detail,hint}], zeroInfo:{count,names}|null }
+  const [pendingSave, setPendingSave] = useState(null);
+  const [saving, setSaving] = useState(false);
 
   const activeItems = useMemo(() =>
     (state.items||[]).filter(i => i.active !== false), [state.items]);
@@ -36248,43 +36366,28 @@ function NewPOModal({ state, dispatch, user, onClose }){
   // Calculate totals (line-level VAT + priceMode)
   const totals = useMemo(() => calcPOTotals(lines, priceMode, state.company), [lines, priceMode, state.company]);
 
-  const save = (submit=true) => {
-    if(!supplierId) return alert('เลือก supplier');
-    if(!destinationBranch) return alert('เลือกสาขาปลายทาง');
+  // ════════════════════════════════════════════════════════════════
+  // 🔴 FIX-3.1 "สร้าง PO ซ้ำแล้วกดตกลง → PO ไม่ถูกสร้าง"
+  //   สาเหตุ: save() เดิมยิง native confirm() ซ้อนกันได้ถึง 3 ชั้นในการกดปุ่มครั้งเดียว
+  //     (1) ราคา 0 → (2) PO ซ้ำ → (ถ้ามี) อื่น ๆ  ทุกชั้นจบด้วย `return` เงียบ ๆ ถ้าได้ false
+  //   เบราว์เซอร์ (Chrome/Edge) จะขึ้นช่อง "ป้องกันไม่ให้หน้านี้สร้างกล่องโต้ตอบเพิ่มเติม"
+  //   เมื่อมี dialog หลายกล่องติดกันในการกดครั้งเดียว · ถ้าโดนติ๊ก (หรือเบราว์เซอร์ suppress เอง)
+  //   → confirm() ชั้นถัดไป "คืน false ทันทีโดยไม่แสดงกล่อง" = ผู้ใช้กดตกลงที่กล่องแรกแล้ว
+  //   แต่ save() ก็ยัง return ออกไปเงียบ ๆ ไม่มี PO ไม่มี error ไม่มีอะไรเลย
+  //   (ตรงกับอาการ "กดตกลงแล้วไม่ขึ้น ต้องกรอกใหม่ทั้งหมดอีกรอบถึงจะขึ้น" — รอบใหม่ dialog ถูก reset)
+  //   แก้: ไม่ใช้ native confirm อีก → รวมคำเตือนทุกข้อเป็น "แผงยืนยันในหน้าจอ" ชั้นเดียว
+  //        + ห่อ dispatch ด้วย try/catch ไม่ให้ล้มเงียบ + ข้อมูลที่กรอกไว้ไม่หายทุกกรณี
+  // ════════════════════════════════════════════════════════════════
+  const doCreate = (submit, zeroInfo) => {
     const valid = lines.filter(l => l.itemId && l.qty > 0);
-    if(valid.length === 0) return alert('ใส่อย่างน้อย 1 รายการ');
-    // 🆕 ทรัพย์สิน: ติ๊ก "เป็นทรัพย์สิน" แล้วต้องเลือกหมวด (กันหมวดว่างไหลไปตั้งค่าเสื่อมผิด)
-    const assetNoCat = valid.filter(l => l.isAsset && !l.assetCategoryId);
-    if(assetNoCat.length > 0) return alert(`มี ${assetNoCat.length} รายการที่ติ๊ก "💎 เป็นทรัพย์สิน" แต่ยังไม่เลือกหมวดทรัพย์สิน — เลือกหมวดก่อนบันทึก`);
-
-    // 🆕 A4: กัน PO ราคา 0 ผ่านเงียบ (สินค้านำเข้า costPrice=0 → ราคา default 0 → ต้นทุน/3-way match เพี้ยน)
-    //   ของแถม (isFreebie) ราคา 0 ตั้งใจ ยกเว้น · ที่เหลือราคา ≤0 ต้องยืนยันก่อน
-    const zeroPriced = valid.filter(l => !l.isFreebie && !((Number(l.unitPrice)||0) > 0));
-    if(zeroPriced.length > 0){
-      const names = zeroPriced.map(l => (state.items.find(i=>i.id===l.itemId)?.name) || l.itemId).slice(0,6).join(', ');
-      if(!window.confirm(`⚠️ มี ${zeroPriced.length} รายการราคา 0 บาท:\n${names}${zeroPriced.length>6?' …':''}\n\nราคา 0 จะทำให้ต้นทุนสินค้า/ยอด PO ผิด และปิดการตรวจ 3-way match\nถ้าตั้งใจให้เป็น "ของแถม" → ติ๊ก 🎁 ของแถม แทน\n\nยืนยันบันทึก PO ราคา 0 ต่อ?`)) return;
+    if(valid.length === 0){ alert('ใส่อย่างน้อย 1 รายการ'); return; }
+    try {
+      setSaving(true);
       // 🆕 A4-UAT(audit P2): บันทึกร่องรอย force-save PO ราคา 0 (non-freebie) — ตรวจย้อนได้
-      dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'po_zero_price_override', by:user.username, byName:user.name||user.username,
-        ts:Date.now(), note:`บันทึก PO ราคา 0 (${zeroPriced.length} รายการ): ${names}`, summary:`PO ราคา 0 x${zeroPriced.length}` }});
-    }
-
-    // Duplicate check — PO supplier เดียวกันที่ยังไม่รับของครบ + มี item ซ้ำ
-    const openPOs = (state.pos||[]).filter(p =>
-      p.supplierId === supplierId &&
-      ['pending','approved','partial'].includes(p.status)
-    );
-    const myItemIds = new Set(valid.map(l => l.itemId));
-    const overlaps = [];
-    for(const p of openPOs){
-      const dupItems = (p.lines||[]).filter(l => myItemIds.has(l.itemId) && (l.receivedQty||0) < (l.qty||0));
-      if(dupItems.length > 0){
-        const names = dupItems.map(l => state.items.find(i=>i.id===l.itemId)?.name || l.itemId).join(', ');
-        overlaps.push(`• ${p.poNumber} (${p.status}): ${names}`);
+      if(zeroInfo && zeroInfo.count > 0){
+        dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'po_zero_price_override', by:user.username, byName:user.name||user.username,
+          ts:Date.now(), note:`บันทึก PO ราคา 0 (${zeroInfo.count} รายการ): ${zeroInfo.names}`, summary:`PO ราคา 0 x${zeroInfo.count}` }});
       }
-    }
-    if(overlaps.length > 0){
-      if(!confirm(`⚠️ พบ PO ที่สั่งสินค้าเดียวกันอยู่แล้ว และยังรับของไม่ครบ:\n\n${overlaps.join('\n')}\n\nต้องการสร้าง PO ใหม่ต่อไปหรือไม่?`)) return;
-    }
 
     const createdDate = getToday();   // วันที่สร้างเอกสารจริงในระบบ
     const poNumber = global.ERP.genDocNumber('PO', poDate, state.pos||[], 'poNumber');
@@ -36347,8 +36450,67 @@ function NewPOModal({ state, dispatch, user, onClose }){
       createdByName: user.name,
       createdAt: Date.now(),
     };
-    dispatch({ type:'ADD_PO', data });
-    onClose();
+      dispatch({ type:'ADD_PO', data });
+      if(global.ERP.toast) global.ERP.toast(`✅ สร้าง ${poNumber} แล้ว (${submit?'ส่งอนุมัติ':'ร่าง'})`, 'success');
+      setPendingSave(null);
+      onClose();
+    } catch(err){
+      setSaving(false);
+      setPendingSave(null);
+      console.error('[NewPOModal] สร้าง PO ไม่สำเร็จ', err);
+      alert('❌ สร้าง PO ไม่สำเร็จ: ' + (err && err.message ? err.message : err) +
+        '\n\nข้อมูลที่กรอกไว้ยังอยู่ในหน้าจอ — แก้แล้วกดสร้างใหม่ได้เลย');
+    }
+  };
+
+  // ตรวจ + รวบคำเตือน แล้วค่อยเปิดแผงยืนยัน (ไม่มี native confirm)
+  const save = (submit=true) => {
+    if(!supplierId) return alert('เลือก supplier');
+    if(!destinationBranch) return alert('เลือกสาขาปลายทาง');
+    const valid = lines.filter(l => l.itemId && l.qty > 0);
+    if(valid.length === 0) return alert('ใส่อย่างน้อย 1 รายการ');
+    // 🆕 ทรัพย์สิน: ติ๊ก "เป็นทรัพย์สิน" แล้วต้องเลือกหมวด (กันหมวดว่างไหลไปตั้งค่าเสื่อมผิด) — hard block
+    const assetNoCat = valid.filter(l => l.isAsset && !l.assetCategoryId);
+    if(assetNoCat.length > 0) return alert(`มี ${assetNoCat.length} รายการที่ติ๊ก "💎 เป็นทรัพย์สิน" แต่ยังไม่เลือกหมวดทรัพย์สิน — เลือกหมวดก่อนบันทึก`);
+
+    const warnings = [];
+
+    // 🆕 A4: กัน PO ราคา 0 ผ่านเงียบ (สินค้านำเข้า costPrice=0 → ราคา default 0 → ต้นทุน/3-way match เพี้ยน)
+    //   ของแถม (isFreebie) ราคา 0 ตั้งใจ ยกเว้น · ที่เหลือราคา ≤0 ต้องยืนยันก่อน
+    const zeroPriced = valid.filter(l => !l.isFreebie && !((Number(l.unitPrice)||0) > 0));
+    let zeroInfo = null;
+    if(zeroPriced.length > 0){
+      const znames = zeroPriced.map(l => (state.items.find(i=>i.id===l.itemId)?.name) || l.itemId).slice(0,6).join(', ');
+      zeroInfo = { count: zeroPriced.length, names: znames };
+      warnings.push({ key:'zero',
+        title:`มี ${zeroPriced.length} รายการราคา 0 บาท`,
+        detail: znames + (zeroPriced.length > 6 ? ' …' : ''),
+        hint:'ราคา 0 ทำให้ต้นทุนสินค้า/ยอด PO ผิด และปิดการตรวจ 3-way match · ถ้าตั้งใจให้ฟรี → ติ๊ก 🎁 ของแถม แทน' });
+    }
+
+    // Duplicate check — PO supplier เดียวกันที่ยังไม่รับของครบ + มี item ซ้ำ
+    const openPOs = (state.pos||[]).filter(p =>
+      p.supplierId === supplierId &&
+      ['pending','approved','partial'].includes(p.status)
+    );
+    const myItemIds = new Set(valid.map(l => l.itemId));
+    const overlaps = [];
+    for(const p of openPOs){
+      const dupItems = (p.lines||[]).filter(l => myItemIds.has(l.itemId) && (l.receivedQty||0) < (l.qty||0));
+      if(dupItems.length > 0){
+        const dnames = dupItems.map(l => state.items.find(i=>i.id===l.itemId)?.name || l.itemId).join(', ');
+        overlaps.push(`${p.poNumber} (${PO_STATUS[p.status]?.[0]||p.status}) — ${dnames}`);
+      }
+    }
+    if(overlaps.length > 0){
+      warnings.push({ key:'dup',
+        title:'พบ PO ที่สั่งสินค้าเดียวกันอยู่แล้ว และยังรับของไม่ครบ',
+        detail: overlaps.join('\n'),
+        hint:'ถ้าตั้งใจสั่งเพิ่ม/สั่งคนละงวด กด "ยืนยันสร้าง PO" ได้เลย — ระบบไม่ได้ห้าม' });
+    }
+
+    if(warnings.length > 0){ setPendingSave({ submit, warnings, zeroInfo }); return; }
+    doCreate(submit, zeroInfo);
   };
 
   return h(Modal, { isOpen:true, title:'➕ สร้างใบสั่งซื้อ (PO)', onClose, size:'xl' },
@@ -36731,11 +36893,35 @@ function NewPOModal({ state, dispatch, user, onClose }){
       ),
 
       h('div', { className:'flex gap-2 pt-3 border-t' },
-        h(Button, { variant:'secondary', onClick:()=>save(false) }, '💾 บันทึกเป็นร่าง'),
-        h(Button, { variant:'primary', onClick:()=>save(true) }, '📤 สร้าง PO + ส่งอนุมัติ'),
-        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
+        h(Button, { variant:'secondary', disabled:saving, onClick:()=>save(false) }, '💾 บันทึกเป็นร่าง'),
+        h(Button, { variant:'primary', disabled:saving, onClick:()=>save(true) }, '📤 สร้าง PO + ส่งอนุมัติ'),
+        h(Button, { variant:'secondary', disabled:saving, onClick:onClose }, 'ยกเลิก'),
       )
     ),
+
+    // 🆕 FIX-3.1: แผงยืนยันคำเตือน (แทน native confirm ที่เบราว์เซอร์กลืนได้) — ข้อมูลในฟอร์มไม่หาย
+    pendingSave && h(Modal, { isOpen:true, size:'md', allowMinimize:false,
+      title:'⚠️ ตรวจสอบก่อนสร้าง PO', onClose:()=>setPendingSave(null) },
+      h('div', { className:'space-y-3' },
+        h('div', { className:'text-sm text-gray-700' },
+          'ระบบพบข้อควรระวัง ', h('b', null, pendingSave.warnings.length), ' ข้อ — ',
+          h('b', { className:'text-blue-700' }, 'ไม่ได้ห้ามสร้าง'), ' ถ้าตั้งใจแบบนี้กดยืนยันได้เลย'),
+        pendingSave.warnings.map(w => h('div', { key:w.key,
+          className:'bg-amber-50 border-2 border-amber-300 rounded p-3' },
+          h('div', { className:'font-bold text-amber-900 text-sm' }, '⚠️ ', w.title),
+          h('div', { className:'text-xs text-amber-900 mt-1 whitespace-pre-line font-mono' }, w.detail),
+          w.hint && h('div', { className:'text-[11px] text-amber-700 mt-1' }, '💡 ', w.hint))),
+        h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-800' },
+          '📋 สรุปใบนี้: ', h('b', null, (state.suppliers||[]).find(s=>s.id===supplierId)?.name || supplierId),
+          ' · ', h('b', null, lines.filter(l=>l.itemId && l.qty>0).length), ' รายการ · รวม ',
+          h('b', null, fmtCur(totals.total))),
+        h('div', { className:'flex gap-2 pt-2 border-t' },
+          h(Button, { variant:'primary', disabled:saving,
+            onClick:()=>doCreate(pendingSave.submit, pendingSave.zeroInfo) },
+            pendingSave.submit ? '✅ ยืนยันสร้าง PO + ส่งอนุมัติ' : '✅ ยืนยันบันทึกร่าง'),
+          h(Button, { variant:'secondary', disabled:saving, onClick:()=>setPendingSave(null) },
+            '↩️ กลับไปแก้ไข'))
+      )),
 
     // 🆕 Per-line delivery schedule editor
     editScheduleIdx !== null && lines[editScheduleIdx] && h(POLineScheduleModal, {
@@ -38211,13 +38397,30 @@ function CreditDebitMemoModal({ presetPo, presetInv, presetType, state, dispatch
   const [amount, setAmount] = useState(0);
   const [vatAmount, setVatAmount] = useState(0);
   const [supMemoNumber, setSupMemoNumber] = useState('');
+  // 🆕 วันที่บนเอกสารของ supplier — เป็นตัวกำหนดเดือนภาษีในรายงานภาษีซื้อ (ม.82/10)
+  const [supMemoDate, setSupMemoDate] = useState(getToday());
   const [supMemoImage, setSupMemoImage] = useState(null);
   const [reason, setReason] = useState('ราคาผิด');
   const [reasonNote, setReasonNote] = useState('');
   const [disposition, setDisposition] = useState('keep_credit'); // keep_credit | apply_now | refund
   const [applyToInvId, setApplyToInvId] = useState('');
+  // 🆕 1.2(ก): โหมดราคาแบบเดียวกับตอนเปิด PO — ยอดที่กรอกรวม VAT แล้วหรือยัง
+  const [memoPriceMode, setMemoPriceMode] = useState('exclusive'); // exclusive | inclusive
 
-  const netAmount = (Number(amount)||0) + (Number(vatAmount)||0);
+  // 🆕 1.2(ข): รองรับบิลผสม — VAT กรอกเองได้ ไม่บังคับ 7% ของยอด
+  //   ตัวอย่างจริง: ใบลดหนี้ยอด 1,000 แต่ VAT จริง 50 (บางรายการยกเว้น VAT)
+  //   exclusive → ยอดที่กรอก = ก่อน VAT · inclusive → ยอดที่กรอก = รวม VAT แล้ว (ถอด VAT ที่กรอกออก)
+  const enteredAmt = Number(amount)||0;
+  const vatAmt = Number(vatAmount)||0;
+  const baseAmount = memoPriceMode === 'inclusive'
+    ? Number(Math.max(0, enteredAmt - vatAmt).toFixed(2))
+    : Number(enteredAmt.toFixed(2));
+  const netAmount = memoPriceMode === 'inclusive'
+    ? Number(enteredAmt.toFixed(2))
+    : Number((enteredAmt + vatAmt).toFixed(2));
+  const expectedVat7 = Number((baseAmount * 7 / 100).toFixed(2));
+  // เตือน (ไม่บล็อก) ถ้า VAT ที่กรอกไม่ตรง 7% ของฐาน — ปกติแปลว่าเป็นบิลผสม
+  const vatMismatch = baseAmount > 0 && Math.abs(vatAmt - expectedVat7) > 0.02;
   const isCredit = type === 'credit';
 
   // suppliers
@@ -38255,8 +38458,18 @@ function CreditDebitMemoModal({ presetPo, presetInv, presetType, state, dispatch
   const submit = () => {
     if(!supplierId){ alert('เลือก supplier'); return; }
     if(netAmount <= 0){ alert('ยอด > 0'); return; }
+    if(memoPriceMode === 'inclusive' && vatAmt > enteredAmt + 0.01){
+      alert('VAT มากกว่ายอดรวม — ตรวจโหมดราคา (เลือก "รวม VAT แล้ว" แต่กรอกยอดก่อน VAT?)'); return;
+    }
     if(!supMemoNumber.trim()){ alert('ใส่เลขเอกสารจาก supplier'); return; }
+    if(!supMemoDate){ alert('ใส่วันที่บนเอกสารจาก supplier (ใช้เป็นเดือนภาษี)'); return; }
     if(!reasonNote.trim()){ alert('ระบุรายละเอียดเหตุผล'); return; }
+    // 🆕 1.10(ข): ไม่ผูก INV → บังคับอธิบายเหตุผลให้ชัด (ไม่งั้นตามเอกสารย้อนหลังไม่ได้)
+    if(!refInvId && reasonNote.trim().length < 10){
+      alert('⛔ ไม่ได้เลือกใบตั้งหนี้ (INV) ที่อ้างอิง\n\n' +
+        'ถ้าไม่ผูก INV ต้องกรอก "รายละเอียด" อธิบายว่าใบนี้ลด/เพิ่มหนี้ของบิลไหน อย่างน้อย 10 ตัวอักษร\n' +
+        '(เช่น "ลดหนี้ค่าขนส่งบิล INV-6812 ที่ยังไม่ได้ตั้งในระบบ")'); return;
+    }
     if(disposition === 'apply_now' && !applyToInvId){ alert('เลือก INV ที่จะใช้หัก'); return; }
     if(!apAccount){ alert('ไม่พบ COA: เจ้าหนี้ (2100)'); return; }
     if(!expenseAcct){ alert('ไม่พบ COA: ค่าใช้จ่าย (5300) — เพิ่มใน ตั้งค่า → ผังบัญชี ก่อน'); return; }
@@ -38276,39 +38489,46 @@ function CreditDebitMemoModal({ presetPo, presetInv, presetType, state, dispatch
             ? `Supplier credit ค้าง — CN ${supMemoNumber}`
             : `ลดหนี้ตามใบลดหนี้ ${supMemoNumber}`) },
         { accountId: expenseAcct.id, accountCode: expenseAcct.code, accountName: expenseAcct.name,
-          debit: 0, credit: amount, description: `กลับต้นทุน/ค่าใช้จ่าย CN ${supMemoNumber}` },
+          debit: 0, credit: baseAmount, description: `กลับต้นทุน/ค่าใช้จ่าย CN ${supMemoNumber}` },
       ];
-      if(vatAmount > 0 && vatRefundAcct){
+      if(vatAmt > 0 && vatRefundAcct){
         lines.push({ accountId: vatRefundAcct.id, accountCode: vatRefundAcct.code, accountName: vatRefundAcct.name,
-          debit: 0, credit: vatAmount, description: `กลับภาษีซื้อตามใบลดหนี้ ${supMemoNumber}` });
+          debit: 0, credit: vatAmt, description: `กลับภาษีซื้อตามใบลดหนี้ ${supMemoNumber}` });
       }
       je = { date, description: `Credit Note ${supMemoNumber} — ${reasonNote}`,
         refType:'sup_memo_cn', source:'sup_memo_cn', status:'posted',
         postedBy: user.username, postedAt: Date.now(),
-        lines, totalDebit: netAmount, totalCredit: amount + (vatAmount > 0 && vatRefundAcct ? vatAmount : 0) };
+        lines, totalDebit: netAmount, totalCredit: baseAmount + (vatAmt > 0 && vatRefundAcct ? vatAmt : 0) };
     } else {
       // DN: เก็บเพิ่ม → DR Expense + DR VAT / CR AP
       const lines = [
         { accountId: (expenseAcct||apAccount).id, accountCode: (expenseAcct||apAccount).code,
           accountName: (expenseAcct||apAccount).name,
-          debit: amount, credit: 0, branchId: state.currentBranch, description: `Debit Note ${supMemoNumber} — ${reason}` },  // 🆕 money-path: DN expense ต้องลงสาขา (สอดคล้อง memoData.branchId)
+          debit: baseAmount, credit: 0, branchId: state.currentBranch, description: `Debit Note ${supMemoNumber} — ${reason}` },  // 🆕 money-path: DN expense ต้องลงสาขา (สอดคล้อง memoData.branchId)
       ];
-      if(vatAmount > 0 && vatRefundAcct){
+      if(vatAmt > 0 && vatRefundAcct){
         lines.push({ accountId: vatRefundAcct.id, accountCode: vatRefundAcct.code, accountName: vatRefundAcct.name,
-          debit: vatAmount, credit: 0, description: `VAT ซื้อเพิ่ม DN ${supMemoNumber}` });
+          debit: vatAmt, credit: 0, description: `VAT ซื้อเพิ่ม DN ${supMemoNumber}` });
       }
       lines.push({ accountId: apAccount.id, accountCode: apAccount.code, accountName: apAccount.name,
         debit: 0, credit: netAmount, description: `เพิ่มหนี้จาก DN ${supMemoNumber}` });
       je = { date, description: `Debit Note ${supMemoNumber} — ${reasonNote}`,
         refType:'sup_memo_dn', source:'sup_memo_dn', status:'posted',
         postedBy: user.username, postedAt: Date.now(),
-        lines, totalDebit: amount + vatAmount, totalCredit: netAmount };
+        lines, totalDebit: baseAmount + vatAmt, totalCredit: netAmount };
     }
 
     const memoData = {
       type, supplierId, branchId: state.currentBranch, date,
-      refPoId, refInvId, amount: Number(amount), vatAmount: Number(vatAmount), netAmount,
-      supMemoNumber, supMemoImage, reason, reasonNote,
+      refPoId, refInvId,
+      // 🆕 1.2: amount = ยอด "ก่อน VAT" เสมอ (ถอดให้แล้วถ้าเลือกโหมดรวม VAT)
+      amount: baseAmount, vatAmount: vatAmt, netAmount,
+      priceMode: memoPriceMode,          // 🆕 บันทึกไว้ว่ากรอกมาแบบไหน
+      grossEntered: enteredAmt,          // ยอดที่ผู้ใช้พิมพ์จริง (ไว้ตรวจย้อน)
+      vatMismatch7: vatMismatch,         // 🆕 บิลผสม (VAT ไม่ตรง 7%) — รายงานกรองได้
+      // 🆕 1.10: ไม่ผูก INV → เก็บเหตุผลไว้ให้ตรวจย้อน
+      noRefInvReason: refInvId ? '' : reasonNote.trim(),
+      supMemoNumber, supMemoDate, supMemoImage, reason, reasonNote,
       disposition: isCredit ? disposition : 'apply_now',
       applyToInvId: disposition === 'apply_now' ? applyToInvId : null,
       je,
@@ -38350,30 +38570,79 @@ function CreditDebitMemoModal({ presetPo, presetInv, presetType, state, dispatch
         h(Combobox, { value: supplierId, onChange: setSupplierId, options: suppliers,
           getKey: s=>s.id, getLabel: s=>s.name, placeholder: 'เลือก supplier' })),
 
-      // Ref
+      // Ref — 🆕 1.10(ก): เลือก supplier แล้วต้องมีช่องเลือก INV ของ supplier นั้นเพื่อผูก
       h('div', { className:'grid grid-cols-2 gap-2' },
         h(Field, { label:'อ้างอิง PO (optional)' },
           h(Combobox, { value: refPoId, onChange: setRefPoId,
             options:[{id:'',poNumber:'(ไม่เลือก)'},...supplierPos],
             getKey: p=>p.id, getLabel: p=>p.poNumber || '-', placeholder:'-' })),
-        h(Field, { label:'อ้างอิง INV (optional)' },
-          h(Combobox, { value: refInvId, onChange: setRefInvId,
-            options:[{id:'',invNumber:'(ไม่เลือก)'},...supplierInvs],
-            getKey: i=>i.id, getLabel: i=>i.invNumber || '-', placeholder:'-' }))),
+        h(Field, { label:'📄 อ้างอิงใบตั้งหนี้ (INV) ของ supplier นี้',
+          hint: refInvId ? '' : 'ถ้าไม่เลือก ต้องอธิบายในช่อง "รายละเอียด" อย่างน้อย 10 ตัวอักษร' },
+          !supplierId
+            ? h('div', { className:'text-xs text-gray-500 bg-gray-50 border rounded p-2' }, 'เลือก supplier ก่อน')
+            : supplierInvs.length === 0
+              ? h('div', { className:'text-xs text-orange-700 bg-orange-50 border border-orange-200 rounded p-2' },
+                  '⚠️ supplier รายนี้ยังไม่มีใบตั้งหนี้ในระบบ — กรอก "รายละเอียด" อธิบายแทน')
+              : h(Combobox, { value: refInvId, onChange: setRefInvId,
+                  options:[{id:'',invNumber:'(ไม่ผูก INV)'},...supplierInvs],
+                  getKey: i=>i.id,
+                  getLabel: i=> i.id
+                    ? `${i.invNumber} · ${fmtDate(i.invDate)} · ${fmtCur(i.netPayable||0)}${i.supInvNumber?` · บิล ${i.supInvNumber}`:''}`
+                    : '(ไม่ผูก INV)',
+                  getSearchText: i => [i.invNumber, i.supInvNumber, i.supTaxInvNumber, i.note].filter(Boolean).join(' '),
+                  placeholder:'-- เลือกใบตั้งหนี้ที่จะผูก --' }))),
+      supplierId && !refInvId && h('div', { className:'bg-amber-50 border-2 border-amber-300 rounded p-2 text-xs text-amber-900' },
+        '⚠️ ', h('b', null, 'ยังไม่ได้ผูกใบตั้งหนี้ (INV)'),
+        ' — บันทึกได้ แต่ต้องกรอกช่อง "รายละเอียด *" อธิบายว่าลด/เพิ่มหนี้ของบิลไหน (อย่างน้อย 10 ตัวอักษร)'),
 
-      // Amounts
+      // 🆕 1.2(ก): โหมดราคา (เหมือนตอนเปิด PO)
+      h(Field, { label:'💰 โหมดราคาของใบนี้',
+        hint:'supplier บางรายออกใบลดหนี้เป็นยอดรวม VAT แล้ว' },
+        h('div', { className:'grid grid-cols-2 gap-1 border-2 rounded p-0.5' },
+          h('button', { type:'button', onClick:()=>setMemoPriceMode('exclusive'),
+            className: cls('px-2 py-1.5 rounded text-xs font-medium',
+              memoPriceMode==='exclusive' ? 'bg-blue-600 text-white' : 'bg-white hover:bg-gray-100')
+          }, 'ยอดที่กรอก = ไม่รวม VAT'),
+          h('button', { type:'button', onClick:()=>setMemoPriceMode('inclusive'),
+            className: cls('px-2 py-1.5 rounded text-xs font-medium',
+              memoPriceMode==='inclusive' ? 'bg-blue-600 text-white' : 'bg-white hover:bg-gray-100')
+          }, 'ยอดที่กรอก = รวม VAT แล้ว'))),
+
+      // Amounts — 🆕 1.2(ข): VAT กรอกเองได้ (บิลผสม)
       h('div', { className:'grid grid-cols-3 gap-2' },
-        h(Field, { label:'ยอดเงิน (ก่อน VAT)' },
+        h(Field, { label: memoPriceMode==='inclusive' ? 'ยอดเงิน (รวม VAT แล้ว)' : 'ยอดเงิน (ก่อน VAT)' },
           h('input', { type:'number', value:amount, step:'0.01',
             onChange:e=>setAmount(Number(e.target.value)||0),
             className:'w-full px-3 py-2 border-2 rounded text-right font-bold' })),
-        h(Field, { label:'VAT' },
-          h('input', { type:'number', value:vatAmount, step:'0.01',
-            onChange:e=>setVatAmount(Number(e.target.value)||0),
-            className:'w-full px-3 py-2 border-2 rounded text-right' })),
+        h(Field, { label:'VAT (กรอกเองตามใบจริง)' },
+          h('div', null,
+            h('input', { type:'number', value:vatAmount, step:'0.01',
+              onChange:e=>setVatAmount(Number(e.target.value)||0),
+              className: cls('w-full px-3 py-2 border-2 rounded text-right',
+                vatMismatch && 'bg-amber-50 border-amber-400') }),
+            h('div', { className:'flex gap-2 mt-0.5' },
+              h('button', { type:'button',
+                onClick:()=>setVatAmount(memoPriceMode==='inclusive'
+                  ? Number((enteredAmt * 7 / 107).toFixed(2))
+                  : Number((enteredAmt * 7 / 100).toFixed(2))),
+                className:'text-[11px] text-blue-600 hover:underline' }, 'คิด 7% ให้'),
+              h('button', { type:'button', onClick:()=>setVatAmount(0),
+                className:'text-[11px] text-gray-500 hover:underline' }, 'ไม่มี VAT')))),
         h(Field, { label:'รวมสุทธิ' },
-          h('div', { className:'w-full px-3 py-2 border-2 rounded text-right font-bold bg-gray-50' },
-            fmtCur(netAmount)))),
+          h('div', null,
+            h('div', { className:'w-full px-3 py-2 border-2 rounded text-right font-bold bg-gray-50' },
+              fmtCur(netAmount)),
+            h('div', { className:'text-[10px] text-gray-500 text-right mt-0.5' },
+              'ก่อน VAT ', fmtCur(baseAmount))))),
+
+      // 🆕 1.2(ข): เตือน (ไม่บล็อก) ถ้า VAT ไม่ตรง 7% — บิลผสมเป็นเรื่องปกติ
+      vatMismatch && h('div', { className:'bg-amber-50 border-2 border-amber-300 rounded p-2 text-xs text-amber-900' },
+        h('b', null, '⚠️ VAT ไม่ตรง 7% ของยอดก่อน VAT'),
+        ` — กรอก ${fmtCur(vatAmt)} · 7% ของ ${fmtCur(baseAmount)} = ${fmtCur(expectedVat7)}`,
+        h('div', { className:'text-[11px] mt-0.5 text-amber-800' },
+          'ถ้าเป็นบิลผสม (บางรายการยกเว้น VAT) แบบนี้ถูกแล้ว — ระบบไม่บล็อก บันทึกต่อได้เลย'),
+        h('div', { className:'text-[11px] mt-0.5 text-amber-800' },
+          '💡 เขียนไว้ในช่อง "รายละเอียด" ด้วยว่ารายการไหนไม่มี VAT จะได้ตรวจย้อนได้')),
 
       // Sup memo info
       h('div', { className:'grid grid-cols-2 gap-2' },
@@ -38381,7 +38650,13 @@ function CreditDebitMemoModal({ presetPo, presetInv, presetType, state, dispatch
           h('input', { type:'text', value:supMemoNumber, onChange:e=>setSupMemoNumber(e.target.value),
             placeholder:'เช่น CN-2026-001',
             className:'w-full px-3 py-2 border-2 rounded text-sm' })),
-        h(Field, { label:'วันที่' },
+        // 🆕 วันที่บนเอกสารของ supplier = เดือนภาษีที่ใบลดหนี้นี้จะไปโผล่ในรายงานภาษีซื้อ
+        h(Field, { label:'📅 วันที่บนเอกสาร supplier *' },
+          h(BEDateInput, { value:supMemoDate, onChange:setSupMemoDate,
+            className:'w-full px-3 py-2 border-2 rounded text-sm' }),
+          h('div', { className:'text-[11px] text-gray-500 mt-0.5' },
+            'ใช้เป็นเดือนภาษีในรายงานภาษีซื้อ (ม.82/10)')),
+        h(Field, { label:'วันที่บันทึกในระบบ' },
           h(BEDateInput, { value:date, onChange:setDate,
             className:'w-full px-3 py-2 border-2 rounded text-sm' }))),
 
@@ -38435,12 +38710,12 @@ function CreditDebitMemoModal({ presetPo, presetInv, presetType, state, dispatch
         h('div', { className:'font-bold text-sm mb-2' }, '📊 JE ที่จะ post:'),
         h('div', { className:'text-xs font-mono space-y-1' },
           isCredit ? [
-            h('div', { key:'d1' }, '  DR เจ้าหนี้                    ', fmtCur(amount)),
-            vatAmount > 0 && h('div', { key:'d2' }, '  DR VAT ซื้อ (คืน)          ', fmtCur(vatAmount)),
+            h('div', { key:'d1' }, '  DR เจ้าหนี้                    ', fmtCur(baseAmount)),
+            vatAmt > 0 && h('div', { key:'d2' }, '  DR VAT ซื้อ (คืน)          ', fmtCur(vatAmt)),
             h('div', { key:'c' }, `  CR ${disposition==='keep_credit' ? 'Supplier Credit' : 'เจ้าหนี้ (apply)'}  `, fmtCur(netAmount)),
           ] : [
-            h('div', { key:'d1' }, '  DR ค่าใช้จ่าย                ', fmtCur(amount)),
-            vatAmount > 0 && h('div', { key:'d2' }, '  DR VAT ซื้อ (เพิ่ม)       ', fmtCur(vatAmount)),
+            h('div', { key:'d1' }, '  DR ค่าใช้จ่าย                ', fmtCur(baseAmount)),
+            vatAmt > 0 && h('div', { key:'d2' }, '  DR VAT ซื้อ (เพิ่ม)       ', fmtCur(vatAmt)),
             h('div', { key:'c' }, '  CR เจ้าหนี้                  ', fmtCur(netAmount)),
           ])),
 
@@ -38693,6 +38968,12 @@ function CreateINVModal({ gr, state, dispatch, user, onClose, onDone }){
   const [splitByWHT, setSplitByWHT] = useState(false);  // แยก INV ตาม WHT category ถ้า supplier ให้หลายหมวด
   const [splitCert, setSplitCert] = useState(false);    // 🆕 WHT2: แยกใบ 50ทวิ ต่อบรรทัด WHT
   const [note, setNote] = useState('');
+  // 🆕 1.1: ช่องทางการชำระ (ตั้งใจจ่ายทางไหน) — เก็บบน INV เพื่อดึงรายงานภายหลัง
+  //   ใช้ชุดเดียวกับตอนจ่ายจริง (PAY_METHODS) → เทียบ "แผน vs จ่ายจริง" ได้
+  const [payMethod, setPayMethod] = useState('transfer');
+  const [payMethodNote, setPayMethodNote] = useState('');
+  // 🆕 1.3: ชื่อผู้ขายบนใบกำกับ — พิมพ์อิสระได้ ถ้าต่างจากชื่อในทะเบียน supplier
+  const [supNameOverride, setSupNameOverride] = useState('');
 
   // ⭐ โหมดจัดการ RTV: 'deduct' = หักยอดจาก INV | 'fullCredit' = เปิดเต็ม ขอ credit note
   const [rtvMode, setRtvMode] = useState('deduct');
@@ -38921,6 +39202,9 @@ function CreateINVModal({ gr, state, dispatch, user, onClose, onDone }){
           netPayable: segNet, paidAmount: 0,
           paymentStatus: 'unpaid',
           note: `${note} (แยก ${idx+1}/${activeLines.length} — ${subLbl||catLabel})`.trim(),
+          // 🆕 1.1 + 1.3
+          payMethod, payMethodNote: payMethodNote.trim() || '',
+          ...(supNameOverride.trim() ? { supplierNameFreeform: supNameOverride.trim() } : {}),
           supInvImage: idx === 0 ? supInvImage : null,  // แนบรูปเฉพาะใบแรก
           splitGroup: finalSupInv || invNo,
           createdBy: user.username, createdAt: Date.now(),
@@ -38985,6 +39269,10 @@ function CreateINVModal({ gr, state, dispatch, user, onClose, onDone }){
       netPayable, paidAmount: 0,
       paymentStatus: 'unpaid',
       note,
+      // 🆕 1.1: ช่องทางการชำระที่ตั้งใจ (เก็บไว้ให้รายงาน + pre-fill ตอนจ่ายจริง)
+      payMethod, payMethodNote: payMethodNote.trim() || '',
+      // 🆕 1.3: ชื่อผู้ขายตามใบกำกับ (ถ้าพิมพ์อิสระ) — แสดงคู่กับชื่อในทะเบียน
+      ...(supNameOverride.trim() ? { supplierNameFreeform: supNameOverride.trim() } : {}),
       supInvImage,        // 📎 รูปใบแจ้งหนี้จาก supplier
       attachments: supInvImage ? [supInvImage] : [],
       // 🆕 Tax invoice (ใบกำกับภาษี) — แยกจาก supInvNumber
@@ -39251,6 +39539,25 @@ function CreateINVModal({ gr, state, dispatch, user, onClose, onDone }){
             className:'w-full px-3 py-2 border-2 rounded text-sm' })
         ),
       ),
+
+      // 🆕 1.1 + 1.3: ช่องทางการชำระ (ตั้งใจจ่ายทางไหน) + ชื่อผู้ขายบนใบกำกับ (พิมพ์เองได้)
+      h('div', { className:'border-2 border-teal-200 bg-teal-50/40 rounded p-2 space-y-2' },
+        h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
+          h(Field, { label:'💳 ช่องทางการชำระ (ตั้งใจจ่ายทางไหน)',
+            hint:'เก็บบนใบตั้งหนี้ → ดึงรายงานภายหลังได้ · ตอนจ่ายจริงแก้ได้อีกที' },
+            h('select', { value:payMethod, onChange:e=>setPayMethod(e.target.value),
+              className:'w-full px-3 py-2 border-2 rounded text-sm' },
+              PAY_INTENT_METHODS.map(m => h('option', { key:m.v, value:m.v }, m.label)))),
+          h(Field, { label:'หมายเหตุช่องทางชำระ (ถ้ามี)',
+            hint:'เช่น เลขเช็ค · ธนาคาร · บัตรใบไหน' },
+            h('input', { type:'text', value:payMethodNote, onChange:e=>setPayMethodNote(e.target.value),
+              placeholder: payMethod==='cheque' ? 'เลขเช็ค / ธนาคาร' : (payMethod==='card' ? 'บัตรใบไหน' : '-'),
+              className:'w-full px-3 py-2 border-2 rounded text-sm' }))),
+        h(Field, { label:'🏭 ชื่อผู้ขายตามใบกำกับ (พิมพ์อิสระ — ใส่เมื่อไม่ตรงกับทะเบียน)',
+          hint:`ทะเบียน: ${sup?.name || '-'} · เว้นว่าง = ใช้ชื่อในทะเบียน` },
+          h('input', { type:'text', value:supNameOverride, onChange:e=>setSupNameOverride(e.target.value),
+            placeholder: sup?.name || 'ชื่อผู้ขาย/ผู้รับเงินตามบิล',
+            className:'w-full px-3 py-2 border-2 rounded text-sm' }))),
 
       // 🆕 Supplier Document Section — แยก INV Sup vs Tax INV + ID card สำหรับ non-VAT
       h(SupplierDocSection, { supplier:sup,
@@ -39997,6 +40304,12 @@ function autoPostINV(inv, state, dispatch, user){
       debit: inv.vat, credit: 0, description: 'VAT ซื้อ' });
   }
   // 🆕 CG-6: rounding adjustment line — ถ้าบัญชีปัดยอดเพิ่ม (supplier บิลเกินมา) DR expense
+  if(roundAdj !== 0 && !roundAcc){
+    // 🆕 ไม่มีบัญชี 5390 → ถ้าปล่อยผ่าน JE จะไม่บาลานซ์เท่ายอดที่ปัด (งบทดลองเพี้ยนเงียบ ๆ)
+    alert('⚠️ ไม่พบบัญชี 5390 "ผลต่างปัดทศนิยม" ในผังบัญชี\n'
+      + 'ยอดที่ปัด ' + roundAdj.toFixed(2) + ' จะทำให้รายการบัญชีไม่สมดุล\n\n'
+      + 'เพิ่มบัญชี 5390 ใน ตั้งค่า → ผังบัญชี ก่อน แล้วตั้งหนี้ใหม่');
+  }
   if(roundAdj !== 0 && roundAcc){
     if(roundAdj > 0){
       // supplier bill > PO total → DR ค่าใช้จ่ายปัดทศนิยม
@@ -40640,6 +40953,11 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
   const [vatRate, setVatRate] = useState(7);
   const [whtRate, setWhtRate] = useState(0);
   const [note, setNote] = useState('');
+  // 🆕 1.9: ปรับยอด/ปัดเศษทศนิยม (± บาท) — ลง 5390 ผลต่างปัดทศนิยม เหมือนจอแก้ INV
+  const [roundingAdj, setRoundingAdj] = useState(0);
+  // 🆕 1.1: ช่องทางการชำระที่ตั้งใจ (ชุดเดียวกับตอนจ่ายจริง)
+  const [payMethod, setPayMethod] = useState('transfer');
+  const [payMethodNote, setPayMethodNote] = useState('');
   // 🆕 ดึง credit/deposit ของ supplier มาหัก
   const supplierCreditNotes = useMemo(() =>
     (state.invoices||[]).filter(i => i.supplierId === supplierId && (i.creditDue||0) > 0)
@@ -40772,7 +41090,8 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
   const vatableBase = (Number(vatRate)||0) === 0 ? 0
     : (vatBreakdown.hasLineData ? vatBreakdown.vatableBase : totalAmount);
   const wht = totalAmount * (Number(whtRate)||0) / 100;
-  const netPayable = totalAmount + vat - wht;
+  const roundAdjNum = Number(roundingAdj)||0;   // 🆕 1.9
+  const netPayable = totalAmount + vat - wht + roundAdjNum;
 
   const save = () => {
     if(!supplierId) return alert('เลือก supplier');
@@ -40856,11 +41175,14 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
       vatRate: Number(vatRate), vat,
       vatableBase,   // 🆕 A8: ฐาน VAT จริง (บิลผสม) — ภ.พ.30 อ่านตัวนี้แทน amount
       whtRate: Number(whtRate), whtAmount: wht,
+      roundingAdjustment: roundAdjNum,   // 🆕 1.9: ลง 5390 ผลต่างปัดทศนิยมใน autoPostINV
       creditUsed: creditAmt,
       depositUsed: depositAmt,
       netPayable: finalNet, paidAmount: 0,
       paymentStatus: 'unpaid',
       note,
+      // 🆕 1.1: ช่องทางการชำระที่ตั้งใจ
+      payMethod, payMethodNote: payMethodNote.trim() || '',
       createdBy: user.username,
       createdAt: Date.now(),
     };
@@ -40868,7 +41190,7 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
     dispatch({ type:'ADD_COMBINED_INV', data:{ inv, grIds:selected.map(g => g.id) }});
     // 🆕 UAT (pre-existing P0): เดิม Combined INV ไม่ post JE เลย (AP มีแต่ GL ไม่มี) — ลง JE ตั้งหนี้เหมือน INV เดี่ยว
     //   mirror po_gr: AP = net ของ credit (มัดจำหักผ่าน postDepositUseJE ต่างหาก กัน AP หักซ้ำ) · A8 vat/vatableBase + A9 asset split ทำงานผ่าน autoPostINV แล้ว
-    autoPostINV({ ...inv, netPayable: Math.max(0, totalAmount + vat - wht - creditAmt) }, state, dispatch, user);
+    autoPostINV({ ...inv, netPayable: Math.max(0, totalAmount + vat - wht + roundAdjNum - creditAmt) }, state, dispatch, user);
     // 🆕 F1F-2 / F1A-2: apply CN auto ทันที (Combined)
     for(const cn of allLinkedCNs){
       if(cn.status === 'await_doc'){
@@ -41032,7 +41354,12 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
             h('div', null,
               h('label', { className:'block text-xs font-medium mb-1' }, 'วันที่ Tax INV'),
               h(BEDateInput, { value:taxInvDate, onChange:setTaxInvDate,
-                className:'w-full px-3 py-2 border-2 rounded text-sm' })))),
+                className:'w-full px-3 py-2 border-2 rounded text-sm' }))),
+          // 🆕 1.4: บอกทางเข้าไปใส่ทีหลัง (เดิมมีปุ่มอยู่แล้วแต่หายาก)
+          taxInvLater && h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-[11px] text-blue-800' },
+            '📍 ใส่ทีหลังได้ที่ ', h('b', null, 'บัญชี → 📑 PI ทั้งหมด (ตั้งหนี้)'),
+            ' แล้วคลิกช่อง Tax INV สีส้ม (⏳ ใส่เลข) ของใบนั้น · หน้า Dashboard บัญชีมีแถบเตือน ',
+            h('b', null, '"📄 INV ยังไม่ได้รับ Tax INV"'), ' กดเข้าได้เลย')),
 
         // 🆕 Credit ของ supplier ที่ค้างอยู่
         totalCreditAvail > 0 && h('div', { className:'bg-purple-50 border-2 border-purple-300 rounded p-2 mb-3' },
@@ -41133,11 +41460,45 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
               h('span', { className:'w-24 text-right text-red-600' }, '- ' + fmtCur(wht))
             )
           ),
+          // 🆕 1.9: ปรับยอด / ปัดเศษทศนิยม (± บาท) — ให้ยอดตรงใบกำกับ supplier เป๊ะ
+          h('div', { className:'flex justify-between items-center' },
+            h('span', { title:'ผลต่างปัดเศษกับใบกำกับ supplier — ลงบัญชี 5390 ผลต่างปัดทศนิยม' },
+              '🔧 ปรับยอด/ปัดเศษ (± บาท):'),
+            h('div', { className:'flex items-center gap-2' },
+              h('input', { type:'number', value:roundingAdj, step:'0.01', placeholder:'0.00',
+                onChange:e=>setRoundingAdj(Number(e.target.value)||0),
+                className: cls('w-24 px-2 py-1 border rounded text-right text-xs',
+                  roundAdjNum !== 0 && 'bg-yellow-50 border-yellow-400') }),
+              h('button', { type:'button',
+                title:'ปัดยอดสุทธิให้ลงตัวเป็นจำนวนเต็มบาท',
+                onClick:()=>{
+                  const raw = totalAmount + vat - wht;
+                  setRoundingAdj(Number((Math.round(raw) - raw).toFixed(2)));
+                },
+                className:'text-[11px] text-blue-600 hover:underline whitespace-nowrap' }, 'ปัดเต็มบาท'),
+              roundAdjNum !== 0 && h('button', { type:'button', onClick:()=>setRoundingAdj(0),
+                className:'text-[11px] text-gray-500 hover:underline' }, 'ล้าง')
+            )
+          ),
+          roundAdjNum !== 0 && h('div', { className:'text-[11px] text-yellow-800 bg-yellow-50 border border-yellow-300 rounded px-2 py-1' },
+            `ผลต่างปัดทศนิยม ${roundAdjNum > 0 ? '+' : ''}${fmtCur(roundAdjNum)} จะลงบัญชี 5390 ผลต่างปัดทศนิยม`),
           h('div', { className:'flex justify-between font-bold text-lg pt-1 border-t' },
             h('span', null, 'สุทธิ:'),
             h('span', { className:'text-blue-900' }, fmtCur(netPayable))
           )
         ),
+
+        // 🆕 1.1: ช่องทางการชำระ (ตั้งใจจ่ายทางไหน)
+        h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3 mt-3' },
+          h(Field, { label:'💳 ช่องทางการชำระ (ตั้งใจจ่ายทางไหน)',
+            hint:'ใช้ชุดเดียวกับตอนจ่ายจริง' },
+            h('select', { value:payMethod, onChange:e=>setPayMethod(e.target.value),
+              className:'w-full px-3 py-2 border-2 rounded text-sm' },
+              PAY_METHODS.map(m => h('option', { key:m.v, value:m.v }, m.label)))),
+          h(Field, { label:'หมายเหตุช่องทางชำระ (ถ้ามี)' },
+            h('input', { type:'text', value:payMethodNote, onChange:e=>setPayMethodNote(e.target.value),
+              placeholder:'เช่น เลขเช็ค / ธนาคาร',
+              className:'w-full px-3 py-2 border-2 rounded text-sm' }))),
 
         h(Field, { label:'หมายเหตุ' },
           h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
@@ -41240,6 +41601,18 @@ function INVDetailModal({ inv, state, dispatch, user, onClose }){
 
       h('div', { className:'bg-gray-50 border rounded p-3 text-sm space-y-1' },
         h('div', null, h('b', null, 'Supplier: '), supName),
+        // 🆕 1.3: ถ้าคีย์ชื่อผู้ขายอิสระไว้ตอนตั้งหนี้ (ต่างจากทะเบียน) — แสดงคู่กัน
+        sup && inv.supplierNameFreeform && inv.supplierNameFreeform !== sup.name &&
+          h('div', { className:'text-xs text-indigo-700' },
+            h('b', null, '🏭 ชื่อบนใบกำกับ: '), inv.supplierNameFreeform),
+        // 🆕 1.1: ช่องทางการชำระที่ตั้งใจไว้ตอนตั้งหนี้
+        inv.payMethod && h('div', { className:'text-xs text-teal-700' },
+          h('b', null, '💳 ช่องทางชำระ (ตั้งใจ): '),
+          PAY_METHODS.find(m => m.v === inv.payMethod)?.label || inv.payMethod,
+          inv.payMethodNote && ` · ${inv.payMethodNote}`),
+        (Number(inv.roundingAdjustment)||0) !== 0 && h('div', { className:'text-xs text-yellow-800' },
+          h('b', null, '🔧 ปรับยอด/ปัดเศษ: '),
+          (Number(inv.roundingAdjustment) > 0 ? '+' : ''), fmtCur(Number(inv.roundingAdjustment)||0)),
         inv.source === 'direct_expense' && h('div', { className:'text-purple-700 font-medium' },
           h('b', null, 'ประเภท: '), inv.expenseLabel || 'ค่าใช้จ่าย',
           inv.description && ` · ${inv.description}`
@@ -41631,14 +42004,18 @@ function INVDetailModal({ inv, state, dispatch, user, onClose }){
 
 // 🆕 PP-5: EditWHTCertModal — แก้ข้อมูล cert (Mode 1: ไม่กระทบ JE)
 function EditWHTCertModal({ inv, certIdx, state, dispatch, user, onClose }){
-  const cert = (inv.whtCertificates||[])[certIdx];
-  if(!cert) return null;
-  const [certNumber, setCertNumber] = useState(cert.certNumber||'');
-  const [supName, setSupName] = useState(cert.supName || (state.suppliers.find(s=>s.id===inv.supplierId)?.name) || '');
-  const [supAddress, setSupAddress] = useState(cert.supAddress || (state.suppliers.find(s=>s.id===inv.supplierId)?.address) || '');
-  const [supTaxId, setSupTaxId] = useState(cert.supTaxId || (state.suppliers.find(s=>s.id===inv.supplierId)?.taxId) || '');
-  const [form, setForm] = useState(cert.form||'53');
+  // 🆕 FIX: early return อยู่ก่อน useState → จำนวน hooks ไม่เท่ากันระหว่าง render = React crash จอขาว
+  //    ใช้ object ว่างแทนตอนไม่เจอ แล้วค่อย return หลัง hook ครบ
+  const cert = (inv.whtCertificates||[])[certIdx] || null;
+  const _c = cert || {};
+  const [certNumber, setCertNumber] = useState(_c.certNumber||'');
+  const [supName, setSupName] = useState(_c.supName || (state.suppliers.find(s=>s.id===inv.supplierId)?.name) || '');
+  const [supAddress, setSupAddress] = useState(_c.supAddress || (state.suppliers.find(s=>s.id===inv.supplierId)?.address) || '');
+  const [supTaxId, setSupTaxId] = useState(_c.supTaxId || (state.suppliers.find(s=>s.id===inv.supplierId)?.taxId) || '');
+  const [form, setForm] = useState(_c.form||'53');
   const [reason, setReason] = useState('');
+
+  if(!cert) return null;   // 🆕 เช็คหลัง hooks ครบแล้ว
 
   const submit = () => {
     if(!reason.trim()) return alert('กรุณาใส่เหตุผลที่แก้');
@@ -42668,7 +43045,8 @@ function bahtText(n){
 function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
   const { Combobox } = global.ERP;
   const [amount, setAmount] = useState(remain);
-  const [method, setMethod] = useState('transfer');
+  // 🆕 1.1: pre-fill ช่องทางที่ตั้งใจไว้ตอนตั้งหนี้ (inv.payMethod) — แก้ได้
+  const [method, setMethod] = useState(inv.payMethod || 'transfer');
   const [bankId, setBankId] = useState(state.bankAccounts?.[0]?.id || '');
   const [date, setDate] = useState(getToday());
   const [ref, setRef] = useState('');
@@ -42688,6 +43066,31 @@ function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
   const overExcess = Math.max(0, Number(amount) - remain);
 
   const banks = state.bankAccounts || [];
+
+  // 🆕 1.10(ค): CN (ใบลดหนี้) ของ supplier รายนี้ที่ยังใช้ได้ — โชว์ให้เลือกหักก่อนจ่าย
+  //   สถานะที่ apply ได้ตรงกับ reducer APPLY_CN_MEMO: open / await_doc / doc_received
+  //   (ตัดตัวที่หักไปแล้วบนบิลต้นทาง หรือ mirror ไป creditDue แล้ว — reducer จะปฏิเสธอยู่ดี)
+  const usableCNs = useMemo(() => (state.supplierMemos||[]).filter(m =>
+    m.type === 'credit' &&
+    m.supplierId === inv.supplierId &&
+    ['open','await_doc','doc_received'].includes(m.status) &&
+    !m.appliedToInvId &&
+    !(m.rtvId && m.creditParkedAcc === '2100') &&
+    !m.mirroredToCreditDue &&
+    (Number(m.netAmount)||0) > 0.01
+  ), [state.supplierMemos, inv.supplierId]);
+  const usableCNTotal = usableCNs.reduce((s,m) => s + (Number(m.netAmount)||0), 0);
+
+  const applyCN = (memo) => {
+    const useAmt = Math.min(Number(memo.netAmount)||0, remain);
+    if(useAmt <= 0.01) return alert('ยอดคงเหลือของบิลนี้ไม่พอให้หักเครดิต');
+    dispatch({ type:'APPLY_CN_MEMO', data:{
+      memoId: memo.id, invId: inv.id, amount: useAmt, by: user.username }});
+    alert(`✅ หักเครดิต ${memo.memoNumber || ''} จำนวน ${fmtCur(useAmt)} เข้าบิล ${inv.invNumber} แล้ว\n\n` +
+      'ปิดหน้าจ่ายเงินให้แล้ว — เปิดใหม่อีกครั้งจะเห็นยอดคงเหลือใหม่');
+    onClose();
+    onDone && onDone();
+  };
 
   const onSlip = (e) => {
     const files = Array.from(e.target.files || []);
@@ -42779,6 +43182,25 @@ function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
       h('div', { className:'bg-red-50 border border-red-200 rounded p-3 text-center' },
         h('div', { className:'text-xs text-red-700' }, 'คงเหลือจ่าย'),
         h('div', { className:'text-3xl font-bold text-red-800' }, fmtCur(remain))
+      ),
+
+      // 🆕 1.10(ค): CN ที่ใช้ได้ของ supplier รายนี้ — เตือน + กดหักก่อนจ่ายได้เลย
+      usableCNs.length > 0 && h('div', { className:'bg-purple-50 border-2 border-purple-300 rounded p-3 space-y-2' },
+        h('div', { className:'font-bold text-purple-900 text-sm' },
+          `💳 supplier รายนี้มีใบลดหนี้ (CN) ใช้ได้ ${usableCNs.length} ใบ · รวม ${fmtCur(usableCNTotal)}`),
+        h('div', { className:'text-xs text-purple-700' },
+          'ถ้ายังไม่ได้หัก จะจ่ายเกินจริง — กด "หักกับบิลนี้" ก่อนจ่ายได้เลย'),
+        h('div', { className:'space-y-1' },
+          usableCNs.map(m => h('div', { key:m.id,
+            className:'flex items-center justify-between gap-2 bg-white border border-purple-200 rounded px-2 py-1 text-xs' },
+            h('div', { className:'flex-1 min-w-0' },
+              h('span', { className:'font-mono font-semibold text-purple-800' }, m.memoNumber || m.supMemoNumber || m.id.slice(-6)),
+              h('span', { className:'ml-2 text-gray-600' }, fmtDate(m.date)),
+              m.reasonNote && h('div', { className:'text-[10px] text-gray-500 truncate' }, m.reasonNote)),
+            h('span', { className:'font-bold text-purple-900 whitespace-nowrap' }, fmtCur(m.netAmount||0)),
+            h('button', { type:'button', onClick:()=>applyCN(m),
+              className:'px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-[11px] font-medium whitespace-nowrap' },
+              'หักกับบิลนี้')))),
       ),
 
       h('div', { className:'grid grid-cols-2 gap-3' },
@@ -46184,8 +46606,8 @@ function PurchaseReports({ state, user }){
       [
         { k:'dashboard',   label:'📊 Dashboard' },
         { k:'price',       label:'💰 เทียบราคา' },
-        { k:'priceHist',   label:'📈 ราคาซื้อแต่ละรอบ' },
-        { k:'byItem',      label:'📦 ตามสินค้า' },
+        { k:'priceHist',   label:'🧾 ประวัติสั่งซื้อรายสินค้า' },
+        { k:'byItem',      label:'📦 สรุปยอดตามสินค้า' },
         { k:'bySupplier',  label:'🏭 ตาม Supplier' },
         { k:'performance', label:'⭐ Supplier Perf.' },
         { k:'aging',       label:'💸 AP Aging' },
@@ -46413,25 +46835,37 @@ function ReportPriceCompare({ state, pos, dr }){
   );
 }
 
-// ---------- 🆕 PR1: Price History (ราคาซื้อแต่ละรอบ — อิง PO) ----------
+// ---------- 📈 ประวัติสั่งซื้อรายสินค้า (เดิม: PR1 Price History ราคาซื้อแต่ละรอบ — อิง PO) ----------
+// 🆕 3.2: ค้นด้วยชื่อ/รหัสสินค้า → เห็น "ทุกครั้งที่เคยสั่ง" ของสินค้านั้น
+//   คอลัมน์: วันที่ · เลข PO · supplier · จำนวน · ราคา/หน่วย · ยอดรวม · สถานะรับของ
+//   เรียงใหม่→เก่า · Export CSV (ทั้งชุด ไม่ใช่แค่หน้าที่ดู) · แบ่งหน้า 50 แถว
 function ReportPriceHistory({ state, pos, dr }){
   // เฉพาะ PO ที่ใช้จริง (approved ขึ้นไป, ไม่ voided/draft/pending) — ราคาที่ตกลงกับ supplier
   const usablePos = useMemo(() => (pos||[]).filter(p =>
     !p.voided && !['draft','pending','rejected','cancelled'].includes(p.status)), [pos]);
 
-  // สินค้าที่เคยถูกซื้อในช่วงนี้
+  // สินค้าที่เคยถูกซื้อในช่วงนี้ → itemId → [รอบสั่งซื้อ] (เรียงเก่า→ใหม่ เพื่อคิด %เทียบรอบก่อน)
   const itemRounds = useMemo(() => {
-    const map = {};  // itemId → [{date, poNumber, supplierId, qty, unit, price, status}]
+    const map = {};
     for(const po of usablePos){
       for(const l of (po.lines||[])){
         if(!l.itemId || l.isFreebie) continue;   // ของแถมไม่นับเป็นราคาซื้อ
+        const qty = Number(l.qty)||0;
+        const price = Number(l.unitPrice)||0;
+        const recv = Number(l.receivedQty)||0;
         (map[l.itemId] = map[l.itemId] || []).push({
+          // id ใช้เป็น react key + ให้ usePaged รู้ว่าชุดข้อมูลเปลี่ยน (reset หน้า 1)
+          id: (po.poNumber||po.id||'?') + '#' + l.itemId + '#' + ((map[l.itemId]||[]).length),
+          itemId: l.itemId,
           date: po.poDate, poNumber: po.poNumber, supplierId: po.supplierId,
-          qty: Number(l.qty)||0, unit: l.unit||'', price: Number(l.unitPrice)||0, status: po.status,
+          qty, unit: l.unit||'', price, status: po.status,
+          // ยอดรวมของบรรทัด — ใช้ lineTotal ถ้ามี (รวมส่วนลด/VAT ตาม priceMode แล้ว)
+          lineTotal: (l.lineTotal != null ? Number(l.lineTotal) : qty * price) || 0,
+          receivedQty: recv,
+          recvStatus: qty <= 0 ? 'none' : (recv >= qty - 0.0001 ? 'full' : (recv > 0 ? 'partial' : 'none')),
         });
       }
     }
-    // เรียงตามวันที่ (เก่า→ใหม่) + คำนวณ %เทียบรอบก่อน
     for(const id of Object.keys(map)){
       map[id].sort((a,b) => (a.date||'').localeCompare(b.date||''));
       let prev = null;
@@ -46443,90 +46877,182 @@ function ReportPriceHistory({ state, pos, dr }){
     return map;
   }, [usablePos]);
 
-  const itemIds = Object.keys(itemRounds).sort((a,b) => {
+  const itemIds = useMemo(() => Object.keys(itemRounds).sort((a,b) => {
     const na = state.items.find(i=>i.id===a)?.name||a, nb = state.items.find(i=>i.id===b)?.name||b;
     return na.localeCompare(nb);
-  });
+  }), [itemRounds, state.items]);
+
+  // 🆕 3.2: ช่องค้นหา ชื่อ/รหัสสินค้า
+  const [q, setQ] = useState('');
   const [selId, setSelId] = useState('');
-  const sel = selId || itemIds[0] || '';
-  const rounds = itemRounds[sel] || [];
-  const selItem = state.items.find(i => i.id === sel);
+
+  // สินค้าที่ตรงคำค้น (ค้นจากชื่อ + รหัส)
+  const matchIds = useMemo(() => {
+    const key = q.trim().toLowerCase();
+    if(!key) return itemIds;
+    return itemIds.filter(id => {
+      const it = state.items.find(x => x.id === id);
+      return ((it?.name||'').toLowerCase().includes(key))
+        || ((it?.code||'').toLowerCase().includes(key))
+        || id.toLowerCase().includes(key);
+    });
+  }, [q, itemIds, state.items]);
+
+  // สินค้าที่กำลังแสดง: ถ้าพิมพ์ค้นหา → แสดงทุกตัวที่ตรง · ถ้าไม่ได้พิมพ์ → แสดงตัวที่เลือก
+  const activeIds = useMemo(() => {
+    if(q.trim()) return matchIds;
+    const one = selId || itemIds[0] || '';
+    return one ? [one] : [];
+  }, [q, matchIds, selId, itemIds]);
+
   const supName = (id) => state.suppliers.find(s => s.id === id)?.name || id || '-';
+  const itName  = (id) => state.items.find(i => i.id === id)?.name || id;
+  const itCode  = (id) => state.items.find(i => i.id === id)?.code || '';
 
-  // สรุปหัว
-  const prices = rounds.map(r => r.price).filter(v => v > 0);
-  const minP = prices.length ? Math.min(...prices) : 0;
-  const maxP = prices.length ? Math.max(...prices) : 0;
-  const avgP = prices.length ? prices.reduce((s,v)=>s+v,0)/prices.length : 0;
-  const latestP = rounds.length ? rounds[rounds.length-1].price : 0;
-  const firstP = prices.length ? rounds.find(r=>r.price>0)?.price : 0;
-  const trendPct = (firstP > 0) ? ((latestP - firstP)/firstP)*100 : 0;
+  // ทุกครั้งที่เคยสั่ง (ของสินค้าที่กำลังแสดง) — เรียงใหม่→เก่า
+  const rows = useMemo(() => {
+    const out = [];
+    for(const id of activeIds) out.push(...(itemRounds[id] || []));
+    return out.sort((a,b) => {
+      const d = (b.date||'').localeCompare(a.date||'');
+      if(d !== 0) return d;
+      return (b.poNumber||'').localeCompare(a.poNumber||'');
+    });
+  }, [activeIds, itemRounds]);
 
-  const doExport = () => {
-    const rows = [['สินค้า','วันที่','เลขที่ PO','Supplier','จำนวน','หน่วย','ราคา/หน่วย','% เทียบรอบก่อน','สถานะ']];
-    for(const r of rounds){
-      rows.push([selItem?.name||sel, r.date, r.poNumber, supName(r.supplierId),
-        r.qty, r.unit, r.price, r.pctChange==null?'':r.pctChange.toFixed(1)+'%', r.status]);
-    }
-    exportCSV(`price-history-${(selItem?.code||sel)}-${dr.startDate}_${dr.endDate}.csv`, rows);
+  // 📄 แบ่งหน้า 50 แถว — KPI/Export ยังคิดจาก rows ทั้งชุด
+  const pg = usePaged(rows, 50);
+
+  // สรุปหัว — คิดจาก rows ทั้งชุด (ไม่ใช่หน้าที่ดูอยู่)
+  const summary = useMemo(() => {
+    const prices = rows.map(r => r.price).filter(v => v > 0);
+    const chrono = [...rows].sort((a,b) => (a.date||'').localeCompare(b.date||''));
+    const firstP = chrono.find(r => r.price > 0)?.price || 0;
+    const latestP = [...chrono].reverse().find(r => r.price > 0)?.price || 0;
+    return {
+      minP: prices.length ? Math.min(...prices) : 0,
+      maxP: prices.length ? Math.max(...prices) : 0,
+      avgP: prices.length ? prices.reduce((s,v)=>s+v,0)/prices.length : 0,
+      latestP,
+      trendPct: firstP > 0 ? ((latestP - firstP)/firstP)*100 : 0,
+      totalValue: rows.reduce((s,r) => s + (Number(r.lineTotal)||0), 0),
+      totalQty: rows.reduce((s,r) => s + (Number(r.qty)||0), 0),
+    };
+  }, [rows]);
+
+  const RECV_LBL = {
+    full:    ['✅ รับครบ',      'text-green-700'],
+    partial: ['🟡 รับบางส่วน',  'text-amber-700'],
+    none:    ['⬜ ยังไม่รับ',    'text-gray-500'],
   };
 
-  if(itemIds.length === 0){
-    return h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
-      'ไม่มีรายการซื้อ (PO ที่อนุมัติแล้ว) ในช่วงนี้');
-  }
+  const doExport = () => {
+    const csv = [['สินค้า','รหัส','วันที่','เลขที่ PO','Supplier','จำนวน','หน่วย','ราคา/หน่วย','ยอดรวม','รับแล้ว','สถานะรับของ','% เทียบรอบก่อน','สถานะ PO']];
+    for(const r of rows){
+      csv.push([
+        itName(r.itemId), itCode(r.itemId), r.date, r.poNumber, supName(r.supplierId),
+        r.qty, r.unit, Number(r.price).toFixed(2), Number(r.lineTotal||0).toFixed(2),
+        r.receivedQty, RECV_LBL[r.recvStatus][0].replace(/^[^ ]+ /,''),
+        r.pctChange==null ? '' : r.pctChange.toFixed(1)+'%',
+        PO_STATUS[r.status]?.[0] || r.status,
+      ]);
+    }
+    const tag = q.trim() ? 'search' : (itCode(activeIds[0]) || activeIds[0] || 'all');
+    exportCSV(`po-history-by-item-${tag}-${dr.startDate}_${dr.endDate}.csv`, csv);
+  };
+
+  const noData = itemIds.length === 0;
 
   return h('div', { className:'space-y-3' },
-    // เลือกสินค้า + export
-    h('div', { className:'bg-white rounded-lg shadow p-3 flex items-center gap-2 flex-wrap' },
-      h('span', { className:'text-sm font-medium' }, '📦 เลือกสินค้า:'),
-      h('select', { value:sel, onChange:e=>setSelId(e.target.value),
-        className:'px-3 py-2 border-2 rounded text-sm min-w-[220px]' },
-        itemIds.map(id => {
-          const it = state.items.find(x=>x.id===id);
-          return h('option', { key:id, value:id }, `${it?.name||id} (${itemRounds[id].length} รอบ)`);
-        })),
-      h('div', { className:'ml-auto' },
-        h('button', { onClick:doExport, className:'px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded text-sm font-medium' },
-          '📥 Export CSV'))),
+    // ค้นหา + เลือกสินค้า + export
+    h('div', { className:'bg-white rounded-lg shadow p-3 space-y-2' },
+      h('div', { className:'flex items-center gap-2 flex-wrap' },
+        h('span', { className:'text-sm font-medium whitespace-nowrap' }, '🔍 ค้นหาสินค้า:'),
+        h('input', { type:'search', value:q, onChange:e=>setQ(e.target.value),
+          placeholder:'พิมพ์ชื่อ หรือ รหัสสินค้า…',
+          className:'px-3 py-2 border-2 rounded text-sm flex-1 min-w-[220px]' }),
+        q.trim() && h('button', { onClick:()=>setQ(''),
+          className:'px-2 py-1 border rounded text-xs text-red-600 hover:bg-red-50' }, '✕ ล้าง'),
+        h('button', { onClick:doExport, disabled: rows.length===0,
+          className: cls('px-3 py-1.5 rounded text-sm font-medium text-white',
+            rows.length===0 ? 'bg-gray-300 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700') },
+          '📥 Export CSV')),
+      !q.trim() && h('div', { className:'flex items-center gap-2 flex-wrap' },
+        h('span', { className:'text-sm font-medium whitespace-nowrap' }, '📦 หรือเลือกจากรายการ:'),
+        h('select', { value: selId || itemIds[0] || '', onChange:e=>setSelId(e.target.value),
+          className:'px-3 py-2 border-2 rounded text-sm min-w-[240px]' },
+          itemIds.map(id => h('option', { key:id, value:id },
+            `${itCode(id) ? itCode(id)+' · ' : ''}${itName(id)} (${itemRounds[id].length} รอบ)`)))),
+      q.trim() && h('div', { className:'text-xs text-gray-600' },
+        `ตรงคำค้น ${matchIds.length} สินค้า · ${rows.length} ครั้งที่สั่ง`),
+      h('div', { className:'text-[11px] text-gray-500' },
+        '💡 ช่วงวันที่ด้านบนจำกัดผลลัพธ์อยู่ — กด ', h('b', null, '"ทั้งหมด"'), ' ที่แถบช่วงวันที่ เพื่อดูย้อนหลังทุกครั้งที่เคยสั่ง')),
 
-    // สรุปหัว
-    rounds.length > 0 && h('div', { className:'grid grid-cols-2 md:grid-cols-5 gap-2' },
-      [['ต่ำสุด', minP, 'text-green-700'], ['สูงสุด', maxP, 'text-red-700'],
-       ['เฉลี่ย', avgP, 'text-gray-700'], ['ล่าสุด', latestP, 'text-blue-700'],
-      ].map(([lbl,val,clr]) => h('div', { key:lbl, className:'bg-white rounded-lg shadow p-3 text-center' },
-        h('div', { className:'text-xs text-gray-500' }, lbl),
-        h('div', { className: cls('text-lg font-bold', clr) }, fmtCur(val)))),
-      h('div', { className:'bg-white rounded-lg shadow p-3 text-center' },
-        h('div', { className:'text-xs text-gray-500' }, 'แนวโน้ม (รอบแรก→ล่าสุด)'),
-        h('div', { className: cls('text-lg font-bold', trendPct>0?'text-red-700':trendPct<0?'text-green-700':'text-gray-700') },
-          trendPct>0?'🔺 ':trendPct<0?'🔻 ':'➖ ', Math.abs(trendPct).toFixed(1)+'%'))),
+    noData
+      ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
+          'ไม่มีรายการซื้อ (PO ที่อนุมัติแล้ว) ในช่วงนี้')
+      : h('div', { className:'space-y-3' },
+        // สรุปหัว
+        rows.length > 0 && h('div', { className:'grid grid-cols-2 md:grid-cols-6 gap-2' },
+          [['ต่ำสุด', summary.minP, 'text-green-700'], ['สูงสุด', summary.maxP, 'text-red-700'],
+           ['เฉลี่ย', summary.avgP, 'text-gray-700'], ['ล่าสุด', summary.latestP, 'text-blue-700'],
+          ].map(([lbl,val,clr]) => h('div', { key:lbl, className:'bg-white rounded-lg shadow p-3 text-center' },
+            h('div', { className:'text-xs text-gray-500' }, lbl),
+            h('div', { className: cls('text-lg font-bold', clr) }, fmtCur(val)))),
+          h('div', { key:'trend', className:'bg-white rounded-lg shadow p-3 text-center' },
+            h('div', { className:'text-xs text-gray-500' }, 'แนวโน้ม (รอบแรก→ล่าสุด)'),
+            h('div', { className: cls('text-lg font-bold',
+              summary.trendPct>0?'text-red-700':summary.trendPct<0?'text-green-700':'text-gray-700') },
+              summary.trendPct>0?'🔺 ':summary.trendPct<0?'🔻 ':'➖ ', Math.abs(summary.trendPct).toFixed(1)+'%')),
+          h('div', { key:'sum', className:'bg-white rounded-lg shadow p-3 text-center' },
+            h('div', { className:'text-xs text-gray-500' }, `ยอดรวมที่สั่ง (${rows.length} ครั้ง)`),
+            h('div', { className:'text-lg font-bold text-indigo-700' }, fmtCur(summary.totalValue)))),
 
-    // ตารางรายรอบ
-    h('div', { className:'bg-white rounded-lg shadow overflow-x-auto' },
-      h('table', { className:'w-full text-sm' },
-        h('thead', { className:'bg-gray-50 border-b text-xs' },
-          h('tr', null,
-            h('th', { className:'px-3 py-2 text-left' }, 'วันที่'),
-            h('th', { className:'px-3 py-2 text-left' }, 'เลขที่ PO'),
-            h('th', { className:'px-3 py-2 text-left' }, 'Supplier'),
-            h('th', { className:'px-3 py-2 text-right' }, 'จำนวน'),
-            h('th', { className:'px-3 py-2 text-right' }, 'ราคา/หน่วย'),
-            h('th', { className:'px-3 py-2 text-right' }, 'เทียบรอบก่อน'))),
-        h('tbody', { className:'divide-y' },
-          rounds.map((r,i) => h('tr', { key:i, className:'hover:bg-gray-50' },
-            h('td', { className:'px-3 py-2 text-xs' }, fmtDate(r.date)),
-            h('td', { className:'px-3 py-2 text-xs font-mono text-blue-700' }, r.poNumber),
-            h('td', { className:'px-3 py-2 text-xs' }, supName(r.supplierId)),
-            h('td', { className:'px-3 py-2 text-right text-xs' }, fmtNum(r.qty), ' ', r.unit),
-            h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(r.price)),
-            h('td', { className:'px-3 py-2 text-right text-xs' },
-              r.pctChange==null ? h('span', { className:'text-gray-400' }, '—')
-                : h('span', { className: cls('font-medium', r.pctChange>0?'text-red-600':r.pctChange<0?'text-green-600':'text-gray-500') },
-                    r.pctChange>0?'🔺':r.pctChange<0?'🔻':'', Math.abs(r.pctChange).toFixed(1)+'%')))))
-      )),
+        // ตารางรายรอบ — ใหม่→เก่า
+        rows.length === 0
+          ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
+              'ไม่พบสินค้าที่ตรงคำค้นในช่วงวันที่นี้')
+          : h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+            h('div', { className:'overflow-x-auto' },
+              h('table', { className:'w-full text-sm min-w-[860px]' },
+                h('thead', { className:'bg-gray-50 border-b text-xs' },
+                  h('tr', null,
+                    h('th', { className:'px-3 py-2 text-left' }, 'วันที่'),
+                    h('th', { className:'px-3 py-2 text-left' }, 'เลขที่ PO'),
+                    h('th', { className:'px-3 py-2 text-left' }, 'สินค้า'),
+                    h('th', { className:'px-3 py-2 text-left' }, 'Supplier'),
+                    h('th', { className:'px-3 py-2 text-right' }, 'จำนวน'),
+                    h('th', { className:'px-3 py-2 text-right' }, 'ราคา/หน่วย'),
+                    h('th', { className:'px-3 py-2 text-right' }, 'ยอดรวม'),
+                    h('th', { className:'px-3 py-2 text-center' }, 'สถานะรับของ'),
+                    h('th', { className:'px-3 py-2 text-right' }, 'เทียบรอบก่อน'))),
+                h('tbody', { className:'divide-y' },
+                  pg.shown.map((r,i) => {
+                    const [rlbl, rclr] = RECV_LBL[r.recvStatus];
+                    return h('tr', { key:(r.id||'')+'_'+i, className:'hover:bg-gray-50' },
+                      h('td', { className:'px-3 py-2 text-xs whitespace-nowrap' }, fmtDate(r.date)),
+                      h('td', { className:'px-3 py-2 text-xs font-mono text-blue-700' }, r.poNumber),
+                      h('td', { className:'px-3 py-2 text-xs' },
+                        h('div', { className:'font-medium' }, itName(r.itemId)),
+                        itCode(r.itemId) && h('div', { className:'text-[10px] text-gray-500 font-mono' }, itCode(r.itemId))),
+                      h('td', { className:'px-3 py-2 text-xs' }, supName(r.supplierId)),
+                      h('td', { className:'px-3 py-2 text-right text-xs whitespace-nowrap' },
+                        fmtNum(r.qty), ' ', r.unit),
+                      h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(r.price)),
+                      h('td', { className:'px-3 py-2 text-right font-medium text-indigo-800' }, fmtCur(r.lineTotal)),
+                      h('td', { className:'px-3 py-2 text-center text-xs whitespace-nowrap' },
+                        h('span', { className: cls('font-medium', rclr) }, rlbl),
+                        r.recvStatus === 'partial' && h('div', { className:'text-[10px] text-gray-500' },
+                          `${fmtNum(r.receivedQty)}/${fmtNum(r.qty)}`)),
+                      h('td', { className:'px-3 py-2 text-right text-xs' },
+                        r.pctChange==null ? h('span', { className:'text-gray-400' }, '—')
+                          : h('span', { className: cls('font-medium', r.pctChange>0?'text-red-600':r.pctChange<0?'text-green-600':'text-gray-500') },
+                              r.pctChange>0?'🔺':r.pctChange<0?'🔻':'', Math.abs(r.pctChange).toFixed(1)+'%')));
+                  })))),
+            h(Pager, { pg, label:'ครั้งที่สั่งซื้อ' }))),
+
     h('div', { className:'text-xs text-gray-400 px-1' },
-      '* อิงราคาจาก PO ที่อนุมัติแล้ว (ราคาที่ตกลงกับ supplier) · ไม่รวมของแถม')
+      '* อิงราคาจาก PO ที่อนุมัติแล้ว (ราคาที่ตกลงกับ supplier) · ไม่รวมของแถม · สถานะรับของอ่านจาก receivedQty ของบรรทัด PO')
   );
 }
 
@@ -47175,7 +47701,7 @@ global.ERP.registerModule('purchase', {
   EditPOPostGRModal,
   CreditDebitMemoModal,
   INV_STATUS,
-  PAY_METHODS,
+  PAY_METHODS, PAY_INTENT_METHODS,
   autoPostINV,
   autoPostPayment,
   autoPostRTV,
@@ -47227,6 +47753,33 @@ function Field({ label, hint, children }){
     hint && h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, hint));
 }
 
+// 🆕 1.8: ช่องค้นหาร่วมของหน้าเจ้าหนี้ (AP) — ชื่อ supplier / เลขบิล / เลขใบกำกับ
+//   ใช้คู่กับ apMatch() · กรองก่อนส่งเข้า usePaged เสมอ (ไม่ใช่กรองเฉพาะหน้าปัจจุบัน)
+function APSearch({ value, onChange, placeholder, found, total }){
+  return h('div', { className:'flex items-center gap-2 flex-wrap' },
+    h('div', { className:'relative flex-1 min-w-[220px]' },
+      h('span', { className:'absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none' }, '🔍'),
+      h('input', { value: value||'', onChange: e=>onChange(e.target.value),
+        placeholder: placeholder || 'ค้นหา: ชื่อ supplier / เลขบิล / เลขใบกำกับ',
+        className:'w-full pl-7 pr-7 py-1.5 border rounded text-sm' }),
+      value && h('button', { onClick:()=>onChange(''), title:'ล้างคำค้น',
+        className:'absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 text-sm leading-none' }, '✕')),
+    value && h('span', { className:'text-xs text-gray-600 whitespace-nowrap' },
+      'พบ ', h('b', { className:'text-blue-700' }, fmtNum(found||0)), ' จาก ', fmtNum(total||0), ' รายการ')
+  );
+}
+
+// helper: คำค้นตรงกับ field ใดก็ได้ (case-insensitive, ตัดช่องว่างหัวท้าย) — ว่าง = ผ่านหมด
+function apMatch(q, fields){
+  const s = String(q==null?'':q).trim().toLowerCase();
+  if(!s) return true;
+  for(const f of (fields||[])){
+    if(f == null) continue;
+    if(String(f).toLowerCase().includes(s)) return true;
+  }
+  return false;
+}
+
 // ==================== MAIN ====================
 function AccountingModule({ state, dispatch }){
   const user = state.currentUser;
@@ -47263,10 +47816,11 @@ function AccountingModule({ state, dispatch }){
     { k:'ap',        label:'💸 เจ้าหนี้ (AP)', badge: pendingGRs + pendingApproval + pettyOpenAdv,
       subs:[
         { k:'invAll',     label:'📑 PI ทั้งหมด (ตั้งหนี้)' },
-        { k:'invQueue',   label:`🧾 GR → ตั้งหนี้ (PI) ${pendingGRs?'('+pendingGRs+')':''}` },
+        // 🆕 1.5: เปลี่ยนชื่อที่แสดงให้ตรงภาษาที่ใช้งานจริง (key เดิมห้ามเปลี่ยน — usePersistedTab + permission ผูกกับ key)
+        { k:'invQueue',   label:`🧾 เจ้าหนี้ ${pendingGRs?'('+pendingGRs+')':''}` },
         { k:'recurring',  label:'🔁 Recurring PI' },
-        { k:'payment',    label:`💰 รายการตั้งหนี้ ${pendingPay?'('+pendingPay+')':''}` },
-        { k:'payApprove', label:`🔒 รอจ่าย ${pendingApproval?'('+pendingApproval+')':''}` },
+        { k:'payment',    label:`💰 รอจ่าย ${pendingPay?'('+pendingPay+')':''}` },
+        { k:'payApprove', label:`🔒 รออนุมัติ ${pendingApproval?'('+pendingApproval+')':''}` },
         // 🆕 RTV-3: ตัด RTV ออกจากบัญชี — จัดการที่คลัง + จัดซื้อ effect ขึ้นใน Supplier Memos
         { k:'supMemo',    label:`💳 CN/DN จาก Supplier ${(()=>{const o=(state.supplierMemos||[]).filter(m=>m.status==='open'&&m.type==='credit').length;return o?'('+o+')':'';})()}` },
         { k:'petty',      label:`💵 เงินสดย่อย/สำรองจ่าย ${pettyOpenAdv?'('+pettyOpenAdv+')':''}` },
@@ -51984,7 +52538,7 @@ function BalanceSheet({ state }){
 }
 
 // ================================================================
-// GR → INV QUEUE (บัญชีตั้งหนี้จาก GR ได้ที่นี่เลย)
+// GR → PI QUEUE — แท็บ "🧾 เจ้าหนี้" (บัญชีตั้งหนี้จาก GR ได้ที่นี่เลย)
 // ================================================================
 // ================================================================
 // ALL INV OVERVIEW — รวม INV ทุกใบ: วันที่ / เลข INV / PO / GR / สถานะ
@@ -52491,6 +53045,7 @@ function INVQueueTab({ state, dispatch, user }){
   const [showExpense, setShowExpense] = useState(false);
   const [updateSupInv, setUpdateSupInv] = useState(null);
   const [supFilter, setSupFilter] = useState('');
+  const [q, setQ] = useState('');   // 🆕 1.8: ค้นหา supplier / เลข GR / เลข PO / เลขใบกำกับ
   const dr = useDateRange(60);
 
   // Access exports จาก purchase module
@@ -52561,10 +53116,18 @@ function INVQueueTab({ state, dispatch, user }){
       return po && po.advanceInvCreated && po.invoiceId;
     }), [state.grs, state.pos]);
 
+  // 🆕 1.8: กรองด้วยคำค้น (ชื่อ/เลขผู้เสียภาษี supplier · เลข GR · เลข PO · เลขใบกำกับที่คีย์ไว้)
+  //   กรองก่อนจัดกลุ่ม → ตารางด้านล่างเห็นเฉพาะที่ค้นเจอ · KPI ด้านบนยังคิดจากทั้งชุด
+  const filteredGRs = useMemo(() => pendingGRs.filter(g => {
+    const sup = (state.suppliers||[]).find(s => s.id === g.supplierId);
+    return apMatch(q, [sup && sup.name, sup && sup.taxId, g.grNumber, g.poNumber,
+      g.supInvNumber, g.invoiceNumber, g.note]);
+  }), [pendingGRs, q, state.suppliers]);
+
   // Group by supplier
   const bySupplier = useMemo(() => {
     const m = {};
-    for(const g of pendingGRs){
+    for(const g of filteredGRs){
       if(!m[g.supplierId]) m[g.supplierId] = {
         supplier: state.suppliers.find(s => s.id === g.supplierId),
         grs: [], total: 0,
@@ -52573,7 +53136,7 @@ function INVQueueTab({ state, dispatch, user }){
       m[g.supplierId].total += g.totalValue||0;
     }
     return Object.values(m).sort((a,b) => b.total - a.total);
-  }, [pendingGRs, state.suppliers]);
+  }, [filteredGRs, state.suppliers]);
 
   // Pending sup inv (INVs ที่ยังไม่มีเลขจาก supplier)
   const pendingSupInv = (state.invoices||[]).filter(i =>
@@ -52581,12 +53144,16 @@ function INVQueueTab({ state, dispatch, user }){
   );
 
   return h('div', null,
-    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 space-y-2' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง GR:' }),
+      // 🆕 1.8: ช่องค้นหา — วางติดกับ DateRangeBar
+      h(APSearch, { value:q, onChange:setQ,
+        placeholder:'🔍 ค้นหา: ชื่อ supplier / เลข GR / เลข PO / เลขใบกำกับ',
+        found: filteredGRs.length, total: pendingGRs.length }),
     ),
 
     h('div', { className:'bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-3 text-sm text-indigo-800' },
-      '💡 งานบัญชี: รับใบกำกับจาก supplier → คีย์เลข → ตั้งหนี้ (INV) → จ่ายได้'
+      '💡 งานบัญชี: รับใบกำกับจาก supplier → คีย์เลข → ตั้งหนี้ (PI) → ส่งต่อไปแท็บ 💰 รอจ่าย'
     ),
 
     h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3 mb-4' },
@@ -52689,9 +53256,9 @@ function INVQueueTab({ state, dispatch, user }){
           h('div', { className:'font-bold text-amber-900 text-sm' },
             `พบ GR ${orphanedGRs.length} ใบที่ควรผูกกับ INV ล่วงหน้าอยู่แล้ว`),
           h('div', { className:'text-xs text-amber-800 mt-0.5' },
-            'GR เหล่านี้รับของจาก PO ที่มี INV ล่วงหน้าอยู่แล้ว — ไม่ควรขึ้นในคิว GR→INV เพราะจะกลายเป็นจ่าย 2 รอบ'),
+            'GR เหล่านี้รับของจาก PO ที่มี INV ล่วงหน้าอยู่แล้ว — ไม่ควรขึ้นในคิวเจ้าหนี้ (GR→PI) เพราะจะกลายเป็นจ่าย 2 รอบ'),
           h('button', { onClick:()=>{
-            if(!confirm(`ผูก GR ${orphanedGRs.length} ใบ เข้ากับ INV ล่วงหน้าของแต่ละ PO?\n\n→ GR เหล่านี้จะหายจากคิว GR→INV ทันที (กันจ่ายซ้ำ)`)) return;
+            if(!confirm(`ผูก GR ${orphanedGRs.length} ใบ เข้ากับ INV ล่วงหน้าของแต่ละ PO?\n\n→ GR เหล่านี้จะหายจากคิวเจ้าหนี้ทันที (กันจ่ายซ้ำ)`)) return;
             for(const g of orphanedGRs){
               const po = state.pos.find(p => p.id === g.poId);
               if(po && po.invoiceId){
@@ -52718,7 +53285,12 @@ function INVQueueTab({ state, dispatch, user }){
 
     bySupplier.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
-          '✅ ไม่มี GR รอตั้งหนี้ในช่วงนี้')
+          q.trim()
+            ? h('div', null,
+                h('div', { className:'mb-1' }, `🔍 ไม่พบรายการที่ตรงกับ "${q.trim()}"`),
+                h('button', { onClick:()=>setQ(''),
+                  className:'text-xs px-3 py-1 border rounded bg-white hover:bg-gray-50' }, 'ล้างคำค้น'))
+            : '✅ ไม่มี GR รอตั้งหนี้ในช่วงนี้')
       : h('div', { className:'space-y-3' },
           bySupplier.map(bs =>
             h('div', { key:bs.supplier?.id, className:'bg-white rounded-lg shadow overflow-hidden' },
@@ -52845,10 +53417,42 @@ function PayApprovalTab({ state, dispatch, user }){
   const [approveTarget, setApproveTarget] = useState(null);
   const [bulkApprove, setBulkApprove] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
+  const [q, setQ] = useState('');             // 🆕 1.8 ค้นหา
+  // 🆕 คำค้นเปลี่ยน → ล้างรายการที่ติ๊กไว้ ไม่งั้นกดอนุมัติแล้วรวมบิลที่มองไม่เห็นบนจอไปด้วย
+  useEffect(() => { setSelectedIds([]); }, [q]);
+  const [expanded, setExpanded] = useState([]); // 🆕 1.7 supplier ที่กางอยู่
 
   const pending = (state.payments||[]).filter(p => p.approvalStatus === 'pending')
     .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
-  const pgPending = usePaged(pending, 50);
+
+  // helper lookup (ใช้ทั้งค้นหา + แสดงผล)
+  const supOf = (id) => (state.suppliers||[]).find(s => s.id === id);
+  const invOf = (p) => (state.invoices||[]).find(i => i.id === p.invId)
+    || (state.invoices||[]).find(i => (p.invoiceIds||[]).includes(i.id));
+
+  // 🆕 1.8: กรองด้วยคำค้น — กรองก่อนจัดกลุ่ม/ก่อนเข้า usePaged
+  const pendingF = useMemo(() => pending.filter(p => {
+    const inv = invOf(p); const sup = supOf(p.supplierId);
+    return apMatch(q, [sup && sup.name, sup && sup.taxId, p.pvNumber, p.ref, p.by,
+      inv && inv.invNumber, inv && inv.supInvNumber, inv && inv.supTaxInvNumber]);
+  }), [state.payments, state.invoices, state.suppliers, q]);
+
+  // 🆕 1.7: จัดกลุ่มบิลของ supplier เดียวกันเป็นแถวเดียว (กางดูรายบิลได้)
+  //   paginate ที่ "กลุ่ม" — บิลในกลุ่มแสดงครบทุกใบเสมอ (ยอดรวมกลุ่มจึงถูกต้องเสมอ)
+  const pendingGroups = useMemo(() => {
+    const m = {};
+    for(const p of pendingF){
+      const k = p.supplierId || '_none';
+      if(!m[k]) m[k] = { id:k, key:k, supplier: supOf(p.supplierId), pays:[], total:0 };
+      m[k].pays.push(p);
+      m[k].total += Number(p.amount)||0;
+    }
+    return Object.values(m).sort((a,b) => b.total - a.total);
+  }, [pendingF, state.suppliers]);
+  const pgPending = usePaged(pendingGroups, 50);
+
+  const toggleExpand = (k) => setExpanded(expanded.includes(k)
+    ? expanded.filter(x => x !== k) : [...expanded, k]);
 
   const reject = (pay) => {
     const reason = prompt(`ปฏิเสธคำขอจ่าย ${fmtCur(pay.amount)}?\n\nเหตุผล:`);
@@ -52862,8 +53466,8 @@ function PayApprovalTab({ state, dispatch, user }){
 
   const toggleSel = (id) => setSelectedIds(selectedIds.includes(id)
     ? selectedIds.filter(x => x !== id) : [...selectedIds, id]);
-  // เลือกทั้งหมด = เฉพาะแถวในหน้าปัจจุบัน (ที่เลือกไว้หน้าอื่นยังคงอยู่)
-  const pageIds = pgPending.shown.map(p => p.id);
+  // เลือกทั้งหมด = ทุกบิลของทุกกลุ่มในหน้าปัจจุบัน (ที่เลือกไว้หน้าอื่น/นอกคำค้นยังคงอยู่)
+  const pageIds = pgPending.shown.reduce((acc, g) => acc.concat(g.pays.map(p => p.id)), []);
   const allSelected = pageIds.length > 0 && pageIds.every(id => selectedIds.includes(id));
   const toggleAll = () => setSelectedIds(allSelected
     ? selectedIds.filter(x => !pageIds.includes(x))
@@ -52882,6 +53486,7 @@ function PayApprovalTab({ state, dispatch, user }){
         <td>${sup?.name||'-'}</td>
         <td style="font-size:9pt">${sup?.taxId||''}</td>
         <td style="font-size:9pt">${inv?.dueDate||''}</td>
+        <td style="font-size:9pt">${p.requestedPayDate||p.payDate||'-'}</td>
         <td style="text-align:right;font-family:monospace;font-weight:bold;color:#c00">${(p.amount||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
       </tr>`;
     }).join('');
@@ -52920,11 +53525,11 @@ function PayApprovalTab({ state, dispatch, user }){
   </div>
   <table>
     <thead><tr>
-      <th>#</th><th>เลข INV</th><th>ใบกำกับ Sup</th><th>ผู้รับเงิน (Supplier)</th><th>เลขผู้เสียภาษี</th><th>ครบกำหนด</th><th>จำนวนเงิน</th>
+      <th>#</th><th>เลข INV</th><th>ใบกำกับ Sup</th><th>ผู้รับเงิน (Supplier)</th><th>เลขผู้เสียภาษี</th><th>ครบกำหนด</th><th>นัดจ่าย</th><th>จำนวนเงิน</th>
     </tr></thead>
     <tbody>${rows}</tbody>
     <tfoot><tr>
-      <td colspan="6" style="text-align:right">รวมทั้งสิ้น</td>
+      <td colspan="7" style="text-align:right">รวมทั้งสิ้น</td>
       <td style="text-align:right;color:#c00">${selectedTotal.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
     </tr></tfoot>
   </table>
@@ -52952,13 +53557,20 @@ function PayApprovalTab({ state, dispatch, user }){
     setBulkApprove(true);
   };
 
-  // 🆕 PIPV-E1: sub-tabs "รอจ่าย" vs "ประวัติอนุมัติ" (D3-3: ลบ มัดจำรอจ่าย — DP เข้า PI Queue แล้ว)
+  // 🆕 PIPV-E1: sub-tabs "รออนุมัติ" vs "ประวัติอนุมัติ" (D3-3: ลบ มัดจำรอจ่าย — DP เข้า PI Queue แล้ว)
   const [subTab, setSubTab] = useState('waiting');
-  const historyPays = useMemo(() =>
+  const historyPaysAll = useMemo(() =>
     (state.payments||[]).filter(p => p.approvalStatus && p.approvalStatus !== 'pending')
       .sort((a,b) => (b.approvedAt||b.rejectedAt||0) - (a.approvedAt||a.rejectedAt||0))
-      
+
   , [state.payments]);
+  // 🆕 1.8: ค้นหาในประวัติอนุมัติด้วยคำค้นเดียวกัน
+  const historyPays = useMemo(() => historyPaysAll.filter(p => {
+    const inv = invOf(p); const sup = supOf(p.supplierId);
+    return apMatch(q, [sup && sup.name, sup && sup.taxId, p.pvNumber, p.ref,
+      p.approvedBy, p.rejectedBy, inv && inv.invNumber, inv && inv.supInvNumber,
+      inv && inv.supTaxInvNumber]);
+  }), [historyPaysAll, state.invoices, state.suppliers, q]);
   const pgHistory = usePaged(historyPays, 50);
 
   return h('div', null,
@@ -52966,12 +53578,19 @@ function PayApprovalTab({ state, dispatch, user }){
       h('button', { onClick:()=>setSubTab('waiting'),
         className: cls('px-4 py-2 rounded text-sm font-medium',
           subTab==='waiting' ? 'bg-indigo-600 text-white' : 'bg-gray-100') },
-        `⏳ รอจ่าย (${pending.length})`),
+        `⏳ รออนุมัติ (${pending.length})`),
       h('button', { onClick:()=>setSubTab('history'),
         className: cls('px-4 py-2 rounded text-sm font-medium',
           subTab==='history' ? 'bg-indigo-600 text-white' : 'bg-gray-100') },
-        `📜 ประวัติอนุมัติ (${historyPays.length})`)
+        `📜 ประวัติอนุมัติ (${historyPaysAll.length})`)
     ),
+
+    // 🆕 1.8: ช่องค้นหา — ใช้ได้ทั้ง 2 sub-tab
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
+      h(APSearch, { value:q, onChange:setQ,
+        placeholder:'🔍 ค้นหา: ชื่อ supplier / เลข PI / เลขใบกำกับ / เลข PV',
+        found: subTab==='waiting' ? pendingF.length : historyPays.length,
+        total: subTab==='waiting' ? pending.length : historyPaysAll.length })),
 
     // 🆕 D2-2: section มัดจำรอจ่าย
     // 🆕 D3-3: ลบ subTab=='deposits' — DP เข้า PI Queue ตามปกติแล้ว
@@ -52980,7 +53599,8 @@ function PayApprovalTab({ state, dispatch, user }){
       h('div', { className:'bg-purple-50 border border-purple-200 rounded-lg p-3 mb-3 text-sm text-purple-900' },
         '📜 ประวัติคำขอที่อนุมัติ/ปฏิเสธแล้ว — แสดง 300 ล่าสุด · พิมพ์ PV/PI ย้อนหลังได้'),
       historyPays.length === 0
-        ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' }, 'ยังไม่มีประวัติ')
+        ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
+            q.trim() ? `🔍 ไม่พบประวัติที่ตรงกับ "${q.trim()}"` : 'ยังไม่มีประวัติ')
         : h('div', { className:'bg-white rounded-lg shadow overflow-x-auto' },
             h('table', { className:'w-full text-sm' },
               h('thead', { className:'bg-gray-50 border-b' },
@@ -53033,11 +53653,14 @@ function PayApprovalTab({ state, dispatch, user }){
 
     subTab === 'waiting' && h('div', { className:'bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-3 text-sm text-indigo-800' },
       '🔒 คำขอจ่ายที่รออนุมัติ · ยังไม่ตัดบัญชีจนกว่าจะอนุมัติ · JE post หลังอนุมัติ · ',
-      h('b', null, 'ติ๊กหลายใบ'), ' → พิมพ์ใบปะหน้ารวม / อนุมัติพร้อมกันได้'
+      h('b', null, 'ติ๊กหลายใบ'), ' → พิมพ์ใบปะหน้ารวม / อนุมัติพร้อมกันได้',
+      h('div', { className:'text-xs mt-1' },
+        '🗂️ รวมบิลของ supplier เดียวกันเป็นแถวเดียว — กดชื่อ supplier เพื่อกางดูรายบิล · ',
+        'ติ๊กที่หัวกลุ่ม = เลือกทุกบิลของ supplier นั้น')
     ),
 
     // Bulk action bar (only in waiting sub-tab)
-    subTab === 'waiting' && pending.length > 0 && h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex items-center gap-2 flex-wrap' },
+    subTab === 'waiting' && pendingGroups.length > 0 && h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex items-center gap-2 flex-wrap' },
       h('label', { className:'flex items-center gap-1 text-sm' },
         h('input', { type:'checkbox', checked:allSelected, onChange:toggleAll }),
         h('span', null, `เลือกทั้งหมดในหน้านี้ (${pageIds.length})`)),
@@ -53052,56 +53675,120 @@ function PayApprovalTab({ state, dispatch, user }){
         onClick:()=>setSelectedIds([]) }, 'ล้าง')
     ),
 
-    subTab === 'waiting' && (pending.length === 0
+    subTab === 'waiting' && (pendingGroups.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
-          '✅ ไม่มีคำขอรออนุมัติ')
+          q.trim()
+            ? h('div', null,
+                h('div', { className:'mb-1' }, `🔍 ไม่พบคำขอที่ตรงกับ "${q.trim()}"`),
+                h('button', { onClick:()=>setQ(''),
+                  className:'text-xs px-3 py-1 border rounded bg-white hover:bg-gray-50' }, 'ล้างคำค้น'))
+            : '✅ ไม่มีคำขอรออนุมัติ')
       : h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+          h('div', { className:'overflow-x-auto' },
           h('table', { className:'w-full text-sm' },
             h('thead', { className:'bg-gray-50 border-b' },
               h('tr', null,
                 h('th', { className:'px-2 py-2 w-8' }, ''),
-                h('th', { className:'px-3 py-2 text-left text-xs' }, 'วันที่'),
-                h('th', { className:'px-3 py-2 text-left text-xs' }, 'PI'),
-                h('th', { className:'px-3 py-2 text-left text-xs' }, 'Supplier'),
-                h('th', { className:'px-3 py-2 text-left text-xs' }, 'วิธี'),
-                h('th', { className:'px-3 py-2 text-left text-xs' }, 'บัญชี'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'วันที่ขอ'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'นัดจ่าย'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'PI / ใบกำกับ'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'วิธี / บัญชี'),
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'จำนวน'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'ขอโดย'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'),
               )
             ),
+            // 🆕 1.7: 1 กลุ่ม = 1 supplier (ชื่อ + จำนวนบิล + ยอดรวม) · กดกางดูรายบิลได้
+            //   กลุ่มที่มีบิลเดียวกางอัตโนมัติ (ไม่ต้องกดเพิ่ม 1 ครั้งเพื่อกดอนุมัติ)
             h('tbody', { className:'divide-y' },
-              pgPending.shown.map(p => {
-                const inv = state.invoices.find(i => i.id === p.invId);
-                const sup = state.suppliers.find(s => s.id === p.supplierId);
-                const checked = selectedIds.includes(p.id);
-                return h('tr', { key:p.id, className: cls('hover:bg-gray-50', checked && 'bg-blue-50') },
+              pgPending.shown.reduce((rows, g) => {
+                const groupIds = g.pays.map(p => p.id);
+                const groupAll = groupIds.every(id => selectedIds.includes(id));
+                const groupSome = !groupAll && groupIds.some(id => selectedIds.includes(id));
+                const open = g.pays.length === 1 || expanded.includes(g.key);
+                const ownCount = canApprove ? g.pays.filter(p => (p.createdBy || p.by) === user.username).length : 0;
+                // 🆕 1.6+1.7: สรุป "วันนัดจ่าย" ของกลุ่มให้เห็นตั้งแต่ตอนยังไม่กาง
+                const gPayDates = Array.from(new Set(g.pays
+                  .map(p => p.payDate || p.requestedPayDate).filter(Boolean))).sort();
+                const toggleGroup = () => setSelectedIds(groupAll
+                  ? selectedIds.filter(x => !groupIds.includes(x))
+                  : Array.from(new Set([...selectedIds, ...groupIds])));
+                // --- แถวหัวกลุ่ม (supplier) ---
+                rows.push(h('tr', { key:'g_'+g.key,
+                  className: cls('bg-slate-100 border-t-2 border-slate-300',
+                    (groupAll || groupSome) && 'bg-blue-100') },
                   h('td', { className:'px-2 py-2 text-center' },
-                    h('input', { type:'checkbox', checked, onChange:()=>toggleSel(p.id) })),
-                  h('td', { className:'px-3 py-2 text-xs' }, fmtDate(p.date)),
-                  h('td', { className:'px-3 py-2 font-mono text-xs text-red-700' }, inv?.invNumber || '-'),
-                  h('td', { className:'px-3 py-2 text-sm' }, sup?.name || '-'),
-                  h('td', { className:'px-3 py-2 text-xs' }, PAY_METHODS.find(m=>m.v===p.method)?.label || p.method),
-                  h('td', { className:'px-3 py-2 text-xs' }, p.bankName || '-'),
-                  h('td', { className:'px-3 py-2 text-right font-bold text-red-700' }, fmtCur(p.amount)),
-                  h('td', { className:'px-3 py-2 text-xs text-gray-500' }, p.by),
-                  h('td', { className:'px-3 py-2 text-center' },
-                    h('div', { className:'flex gap-1 justify-center flex-wrap' },
-                      printPayApprovalSheet && h(Button, { variant:'secondary', size:'sm',
-                        onClick:()=>printPayApprovalSheet(p, inv, state) }, '🖨️'),
-                      canApprove && (canApproveThis(p)
-                        ? h(Button, { variant:'success', size:'sm', onClick:()=>setApproveTarget(p) }, '✅')
-                        : h('span', { className:'text-[10px] text-orange-600 bg-orange-100 rounded px-1.5 py-1',
-                            title:'คุณเป็นผู้สร้างคำขอนี้ — ต้องให้คนอื่นอนุมัติ (dual-eye)' }, '🔒 ตัวเอง')),
-                      canApprove && h(Button, { variant:'danger', size:'sm',
-                        onClick:()=>reject(p) }, '❌'),
+                    h('input', { type:'checkbox', checked: groupAll,
+                      ref: el => { if(el) el.indeterminate = groupSome; },
+                      title: 'เลือก/ยกเลิกทุกบิลของ '+(g.supplier?.name||'-'),
+                      onChange: toggleGroup })),
+                  h('td', { colSpan:4, className:'px-3 py-2' },
+                    h('button', {
+                      onClick: () => g.pays.length > 1 && toggleExpand(g.key),
+                      className: cls('text-left flex items-center gap-2 flex-wrap',
+                        g.pays.length > 1 ? 'hover:text-blue-700' : 'cursor-default') },
+                      g.pays.length > 1 && h('span', { className:'text-gray-500 text-xs w-3 inline-block' },
+                        open ? '▾' : '▸'),
+                      h('span', { className:'font-bold text-gray-800' }, g.supplier?.name || '(ไม่ระบุ supplier)'),
+                      h('span', { className:'text-xs bg-indigo-100 text-indigo-800 rounded px-1.5 py-0.5' },
+                        `${g.pays.length} บิล`),
+                      g.supplier?.taxId && h('span', { className:'text-[10px] text-gray-500' }, g.supplier.taxId),
+                      gPayDates.length > 0 && h('span', {
+                        className:'text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5',
+                        title:'วันที่ผู้ขอระบุว่าต้องการจ่าย' },
+                        gPayDates.length === 1
+                          ? `📅 นัดจ่าย ${fmtDate(gPayDates[0])}`
+                          : `📅 นัดจ่าย ${fmtDate(gPayDates[0])} – ${fmtDate(gPayDates[gPayDates.length-1])}`),
+                      ownCount > 0 && h('span', { className:'text-[10px] text-orange-700 bg-orange-100 rounded px-1.5 py-0.5',
+                        title:'คำขอที่คุณเป็นผู้สร้างเอง — ต้องให้คนอื่นอนุมัติ (dual-eye)' },
+                        `🔒 ของตัวเอง ${ownCount}`),
+                      g.pays.length > 1 && !open && h('span', { className:'text-[10px] text-blue-600' }, 'กดเพื่อดูรายบิล'))),
+                  h('td', { className:'px-3 py-2 text-right font-bold text-red-700' }, fmtCur(g.total)),
+                  h('td', { className:'px-3 py-2' }, ''),
+                  h('td', { className:'px-3 py-2' }, '')
+                ));
+                // --- แถวรายบิล (กางแล้ว) ---
+                if(open) g.pays.forEach(p => {
+                  const inv = invOf(p);
+                  const checked = selectedIds.includes(p.id);
+                  rows.push(h('tr', { key:p.id,
+                    className: cls('hover:bg-gray-50', checked && 'bg-blue-50') },
+                    h('td', { className:'px-2 py-2 text-center' },
+                      h('input', { type:'checkbox', checked, onChange:()=>toggleSel(p.id) })),
+                    h('td', { className:'px-3 py-2 text-xs pl-6' }, fmtDate(p.date)),
+                    h('td', { className:'px-3 py-2 text-xs' },
+                      (p.payDate || p.requestedPayDate)
+                        ? h('span', { className:'text-amber-800 font-medium' },
+                            '📅 ', fmtDate(p.payDate || p.requestedPayDate))
+                        : h('span', { className:'text-gray-400' }, '-')),
+                    h('td', { className:'px-3 py-2' },
+                      h('div', { className:'font-mono text-xs text-red-700' }, inv?.invNumber || '-'),
+                      inv?.supInvNumber && h('div', { className:'text-[10px] text-gray-500 font-mono' },
+                        'ใบกำกับ ', inv.supInvNumber)),
+                    h('td', { className:'px-3 py-2 text-xs' },
+                      PAY_METHODS.find(m=>m.v===p.method)?.label || p.method,
+                      p.bankName && h('div', { className:'text-[10px] text-gray-500' }, p.bankName)),
+                    h('td', { className:'px-3 py-2 text-right font-bold text-red-700' }, fmtCur(p.amount)),
+                    h('td', { className:'px-3 py-2 text-xs text-gray-500' }, p.by),
+                    h('td', { className:'px-3 py-2 text-center' },
+                      h('div', { className:'flex gap-1 justify-center flex-wrap' },
+                        printPayApprovalSheet && h(Button, { variant:'secondary', size:'sm',
+                          onClick:()=>printPayApprovalSheet(p, inv, state) }, '🖨️'),
+                        canApprove && (canApproveThis(p)
+                          ? h(Button, { variant:'success', size:'sm', onClick:()=>setApproveTarget(p) }, '✅')
+                          : h('span', { className:'text-[10px] text-orange-600 bg-orange-100 rounded px-1.5 py-1',
+                              title:'คุณเป็นผู้สร้างคำขอนี้ — ต้องให้คนอื่นอนุมัติ (dual-eye)' }, '🔒 ตัวเอง')),
+                        canApprove && h(Button, { variant:'danger', size:'sm',
+                          onClick:()=>reject(p) }, '❌'),
+                      )
                     )
-                  )
-                );
-              })
+                  ));
+                });
+                return rows;
+              }, [])
             )
-          ),
-          h(Pager, { pg: pgPending, label:'คำขอจ่าย' })
+          )),
+          h(Pager, { pg: pgPending, label:'supplier' })
         )),
     approveTarget && h(ApprovePaymentModal, {
       pay:approveTarget, state, dispatch, user,
@@ -53154,7 +53841,13 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
   const autoPostPayment = purchaseMod?.autoPostPayment;
   const banks = state.bankAccounts || [];
   const [bankId, setBankId] = useState(banks[0]?.id || '');
-  const [date, setDate] = useState(getToday());
+  // 🆕 FIX(P0): "วันจ่ายจริง" = วันที่เงินออกจากบัญชีจริง → default ต้องเป็นวันนี้เสมอ
+  //    ถ้า default เป็นวันนัดในอนาคต: ระบบตัดเงินจากธนาคาร + ปิดบิลเป็นจ่ายแล้ว
+  //    แต่ JE ถูกบล็อกเพราะเป็นวันอนาคต = เงินออกจริงแต่ไม่มีรายการบัญชี
+  //    (วันนัดของผู้ขอยังโชว์ให้เห็นด้านล่างเป็นข้อมูลอ้างอิง)
+  const reqDates = Array.from(new Set((pays||[])
+    .map(p => p.requestedPayDate || p.payDate).filter(Boolean)));
+  const [date, setDate] = useState(getToday);
   const [note, setNote] = useState('');
 
   const total = pays.reduce((s,p) => s + (p.amount||0), 0);
@@ -53235,9 +53928,13 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
         h('div', { className:'text-xs text-red-700' }, 'ยอดรวมที่จะตัดบัญชี'),
         h('div', { className:'text-3xl font-bold text-red-800' }, fmtCur(total))),
       h('div', { className:'grid grid-cols-2 gap-3' },
-        h('label', null, 'วันที่จ่าย',
+        h('label', null, 'วันที่จ่ายจริง (ลง JE/ภาษี)',
           h(BEDateInput, { value:date, onChange:setDate,
-            className:'w-full px-2 py-1.5 border rounded mt-0.5' })),
+            className:'w-full px-2 py-1.5 border rounded mt-0.5' }),
+          // 🆕 1.6: โชว์วันที่ผู้ขอ "นัดจ่าย" ไว้ เพื่อเทียบก่อนยืนยัน
+          reqDates.length > 0 && h('div', { className:'text-[10px] text-amber-800 mt-0.5' },
+            '📅 ผู้ขอนัดจ่าย: ',
+            reqDates.length === 1 ? fmtDate(reqDates[0]) : `${reqDates.length} วันไม่ตรงกัน`)),
         h('label', null, '🏦 บัญชีที่ใช้โอน *',
           h('select', { value:bankId, onChange:e=>setBankId(e.target.value),
             className:'w-full px-2 py-1.5 border rounded mt-0.5' },
@@ -53281,6 +53978,9 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
   const [ref, setRef] = useState(pay.ref || '');
   const [slip, setSlip] = useState(pay.slip || null);
   const [note, setNote] = useState('');
+  // 🆕 FIX(P0): เหตุผลเดียวกับ BulkApprovePayModal — วันจ่ายจริง default = วันนี้เสมอ
+  const reqPayDate = pay.requestedPayDate || pay.payDate || '';
+  const [payDate, setPayDate] = useState(getToday);
 
   const onSlip = (e) => {
     const file = e.target.files?.[0];
@@ -53323,6 +54023,9 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
     const updatedPay = {
       ...pay,
       method, ref, slip,
+      // 🆕 1.6: วันจ่ายจริงที่ผู้อนุมัติยืนยัน (JE + เลข PV อิงค่านี้) · วันที่ขอ (pay.date) คงเดิม
+      payDate: payDate || pay.payDate || getToday(),
+      requestedPayDate: pay.requestedPayDate || pay.payDate || null,
       bankId: bankId||null, bankName: bank?.name||'', bankNumber: bank?.accountNumber||'',
       approvalStatus:'approved',
       approvedBy: user.username, approvedAt: Date.now(),
@@ -53359,6 +54062,15 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
           h('input', { value:ref, onChange:e=>setRef(e.target.value),
             className:'w-full px-2 py-1 border rounded mt-0.5' })
         ),
+      ),
+      // 🆕 1.6: วันจ่ายจริง + วันที่ผู้ขอนัดไว้
+      h('label', { className:'block text-sm' }, 'วันที่จ่ายจริง (ลง JE/ภาษี)',
+        h(BEDateInput, { value:payDate, onChange:setPayDate,
+          className:'w-full px-2 py-1 border rounded mt-0.5' }),
+        h('div', { className:'text-[10px] mt-0.5' },
+          reqPayDate
+            ? h('span', { className:'text-amber-800' }, '📅 ผู้ขอนัดจ่าย: ', fmtDate(reqPayDate))
+            : h('span', { className:'text-gray-500' }, 'ผู้ขอไม่ได้ระบุวันที่ต้องการจ่าย'))
       ),
       method === 'transfer' && h('label', { className:'block text-sm' }, '🏦 บัญชีที่ใช้โอน *',
         h(Combobox || 'select', Combobox ? {
@@ -53404,6 +54116,9 @@ function PaymentCenter({ state, dispatch, user }){
   const [taxInvEntry, setTaxInvEntry] = useState(null); // INV ที่จะบันทึก Tax INV
   const dr = useDateRange(60);
   const [tab, setTab] = usePersistedTab('acct_pay', 'tobay');
+  const [q, setQ] = useState('');   // 🆕 1.8: ค้นหา supplier / เลข PI / เลขใบกำกับ (ใช้ทุก sub-tab)
+  // 🆕 คำค้นเปลี่ยน → ล้างรายการที่ติ๊กไว้ (เหตุผลเดียวกับหน้ารออนุมัติ)
+  useEffect(() => { setSelectedIds([]); }, [q]);
 
   const canPay = hasPerm(user, 'purchase','payment','create');
 
@@ -53447,10 +54162,35 @@ function PaymentCenter({ state, dispatch, user }){
     [state.payments, dr.startDate, dr.endDate]
   );
 
+  // 🆕 1.8: กรองด้วยคำค้น (ชื่อ supplier / เลข PI / เลขใบแจ้งหนี้ / เลขใบกำกับภาษี)
+  //   กรองก่อนส่งเข้าตาราง (usePaged อยู่ในตารางลูก) · KPI + ตัวเลขบนปุ่ม tab ยังคิดจากทั้งชุด
+  const matchInv = (i) => {
+    const sup = (state.suppliers||[]).find(s => s.id === i.supplierId);
+    return apMatch(q, [sup && sup.name, sup && sup.taxId, i.invNumber, i.supInvNumber,
+      i.supTaxInvNumber, i.supplierNameFreeform, i.poNumber, i.grNumber]);
+  };
+  const invsToPayF = useMemo(() => invsToPay.filter(matchInv),
+    [invsToPay, q, state.suppliers]);
+  const invsAwaitingTaxInvF = useMemo(() => invsAwaitingTaxInv.filter(matchInv),
+    [invsAwaitingTaxInv, q, state.suppliers]);
+  const paymentsF = useMemo(() => payments.filter(p => {
+    const inv = (state.invoices||[]).find(i => i.id === p.invId)
+      || (state.invoices||[]).find(i => (p.invoiceIds||[]).includes(i.id));
+    const sup = (state.suppliers||[]).find(s => s.id === p.supplierId);
+    return apMatch(q, [sup && sup.name, sup && sup.taxId, p.pvNumber, p.ref,
+      inv && inv.invNumber, inv && inv.supInvNumber, inv && inv.supTaxInvNumber]);
+  }), [payments, q, state.invoices, state.suppliers]);
+
   const today = getToday();
   // ⛔ exclude reversed
   const todayPay = (state.payments||[]).filter(p => !p.reversed && p.date === today);
   const todayTotal = todayPay.reduce((s,p) => s + (p.amount||0), 0);
+
+  // จำนวนที่ค้นเจอ/ทั้งหมด ของ sub-tab ที่กำลังเปิด (ใช้โชว์ข้าง ๆ ช่องค้นหา)
+  const searchFound = tab === 'tobay' ? invsToPayF.length
+    : tab === 'taxinv' ? invsAwaitingTaxInvF.length : paymentsF.length;
+  const searchTotal = tab === 'tobay' ? invsToPay.length
+    : tab === 'taxinv' ? invsAwaitingTaxInv.length : payments.length;
 
   return h('div', null,
 
@@ -53486,15 +54226,21 @@ function PaymentCenter({ state, dispatch, user }){
       h('button', { onClick:()=>setTab('history'),
         className: cls('px-4 py-2 rounded text-sm font-medium',
           tab==='history' ? 'bg-blue-600 text-white' : 'bg-gray-100') },
-        `📜 ประวัติตั้งหนี้/จ่าย`),
+        `📜 ประวัติจ่าย`),
       tab === 'tobay' && canPay && h(Button, {
         variant: selectedIds.length > 0 ? 'warning' : 'secondary',
         disabled: selectedIds.length === 0,
         onClick: () => setShowBulk(true),
       }, `📋 ขออนุมัติจ่าย (${selectedIds.length})`),
       tab === 'tobay' && pendingRequests.length > 0 && h('span', { className:'text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded' },
-        `⏳ รออนุมัติอยู่ ${pendingRequests.length} ใบ → ดูที่ 🔒 รออนุมัติจ่าย`)
+        `⏳ รออนุมัติอยู่ ${pendingRequests.length} ใบ → ดูที่แท็บ 🔒 รออนุมัติ`)
     ),
+
+    // 🆕 1.8: ช่องค้นหา — ใช้ได้ทุก sub-tab (รอจ่าย / รอ Tax INV / ประวัติจ่าย)
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
+      h(APSearch, { value:q, onChange:setQ,
+        placeholder:'🔍 ค้นหา: ชื่อ supplier / เลข PI / เลขใบแจ้งหนี้ / เลขใบกำกับภาษี',
+        found: searchFound, total: searchTotal })),
 
     tab === 'tobay' && pendingRequests.length > 0 && h('div', { className:'bg-amber-50 border-2 border-amber-300 rounded-lg p-3 mb-3' },
       h('div', { className:'font-bold text-amber-900 text-sm mb-2' },
@@ -53520,12 +54266,12 @@ function PaymentCenter({ state, dispatch, user }){
         }))),
 
     tab === 'tobay'
-      ? h(PayQueue, { invs:invsToPay, state, dispatch, user, setDetail, canPay, today,
-          selectedIds, setSelectedIds })
+      ? h(PayQueue, { invs:invsToPayF, state, dispatch, user, setDetail, canPay, today,
+          selectedIds, setSelectedIds, q, setQ })
       : tab === 'taxinv'
-        ? h(TaxInvPendingTab, { invs:invsAwaitingTaxInv, state, setDetail, setTaxInvEntry,
+        ? h(TaxInvPendingTab, { invs:invsAwaitingTaxInvF, state, setDetail, setTaxInvEntry,
             includeUnpaid:taxInvIncludeUnpaid, setIncludeUnpaid:setTaxInvIncludeUnpaid })
-        : h(PayHistory, { payments, state, dr, dispatch, user }),
+        : h(PayHistory, { payments:paymentsF, state, dr, dispatch, user }),
 
     showBulk && h(BulkRequestPayModal, {
       invIds: selectedIds, state, dispatch, user,
@@ -54586,6 +55332,9 @@ function TaxInvEntryModal({ inv, state, dispatch, user, onClose }){
 function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone }){
   const invs = (state.invoices||[]).filter(i => invIds.includes(i.id));
   const [date, setDate] = useState(getToday());
+  // 🆕 1.6: "วันที่ต้องการจ่าย" — ผู้ขอเลือกได้ตั้งแต่ตอนขออนุมัติ (default = วันนี้)
+  //   เก็บลง payment เป็น payDate (+ requestedPayDate สำรองไว้ให้ยังเห็นหลังผู้อนุมัติแก้วันจ่ายจริง)
+  const [payDate, setPayDate] = useState(getToday());
   const [note, setNote] = useState('');
   const [amounts, setAmounts] = useState(() => {
     const m = {};
@@ -54596,6 +55345,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   const total = invs.reduce((s,i) => s + (Number(amounts[i.id])||0), 0);
 
   const submit = () => {
+    if(!payDate) return alert('เลือก "วันที่ต้องการจ่าย" ด้วย');
     let sent = 0, capped = 0;
     for(const inv of invs){
       let amt = Number(amounts[inv.id])||0;
@@ -54615,6 +55365,11 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         id: genId('pay'),
         invId: inv.id, supplierId: inv.supplierId,
         date, amount: amt,
+        // 🆕 1.6: เก็บ "วันที่ผู้ขอนัดจ่าย" เท่านั้น
+        // ⛔ ห้ามเขียน payDate ตอนนี้ — payDate = วันที่เงินออกจริง ซึ่งกำหนด
+        //    งวดของ JE · เดือนของเลข PV · VAT เกณฑ์เงินสด · เดือนยื่น ภ.ง.ด.3/53
+        //    ถ้าเขียนตั้งแต่ตอนขอ = ยื่นภาษีผิดเดือน · payDate ถูก set ตอนอนุมัติเท่านั้น
+        requestedPayDate: payDate,
         method: 'transfer',    // default — อนุมัติจะเลือกบัญชีจริงตอนอนุมัติ
         ref: '', note,
         bankId: null, bankName: '', bankNumber: '',
@@ -54626,7 +55381,10 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
       dispatch({ type:'ADD_PAY', data: payData });
       sent++;
     }
-    alert(`📋 ส่งคำขออนุมัติจ่าย ${sent} ใบ` + (capped ? `\n(ปรับยอดลงให้พอดียอดค้าง ${capped} ใบ)` : '') + `\n→ รออนุมัติที่ tab 🔒 รออนุมัติจ่าย`);
+    alert(`📋 ส่งคำขออนุมัติจ่าย ${sent} ใบ`
+      + `\n📅 วันที่ต้องการจ่าย: ${fmtDate(payDate)}`
+      + (capped ? `\n(ปรับยอดลงให้พอดียอดค้าง ${capped} ใบ)` : '')
+      + `\n→ รออนุมัติที่แท็บ 🔒 รออนุมัติ`);
     onClose();
     onDone && onDone();
   };
@@ -54636,10 +55394,18 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-sm text-blue-800' },
         '💡 ขออนุมัติโดยไม่ต้องระบุบัญชี / สลิป → ผู้อนุมัติจะเลือกบัญชีตอนอนุมัติ'
       ),
-      h('div', { className:'grid grid-cols-2 gap-3' },
+      h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
         h('label', { className:'text-sm' }, 'วันที่ขอ',
           h(BEDateInput, { value:date, onChange:setDate,
             className:'w-full px-2 py-1 border rounded text-sm mt-0.5' })
+        ),
+        // 🆕 1.6: วันที่ต้องการจ่าย
+        h('label', { className:'text-sm' },
+          h('span', { className:'font-medium text-amber-800' }, '📅 วันที่ต้องการจ่าย *'),
+          h(BEDateInput, { value:payDate, onChange:setPayDate,
+            className:'w-full px-2 py-1 border-2 border-amber-300 rounded text-sm mt-0.5' }),
+          h('div', { className:'text-[10px] text-gray-500 mt-0.5' },
+            'ผู้อนุมัติจะเห็นวันนี้ในแท็บ 🔒 รออนุมัติ')
         ),
         h('label', { className:'text-sm' }, 'หมายเหตุ (ใช้ทุกรายการ)',
           h('input', { value:note, onChange:e=>setNote(e.target.value),
@@ -54693,20 +55459,25 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   );
 }
 
-function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selectedIds, setSelectedIds }){
+function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selectedIds, setSelectedIds, q, setQ }){
   const canVoid = user && (isSuperUser(user) || hasPerm(user,'purchase','inv','delete'));
   const pg = usePaged(invs, 50);
   const voidINV = (i) => {
     const reason = prompt(`❌ ยกเลิก/ลบ INV ${i.invNumber} ทั้งใบ?\n\nเหตุผล (เช่น "คีย์ผิด" / "คืนของทั้งล็อต ไม่ต้องจ่าย"):`, '');
     if(reason === null) return;
     if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
-    if(!confirm(`⚠️ ยืนยันยกเลิก INV ${i.invNumber}?\n\nระบบจะ:\n• Mark INV เป็น voided (เก็บ audit log)\n• Reverse JE อัตโนมัติ\n• ปลด link จาก GR (กลับไปอยู่คิว GR→INV ตั้งใหม่ได้)\n• INV หายจากรายการรอจ่าย\n\nเหตุผล: ${reason}`)) return;
+    if(!confirm(`⚠️ ยืนยันยกเลิก INV ${i.invNumber}?\n\nระบบจะ:\n• Mark INV เป็น voided (เก็บ audit log)\n• Reverse JE อัตโนมัติ\n• ปลด link จาก GR (กลับไปอยู่คิวเจ้าหนี้ ตั้งใหม่ได้)\n• INV หายจากรายการรอจ่าย\n\nเหตุผล: ${reason}`)) return;
     dispatch({ type:'VOID_INV', data:{ invId:i.id, reason:reason.trim(), by:user.username } });
-    alert(`✅ ยกเลิก INV ${i.invNumber} แล้ว\n• Reverse JE แล้ว\n• GR กลับเข้าคิว "GR → INV" — ตั้งใหม่ได้`);
+    alert(`✅ ยกเลิก INV ${i.invNumber} แล้ว\n• Reverse JE แล้ว\n• GR กลับเข้าคิว "🧾 เจ้าหนี้" — ตั้งใหม่ได้`);
   };
   if(invs.length === 0){
-    return h('div', { className:'bg-green-50 border border-green-200 rounded-lg p-8 text-center text-green-700' },
-      '✅ ไม่มี INV ค้างจ่าย (หรือขออนุมัติไปหมดแล้ว)');
+    return String(q||'').trim()
+      ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
+          h('div', { className:'mb-1' }, `🔍 ไม่พบบิลที่ตรงกับ "${String(q).trim()}"`),
+          setQ && h('button', { onClick:()=>setQ(''),
+            className:'text-xs px-3 py-1 border rounded bg-white hover:bg-gray-50' }, 'ล้างคำค้น'))
+      : h('div', { className:'bg-green-50 border border-green-200 rounded-lg p-8 text-center text-green-700' },
+          '✅ ไม่มี INV ค้างจ่าย (หรือขออนุมัติไปหมดแล้ว)');
   }
   const toggle = (id) => setSelectedIds(selectedIds.includes(id)
     ? selectedIds.filter(x => x !== id) : [...selectedIds, id]);
