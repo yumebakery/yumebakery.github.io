@@ -5563,6 +5563,26 @@ function reducer(s, a){
     //    เดิมทำได้ทางเดียวคือยกเลิกใบตั้งหนี้ทั้งใบ (UNDO_SHORT_DECISION บล็อกถ้ามี PI แล้ว)
     //    ซึ่งพังมากถ้าจ่ายเงินไปแล้ว — ตัวนี้ถอนเฉพาะส่วน CN ใบตั้งหนี้/ภาษีซื้อยังอยู่เหมือนเดิม
     // a.data: { poId, lineIdx, reason, by }
+    // 🆕 จัดซื้อตัดสินว่า GR ชดเชยใบนี้จะตั้งหนี้ใหม่ไหม (คลังไม่ตัดสินเรื่องหนี้/ภาษี)
+    // a.data: { grId, needsPI, reason, by }
+    case 'DECIDE_REPLACEMENT_BILLING': {
+      const { grId, needsPI, reason, by } = a.data || {};
+      const gr = (s.grs||[]).find(g => g.id === grId);
+      if(!gr){ alert('ไม่พบใบรับของ'); return s; }
+      if(!gr.needsPurchaseDecision){ alert('ใบนี้ตัดสินไปแล้ว'); return s; }
+      return { ...s,
+        grs: (s.grs||[]).map(g => g.id === grId
+          ? { ...g, replacementNeedsPI: !!needsPI, needsPurchaseDecision: false,
+              billingDecidedBy: by, billingDecidedAt: Date.now(), billingDecisionReason: reason||'' }
+          : g),
+        auditLog: [...(s.auditLog||[]), { id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,4),
+          ts:Date.now(), type:'replacement_billing_decide', by, entityId: grId, entityRef: gr.grNumber,
+          amount: gr.totalValue||0,
+          note: (needsPI ? 'supplier ออกใบกำกับใหม่ → ตั้งหนี้ใบใหม่' : 'ใช้บิลเดิม → ไม่สร้างหนี้ใหม่')
+            + ' · ' + (reason||'') }],
+      };
+    }
+
     case 'REVERT_CN_TO_DELIVERY': {
       const { poId, lineIdx, reason, by } = a.data;
       const po = (s.pos||[]).find(p => p.id === poId);
@@ -15352,7 +15372,10 @@ function RTVViewModal({ rtv, state, dispatch, user, onClose }){
 function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, onClose }){
   // 🆕 เคลมปกติ supplier ส่งของชดเชยโดย "ไม่ออกใบกำกับใหม่" (ของนี้จ่ายไปแล้วในบิลเดิม)
   //    เดิมตั้ง replacementNeedsPI = true เสมอ → เกิด PI ใบที่ 2 เต็มมูลค่า = หนี้ซ้ำ + ภาษีซื้อซ้ำ
-  const [supIssuesNewInv, setSupIssuesNewInv] = useState(false);
+  // 🆕 คลังไม่ตัดสินใจเรื่องหนี้/ภาษี — บันทึกแค่ "เอกสารอะไรมากับรถ" เป็นข้อเท็จจริง
+  //    จัดซื้อเป็นคนตัดสินว่าจะตั้งหนี้ใหม่ไหม (เขาเป็นคนคุยเงื่อนไขกับ supplier)
+  const [docWithGoods, setDocWithGoods] = useState('none');   // none | delivery_note | tax_invoice
+  const [supInvNoSeen, setSupInvNoSeen] = useState('');
   const [repLines, setRepLines] = useState(() =>
     (rtv.lines||[]).map(l => {
       const remain = l.qty - (alreadyReplaced[l.itemId]||0);
@@ -15429,7 +15452,10 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
     const replGR = {
       id: genId('gr'), grNumber, grDate: repDate,
       isReplacement: true,
-      replacementNeedsPI: supIssuesNewInv,   // 🆕 ขึ้นคิวตั้งหนี้เฉพาะกรณี supplier ออกใบกำกับใหม่จริง
+      // 🆕 ยังไม่ตั้งหนี้จนกว่าจัดซื้อจะตัดสิน — คลังบอกได้แค่ว่าเห็นเอกสารอะไรมา
+      replacementNeedsPI: false,
+      needsPurchaseDecision: true,          // เข้าคิวให้จัดซื้อตัดสิน
+      docWithGoods, supInvNoSeen: supInvNoSeen.trim() || null,
       rtvId: rtv.id, rtvNumber: rtv.rtvNumber,
       poId: rtv.poId, poNumber: rtv.poNumber,
       supplierId: rtv.supplierId, branch,
@@ -15471,25 +15497,28 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
     dispatch({ type:'ADD_REPLACEMENT_GR', data:{ gr:replGR, stockUpdates, fifoLayers, movements, invRestore: null, rtvUpdate }});
 
     alert(`✅ รับชดเชยเรียบร้อย\nGR: ${grNumber} · มูลค่า ${fmtCur(totalValue)}\n\n` +
-      (supIssuesNewInv
-        ? `📋 GR นี้เข้าคิว "บัญชี → GR → ตั้งหนี้ (PI)" แล้ว\n   บัญชีตั้ง PI → ดึง CN/credit จาก RTV หักยอด`
-        : `✅ เข้าสต๊อกอย่างเดียว — ไม่สร้างหนี้ใหม่\n   (ของชดเชยใช้ใบกำกับเดิม จ่ายเงินไปแล้วในบิลแรก)`));
+      `✅ ของเข้าสต๊อกแล้ว\n\n` +
+      (docWithGoods === 'tax_invoice'
+        ? `📋 บันทึกไว้ว่ามีใบกำกับภาษีมาด้วย${supInvNoSeen.trim() ? ' เลขที่ ' + supInvNoSeen.trim() : ''}\n   ส่งให้จัดซื้อตัดสินว่าจะตั้งหนี้ใหม่หรือใช้บิลเดิม`
+        : `📋 ส่งให้จัดซื้อตัดสินเรื่องเอกสาร/หนี้ต่อ\n   (ยังไม่สร้างหนี้ใหม่)`));
     onClose();
   };
 
   return h(Modal, { isOpen:true, title:`📦 รับของชดเชย — RTV: ${rtv.rtvNumber}`, onClose, size:'xl' },
     h('div', { className:'space-y-4' },
       // 🆕 ตัดสินที่ต้นทาง: ของชดเชยสร้างหนี้ใหม่หรือไม่
-      h('div', { className: cls('border-2 rounded p-3', supIssuesNewInv ? 'bg-amber-50 border-amber-300' : 'bg-green-50 border-green-300') },
-        h('label', { className:'flex items-start gap-2 cursor-pointer' },
-          h('input', { type:'checkbox', checked:supIssuesNewInv,
-            onChange:e=>setSupIssuesNewInv(e.target.checked), className:'mt-1' }),
-          h('div', null,
-            h('div', { className:'font-semibold text-sm' }, 'supplier ออกใบกำกับภาษี "ใบใหม่" สำหรับของชดเชยนี้'),
-            h('div', { className:'text-xs text-gray-600 mt-0.5' },
-              supIssuesNewInv
-                ? '→ GR นี้จะเข้าคิวตั้งหนี้ (PI ใบใหม่) · ใช้เมื่อ supplier คิดเงินใหม่จริงเท่านั้น'
-                : '→ เข้าสต๊อกอย่างเดียว ไม่สร้างหนี้ใหม่ (ปกติของเคลมใช้ใบกำกับเดิม จ่ายไปแล้วในบิลแรก)'))))
+      h('div', { className:'border-2 border-blue-300 bg-blue-50 rounded p-3' },
+        h('div', { className:'font-semibold text-sm mb-1' }, '📄 เอกสารที่มากับของ (บันทึกตามที่เห็นจริง)'),
+        h('div', { className:'text-xs text-gray-600 mb-2' },
+          'คลังบันทึกแค่ว่าเห็นเอกสารอะไรมา — ',
+          h('b', null, 'จัดซื้อจะเป็นคนตัดสิน'), 'ว่าจะตั้งหนี้ใหม่หรือใช้บิลเดิม'),
+        [['none','ไม่มีเอกสารมาด้วย'],['delivery_note','มีใบส่งของอย่างเดียว'],['tax_invoice','มีใบกำกับภาษี']]
+          .map(([v,lb]) => h('label', { key:v, className:'flex items-center gap-2 text-sm py-0.5 cursor-pointer' },
+            h('input', { type:'radio', name:'docWithGoods', checked:docWithGoods===v,
+              onChange:()=>setDocWithGoods(v) }), lb)),
+        docWithGoods === 'tax_invoice' && h('input', { type:'text', value:supInvNoSeen,
+          onChange:e=>setSupInvNoSeen(e.target.value), placeholder:'เลขที่ใบกำกับภาษี (ถ้าอ่านได้)',
+          className:'mt-2 w-full px-2 py-1 border-2 rounded text-sm' }))
       ,
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800' },
         '✨ Supplier ส่งของแทนที่คืน — ระบบจะ:',
@@ -37057,6 +37086,27 @@ function ShortDecisionTab({ state, dispatch, user }){
     })).filter(x => x.pendingLines.length > 0)
   , [state.pos]);
 
+  // 🆕 GR ของชดเชยที่คลังรับเข้ามาแล้ว รอจัดซื้อตัดสินเรื่องเอกสาร/หนี้
+  const replPendingBilling = useMemo(() =>
+    (state.grs||[]).filter(g => g.isReplacement && g.needsPurchaseDecision && !g.voided)
+  , [state.grs]);
+
+  const decideReplBilling = (gr, needsPI) => {
+    const sup = (state.suppliers||[]).find(x => x.id === gr.supplierId);
+    const msg = needsPI
+      ? `ยืนยันว่า ${sup?.name||'supplier'} ออกใบกำกับภาษี "ใบใหม่" สำหรับของชดเชยนี้?\n\n`
+        + `→ GR ${gr.grNumber} (${fmtCur(gr.totalValue||0)}) จะเข้าคิวตั้งหนี้ใบใหม่\n`
+        + `→ ใช้เมื่อ supplier คิดเงินใหม่จริงเท่านั้น ไม่งั้นจะจ่ายซ้ำ\n\nเหตุผล:`
+      : `ยืนยันว่าใช้บิลเดิม ไม่มีใบกำกับใหม่?\n\n`
+        + `→ GR ${gr.grNumber} เข้าสต๊อกอย่างเดียว ไม่สร้างหนี้ใหม่\n`
+        + `→ ของชดเชยถือว่าจ่ายไปแล้วในบิลแรก\n\nเหตุผล:`;
+    const reason = prompt(msg, needsPI ? '' : 'supplier ยืนยันใช้บิลเดิม');
+    if(reason === null) return;
+    if(!reason.trim()) return alert('ต้องระบุเหตุผล');
+    dispatch({ type:'DECIDE_REPLACEMENT_BILLING',
+      data:{ grId: gr.id, needsPI, reason: reason.trim(), by: user.username }});
+  };
+
   // 🆕 line ที่ตัดสินไป "ใช้บิลเดิม + รอใบลดหนี้" แล้ว แต่ยังไม่ได้เอกสาร
   //    เผื่อ supplier เปลี่ยนใจมาส่งของแทน → จัดซื้อต้องกลับคำได้โดยไม่ต้องยกเลิกใบตั้งหนี้
   const posAwaitCn = useMemo(() =>
@@ -37172,6 +37222,34 @@ function ShortDecisionTab({ state, dispatch, user }){
                   );
                 })));
           })),
+
+    replPendingBilling.length > 0 && h('div', { className:'mt-5' },
+      h('h3', { className:'text-lg font-bold mb-2' },
+        '📦 ของชดเชยรับเข้าแล้ว — รอตัดสินเรื่องเอกสาร (', replPendingBilling.length, ')'),
+      h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 mb-2 text-xs text-amber-900' },
+        'คลังรับของเข้าสต๊อกแล้ว และบันทึกไว้ว่าเห็นเอกสารอะไรมากับรถ · ',
+        h('b', null, 'คุณเป็นคนตัดสิน'), 'ว่า supplier คิดเงินใหม่หรือใช้บิลเดิม เพราะเป็นคนคุยเงื่อนไข'),
+      h('div', { className:'space-y-2' },
+        replPendingBilling.map(gr => {
+          const sup = (state.suppliers||[]).find(x => x.id === gr.supplierId);
+          const DOC = { tax_invoice:'🧾 มีใบกำกับภาษีมาด้วย', delivery_note:'📄 มีใบส่งของอย่างเดียว', none:'— ไม่มีเอกสารมาด้วย' };
+          return h('div', { key:gr.id, className:'bg-white rounded-lg shadow p-3' },
+            h('div', { className:'flex justify-between items-start gap-2 flex-wrap' },
+              h('div', null,
+                h('div', { className:'font-bold' },
+                  h('span', { className:'font-mono text-green-700' }, gr.grNumber), ' · ', sup?.name || '-',
+                  h('span', { className:'ml-2 text-sm text-gray-600' }, fmtCur(gr.totalValue||0))),
+                h('div', { className:'text-xs mt-0.5' },
+                  'อ้างอิงคืนของ: ', h('b', null, gr.rtvNumber||'-'), ' · คลังบันทึก: ',
+                  h('b', { className: gr.docWithGoods === 'tax_invoice' ? 'text-amber-800' : 'text-gray-700' },
+                    DOC[gr.docWithGoods] || DOC.none),
+                  gr.supInvNoSeen && h('span', null, ' เลขที่ ', h('b', null, gr.supInvNoSeen)))),
+              hasPerm(user, 'purchase', 'po', 'edit') && h('div', { className:'flex gap-2' },
+                h(Button, { variant:'secondary', size:'sm', onClick:()=>decideReplBilling(gr, false) },
+                  '✅ ใช้บิลเดิม'),
+                h(Button, { variant:'warning', size:'sm', onClick:()=>decideReplBilling(gr, true) },
+                  '🧾 ออกบิลใหม่ → ตั้งหนี้'))));
+        }))),
 
     posAwaitCn.length > 0 && h('div', { className:'mt-5' },
       h('h3', { className:'text-lg font-bold mb-2' },
