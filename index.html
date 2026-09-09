@@ -4838,12 +4838,27 @@ function reducer(s, a){
     }
     // 🆕 ตัด stock + อัพเดต item.stockByBranch (สำหรับ production op start)
     case 'CONSUME_PRODUCTION_MATERIALS': {
-      // a.data = { branch, locId, allowNegative, items:[{itemId, qty}], movement }
-      const { branch, locId, allowNegative, items: matItems, movement } = a.data;
+      // a.data = { branch, locId, allowNegative, items:[{itemId, qty}], movement, orderId? }
+      // 🆕 ต้นทุนจริงต่อล็อต: deductFIFO คืน cost + breakdown ของชั้นที่ตัดจริงอยู่แล้ว
+      //    เดิมทิ้งไปเฉย ๆ → ต้นทุน FG ถูกคิดใหม่จากสูตรแทนที่จะใช้ของที่เบิกจริง
+      //    ตอนนี้สะสมไว้บนใบสั่งผลิต เพื่อให้ตอนบันทึกผลผลิตคิดจากของจริง
+      const { branch, locId, allowNegative, items: matItems, movement, orderId } = a.data;
       let layers = s.fifoLayers.map(l => ({...l}));
       let items = s.items.slice();
+      let _actCost = 0;
+      const _actLots = [];
       for(const m of matItems){
         const result = deductFIFO(layers, m.itemId, m.qty, branch, locId);
+        _actCost += Number(result.cost) || 0;
+        (result.breakdown||[]).forEach(b => _actLots.push({
+          itemId: m.itemId, lot: b.lot, qty: b.qty, unitCost: b.unitCost, subtotal: b.subtotal }));
+        if(result.shortage > 0){
+          // ส่วนที่ตัดติดลบ ตี @costPrice เพื่อไม่ให้ต้นทุนต่ำผิด (layer ติดลบสร้างด้านล่าง)
+          const _cp = Number((s.items.find(x => x.id === m.itemId)||{}).costPrice) || 0;
+          _actCost += result.shortage * _cp;
+          if(_cp > 0) _actLots.push({ itemId: m.itemId, lot:'NEG', qty: result.shortage,
+            unitCost: _cp, subtotal: result.shortage * _cp, estimated: true });
+        }
         if(result.shortage > 0 && allowNegative){
           // 🆕 B3: ตี NEG layer @ costPrice (ไม่ใช่ 0) — ต้นทุน FG ไม่ถูก zero เงียบ
           const _negCp = Number((s.items.find(x => x.id === m.itemId)||{}).costPrice) || 0;
@@ -4862,8 +4877,17 @@ function reducer(s, a){
           ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, branch, locId, -m.qty) }
           : it);
       }
+      // สะสมต้นทุนจริงไว้บนใบสั่งผลิต (เบิกหลายรอบก็บวกทบ)
+      let prodOrders = s.productionOrders || [];
+      if(orderId && _actCost > 0){
+        prodOrders = prodOrders.map(o => o.id === orderId ? { ...o,
+          actualMaterialCost: (Number(o.actualMaterialCost)||0) + _actCost,
+          actualMaterialLots: [ ...(o.actualMaterialLots||[]), ..._actLots ],
+          actualCostUpdatedAt: Date.now(),
+        } : o);
+      }
       return {
-        ...s, items, fifoLayers: layers,
+        ...s, items, fifoLayers: layers, productionOrders: prodOrders,
         movements: movement ? [...s.movements, ...(Array.isArray(movement) ? movement : [movement])] : s.movements,
       };
     }
@@ -4878,11 +4902,34 @@ function reducer(s, a){
         console.warn('[PRODUCE_FG_TO_LOCATION] ข้าม — FG ถูก dispatch ไปแล้วสำหรับ ' + dedupeKey);
         return s;
       }
+      // 🆕 ต้นทุนจริงต่อล็อต — ใช้ของที่เบิกจริงในใบสั่งผลิตนี้ แทนการคิดใหม่จากสูตร
+      //    คำนวณใน reducer เพราะฝั่งหน้าจอถือ state ก่อนหน้า (ยังไม่เห็นยอดที่เพิ่งเบิก)
+      //    costShare = สัดส่วนของ FG ตัวนี้ในสูตรที่ได้หลายอย่าง (1 = ผลผลิตเดียว)
+      //    extraCost = ค่าแรง+โสหุ้ยของรอบผลิตนี้ · ตกไปใช้ต้นทุนมาตรฐานถ้ายังไม่มีการเบิกจริง
+      let _unitCost = Number(unitCost) || 0;
+      let _costBasis = 'standard';
+      {
+        const _ord = a.data.orderId ? (s.productionOrders||[]).find(o => o.id === a.data.orderId) : null;
+        const _act = Number(_ord && _ord.actualMaterialCost) || 0;
+        if(_act > 0 && qty > 0){
+          const _share = (a.data.costShare == null) ? 1 : Number(a.data.costShare);
+          const _extra = Number(a.data.extraCost) || 0;
+          // ก้อนต้นทุนของ FG ตัวนี้ = (วัตถุดิบที่เบิกจริง + ค่าแรง/โสหุ้ย) × สัดส่วนในสูตร
+          const _pool = (_act + _extra) * (_share > 0 && _share <= 1 ? _share : 1);
+          // หารด้วย "จำนวนที่วางแผนผลิต" ไม่ใช่จำนวนของรอบนี้ —
+          //   เพราะเบิกทีเดียวแล้วทยอยบันทึกผลผลิตหลายรอบได้ ถ้าหารด้วยรอบแรกจะกินก้อนหมด
+          //   รอบถัดไปจะเหลือ 0 · ใช้แผนเป็นตัวหารทำให้ทุกรอบได้ต้นทุนเท่ากัน
+          //   ผลิตได้มาก/น้อยกว่าแผน → ผลต่างโผล่ที่ actualCostAllocated เทียบกับที่เบิกจริง (ดูรายงานได้)
+          const _planned = Number(_ord.yieldQty) > 0 ? Number(_ord.yieldQty) : qty;
+          if(_pool > 0){ _unitCost = _pool / _planned; _costBasis = 'actual'; }
+        }
+      }
       const newLayer = {
         id: 'fl_prod_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
         itemId: fgItemId, branch, locId: locId || null,
         qty, remaining: qty,
-        unitCost: Number(unitCost)||0, totalCost: qty * (Number(unitCost)||0),
+        unitCost: _unitCost, totalCost: qty * _unitCost,
+        costBasis: _costBasis,   // 'actual' = จากของที่เบิกจริง · 'standard' = จากสูตร
         date: new Date().toISOString().slice(0,10),
         lot: lot || ('PROD-' + Date.now().toString(36)),
         expiryDate: expiryDate || null,
@@ -4905,7 +4952,7 @@ function reducer(s, a){
         const toSeq = (s.seq?.to || 1);
         const d = new Date();
         const toNumber = `TO-${String(d.getFullYear()+543).slice(-2)}${String(d.getMonth()+1).padStart(2,'0')}-${String(toSeq).padStart(4,'0')}`;
-        const cost = Number(unitCost)||0;
+        const cost = _unitCost;   // 🆕 ใบโอนอัตโนมัติต้องใช้ต้นทุนจริงเดียวกับ layer ที่เพิ่งสร้าง
         const toData = {
           id: 'to_' + Date.now().toString(36) + Math.random().toString(36).slice(2,5),
           toNumber, toDate: getToday(),
@@ -4942,7 +4989,18 @@ function reducer(s, a){
       const fgDispatchKeys = dedupeKey
         ? [...(s.fgDispatchKeys||[]), dedupeKey]
         : (s.fgDispatchKeys || []);
-      return { ...s, items, fifoLayers, movements, transferOrders, seq, auditLog, fgDispatchKeys };
+      // 🆕 จดว่าปันต้นทุนจริงไปแล้วเท่าไหร่ — บันทึกผลผลิตหลายรอบจากการเบิกครั้งเดียวจะได้ไม่ปันซ้ำ
+      //    และเก็บต้นทุน/ล็อตไว้บนใบสั่งผลิตเพื่อใช้ดูย้อนหลัง + ทำรายงานผลต่างเทียบสูตร
+      let prodOrders2 = s.productionOrders || [];
+      if(a.data.orderId && _costBasis === 'actual'){
+        prodOrders2 = prodOrders2.map(o => o.id === a.data.orderId ? { ...o,
+          actualCostAllocated: (Number(o.actualCostAllocated)||0) + (_unitCost * qty),
+          actualFgCosts: [ ...(o.actualFgCosts||[]), {
+            fgItemId, qty, unitCost: _unitCost, lot: newLayer.lot, at: Date.now() } ],
+        } : o);
+      }
+      return { ...s, items, fifoLayers, movements, transferOrders, seq, auditLog, fgDispatchKeys,
+        productionOrders: prodOrders2 };
     }
 
     // ---------- Movements ----------
@@ -12320,6 +12378,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
       receiveNow: (l.qty||0) - (l.receivedQty||0),
       lot: '',
       expiryDate: '',
+      labelQty: 0,   // 🏷️ LOT-LABEL: จำนวนสติ๊กเกอร์ที่จะพิมพ์ (0 = ไม่พิมพ์)
     }))
   );
   // 🆕 BUG-PO1: ตรวจจับ PO ที่รับครบแล้วแต่ status ยังค้าง 'partial' → เสนอปุ่ม fix
@@ -12362,7 +12421,13 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
   const removePhoto = (idx) => setPhotos(photos.filter((_,i) => i !== idx));
 
   const updateLine = (i, k, v) => setRcvLines(rcvLines.map((l,idx) => idx===i ? {...l, [k]:v} : l));
+  // 🏷️ LOT-LABEL: ตั้งจำนวนสติ๊กเกอร์ (clamp 0-99 · กันพิมพ์หลุดเป็นร้อยดวง)
+  const setLabelQty = (i, v) => updateLine(i, 'labelQty',
+    Math.max(0, Math.min(99, Math.floor(Number(v)||0))));
   const totalValue = rcvLines.reduce((s,l) => s + (l.unitPrice||0) * (l.receiveNow||0), 0);
+  // 🏷️ นับเฉพาะรายการที่รับจริง — ไม่รับ = ไม่ต้องมีสติ๊กเกอร์
+  const totalLabels = rcvLines.reduce((s,l) =>
+    s + ((l.receiveNow||0) > 0 ? (Number(l.labelQty)||0) : 0), 0);
   const hasAny = rcvLines.some(l => l.receiveNow > 0);
   const hasOverReceive = rcvLines.some(l => l.receiveNow > l.remainQty);
 
@@ -12379,9 +12444,32 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     if(receiving.length === 0) return alert('ไม่มีรายการที่จะรับ');
     if(hasOverReceive && !confirm('⚠️ บางรายการรับเกินที่สั่ง — ระบบจะบันทึก over-receive\nยืนยัน?')) return;
 
-    const grDate = getToday();
+    // 🆕 FIX: เดิมประกาศ const grDate = getToday() ทับ state ที่ผู้ใช้เลือก (บรรทัด ~1069)
+    //    → ช่อง "วันที่รับของ" ไม่เคยถูกใช้เลย ทุกใบลงวันที่วันนี้เสมอ
+    //    กระทบทั้งวัน GR / วัน FIFO layer (ลำดับตัดของ) / วัน movement / วันบนสติ๊กเกอร์
+    //    รับของย้อนหลัง (ของมาเมื่อวานแต่คีย์วันนี้) จึงลงผิดวันมาตลอด
+    if(!grDate) return alert('เลือกวันที่รับของก่อน');
+    // เช็คงวดปิด/วันอนาคตฝั่งหน้าจอก่อน — reducer ก็เช็คอีกชั้น แต่ต้องกันไว้ก่อนพิมพ์สติ๊กเกอร์
+    {
+      const _lock = state.settings?.periodLockUntil;
+      if(_lock && String(grDate) < String(_lock))
+        return alert(`📅 งวด ≤ ${_lock} ปิดแล้ว — รับของวันที่ ${grDate} ไม่ได้`);
+      const _lim = Number(state.settings?.futureDateLimit ?? 7);
+      if(_lim >= 0){
+        const _t = new Date(); _t.setHours(23,59,59,999);
+        const _max = new Date(_t.getTime() + _lim*86400000).toISOString().slice(0,10);
+        if(String(grDate) > _max)
+          return alert(`📅 วันที่ ${grDate} อยู่ในอนาคตเกิน ${_lim} วัน — รับของไม่ได้`);
+      }
+    }
     const grNumber = global.ERP.genDocNumber('GR', grDate, state.grs||[], 'grNumber');
     const branch = po.destinationBranch || state.currentBranch;
+
+    // 🏷️ LOT-LABEL: คำนวณ "เลข LOT จริง" ครั้งเดียว แล้วใช้ตัวเดียวกันทุกที่
+    //   (FIFO layer + GR line + สติ๊กเกอร์) — เดิม GR line เก็บ '' เมื่อ auto-gen
+    //   ทำให้พิมพ์ซ้ำย้อนหลังไม่รู้ว่า LOT อะไร
+    const resolvedLots = receiving.map((l, idx) =>
+      l.lot || `${grNumber}-${String(idx+1).padStart(2,'0')}`);
 
     const stockUpdates = receiving.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
@@ -12434,7 +12522,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         locId: destLocId || null,  // 📍 track location ที่รับเข้า
         qty: baseQty, remaining: baseQty, unitCost: costPerBase,
         date: grDate,
-        lot: l.lot || `${grNumber}-${String(idx+1).padStart(2,'0')}`,
+        lot: resolvedLots[idx],
         expiryDate: l.expiryDate || '',
         grRef: grNumber, sourcePO: po.poNumber,
         isFreebie: !!l.isFreebie,  // 🆕 mark layer as freebie
@@ -12466,7 +12554,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
       destLocId: destLocId || null,
       // 💰 carry priceMode from PO — INV จะใช้ตอนคำนวณ VAT (กัน double-count กรณี inclusive)
       priceMode: po.priceMode || 'exclusive',
-      lines: receiving.map(l => {
+      lines: receiving.map((l, idx) => {
         const item = state.items.find(i => i.id === l.itemId);
         const baseQty = toBaseQty(item, l.receiveNow, l.unit);
         // ⭐ ดึง PO line ด้วย _poLineIdx ที่ผูกมาแล้ว (กัน bug: PO มี itemId ซ้ำ 2 line → asset/VAT ปนผิด line)
@@ -12478,7 +12566,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
           unitPrice: l.isFreebie ? 0 : l.unitPrice,
           lineTotal: l.isFreebie ? 0 : (l.unitPrice * l.receiveNow),
           vatRate: l.isFreebie ? 0 : (poLine?.vatRate ?? 7),
-          lot: l.lot || '', expiryDate: l.expiryDate || '',
+          lot: resolvedLots[idx], expiryDate: l.expiryDate || '',
           // 🆕 PE-2: ของแถม flag
           isFreebie: !!l.isFreebie,
           // 🆕 ทรัพย์สิน — สืบจาก PO line (พร้อมรายละเอียด แบรนด์/รุ่น/ขนาด/สี/ประกัน/หมายเหตุ → seed ทะเบียน)
@@ -12535,14 +12623,40 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         data: { grId: gr.id, poId: po.id, lineDecisions,
           by: user.username, note: shortNote } });
     }
+    // 🏷️ LOT-LABEL: พิมพ์สติ๊กเกอร์ติดของ — ต้องอยู่ "หลัง" dispatch สำเร็จ
+    //   และใช้ resolvedLots (LOT จริงที่เข้า FIFO layer) ไม่ใช่ค่าที่ผู้ใช้พิมพ์อย่างเดียว
+    //   เปิดหน้าต่างพิมพ์ก่อน alert — กัน popup blocker กินสิทธิ์ตอนค้าง dialog
+    const labelJobs = receiving.map((l, idx) => {
+      const n = Math.max(0, Math.min(99, Math.floor(Number(l.labelQty)||0)));
+      if(n <= 0) return null;
+      const item = state.items.find(i => i.id === l.itemId);
+      return {
+        count: n,
+        name: item?.name || l.itemId,
+        code: item?.code || '',
+        lot: resolvedLots[idx],
+        dateText: fmtDate(grDate),
+        expText: l.expiryDate ? fmtDate(l.expiryDate) : '',
+        grNumber,
+      };
+    }).filter(Boolean);
+    const labelCount = labelJobs.reduce((s2, j) => s2 + j.count, 0);
+    // 🆕 บอกตามจริง — printLotLabels คืน false ถ้าเปิดหน้าต่างไม่ได้ (popup ถูกบล็อก)
+    //    หรือผู้ใช้กดยกเลิกตอนถามยืนยันจำนวนมาก · เดิมขึ้นว่า "เปิดหน้าพิมพ์แล้ว" ทุกกรณี
+    const _printed = labelJobs.length > 0 ? (printLotLabels(labelJobs) !== false) : null;
+    const labelMsg = labelCount <= 0 ? ''
+      : (_printed
+          ? `\n\n🏷️ เปิดหน้าพิมพ์สติ๊กเกอร์ ${labelCount} ดวงแล้ว`
+          : `\n\n⚠️ เปิดหน้าพิมพ์สติ๊กเกอร์ไม่ได้ (เบราว์เซอร์บล็อก popup)\n   ของรับเข้าคลังเรียบร้อยแล้ว — พิมพ์ได้ที่ ประวัติรับของ → 🏷️ สติ๊กเกอร์`);
+
     // 🆕 แจ้งว่าผูกกับ INV ล่วงหน้าแล้ว — ไม่ต้องตั้งหนี้อีก
     if(linkedAdvanceInvId){
       const advInv = state.invoices.find(i => i.id === linkedAdvanceInvId);
       alert(`✅ รับของเรียบร้อย\nGR: ${grNumber}\nมูลค่า: ${fmtCur(totalValue)} บาท\n\n` +
         `🔗 ผูกอัตโนมัติกับ INV ล่วงหน้า: ${advInv?.invNumber||linkedAdvanceInvId}\n` +
-        `→ ไม่ต้องตั้งหนี้อีก (กันจ่ายซ้ำ)`);
+        `→ ไม่ต้องตั้งหนี้อีก (กันจ่ายซ้ำ)` + labelMsg);
     } else {
-      alert(`✅ รับของเรียบร้อย\nGR: ${grNumber}\nมูลค่า: ${fmtCur(totalValue)} บาท\nฝ่ายจัดซื้อไปออก INV ต่อได้`);
+      alert(`✅ รับของเรียบร้อย\nGR: ${grNumber}\nมูลค่า: ${fmtCur(totalValue)} บาท\nฝ่ายจัดซื้อไปออก INV ต่อได้` + labelMsg);
     }
     onClose();
   };
@@ -12650,6 +12764,24 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                 h('label', { className:'block text-[11px] text-gray-500 mb-0.5' }, 'วันหมดอายุ'),
                 h('input', { type:'date', value:l.expiryDate, onChange:e=>updateLine(i,'expiryDate',e.target.value),
                   className:'w-full px-2 py-1.5 border rounded text-sm' }))),
+            // 🏷️ LOT-LABEL: จำนวนสติ๊กเกอร์ — โชว์เฉพาะรายการที่รับจริง · ปุ่ม +/- นิ้วโป้งกดได้
+            l.receiveNow > 0 && h('div', { className:'mt-2 pt-2 border-t flex items-center gap-1.5 flex-wrap' },
+              h('span', { className:'text-sm font-medium shrink-0' }, '🏷️ สติ๊กเกอร์'),
+              h('button', { type:'button',
+                onClick:()=>setLabelQty(i, (Number(l.labelQty)||0) - 1),
+                className:'w-10 h-10 shrink-0 rounded border-2 border-gray-300 bg-gray-50 text-xl font-bold leading-none' }, '−'),
+              h('input', { type:'number', value:l.labelQty||0, min:0, max:99, step:1, inputMode:'numeric',
+                onChange:e=>setLabelQty(i, e.target.value),
+                className: cls('w-14 shrink-0 px-1 py-2 border-2 rounded text-lg text-center font-bold',
+                  (Number(l.labelQty)||0) > 0 ? 'border-indigo-400 bg-indigo-50' : 'border-gray-300') }),
+              h('button', { type:'button',
+                onClick:()=>setLabelQty(i, (Number(l.labelQty)||0) + 1),
+                className:'w-10 h-10 shrink-0 rounded border-2 border-gray-300 bg-gray-50 text-xl font-bold leading-none' }, '+'),
+              h('span', { className:'text-xs text-gray-500 shrink-0' }, 'ดวง'),
+              h('button', { type:'button',
+                onClick:()=>setLabelQty(i, Math.ceil(l.receiveNow)),
+                className:'ml-auto px-2 py-2 text-xs bg-indigo-600 text-white rounded shrink-0 font-medium' },
+                `= ${Math.max(0, Math.min(99, Math.ceil(Number(l.receiveNow)||0)))} ดวง`)),
             l.receiveNow > 0 && h('div', { className:'text-right text-sm mt-2 pt-2 border-t' },
               'มูลค่า ', h('b', { className:'text-green-700' }, fmtCur((l.unitPrice||0) * l.receiveNow))));
         }),
@@ -12669,6 +12801,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
               h('th', { className:'px-2 py-1.5 text-right text-xs w-24' }, 'รับตอนนี้'),
               h('th', { className:'px-2 py-1.5 text-left text-xs w-28' }, 'LOT'),
               h('th', { className:'px-2 py-1.5 text-left text-xs w-32' }, 'หมดอายุ'),
+              h('th', { className:'px-2 py-1.5 text-center text-xs w-28' }, '🏷️ สติ๊กเกอร์'),
               h('th', { className:'px-2 py-1.5 text-right text-xs' }, 'รวม'),
             )
           ),
@@ -12707,13 +12840,29 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                   h('input', { type:'date', value:l.expiryDate, onChange:e=>updateLine(i,'expiryDate',e.target.value),
                     className:'w-full px-1 py-1 border rounded text-xs' })
                 ),
+                // 🏷️ LOT-LABEL: จำนวนสติ๊กเกอร์ (จอกว้าง)
+                h('td', { className:'px-2 py-1.5' },
+                  l.receiveNow > 0
+                    ? h('div', { className:'flex items-center justify-center gap-1' },
+                        h('button', { type:'button',
+                          onClick:()=>setLabelQty(i, (Number(l.labelQty)||0) - 1),
+                          className:'w-6 h-6 rounded border bg-gray-50 text-sm font-bold leading-none' }, '−'),
+                        h('input', { type:'number', value:l.labelQty||0, min:0, max:99, step:1,
+                          onChange:e=>setLabelQty(i, e.target.value),
+                          className: cls('w-12 px-1 py-1 border rounded text-sm text-center font-bold',
+                            (Number(l.labelQty)||0) > 0 && 'border-indigo-400 bg-indigo-50') }),
+                        h('button', { type:'button',
+                          onClick:()=>setLabelQty(i, (Number(l.labelQty)||0) + 1),
+                          className:'w-6 h-6 rounded border bg-gray-50 text-sm font-bold leading-none' }, '+'))
+                    : h('div', { className:'text-center text-xs text-gray-300' }, '—')
+                ),
                 h('td', { className:'px-2 py-1.5 text-right font-medium' },
                   l.receiveNow > 0 ? fmtCur((l.unitPrice||0) * l.receiveNow) : '-'
                 )
               );
             }),
             h('tr', { className:'bg-gray-50 border-t-2' },
-              h('td', { colSpan:7, className:'px-2 py-2 text-right font-medium' }, 'รวมมูลค่ารับ:'),
+              h('td', { colSpan:8, className:'px-2 py-2 text-right font-medium' }, 'รวมมูลค่ารับ:'),
               h('td', { className:'px-2 py-2 text-right font-bold text-green-700' }, fmtCur(totalValue))
             )
           )
@@ -12794,13 +12943,21 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
       ),
 
+      // 🏷️ LOT-LABEL: สรุปก่อนพิมพ์ — บอกล่วงหน้าว่าจะเด้งหน้าพิมพ์
+      totalLabels > 0 && h('div', { className:'bg-indigo-50 border-2 border-indigo-200 rounded p-2.5 text-xs text-indigo-900' },
+        '🏷️ ', h('b', null, `จะพิมพ์สติ๊กเกอร์ LOT ${totalLabels} ดวง`),
+        ' — หน้าต่างพิมพ์จะเปิดเองหลังกด "ยืนยันรับของ"',
+        h('div', { className:'text-[11px] text-indigo-700 mt-0.5' },
+          '📄 ค่าเริ่มต้นกระดาษ 5×3 ซม. (เลือก 10×5 ซม. ได้ในหน้าต่างพิมพ์) · ถ้าไม่เด้ง ให้อนุญาต popup แล้วพิมพ์ซ้ำจากประวัติรับของ')),
+
       // 📱 จอแคบ: ปุ่มยืนยันติดล่างจอ ไม่ต้องเลื่อนหาเวลารายการยาว + ปุ่มเต็มความกว้างกดง่าย
       h('div', { className:'flex gap-2 pt-3 border-t sticky bottom-0 bg-white -mx-4 px-4 pb-1 md:static md:mx-0 md:px-0 md:pb-0' },
         h('button', { onClick:submit, disabled:!hasAny,
           className: cls('flex-1 md:flex-none px-4 py-3 md:py-2 rounded font-bold text-white',
             hasAny ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-300 cursor-not-allowed') },
           '✅ ยืนยันรับของ',
-          hasAny && h('span', { className:'md:hidden font-normal' }, ' · ', fmtCur(totalValue))),
+          hasAny && h('span', { className:'md:hidden font-normal' }, ' · ', fmtCur(totalValue)),
+          hasAny && totalLabels > 0 && h('span', { className:'font-normal' }, ' · 🏷️ ', totalLabels)),
         h('button', { onClick:onClose,
           className:'px-4 py-3 md:py-2 rounded border-2 border-gray-300 text-gray-700 font-medium' }, 'ยกเลิก'),
       )
@@ -14655,6 +14812,7 @@ function GRHistoryTab({ state, user, dispatch }){
   const [search, setSearch] = useState('');
   const [detail, setDetail] = useState(null);
   const [rtvGR, setRtvGR] = useState(null);  // GR ที่จะเปิด RTV modal
+  const [labelGR, setLabelGR] = useState(null);  // 🏷️ GR ที่จะพิมพ์สติ๊กเกอร์ซ้ำ
   const dr = useDateRange(7);
 
   const canRTV = hasPerm(user, 'stock','list','adjust');
@@ -14759,6 +14917,11 @@ function GRHistoryTab({ state, user, dispatch }){
                     h('td', { className:'px-3 py-2 text-center' },
                       h('div', { className:'flex gap-1 justify-center' },
                         h(Button, { variant:'secondary', size:'sm', onClick:()=>setDetail(g) }, 'ดู'),
+                        // 🏷️ LOT-LABEL: พิมพ์สติ๊กเกอร์ซ้ำ (สติ๊กเกอร์หลุด/พิมพ์ไม่ติด)
+                        !g.voided && (g.lines||[]).length > 0 && h('button', {
+                          onClick:()=>setLabelGR(g),
+                          className:'px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-300 rounded text-xs font-medium',
+                          title:'พิมพ์สติ๊กเกอร์ LOT ติดของ (พิมพ์ซ้ำได้)' }, '🏷️ สติ๊กเกอร์'),
                         !g.voided && canRTV && g.supplierId && !g.isReplacement && h(Button, {
                           variant:'danger', size:'sm',
                           onClick:()=>setRtvGR(g),
@@ -14792,7 +14955,128 @@ function GRHistoryTab({ state, user, dispatch }){
         ),
 
     detail && h(GRViewModal, { gr:detail, state, onClose:()=>setDetail(null) }),
-    rtvGR && h(NewRTVModal, { state, dispatch, user, initialGrId:rtvGR.id, onClose:()=>setRtvGR(null) })
+    rtvGR && h(NewRTVModal, { state, dispatch, user, initialGrId:rtvGR.id, onClose:()=>setRtvGR(null) }),
+    labelGR && h(LotLabelReprintModal, { gr:labelGR, state, onClose:()=>setLabelGR(null) })
+  );
+}
+
+// 🏷️ LOT-LABEL: หา "เลข LOT จริง" ของแต่ละบรรทัดใน GR (สำหรับพิมพ์ซ้ำ)
+//   GR ใบเก่าเก็บ lot เป็น '' ตอนระบบ auto-gen → ไล่จับจาก FIFO layer ที่ผูก grRef ไว้
+//   ถ้าหาไม่เจอจริงๆ (layer ถูกลบ/void) ค่อย fallback สูตรเดิม GRxxxxx-01
+// หา LOT จริงของ GR ใบเก่า เพื่อพิมพ์สติ๊กเกอร์ซ้ำ
+// ⚠️ ห้ามเดาเลข LOT เด็ดขาด — สติ๊กเกอร์เลขปลอมแปะบนกล่องแล้วตามสอบย้อนกลับไม่เจอ
+//    อันตรายกว่าไม่มีสติ๊กเกอร์ เพราะคนเชื่อว่าเลขบนกล่องถูก
+//    ใบรับโอนสาขาเก็บ FIFO layer ด้วย sourceRef (เลข TO) ไม่ใช่ grRef → ต้องหาคนละทาง
+function grLineLots(gr, state){
+  const all = state.fifoLayers || [];
+  const layers = (gr.source === 'transfer' || gr.toNumber)
+    ? all.filter(l => l.sourceRef === gr.toNumber && (!gr.branch || l.branch === gr.branch))
+    : all.filter(l => l.grRef === gr.grNumber);
+  const used = {};
+  return (gr.lines||[]).map((l) => {
+    if(l.lot) return { lot: l.lot, expiryDate: l.expiryDate || '' };
+    const hit = layers.find(x => x.itemId === l.itemId && !used[x.id]);
+    if(hit){
+      used[hit.id] = 1;
+      return { lot: hit.lot || '', expiryDate: l.expiryDate || hit.expiryDate || '' };
+    }
+    return { lot: '', expiryDate: l.expiryDate || '' };   // หาไม่เจอ = ไม่พิมพ์ ดีกว่าพิมพ์เลขมั่ว
+  });
+}
+
+// 🏷️ LOT-LABEL: พิมพ์สติ๊กเกอร์ซ้ำจาก GR ใบเก่า (สติ๊กเกอร์หลุด / พิมพ์ไม่ติด)
+function LotLabelReprintModal({ gr, state, onClose }){
+  const lines = gr.lines || [];
+  const lots = useMemo(() => grLineLots(gr, state), [gr, state.fifoLayers]);
+  // บรรทัดที่หา LOT จริงไม่เจอ → ล็อกไว้ที่ 0 พิมพ์ไม่ได้ (กันสติ๊กเกอร์เลขปลอม)
+  const [counts, setCounts] = useState(() => lines.map((l, i) => (lots[i] && lots[i].lot) ? 1 : 0));
+  const setC = (i, v) => setCounts(cs => cs.map((c, idx) => {
+    if(idx !== i) return c;
+    if(!(lots[i] && lots[i].lot)) return 0;
+    return Math.max(0, Math.min(99, Math.floor(Number(v)||0)));
+  }));
+  const setAll = (v) => setCounts(lines.map((l, i) => (lots[i] && lots[i].lot) ? v : 0));
+  const total = counts.reduce((sum, c) => sum + (Number(c)||0), 0);
+
+  const doPrint = () => {
+    const jobs = lines.map((l, i) => {
+      if((counts[i]||0) <= 0) return null;
+      if(!(lots[i] && lots[i].lot)) return null;   // ไม่มี LOT จริง = ไม่พิมพ์
+      const item = (state.items||[]).find(x => x.id === l.itemId);
+      return {
+        count: counts[i],
+        name: item?.name || l.itemId,
+        code: item?.code || '',
+        lot: lots[i]?.lot || '',
+        dateText: fmtDate(gr.grDate),
+        expText: lots[i]?.expiryDate ? fmtDate(lots[i].expiryDate) : '',
+        grNumber: gr.grNumber,
+      };
+    }).filter(Boolean);
+    if(jobs.length === 0) return alert('ยังไม่ได้เลือกจำนวนสติ๊กเกอร์');
+    if(printLotLabels(jobs) === false){
+      alert('🖨️ เปิดหน้าต่างพิมพ์ไม่ได้ — เบราว์เซอร์บล็อก popup\n\nอนุญาต popup ของเว็บนี้ก่อน แล้วกดใหม่');
+    }
+  };
+
+  return h(Modal, { isOpen:true, title:`🏷️ พิมพ์สติ๊กเกอร์ LOT — ${gr.grNumber}`, onClose, size:'lg' },
+    h('div', { className:'space-y-3' },
+      h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-2.5 text-xs text-indigo-900' },
+        'พิมพ์ซ้ำได้เมื่อสติ๊กเกอร์หลุด/พิมพ์ไม่ติด — ใช้ ', h('b', null, 'LOT เดิม'),
+        ' ของใบรับของนี้ ไม่สร้างล็อตใหม่ ไม่กระทบสต๊อก',
+        h('div', { className:'text-[11px] text-indigo-700 mt-0.5' },
+          `📅 รับเมื่อ ${fmtDate(gr.grDate)} · ตั้งกระดาษ 5×3 ซม. (เลือก 10×5 ซม. ได้ในหน้าต่างพิมพ์)`)),
+
+      h('div', { className:'flex gap-2 flex-wrap' },
+        h('button', { type:'button', onClick:()=>setAll(1),
+          className:'px-3 py-1.5 text-xs border-2 border-gray-300 rounded font-medium' }, 'ทุกรายการ 1 ดวง'),
+        h('button', { type:'button', onClick:()=>setAll(0),
+          className:'px-3 py-1.5 text-xs border-2 border-gray-300 rounded font-medium' }, 'ล้างทั้งหมด')),
+
+      h('div', { className:'space-y-2 max-h-[50vh] overflow-y-auto' },
+        lines.map((l, i) => {
+          const item = (state.items||[]).find(x => x.id === l.itemId);
+          const hasLot = !!(lots[i] && lots[i].lot);
+          // จำนวนที่โชว์/ใช้เป็นปุ่มลัด ต้องเป็น "หน่วยสั่ง" ไม่ใช่หน่วยฐาน
+          //   ใบโอนสาขาเก็บ qty เป็นหน่วยฐาน (กรัม/มล.) → โอน 5 ถุง = 5,000 กรัม
+          //   ถ้าใช้ตรง ๆ ปุ่มลัดจะสั่งพิมพ์ 99 ดวง
+          const shownQty = (l.displayQty != null) ? Number(l.displayQty) : Number(l.qty)||0;
+          const shownUnit = l.displayUnit || l.unit || '';
+          const quick = Math.max(0, Math.min(99, Math.ceil(shownQty)));
+          return h('div', { key:i, className: cls('border-2 rounded-lg p-2.5',
+            !hasLot ? 'border-amber-300 bg-amber-50'
+              : ((counts[i]||0) > 0 ? 'border-indigo-300 bg-indigo-50' : 'border-gray-200 bg-white')) },
+            h('div', { className:'font-semibold text-sm leading-tight' }, item?.name || l.itemId),
+            h('div', { className:'text-xs text-gray-600 mb-2' },
+              hasLot
+                ? h('span', { className:'font-mono font-bold text-gray-800' }, lots[i].lot)
+                : h('span', { className:'text-amber-800 font-medium' }, '⚠️ ไม่พบ LOT ในระบบ — พิมพ์ไม่ได้'),
+              ' · รับ ', fmtNum(shownQty), ' ', shownUnit,
+              lots[i]?.expiryDate
+                ? h('span', { className:'ml-1 text-red-700 font-medium' }, '· หมดอายุ ', fmtDate(lots[i].expiryDate))
+                : h('span', { className:'ml-1 text-gray-400' }, '· ไม่มีวันหมดอายุ')),
+            hasLot && h('div', { className:'flex items-center gap-1.5 flex-wrap' },
+              h('button', { type:'button', onClick:()=>setC(i, (counts[i]||0) - 1),
+                className:'w-10 h-10 shrink-0 rounded border-2 border-gray-300 bg-white text-xl font-bold leading-none' }, '−'),
+              h('input', { type:'number', value:counts[i]||0, min:0, max:99, step:1, inputMode:'numeric',
+                onChange:e=>setC(i, e.target.value),
+                className:'w-16 shrink-0 px-1 py-2 border-2 border-gray-300 rounded text-lg text-center font-bold' }),
+              h('button', { type:'button', onClick:()=>setC(i, (counts[i]||0) + 1),
+                className:'w-10 h-10 shrink-0 rounded border-2 border-gray-300 bg-white text-xl font-bold leading-none' }, '+'),
+              h('span', { className:'text-xs text-gray-500 shrink-0' }, 'ดวง'),
+              quick > 0 && h('button', { type:'button', onClick:()=>setC(i, quick),
+                className:'ml-auto px-2 py-2 text-xs bg-indigo-600 text-white rounded shrink-0 font-medium' },
+                `= ${quick} ดวง`)));
+        })),
+
+      h('div', { className:'flex gap-2 pt-2 border-t' },
+        h('button', { onClick:doPrint, disabled: total === 0,
+          className: cls('flex-1 px-4 py-3 rounded font-bold text-white',
+            total > 0 ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-300 cursor-not-allowed') },
+          `🖨️ พิมพ์ ${total} ดวง`),
+        h('button', { onClick:onClose,
+          className:'px-4 py-3 rounded border-2 border-gray-300 text-gray-700 font-medium' }, 'ปิด'))
+    )
   );
 }
 
@@ -15357,6 +15641,122 @@ function printRTV(rtv, state, sup){
   const w = window.open('', '_blank', 'width=900,height=700');
   if(!w){ alert('Popup ถูก block — โปรดอนุญาต popup สำหรับ print'); return; }
   w.document.write(html); w.document.close();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 🏷️ LOT-LABEL: พิมพ์สติ๊กเกอร์ LOT ติดกล่อง/ถุง (คุม FIFO หน้างาน)
+//   · ไม่ผูกยี่ห้อเครื่องพิมพ์ — เปิดหน้าต่าง + window.print() → ให้ OS เลือกเอง
+//     (มือถือจะเด้ง AirPrint / Mopria ให้เลือกเครื่อง)
+//   · ไม่มีรูป/ฟอนต์ภายนอกเลย — เน็ตช้าที่หน้าคลังก็พิมพ์ได้
+//   labels: [{ count, name, code, lot, dateText, expText, grNumber }]
+// ════════════════════════════════════════════════════════════════════
+function lblEsc(v){
+  return String(v == null ? '' : v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function printLotLabels(labels){
+  const jobs = (labels||[])
+    .map(x => ({ ...x, count: Math.max(0, Math.min(99, Math.floor(Number(x.count)||0))) }))
+    .filter(x => x.count > 0);
+  // คืน true = เปิดหน้าพิมพ์สำเร็จ · false = ไม่ได้พิมพ์ (ผู้เรียกจะได้แจ้งผู้ใช้ตามจริง)
+  if(jobs.length === 0){ alert('ยังไม่ได้เลือกจำนวนสติ๊กเกอร์'); return false; }
+  const total = jobs.reduce((sum, x) => sum + x.count, 0);
+  // 🛑 กันเผลอสั่งพิมพ์เป็นร้อยดวง (เช่นกดปุ่มลัดกับของที่ชั่งเป็นกรัม)
+  if(total > 30 && !confirm(`จะพิมพ์สติ๊กเกอร์ ${total} ดวง — แน่ใจไหม?`)) return false;
+
+  const cards = [];
+  jobs.forEach(x => {
+    for(let k = 0; k < x.count; k++){
+      cards.push(
+        '<div class="lb">' +
+          '<div class="nm">' + lblEsc(x.name) + '</div>' +
+          '<div class="lot">' + lblEsc(x.lot || '-') + '</div>' +
+          '<div class="dt">รับ: <b>' + lblEsc(x.dateText || '-') + '</b></div>' +
+          (x.expText
+            ? '<div class="exp">หมดอายุ ' + lblEsc(x.expText) + '</div>'
+            : '<div class="noexp">หมดอายุ: ไม่ระบุ</div>') +
+          '<div class="ft"><span>' + lblEsc(x.code || '') + '</span><span>' +
+            lblEsc(x.grNumber || '') + (x.count > 1 ? ' · ' + (k+1) + '/' + x.count : '') +
+          '</span></div>' +
+        '</div>');
+    }
+  });
+
+  const html = `<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>สติ๊กเกอร์ LOT (${total} ดวง)</title>
+<style id="pg">@page{size:50mm 30mm;margin:2mm}</style>
+<style>
+ *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+ body{margin:0;padding:0;background:#fff;color:#000;
+   font-family:'TH Sarabun New',Sarabun,'Noto Sans Thai','Leelawadee UI',Tahoma,sans-serif}
+ .lb{width:46mm;height:26mm;overflow:hidden;line-height:1.12;display:flex;flex-direction:column;
+   page-break-after:always;break-after:page}
+ .lb:last-of-type{page-break-after:auto;break-after:auto}
+ .nm{font-size:11pt;font-weight:700;max-height:9mm;min-height:0;overflow:hidden;
+   word-break:break-word;flex:0 1 auto}
+ .lot,.dt,.exp,.noexp,.ft{flex:none}
+ .lot{font-family:'Courier New',monospace;font-size:12pt;font-weight:700;
+   white-space:nowrap;overflow:hidden;margin-top:0.4mm}
+ .dt{font-size:9pt}
+ .exp{font-size:10pt;font-weight:700;border:1.2pt solid #000;border-radius:1mm;
+   padding:0 1mm;align-self:flex-start;margin-top:0.4mm}
+ .noexp{font-size:8pt;color:#555;margin-top:0.4mm}
+ .ft{margin-top:auto;font-size:7pt;color:#333;display:flex;justify-content:space-between;gap:2mm}
+ body.big .lb{width:96mm;height:46mm;line-height:1.15}
+ body.big .nm{font-size:19pt;max-height:16mm}
+ body.big .lot{font-size:21pt}
+ body.big .dt{font-size:13pt}
+ body.big .exp{font-size:15pt}
+ body.big .noexp{font-size:11pt}
+ body.big .ft{font-size:9pt}
+ .bar{padding:10px;background:#eee;border-bottom:1px solid #999;font-size:14px}
+ .bar button{padding:10px 14px;margin:0 6px 6px 0;font-size:15px;border:1px solid #888;
+   border-radius:6px;background:#fff;cursor:pointer}
+ .bar button.on{background:#4338ca;color:#fff;border-color:#4338ca;font-weight:700}
+ .bar .hint{font-size:12px;color:#333;margin-top:4px;line-height:1.6}
+ @media screen{
+   body{background:#dcdcdc;padding:0 0 20px}
+   .lb{background:#fff;margin:8px auto 0;padding:1mm;outline:1px dashed #999;
+     box-shadow:0 1px 4px rgba(0,0,0,.25)}
+ }
+ @media print{
+   .bar{display:none!important}
+   body{background:#fff;padding:0}
+   .lb{margin:0;padding:0;outline:0;box-shadow:none}
+ }
+</style></head><body>
+<div class="bar">
+  <button onclick="window.print()">🖨️ พิมพ์</button>
+  <button id="b1" class="on" onclick="setSz(0)">5×3 ซม.</button>
+  <button id="b2" onclick="setSz(1)">10×5 ซม.</button>
+  <button onclick="window.close()">ปิด</button>
+  <div class="hint">📄 ในหน้าจอพิมพ์ ตั้งขนาดกระดาษเป็น <b id="szNote">50 × 30 มม.</b>
+   · ย่อ/ขยาย 100% (ปิด "พอดีหน้ากระดาษ") · ปิดหัว-ท้ายกระดาษ<br/>
+   🏷️ รวม ${total} ดวง — ถ้าหน้าจอพิมพ์ไม่เด้งเอง ให้กดปุ่ม "🖨️ พิมพ์" ด้านบน</div>
+</div>
+${cards.join('')}
+<script>
+function setSz(b){
+  document.body.className = b ? 'big' : '';
+  document.getElementById('pg').textContent =
+    b ? '@page{size:100mm 50mm;margin:2mm}' : '@page{size:50mm 30mm;margin:2mm}';
+  document.getElementById('szNote').textContent = b ? '100 × 50 มม.' : '50 × 30 มม.';
+  document.getElementById('b1').className = b ? '' : 'on';
+  document.getElementById('b2').className = b ? 'on' : '';
+}
+window.onload = function(){ setTimeout(function(){ try{ window.print(); }catch(e){} }, 500); };
+<\/script>
+</body></html>`;
+
+  const w = window.open('', '_blank', 'width=430,height=760');
+  if(!w){
+    // ไม่ alert ที่นี่ — ผู้เรียกจะรวมข้อความให้ครั้งเดียว (กัน alert ซ้อน 2 ชั้นตอนรับของ)
+    return false;
+  }
+  w.document.write(html); w.document.close();
+  return true;
 }
 
 function RTVViewModal({ rtv, state, dispatch, user, onClose }){
@@ -19981,6 +20381,31 @@ function buildSimpleProductionOrder({ state, user, branchId, bom, primaryProduct
 
 // 🆕 FIX-3 (PROD-C2): ต้นทุน/หน่วยของ FG ที่ผลิต = ต้นทุนจริงจาก BOM (วัตถุดิบ FIFO + ค่าแรง + OH)
 //   กระจายตาม output ratio แล้วหารจำนวน — เลิกใช้ costPrice/0 ที่ทำให้สต๊อก/COGS เพี้ยน
+// 🆕 ต้นทุนจริงต่อล็อต: สัดส่วนของ FG ตัวนี้ในสูตรที่ได้หลายอย่างพร้อมกัน (joint BOM)
+//    สูตรผลผลิตเดียว = 1 · สูตรร่วม = ปันตาม ratio/qty เหมือน calcBomCost เดิม
+function fgCostShare(state, order){
+  try {
+    const bom = (state.boms||[]).find(b => b.id === order.bomId);
+    if(!bom) return 1;
+    const outs = global.ERP.getBomOutputs(bom) || [];
+    if(outs.length <= 1) return 1;
+    const total = outs.reduce((t,o) => t + (Number(o.ratio || o.qty) || 0), 0);
+    if(!(total > 0)) return 1;
+    const mine = outs.find(o => o.productId === order.itemId);
+    if(!mine) return 1;
+    return (Number(mine.ratio || mine.qty) || 0) / total;
+  } catch(e){ return 1; }
+}
+// ค่าแรง + โสหุ้ยของรอบผลิตนี้ (สเกลตามจำนวน batch ที่ผลิตจริง)
+function fgExtraCost(state, order, batches){
+  try {
+    const bom = (state.boms||[]).find(b => b.id === order.bomId);
+    if(!bom) return 0;
+    const per = (Number(bom.laborCost)||0) + (Number(bom.overheadCost)||0);
+    return per * (Number(batches) > 0 ? Number(batches) : 1);
+  } catch(e){ return 0; }
+}
+
 function fgUnitCost(state, order, fgItem){
   try {
     const bom = (state.boms||[]).find(b => b.id === order.bomId);
@@ -23792,7 +24217,10 @@ function OperationsPipeline({ order, state, dispatch, user }){
           const fgItem = (state.items||[]).find(x => x.id === order.itemId);
           dispatch({ type:'PRODUCE_FG_TO_LOCATION', data:{
             branch: order.branchId, locId: fgLoc.id, fgItemId: order.itemId, qty: producedQty,
-            unitCost: fgUnitCost(state, order, fgItem),
+            unitCost: fgUnitCost(state, order, fgItem),   // ใช้เป็นค่าสำรองถ้ายังไม่มีการเบิกจริง
+            orderId: order.id,
+            costShare: fgCostShare(state, order),
+            extraCost: fgExtraCost(state, order, order.batches || 1),
             lot: order.orderNumber,
             movement: { id: genId('mv'), type:'production_in', itemId: order.itemId, qty: producedQty,
               branch: order.branchId, locId: fgLoc.id, date: getToday(), ref: order.orderNumber,
@@ -31410,7 +31838,10 @@ function MyStationTab({ state, dispatch, user, branchId }){
               locId: fgLoc.id,
               fgItemId: order.itemId,
               qty: producedQty,
-              unitCost: fgUnitCost(state, order, fgItem),
+              unitCost: fgUnitCost(state, order, fgItem),   // ใช้เป็นค่าสำรองถ้ายังไม่มีการเบิกจริง
+              orderId: order.id,
+              costShare: fgCostShare(state, order),
+              extraCost: fgExtraCost(state, order, order.batches || 1),
               lot: order.orderNumber + (w.batchSeq ? '-B'+w.batchSeq : ''),
               movement,
               dedupeKey: 'fg:' + order.id + (w.batchSeq ? '·B'+w.batchSeq : ''),  // 🆕 FIX-4 กัน FG ซ้ำ
@@ -31490,6 +31921,7 @@ function MyStationTab({ state, dispatch, user, branchId }){
           allowNegative: true,
           items: consumeItems,
           movement,
+          orderId: w.order.id,   // 🆕 ให้ reducer เก็บต้นทุนจริงไว้บนใบสั่งผลิต
         }});
       }
     }
@@ -31691,7 +32123,10 @@ function MyStationTab({ state, dispatch, user, branchId }){
             locId: fgLoc.id,
             fgItemId: order.itemId,
             qty: producedQty,
-            unitCost: fgUnitCost(state, order, fgItem),
+            unitCost: fgUnitCost(state, order, fgItem),   // ใช้เป็นค่าสำรองถ้ายังไม่มีการเบิกจริง
+            orderId: order.id,
+            costShare: fgCostShare(state, order),
+            extraCost: fgExtraCost(state, order, order.batches || 1),
             lot: order.orderNumber + (w.batchSeq ? '-B'+w.batchSeq : ''),
             movement,
             dedupeKey: 'fg:' + order.id + (w.batchSeq ? '·B'+w.batchSeq : ''),  // 🆕 FIX-4 กัน FG ซ้ำ
