@@ -5173,7 +5173,18 @@ function reducer(s, a){
       // 🆕 ถ้าแก้ user ที่กำลังล็อกอินอยู่ → อัปเดต currentUser ด้วย
       //    ไม่งั้นสิทธิ์ที่เพิ่งให้ (เช่น สถานีที่ทำได้) ไม่มีผลจนกว่าจะ logout/login ใหม่
       const _curU = (s.currentUser && s.currentUser.id === a.data.id) ? a.data : s.currentUser;
-      return { ...s, users:(s.users||[]).map(u => u.id===a.data.id ? a.data : u), currentUser:_curU, auditLog };
+      // 🆕 ถ้าแก้สาขา/สิทธิ์สาขาของตัวเอง แล้วสาขาที่เปิดค้างอยู่หลุด scope → ย้ายไปสาขาแรกที่เข้าถึงได้
+      //    ไม่งั้น switcher โชว์ค่าที่ไม่มีใน option + ยังเห็นข้อมูลสาขาที่ไม่มีสิทธิ์แล้ว
+      let _curBranch = s.currentBranch;
+      if(_curU !== s.currentUser){
+        try {
+          const _gab = global.ERP.getAllowedBranches;
+          const _allowed = (typeof _gab === 'function') ? _gab(_curU, s) : (s.branches||[]);
+          if(_allowed.length && !_allowed.some(b => b.id === _curBranch)) _curBranch = _allowed[0].id;
+        } catch(_ab){}
+      }
+      return { ...s, users:(s.users||[]).map(u => u.id===a.data.id ? a.data : u),
+        currentUser:_curU, currentBranch:_curBranch, auditLog };
     }
 
     // ---------- Department ----------
@@ -10007,7 +10018,12 @@ function MainShell(){
       const next = mig ? mig(cs) : cs;
       // session เป็นของ "เครื่องนี้" ไม่ได้อยู่บน cloud → ต้องคงไว้ ไม่งั้นเด้งออกจากระบบ
       // ต้องสร้าง object เดียวกับที่ reducer จะคืน ไม่ได้ → ใช้ marker บน payload แทน
-      const _payload = { ...next, currentUser: state.currentUser,
+      // 🆕 สิทธิ์ที่แอดมินเพิ่งแก้จากเครื่องอื่น ต้องมีผลกับเครื่องนี้ด้วย → ดึง user ตัวเองจากก้อนใหม่ตาม id
+      //    ถ้าไม่เจอ (ถูกลบ/ยังไม่ sync) ให้คงของเดิมไว้ ห้ามเป็น null กลางคัน = เด้งออกจากระบบขณะคีย์งาน
+      const _meNow = state.currentUser
+        ? ((next.users||[]).find(u => u.id === state.currentUser.id) || state.currentUser)
+        : state.currentUser;
+      const _payload = { ...next, currentUser: _meNow,
         currentBranch: state.currentBranch, __fromCloudPull: Date.now() };
       _skipSaveRef.current = _payload.__fromCloudPull;
       dispatch({ type:'IMPORT_STATE', data:_payload });
@@ -10017,7 +10033,20 @@ function MainShell(){
   }, [state.currentUser, state.currentBranch]);
   R.useEffect(() => { global.ERP.__refreshFromCloud = refreshFromCloud; }, [refreshFromCloud]);
   // 🛠 admin/debug hook — ให้ผู้ดูแลระบบสั่ง action ผ่าน console ได้ (ผ่าน reducer + audit + cloud sync ตามปกติ)
-  R.useEffect(() => { global.ERP.__dispatch = dispatchLogged; }, [dispatchLogged]);
+  //    เปิดเฉพาะตอนล็อกอินแล้ว — ไม่งั้นได้ "การเขียนข้อมูลบริษัทที่ไม่มีเจ้าของ" (audit by_user = null)
+  //    และบล็อก action ที่ทับ/ล้างข้อมูลทั้งก้อน ซึ่งเส้นทางปกติมี snapshot กันไว้แต่ console ข้ามหมด
+  R.useEffect(() => {
+    if(!state.currentUser){ global.ERP.__dispatch = null; return; }
+    const BLOCKED = ['IMPORT_STATE','RESET_STATE','CLEAR_TRANSACTIONS'];
+    global.ERP.__dispatch = (action) => {
+      const t = (action && action.type) || '';
+      if(BLOCKED.includes(t) || t.indexOf('DELETE_') === 0){
+        throw new Error('__dispatch: ห้ามสั่ง "' + t + '" ผ่าน console — ใช้เมนูในแอป (มี snapshot/ยืนยันก่อนทับข้อมูล)');
+      }
+      return dispatchLogged(action);
+    };
+    return () => { global.ERP.__dispatch = null; };
+  }, [dispatchLogged, state.currentUser]);
 
   // 🆕 SESSION-PER-DEVICE: จำสาขาที่เลือกไว้ "ต่อเครื่อง" (ไม่ขึ้น cloud → ไม่ไปเปลี่ยนสาขาเครื่องอื่น)
   useEffect(() => {
@@ -58642,7 +58671,10 @@ function UserEditModal({ user, state, dispatch, onClose }){
     if(!isEdit && !password) return alert('ใส่รหัสผ่าน');
     if(!isEdit && state.users.find(u => u.username === username.trim())) return alert('username ซ้ำ');
 
+    // 🛡 merge ของเดิมก่อน — ฟอร์มนี้ไม่มีทุก field ที่ user มี (favoriteItemIds, superAdmin ฯลฯ)
+    //    เดิมสร้าง object ใหม่ทั้งก้อน → กดบันทึกทีเดียว ของที่ไม่มีในฟอร์มหายถาวร
     const data = {
+      ...(isEdit && user ? user : {}),
       id: isEdit ? user.id : genId('u'),
       username: username.trim(), name: name.trim(),
       role, position, departmentIds, signature,
@@ -58659,6 +58691,15 @@ function UserEditModal({ user, state, dispatch, onClose }){
       canSeeStockValue: canSeeStockValueOverride === 'on' ? true :
                         canSeeStockValueOverride === 'off' ? false : null,
     };
+    // 🛡 กันแอดมินลดสิทธิ์ตัวเองแล้วเข้าไปแก้กลับไม่ได้ (เมนูหายทันทีที่บันทึก ต้องให้คนอื่นแก้ให้)
+    const _me = state.currentUser;
+    if(isEdit && _me && _me.id === data.id){
+      const _keys = ['role','active','superAdmin','permissions','accessBranches','branch'];
+      const _diff = _keys.filter(k => JSON.stringify(_me[k] ?? null) !== JSON.stringify(data[k] ?? null));
+      if(_diff.length && !confirm(
+        '⚠️ กำลังแก้สิทธิ์ของตัวเอง (' + _diff.join(', ') + ')\n\n' +
+        'ถ้าลดสิทธิ์ตัวเอง เมนูจะหายทันทีและกลับมาแก้เองไม่ได้ — ต้องให้ผู้ดูแลอีกคนแก้ให้\n\nยืนยันบันทึก?')) return;
+    }
     dispatch({ type: isEdit ? 'UPDATE_USER' : 'ADD_USER', data });
     onClose();
   };
