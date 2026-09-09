@@ -3898,7 +3898,7 @@ const { STORAGE_KEY, genId, getToday, LZ } = global.ERP;
 
 // ==================== INITIAL STATE ====================
 const INIT_STATE = {
-  version: 30,
+  version: 31,
   currentUser: null,
   currentBranch: 'b1',
 
@@ -4255,6 +4255,7 @@ const INIT_STATE = {
   // station type ที่ใช้ใน BOM operations + assign ให้ user ทำได้
   // { id, label, icon, dept }
   stationTypes: [
+    { id:'weigh',   label:'ชั่ง/ตวง/วัด',  icon:'⚖️', dept:'all' },
     { id:'mixer',   label:'เครื่องผสม',   icon:'🌀', dept:'all' },
     { id:'table',   label:'โต๊ะปั้น/แบ่ง', icon:'🍞', dept:'bread' },
     { id:'proof',   label:'ตู้บ่ม',       icon:'🌡️', dept:'bread' },
@@ -9398,6 +9399,16 @@ function _migrateStateOnce(s){
       coa.push({ id:'1151', code:'1151', name:'ภาษีซื้อรอใบลดหนี้ (contra)', type:'asset', normal:'credit' });
     }
     return { ...s, version: 30, chartOfAccounts: coa };
+  }
+  // 🆕 v30 -> v31: เพิ่มสถานี "ชั่ง/ตวง/วัด"
+  //    เดิมมีแต่ไลน์ชั่ง (productionLines) แต่ไม่มีสถานี → ใส่ขั้นตอนชั่งในสูตรไม่ได้
+  //    งานชั่งจึงไม่มีทางโผล่ที่จอสถานี ต่อให้ติ๊กสิทธิ์ครบ
+  if(s.version === 30){
+    const sts = [...(s.stationTypes||[])];
+    if(!sts.find(x => x.id === 'weigh')){
+      sts.unshift({ id:'weigh', label:'ชั่ง/ตวง/วัด', icon:'⚖️', dept:'all' });
+    }
+    return { ...s, version: 31, stationTypes: sts };
   }
   if(s.version === 27){
     const coa = [...(s.chartOfAccounts||[])];
@@ -31932,6 +31943,37 @@ function MyStationTab({ state, dispatch, user, branchId }){
   const inProgressItems = myWorkItems.filter(w => w.opState.status === 'in_progress');
   const readyItems = myWorkItems.filter(w => w.opState.status === 'ready');
 
+  // 🆕 บอกสาเหตุเมื่อ "ไม่มีงานขึ้น" — เดิมเงียบสนิท คนเข้าใจว่าติ๊กสิทธิ์ผิด
+  //    แต่สาเหตุจริงมักเป็น: สูตรไม่มีขั้นตอนการผลิต หรือขั้นตอนอยู่คนละสถานีกับที่ได้รับมอบหมาย
+  const _noWorkReason = (() => {
+    if(myWorkItems.length > 0) return null;
+    const inBranch = (state.productionOrders||[])
+      .filter(o => o.branchId === branchId && !['completed','cancelled'].includes(o.status));
+    if(inBranch.length === 0) return null;                       // ไม่มีใบสั่งผลิตเลย = ปกติ
+    const noOps = inBranch.filter(o => !Array.isArray(o.operations) || o.operations.length === 0);
+    if(noOps.length === inBranch.length){
+      return { kind:'no-ops', n: noOps.length,
+        text:`มีใบสั่งผลิต ${noOps.length} ใบ แต่ยังไม่มี "ขั้นตอนการผลิต" ในสูตร`,
+        how:'ไปที่ ผลิต / BOM → เปิดสูตรที่ใช้ → เพิ่มขั้นตอน (เช่น ชั่ง → ผสม → อบ → แพ็ค) แล้วสั่งผลิตใหม่' };
+    }
+    // มีขั้นตอน แต่ไม่ตรงสถานีที่เราได้รับมอบหมาย
+    const others = new Set();
+    inBranch.forEach(o => (o.operations||[]).forEach(op => {
+      const mine = getStationsForLine ? getStationsForLine(user, o.lineId) : myStations;
+      if(!mine.includes(op.stationType)) others.add(op.stationType);
+    }));
+    if(others.size > 0){
+      const names = Array.from(others).map(id => {
+        const st = (state.stationTypes||[]).find(x => x.id === id);
+        return st ? `${st.icon||''} ${st.label}` : id;
+      }).join(' · ');
+      return { kind:'other-station',
+        text:'มีงานอยู่ แต่อยู่สถานีที่คุณไม่ได้รับมอบหมาย: ' + names,
+        how:'ให้ admin ติ๊กสถานีเพิ่มที่ ตั้งค่า → ผู้ใช้ → เลือกคน → สถานีที่ทำได้' };
+    }
+    return null;
+  })();
+
   // Group ready
   const readyGrouped = {};
   const groupMeta = {};
@@ -32382,6 +32424,12 @@ function MyStationTab({ state, dispatch, user, branchId }){
   };
 
   return h('div', { className:'space-y-3' },
+    // 🆕 ไม่มีงานขึ้น → บอกสาเหตุจริง ไม่ปล่อยให้เดาว่าติ๊กสิทธิ์ผิด
+    _noWorkReason && h('div', { className:'bg-amber-50 border-2 border-amber-400 rounded-lg p-3' },
+      h('div', { className:'font-bold text-amber-900 mb-1' }, '⚠️ ยังไม่มีงานขึ้นที่สถานีของคุณ'),
+      h('div', { className:'text-sm text-amber-900' }, _noWorkReason.text),
+      h('div', { className:'text-xs text-amber-800 mt-1.5' }, '👉 ', _noWorkReason.how)),
+
     // Header — show user info
     h('div', { className:'bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-lg p-3 shadow' },
       h('div', { className:'flex items-center justify-between' },
