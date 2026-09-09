@@ -32168,15 +32168,22 @@ function MyStationTab({ state, dispatch, user, branchId }){
         .map(r => ({ itemId: r.itemId, qty: Number(r.value)||0 }));
       if(consumeItems.length > 0){
         // 🆕 UAT: เตือนถ้าวัตถุดิบไม่พอ (สต๊อกจะติดลบ + ต้นทุนส่วนขาด=0 → ต้นทุนผลิตต่ำกว่าจริง) — กันชั่งผลิตแล้วของขาดเงียบ
+        // 🛠 เทียบกับ "ของที่ตัดได้จริง" = FIFO layer ใน location ที่จะตัด (lineLoc) ไม่ใช่ยอดรวมทั้งสาขา
+        //    เดิมเทียบยอดสาขา → สาขาที่มีหลายคลังไม่เคยเตือนเลย แล้วแอบสร้างสต๊อกติดลบเงียบ ๆ
+        //    (ของอยู่คลังกลาง แต่ผลิตตัดจากตู้ไลน์ = ตัดไม่เจอ)
         const _short = consumeItems.filter(c => {
-          const _it = (state.items||[]).find(x => x.id === c.itemId);
-          const _cur = _it && _it.stockByBranch ? _it.stockByBranch[w.order.branchId] : 0;
-          const _onHand = (_cur && typeof _cur === 'object') ? Number(_cur._total||0) : Number(_cur||0);
-          return c.qty > _onHand + 0.0001;
+          const _avail = (state.fifoLayers||[]).reduce((sum, l) => {
+            if(l.itemId !== c.itemId || l.branch !== w.order.branchId) return sum;
+            if(lineLoc && (l.locId||null) !== lineLoc.id) return sum;
+            const _r = Number(l.remaining)||0;
+            return _r > 0 ? sum + _r : sum;
+          }, 0);
+          return c.qty > _avail + 0.0001;
         });
         if(_short.length > 0){
           const _names = _short.map(c => { const _it=(state.items||[]).find(x=>x.id===c.itemId); return (_it&&_it.name)||c.itemId; }).join(', ');
-          if(!confirm(`⚠️ วัตถุดิบไม่พอในสต๊อก: ${_names}\n\nถ้าตัดต่อ สต๊อกจะ "ติดลบ" + ต้นทุนส่วนที่ขาดตี @ ราคาต้นทุนมาตรฐาน (ถ้ายังไม่ตั้ง = 0 ต้นทุนยังเพี้ยน)\n\nยืนยันตัดวัตถุดิบต่อ?`)) return;
+          const _where = lineLoc ? `"${lineLoc.name}"` : 'คลังสาขา';
+          if(!confirm(`⚠️ วัตถุดิบไม่พอใน ${_where}: ${_names}\n\n(ของอาจมีอยู่ในคลังอื่นของสาขา แต่การผลิตตัดจาก ${_where} เท่านั้น — ต้องโอน/เบิกเข้ามาก่อน)\n\nถ้าตัดต่อ สต๊อกจะ "ติดลบ" + ต้นทุนส่วนที่ขาดตี @ ราคาต้นทุนมาตรฐาน (ถ้ายังไม่ตั้ง = 0 ต้นทุนยังเพี้ยน)\n\nยืนยันตัดวัตถุดิบต่อ?`)) return;
           // 🆕 B3: audit ที่ event จริง (ตอน consume สร้าง NEG layer = ต้นทุน FG เพี้ยนจุดนี้ ไม่ใช่ตอน plan)
           dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'plan_shortage_ack', subType:'prod_consume_negative',
             by:user.username, byName:user.name||user.username, ts:Date.now(),
@@ -32381,9 +32388,11 @@ function MyStationTab({ state, dispatch, user, branchId }){
           producedQty = Number(order.yieldQty)||0;
           qtySource = 'order';
         }
-        // หัก waste
+        // หัก waste — เฉพาะกรณีที่ยอดไม่ได้มาจาก shapeRows
+        //   shapeRows[].goodQty ถูกหัก waste มาแล้วตอนกด "เสร็จ" (StepDoneModal)
+        //   ถ้าหักซ้ำอีกที่นี่ → บันทึกของเสีย 1 ชิ้น แต่ FG หายไป 2 ชิ้น
         const wasteQty = (wasteEntries||[]).reduce((s,we) => s + (Number(we.qty)||0), 0);
-        producedQty = Math.max(0, producedQty - wasteQty);
+        if(qtySource !== 'shapeRows') producedQty = Math.max(0, producedQty - wasteQty);
         if(producedQty > 0){
           const fgItem = (state.items||[]).find(x => x.id === order.itemId);
           const movement = {
