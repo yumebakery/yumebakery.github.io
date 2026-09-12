@@ -4,6 +4,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-title" content="ชั่งวัดตวง"/>
 <script src="https://cdn.tailwindcss.com"></script>
+<style>html,body{overscroll-behavior-y:none}</style>
 <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
 </head><body class="bg-slate-100"><div id="root">กำลังโหลด...</div>
@@ -58,7 +59,36 @@ const loadState = () => {
     return { recipes: s.recipes, logs: s.logs||[], settings: settingsWithDefaults(s.settings) };
   } catch(e){ return { recipes: JSON.parse(JSON.stringify(SEED_RECIPES)), logs:[], settings: settingsWithDefaults({}) }; }
 };
-const saveState = (s) => { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch(e){} };
+let _quotaWarned = false;
+const saveState = (s) => {
+  try { localStorage.setItem(KEY, JSON.stringify(s)); }
+  catch(e){
+    // เดิมกลืนเงียบ → พื้นที่เต็ม/เขียนไม่ได้ = ประวัติหายโดยไม่มีใครรู้
+    if(!_quotaWarned){ _quotaWarned = true;
+      alert('⚠️ บันทึกลงเครื่องไม่ได้ (' + (e && e.name || 'error') + ')\nประวัติการชั่งรอบนี้อาจไม่ถูกเก็บ — ไปที่ ตั้งค่า → Export ข้อมูล แล้วแจ้งผู้ดูแล'); }
+  }
+};
+// ขอให้เบราว์เซอร์ไม่ล้างข้อมูลหน้านี้เองตอนพื้นที่ตึง (Chrome Android ให้เมื่อใช้งานบ่อย/เพิ่มไปหน้าจอหลัก)
+try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch(e){}
+// 🆕 ชุดที่กำลังชั่ง (session) เก็บแยก — refresh/เผลอสลับแท็บ/จอดับ แล้วกลับมาชั่งต่อได้ ไม่ต้องเริ่มใหม่
+const SESSION_KEY = KEY + '__session';
+const loadSession = () => { try { return JSON.parse(localStorage.getItem(SESSION_KEY)||'null') || null; } catch(e){ return null; } };
+const saveSession = (x) => { try { x ? localStorage.setItem(SESSION_KEY, JSON.stringify(x)) : localStorage.removeItem(SESSION_KEY); } catch(e){} };
+// รหัสเครื่อง 2 ตัว (ใช้ต่อท้ายเลข LOT กันชนกันระหว่างแท็บเล็ตหลายจุด)
+const getDeviceId = () => {
+  try {
+    let id = localStorage.getItem(KEY + '__device');
+    if(!id){ const A='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; id = A[Math.floor(Math.random()*A.length)] + A[Math.floor(Math.random()*A.length)];
+      localStorage.setItem(KEY + '__device', id); }
+    return id;
+  } catch(e){ return 'XX'; }
+};
+const LOG_CAP = 3000;   // เดิม 200 = ครัวกลางอยู่ได้ไม่ถึงสัปดาห์แล้วประวัติเก่าหายเงียบ
+// แปลงเป็นกรัม: kg/L ×1000 · ml/g ×1 (ของเหลวตวงเป็นกรัม 1 มล. ≈ 1 ก.) · หน่วยอื่นใช้ตัวเลขตรง ๆ
+const toGrams = (v, unit) => { const n = Number(v)||0; return (unit==='kg'||unit==='L') ? n*1000 : n; };
+const WEIGH_UNITS = ['g','kg','ml','L'];
+// เปิดปุ่มทดสอบ (Mock/Serial บนมือถือ) ด้วย ?debug=1
+const DEBUG = /[?&]debug=1/.test(location.search);
 // 🆕 มือถือ/แท็บเล็ต: หน้าจอพิมพ์ของ Android/iOS ไปไม่ถึงเครื่องพิมพ์บลูทูธ/USB → ค่าเริ่มต้นไม่เด้งพิมพ์อัตโนมัติ
 //    (บันทึกประวัติตามปกติ · เปิดพิมพ์อัตโนมัติได้เองใน ตั้งค่า ถ้าจุดนั้นมีเครื่องพิมพ์ที่ระบบมองเห็น)
 const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '')
@@ -103,6 +133,30 @@ function useScale(){
   const [baudRate, setBaudRate] = useState(9600);
   const portRef = useRef(null), readerRef = useRef(null), cleanupRef = useRef(null), stableT = useRef(null);
   const appendLog = (l)=>setRawLog(p=>[...p.slice(-14), l]);
+  // 🆕 เวลาแพ็กเก็ตล่าสุด — ใช้จับ "สัญญาณค้าง" (เครื่องหยุดส่งเงียบ ๆ โดยไม่หลุด) ไม่ให้ล็อกค่าค้าง
+  const lastPacketRef = useRef(0);
+  // 🆕 ตัวตัดสิน "นิ่ง" จุดเดียว ใช้ทั้ง Serial และ BLE
+  //    เดิม: ค่าเปลี่ยน → setStable(false) แล้วบรรทัดถัดไปเห็นธง ST → setStable(true) ในแพ็กเก็ตเดียวกัน
+  //    React รวมเป็นรอบเดียว → เครื่องที่ส่ง ST ทุกบรรทัด (มีหลายรุ่น) จะ "นิ่ง" ตลอดแม้กำลังเทอยู่
+  //    ใหม่: แพ็กเก็ตที่ค่าเปลี่ยน = ไม่นิ่งเสมอ · ธง ST มีผลเฉพาะแพ็กเก็ตถัดไปที่ค่าไม่ขยับ
+  const mkStableJudge = () => {
+    let lastW = null, st = null;
+    return (parsed) => {
+      lastPacketRef.current = Date.now();
+      const changed = lastW != null && Math.abs(lastW - parsed.weight) > 0.5;
+      lastW = parsed.weight; setLiveWeight(parsed.weight);
+      if(changed || lastW == null){
+        setStable(false);
+        if(st){ clearTimeout(st); st = null; }
+        // เผื่อเครื่องที่ส่งเฉพาะตอนค่าเปลี่ยน — ถ้าเงียบไป 2 วิ ถือว่านิ่ง
+        st = setTimeout(()=>{ st = null; setStable(true); }, 2000);
+        return;
+      }
+      if(parsed.stable === true){ if(st){ clearTimeout(st); st = null; } setStable(true); }
+      else if(parsed.stable === false){ setStable(false); if(st){ clearTimeout(st); st = null; } }
+      else if(!st) st = setTimeout(()=>{ st = null; setStable(true); }, 2000);
+    };
+  };
 
   const connectMock = () => {
     setMode('mock'); setDevice({ name:'🎭 Mock Scale' }); setConnected(true);
@@ -110,6 +164,7 @@ function useScale(){
     const tick=()=>{
       if(phase==='rising'){ cur+=30+Math.random()*40; if(cur>=target){cur=target;phase='stable';} setStable(false); }
       else { cur=target+(Math.random()-0.5)*2; if(!stableT.current) stableT.current=setTimeout(()=>setStable(true),2000); }
+      lastPacketRef.current = Date.now();
       setLiveWeight(Number(cur.toFixed(1)));
     };
     const iv=setInterval(tick,300);
@@ -124,7 +179,8 @@ function useScale(){
       portRef.current = port;
       setMode('serial'); setDevice({ name:'🔌 Serial USB' }); setConnected(true);
       const reader = port.readable.getReader(); readerRef.current = reader;
-      let buffer='', lastW=null, st=null;
+      let buffer='';
+      const judge = mkStableJudge();
       const loop = async () => {
         try {
           while(true){
@@ -136,13 +192,7 @@ function useScale(){
               if(!ln.trim()) continue;
               appendLog(ln);
               const p = parseScaleLine(ln);
-              if(p!=null){
-                if(Math.abs((lastW||0)-p.weight)>0.5){ setStable(false); if(st){clearTimeout(st);st=null;} }
-                lastW=p.weight; setLiveWeight(p.weight);
-                if(p.stable===true) setStable(true);
-                else if(p.stable===false) setStable(false);
-                else if(!st) st=setTimeout(()=>setStable(true),2000);
-              }
+              if(p!=null) judge(p);
             }
           }
         } catch(e){ appendLog('read error: '+e.message); }
@@ -152,9 +202,68 @@ function useScale(){
     } catch(e){ if(e.name!=='NotFoundError') alert('❌ Serial: '+e.message); }
   };
 
+  // ---------- BLE ----------
+  // 🆕 แยก "เลือกเครื่อง" ออกจาก "ต่อ+สมัครรับค่า" เพื่อให้ต่อใหม่อัตโนมัติได้เมื่อเครื่องชั่งดับเอง
+  //    (เครื่องชั่ง BLE ราคาถูกส่วนใหญ่ปิดเองเมื่อนิ่ง 2-3 นาที — เดิมต้องกดเลือกเครื่องใหม่ทุกครั้ง)
+  const [connecting, setConnecting] = useState('');   // ข้อความสถานะระหว่างต่อ ('' = ไม่ได้ต่ออยู่)
+  const devRef = useRef(null);
+  const onDropRef = useRef(null);   // callback ให้หน้าชั่งรู้ว่าสัญญาณหลุดกลางคัน
+  const reconnectingRef = useRef(false);
+
+  const attachBLE = async (dev, label) => {
+    let server = null;
+    for(let attempt=1; attempt<=4; attempt++){
+      try {
+        setConnecting(`${label||'กำลังเชื่อมต่อ'}… (ครั้งที่ ${attempt}/4)`);
+        appendLog(`⏳ GATT connect... (ครั้งที่ ${attempt}/4)`);
+        server = await dev.gatt.connect();
+        if(server && server.connected){ appendLog('✅ GATT connected'); break; }
+      } catch(err){
+        appendLog(`⚠️ ครั้งที่ ${attempt} ล้ม: ${err.message}`);
+        if(attempt < 4){
+          await new Promise(r=>setTimeout(r, 600*attempt));  // backoff 0.6/1.2/1.8s
+          try{ dev.gatt.disconnect(); }catch{}
+        } else {
+          throw new Error(`เชื่อมเครื่องชั่งไม่ได้ (ลอง 4 ครั้ง) — ${err.message}\n\n💡 ลอง:\n• เปิดเครื่องชั่ง + วางใกล้แท็บเล็ต + เช็คแบต\n• ปิด-เปิด Bluetooth\n• ถ้าเคยจับคู่ไว้ในตั้งค่าเครื่อง ให้ลบการจับคู่ออกแล้วต่อผ่านหน้านี้อย่างเดียว`);
+        }
+      }
+    }
+    if(!server) throw new Error('GATT connect ไม่สำเร็จ');
+    setConnecting('กำลังค้นหาสัญญาณน้ำหนัก…');
+    const services = await server.getPrimaryServices();
+    let nc=null;
+    const std = services.find(s=>s.uuid.toLowerCase().includes('0000181d'));
+    if(std){ try{ const cs=await std.getCharacteristics(); const w=cs.find(c=>c.uuid.toLowerCase().includes('00002a9d')); if(w&&w.properties.notify) nc=w; }catch{} }
+    if(!nc){ for(const s of services){ try{ const cs=await s.getCharacteristics(); for(const c of cs){ if(c.properties.notify||c.properties.indicate){ nc=c; break; } } if(nc) break; }catch{} } }
+    if(!nc) throw new Error('ไม่พบสัญญาณน้ำหนักจากเครื่องนี้ — อาจเลือกผิดเครื่อง หรือเครื่องชั่งรุ่นนี้ไม่รองรับ Web Bluetooth');
+    const judge = mkStableJudge();
+    const onVal = (ev)=>{
+      const dv=ev.target.value; const b=[];
+      for(let i=0;i<dv.byteLength;i++) b.push(dv.getUint8(i).toString(16).padStart(2,'0'));
+      appendLog(b.join(' '));
+      let parsed=null;
+      if(dv.byteLength>=3 && nc.uuid.toLowerCase().includes('00002a9d')){
+        const fl=dv.getUint8(0), raw=dv.getUint16(1,true);
+        parsed={ weight:Number(((fl&1?raw*0.01*0.453592:raw*0.005)*1000).toFixed(1)), stable:true };
+      } else {
+        const t=new TextDecoder().decode(dv); const pp=parseScaleLine(t);
+        if(pp) parsed=pp; else { const mm=t.match(/([+-]?\d+\.?\d*)/); if(mm){ const v=parseFloat(mm[1]); parsed={ weight:/kg/i.test(t)?v*1000:v, stable:/ST|stable/i.test(t) }; } }
+        if(!parsed && dv.byteLength>=2) parsed={ weight:dv.getUint16(0,true), stable:true };
+      }
+      if(parsed) judge(parsed);
+    };
+    await nc.startNotifications();
+    nc.addEventListener('characteristicvaluechanged', onVal);
+    appendLog('✅ subscribed');
+    cleanupRef.current=async()=>{ try{ nc.removeEventListener('characteristicvaluechanged',onVal); await nc.stopNotifications(); dev.gatt.disconnect(); }catch{} };
+    setMode('bluetooth'); setDevice({ name:dev.name||'BLE' }); setConnected(true); setConnecting('');
+  };
+
   const connectBLE = async () => {
-    if(!navigator.bluetooth){ alert('❌ Browser ไม่รองรับ Web Bluetooth'); return; }
+    if(!navigator.bluetooth){ alert('❌ เบราว์เซอร์นี้ไม่รองรับ Web Bluetooth — ใช้ Chrome บน Android / คอม'); return; }
+    if(connecting) return;   // กันกดซ้ำระหว่างรอ
     try {
+      setConnecting('เลือกเครื่องชั่งจากรายการ…');
       // รายการ service เดียวกับใน ERP (เครื่องชั่งของร้านต่อผ่านรายการนี้สำเร็จแล้ว)
       const dev = await navigator.bluetooth.requestDevice({ acceptAllDevices:true,
         optionalServices:[0x181D,0x181B,0x1810,0xFFE0,0xFFF0,0xFFB0,0xFEE7,
@@ -163,81 +272,59 @@ function useScale(){
           '6e400001-b5a3-f393-e0a9-e50e24dcca9e',
           '49535343-fe7d-4ae5-8fa9-9fafd205e455'] });
       appendLog('🔵 '+(dev.name||dev.id));
-      // 🆕 Auto-retry GATT connect — "Attempt failed" มักหายถ้าลองใหม่
-      let server = null;
-      for(let attempt=1; attempt<=4; attempt++){
+      devRef.current = dev;
+      // หลุด → แจ้งหน้าชั่ง + พยายามต่อใหม่เองจากเครื่องเดิม (ไม่ต้องเลือกใหม่)
+      dev.addEventListener('gattserverdisconnected', async ()=>{
+        if(devRef.current !== dev) return;   // ผู้ใช้กด "ตัด" เอง / เปลี่ยนเครื่องแล้ว
+        setConnected(false); setLiveWeight(null); setStable(false);
+        try{ onDropRef.current && onDropRef.current(); }catch(e){}
+        if(reconnectingRef.current) return;
+        reconnectingRef.current = true;
         try {
-          appendLog(`⏳ GATT connect... (ครั้งที่ ${attempt}/4)`);
-          server = await dev.gatt.connect();
-          if(server && server.connected){ appendLog('✅ GATT connected'); break; }
-        } catch(err){
-          appendLog(`⚠️ ครั้งที่ ${attempt} ล้ม: ${err.message}`);
-          if(attempt < 4){
-            await new Promise(r=>setTimeout(r, 600*attempt));  // backoff 0.6/1.2/1.8s
-            try{ dev.gatt.disconnect(); }catch{}
-          } else {
-            throw new Error(`เชื่อม GATT ล้ม 4 ครั้ง — ${err.message}\n\n💡 ลอง:\n• Windows Settings → Bluetooth → ลบ pairing เครื่องชั่งออก\n• ปิด-เปิด Bluetooth\n• วางเครื่องชั่งใกล้คอม + เช็คแบต`);
+          for(let i=1;i<=3;i++){
+            if(devRef.current !== dev) return;
+            await new Promise(r=>setTimeout(r, 1500*i));
+            try { await attachBLE(dev, `สัญญาณหลุด — ต่อใหม่อัตโนมัติ`); return; }
+            catch(e){ appendLog('↻ ต่อใหม่ล้ม: '+e.message); }
           }
-        }
-      }
-      if(!server) throw new Error('GATT connect ไม่สำเร็จ');
-      const services = await server.getPrimaryServices();
-      let nc=null;
-      const std = services.find(s=>s.uuid.toLowerCase().includes('0000181d'));
-      if(std){ try{ const cs=await std.getCharacteristics(); const w=cs.find(c=>c.uuid.toLowerCase().includes('00002a9d')); if(w&&w.properties.notify) nc=w; }catch{} }
-      if(!nc){ for(const s of services){ try{ const cs=await s.getCharacteristics(); for(const c of cs){ if(c.properties.notify||c.properties.indicate){ nc=c; break; } } if(nc) break; }catch{} } }
-      if(!nc){ alert('❌ ไม่พบ characteristic notify — เครื่องนี้อาจไม่รองรับ Web BLE'); return; }
-      setMode('bluetooth'); setDevice({ name:dev.name||'BLE' }); setConnected(true);
-      let lastW=null, st=null;
-      const onVal = (ev)=>{
-        const dv=ev.target.value; const b=[];
-        for(let i=0;i<dv.byteLength;i++) b.push(dv.getUint8(i).toString(16).padStart(2,'0'));
-        appendLog(b.join(' '));
-        let parsed=null;
-        if(dv.byteLength>=3 && nc.uuid.toLowerCase().includes('00002a9d')){
-          const fl=dv.getUint8(0), raw=dv.getUint16(1,true);
-          parsed={ weight:Number(((fl&1?raw*0.01*0.453592:raw*0.005)*1000).toFixed(1)), stable:true };
-        } else {
-          const t=new TextDecoder().decode(dv); const pp=parseScaleLine(t);
-          if(pp) parsed=pp; else { const mm=t.match(/([+-]?\d+\.?\d*)/); if(mm){ const v=parseFloat(mm[1]); parsed={ weight:/kg/i.test(t)?v*1000:v, stable:/ST|stable/i.test(t) }; } }
-          if(!parsed && dv.byteLength>=2) parsed={ weight:dv.getUint16(0,true), stable:true };
-        }
-        if(parsed){
-          if(Math.abs((lastW||0)-parsed.weight)>0.5){ setStable(false); if(st){clearTimeout(st);st=null;} }
-          lastW=parsed.weight; setLiveWeight(parsed.weight);
-          if(parsed.stable===true) setStable(true);
-          else if(parsed.stable===false) setStable(false);
-          else if(!st) st=setTimeout(()=>setStable(true),2000);
-        }
-      };
-      await nc.startNotifications();
-      nc.addEventListener('characteristicvaluechanged', onVal);
-      appendLog('✅ subscribed');
-      cleanupRef.current=async()=>{ try{ nc.removeEventListener('characteristicvaluechanged',onVal); await nc.stopNotifications(); dev.gatt.disconnect(); }catch{} };
-      dev.addEventListener('gattserverdisconnected', ()=>{ setConnected(false); setDevice(null); setLiveWeight(null); setMode(null); });
+          // ต่อใหม่ไม่ได้ → ปล่อยให้ผู้ใช้กดต่อเอง (เครื่องชั่งอาจปิดจริง)
+          setDevice(null); setMode(null); setConnecting('');
+        } finally { reconnectingRef.current = false; }
+      });
+      await attachBLE(dev, 'กำลังเชื่อมต่อ ' + (dev.name||''));
     } catch(e){
-      if(e.name!=='NotFoundError') alert('❌ BLE: '+e.message
+      setConnecting('');
+      if(e.name!=='NotFoundError') alert('❌ ' + e.message
         + (IS_MOBILE ? '\n\n💡 บน Android: เปิด Bluetooth + เปิด "ตำแหน่ง (Location)" ด้วย ไม่งั้นรายการเครื่องจะว่าง · ใช้ Chrome ตัวจริง (ไม่ใช่เบราว์เซอร์ในแอปแชท)' : ''));
     }
   };
 
-  const disconnect=()=>{ if(cleanupRef.current) try{cleanupRef.current();}catch{} cleanupRef.current=null;
-    setConnected(false); setDevice(null); setLiveWeight(null); setStable(false); setMode(null); setRawLog([]); };
-  const tare=()=>{ setLiveWeight(0); setStable(false); if(stableT.current){clearTimeout(stableT.current);stableT.current=null;} };
+  const disconnect=()=>{ devRef.current = null; if(cleanupRef.current) try{cleanupRef.current();}catch{} cleanupRef.current=null;
+    setConnected(false); setDevice(null); setLiveWeight(null); setStable(false); setMode(null); setRawLog([]); setConnecting(''); };
+  // (เดิมมีปุ่ม Tare ในแอปที่แค่เขียนค่า 0 ทับบนจอ ไม่ได้สั่งเครื่อง → เปิด zero-gate ผิดได้ทั้งที่มีของบนเครื่อง — ถอดออกแล้ว)
 
   // 🆕 กันจอดับตอนต่อเครื่องชั่งอยู่ (แท็บเล็ต/มือถือหน้างาน) — ปล่อยเองเมื่อตัดการเชื่อมต่อ
   useEffect(()=>{
     if(!connected || !navigator.wakeLock) return;
     let lock = null, alive = true;
-    const grab = async()=>{ try{ lock = await navigator.wakeLock.request('screen'); }catch(e){} };
+    const grab = async()=>{
+      if(lock && !lock.released) return;
+      try {
+        const l = await navigator.wakeLock.request('screen');
+        if(!alive){ try{ l.release(); }catch(e){} return; }   // ตัดการเชื่อมต่อไปก่อนที่ระบบจะให้ lock
+        lock = l;
+      } catch(e){}
+    };
     grab();
     const onVis = ()=>{ if(alive && document.visibilityState==='visible') grab(); };
     document.addEventListener('visibilitychange', onVis);
     return ()=>{ alive=false; document.removeEventListener('visibilitychange', onVis); try{ lock && lock.release(); }catch(e){} };
   }, [connected]);
 
-  return { connected, device, liveWeight, stable, mode, rawLog, baudRate, setBaudRate,
-    connectMock, connectSerial, connectBLE, disconnect, tare };
+  // อายุของแพ็กเก็ตล่าสุด (ms) — ให้หน้าชั่งตัดสินว่าสัญญาณค้างไหม
+  const packetAge = () => lastPacketRef.current ? (Date.now() - lastPacketRef.current) : Infinity;
+  return { connected, connecting, device, liveWeight, stable, mode, rawLog, baudRate, setBaudRate,
+    connectMock, connectSerial, connectBLE, disconnect, packetAge, onDropRef };
 }
 
 // ==================== LABEL (100x75mm — แนวนอน) ====================
@@ -324,49 +411,63 @@ function App(){
   const [tab, setTab] = useState('weigh');
   useEffect(()=>{ saveState(state); }, [state]);
   const update = (patch)=>setState(s=>({ ...s, ...patch }));
+  // 🆕 เครื่องชั่งอยู่ระดับแอป — สลับไปดูสูตร/ประวัติแล้วกลับมา การเชื่อมต่อ+ชุดที่ชั่งอยู่ยังอยู่ครบ
+  //    (เดิมอยู่ใน WeighTab ซึ่งถูก unmount ตอนสลับแท็บ → หลุดหมด + BLE ค้างเบื้องหลัง)
+  const scale = useScale();
 
-  // 🆕 ตรวจสูตรที่ฝังในไฟล์ (SEED_RECIPES) vs สูตรในเครื่อง — ถ้าต่าง → ถามว่าจะใช้จากไฟล์ทับไหม
-  //    แก้ปัญหา: ส่งไฟล์ที่ฝังสูตรไปเครื่องที่มีสูตรเดิม แล้ว localStorage ชนะไฟล์เสมอ
+  // 🆕 สูตรที่ฝังในไฟล์ (SEED_RECIPES) เปลี่ยน (มี deploy ชุดใหม่) → รวมเข้าเครื่องแบบ "ตาม id"
+  //    - id ใหม่ในไฟล์ → เพิ่ม · id เดิมแต่เนื้อหาต่าง → ใช้ของไฟล์ · สูตรที่เครื่องนี้สร้างเอง → คงไว้
+  //    - ถามเฉพาะตอนสูตรในไฟล์เปลี่ยน ไม่ใช่ทุกครั้งที่เปิด · เขียนธง "เห็นแล้ว" หลังผู้ใช้ตอบ
   useEffect(()=>{
     try {
-      const key = r => (r.items||[]).map(i=>i.name+':'+i.target).join('|');
-      const sig = list => (list||[]).map(r=>r.name+'='+key(r)).sort().join('||');
+      const key = r => (r.items||[]).map(i=>[i.name,i.target,i.unit||'g',i.tol??''].join(':')).join('|');
+      const sig = list => (list||[]).map(r=>r.id+'='+r.name+'='+key(r)).sort().join('||');
       const fileSig = sig(SEED_RECIPES);
-      const localSig = sig(state.recipes);
-      // 🆕 บนเว็บ: เปิดหน้าซ้ำบ่อย → ถามเฉพาะตอน "สูตรในไฟล์เปลี่ยน" (มี deploy สูตรชุดใหม่)
-      //    ไม่ใช่ทุกครั้งที่สูตรในเครื่องต่างจากไฟล์ (ไม่งั้นแก้สูตรเองแล้วโดนถามทุกครั้งที่เปิด)
       const SEEN_KEY = KEY + '__seedSig';
       let seen = null; try { seen = localStorage.getItem(SEEN_KEY); } catch(e){}
-      const isNewSeed = seen !== fileSig;
-      try { localStorage.setItem(SEEN_KEY, fileSig); } catch(e){}
-      // เทียบเฉพาะกรณีไฟล์มีสูตร และต่างจากในเครื่อง (ทั้งจำนวนหรือเนื้อหา)
-      if(SEED_RECIPES.length > 0 && isNewSeed && fileSig !== localSig){
-        const msg = 'ไฟล์นี้มีสูตรที่ฝังมา ' + SEED_RECIPES.length + ' สูตร '
-          + 'ซึ่งต่างจากสูตรในเครื่องนี้ (' + (state.recipes||[]).length + ' สูตร)\n\n'
-          + 'กด OK = ใช้สูตรจากไฟล์ (ทับของเดิมในเครื่อง)\n'
-          + 'กด Cancel = เก็บสูตรเดิมในเครื่องไว้';
-        if(window.confirm(msg)){
-          setState(s => ({ ...s, recipes: JSON.parse(JSON.stringify(SEED_RECIPES)) }));
-          alert('✅ ใช้สูตรจากไฟล์แล้ว ' + SEED_RECIPES.length + ' สูตร');
-        }
+      if(SEED_RECIPES.length === 0 || seen === fileSig) return;
+      const local = state.recipes || [];
+      const byId = Object.fromEntries(local.map(r=>[r.id, r]));
+      const added = SEED_RECIPES.filter(r => !byId[r.id]);
+      const changed = SEED_RECIPES.filter(r => byId[r.id] && (byId[r.id].name+'='+key(byId[r.id])) !== (r.name+'='+key(r)));
+      if(added.length === 0 && changed.length === 0){ try { localStorage.setItem(SEEN_KEY, fileSig); } catch(e){} return; }
+      const msg = 'มีสูตรชุดใหม่จากส่วนกลาง\n\n'
+        + (added.length ? '• เพิ่มใหม่ ' + added.length + ' สูตร: ' + added.map(r=>r.name).join(', ') + '\n' : '')
+        + (changed.length ? '• ปรับปรุง ' + changed.length + ' สูตร: ' + changed.map(r=>r.name).join(', ') + '\n' : '')
+        + '\nสูตรที่สร้างเองในเครื่องนี้จะยังอยู่ครบ\n\nกด OK = อัปเดตตอนนี้ · Cancel = ไว้ก่อน (จะถามอีกครั้งเมื่อเปิดหน้าใหม่)';
+      if(window.confirm(msg)){
+        const seedIds = new Set(SEED_RECIPES.map(r=>r.id));
+        const merged = [
+          ...SEED_RECIPES.map(r => JSON.parse(JSON.stringify(r))),
+          ...local.filter(r => !seedIds.has(r.id)),
+        ];
+        setState(s => ({ ...s, recipes: merged }));
+        try { localStorage.setItem(SEEN_KEY, fileSig); } catch(e){}
       }
-    } catch(e){ console.warn('seed-compare failed', e); }
+    } catch(e){ console.warn('seed-merge failed', e); }
   }, []);  // รันครั้งเดียวตอนเปิด
 
+  const TABS = [['weigh','⚖️ ชั่ง'],['recipes','📋 สูตร'],['logs','📜 ประวัติ'],['settings','⚙️ ตั้งค่า']];
   return h('div', { className:'min-h-screen' },
     // Header
     h('div', { className:'bg-gradient-to-r from-indigo-600 to-blue-600 text-white p-3 shadow-lg sticky top-0 z-20' },
       h('div', { className:'max-w-5xl mx-auto flex items-center justify-between flex-wrap gap-2' },
         h('div', null,
           h('div', { className:'font-bold text-lg' }, '⚖️ ระบบชั่งวัดตวง'),
-          h('div', { className:'text-xs opacity-90' }, IS_MOBILE ? 'ต่อเครื่องชั่งบลูทูธ · สูตร · ประวัติ' : 'สูตร + พิมพ์ Label อัตโนมัติ (100×75mm)')),
+          h('div', { className:'text-xs opacity-90' },
+            scale.connected
+              ? h('span', null, '🟢 ', scale.device?.name || 'เครื่องชั่ง', ' · ',
+                  h('b', { className:'font-mono' }, scale.liveWeight!=null ? fmt(scale.liveWeight)+' g' : '—'))
+              : scale.connecting ? h('span', { className:'animate-pulse' }, '⏳ ', scale.connecting)
+              : (IS_MOBILE ? 'ต่อเครื่องชั่งบลูทูธ · สูตร · ประวัติ' : 'สูตร + พิมพ์ Label อัตโนมัติ (100×75mm)'))),
         h('div', { className:'flex gap-1' },
-          [['weigh','⚖️ ชั่ง'],['recipes','📋 สูตร'],['logs','📜 ประวัติ'],['settings','⚙️ ตั้งค่า']].map(([k,lbl])=>
+          TABS.map(([k,lbl])=>
             h('button', { key:k, onClick:()=>setTab(k),
-              className: cls('px-3 py-1.5 rounded text-sm font-medium',
+              className: cls('px-3 py-2 rounded text-sm font-medium',
                 tab===k ? 'bg-white text-indigo-700' : 'bg-indigo-500/50 hover:bg-indigo-500') }, lbl))))),
     h('div', { className:'max-w-5xl mx-auto p-3' },
-      tab==='weigh'    && h(WeighTab, { state, update }),
+      // WeighTab ไม่ถูก unmount ตอนสลับแท็บ (ซ่อนแทน) → ชุดที่ชั่งอยู่ไม่หาย
+      h('div', { hidden: tab!=='weigh' }, h(WeighTab, { state, update, scale, visible: tab==='weigh' })),
       tab==='recipes'  && h(RecipesTab, { state, update }),
       tab==='logs'     && h(LogsTab, { state }),
       tab==='settings' && h(SettingsTab, { state, update }))
@@ -421,7 +522,10 @@ function RecipesTab({ state, update }){
   ]});
   const saveRecipe = (r) => {
     if(!r.name.trim()) return alert('ใส่ชื่อสูตร');
-    const items = r.items.filter(it=>it.name.trim() && Number(it.target)>0);
+    const items = r.items.filter(it=>it.name.trim() && Number(it.target)>0)
+      // 🆕 tol ว่าง/0 → ใช้ตารางมาตรฐาน (เดิมสูตรที่คีย์เองได้เกณฑ์คนละแบบกับสูตร seed และไม่โชว์ให้เห็น)
+      .map(it => ({ ...it, name:it.name.trim(), unit: WEIGH_UNITS.includes(it.unit) ? it.unit : 'g',
+        tol: Number(it.tol)>0 ? Number(it.tol) : calcTol(toGrams(it.target, it.unit)) }));
     if(items.length===0) return alert('ใส่วัตถุดิบอย่างน้อย 1 ตัว');
     const clean = { ...r, name:r.name.trim(), items };
     const exists = recipes.some(x=>x.id===r.id);
@@ -456,11 +560,13 @@ function RecipesTab({ state, update }){
               placeholder:'target', className:'w-24 px-2 py-1 border rounded text-right text-sm' }),
             h('select', { value:it.unit, onChange:e=>setItem(i,{unit:e.target.value}),
               className:'px-1 py-1 border rounded text-xs' },
-              ['g','kg','ml','L','ชิ้น','ฟอง'].map(u=>h('option',{key:u,value:u},u))),
+              WEIGH_UNITS.map(u=>h('option',{key:u,value:u},u))),
             h('span', { className:'text-xs text-gray-400' }, '±'),
-            h('input', { type:'number', value:it.tol, step:'any', min:0,
+            h('input', { type:'number', value:it.tol||'', step:'any', min:0,
               onChange:e=>setItem(i,{tol:Number(e.target.value)||0}),
-              placeholder:'tol', className:'w-16 px-2 py-1 border rounded text-right text-sm' }),
+              placeholder: 'อัตโนมัติ ' + calcTol(toGrams(it.target, it.unit)),
+              title:'เว้นว่าง = ใช้ตารางมาตรฐาน: <10→±0.5 · <100→±2 · <300→±5 · <500→±7 · <1000→±12 · ≥1000→±13',
+              className:'w-24 px-2 py-1 border rounded text-right text-sm' }),
             r.items.length>1 && h('button', { onClick:()=>setR({items:r.items.filter((_,j)=>j!==i)}),
               className:'text-red-500 px-1' }, '×'))))),
       h('div', { className:'flex gap-2 pt-2 border-t' },
@@ -470,16 +576,16 @@ function RecipesTab({ state, update }){
           className:'px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded' }, 'ยกเลิก')));
   }
 
-  // 🆕 โหลด/รีเซ็ตสูตร Base 6 สูตร
+  // โหลดสูตรจากส่วนกลาง (ที่ฝังในไฟล์) — เพิ่มเฉพาะที่ยังไม่มี
   const loadBase = () => {
-    if(recipes.length>0 && !confirm('โหลดสูตร Base 6 สูตร — จะเพิ่มเข้าไป (ของเดิมไม่หาย)\nกด OK เพื่อเพิ่ม'))
+    if(recipes.length>0 && !confirm('โหลดสูตรจากส่วนกลาง ' + SEED_RECIPES.length + ' สูตร — จะเพิ่มเฉพาะที่ยังไม่มี (ของเดิมไม่หาย)\nกด OK เพื่อเพิ่ม'))
       return;
     const existIds = new Set(recipes.map(r=>r.id));
     const toAdd = SEED_RECIPES.filter(r=>!existIds.has(r.id))
       .map(r=>JSON.parse(JSON.stringify(r)));
-    if(toAdd.length===0){ alert('สูตร Base ทั้ง 6 มีอยู่แล้ว'); return; }
+    if(toAdd.length===0){ alert('สูตรจากส่วนกลางทั้ง ' + SEED_RECIPES.length + ' สูตร มีอยู่แล้ว'); return; }
     update({ recipes:[...recipes, ...toAdd] });
-    alert(`✅ เพิ่ม ${toAdd.length} สูตร Base แล้ว`);
+    alert(`✅ เพิ่ม ${toAdd.length} สูตรแล้ว`);
   };
   return h('div', { className:'space-y-3' },
     h('div', { className:'flex justify-between items-center flex-wrap gap-2' },
@@ -487,7 +593,7 @@ function RecipesTab({ state, update }){
       h('div', { className:'flex gap-2 flex-wrap' },
         h('button', { onClick:loadBase,
           className:'px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium text-sm' },
-          '📦 โหลดสูตร Base (6)'),
+          '📦 โหลดสูตรส่วนกลาง (' + SEED_RECIPES.length + ')'),
         recipes.length>0 && h('button', { onClick:()=>exportRecipesToHtml(recipes),
           title:'ดาวน์โหลดไฟล์ HTML ที่มีสูตรทั้งหมดฝังอยู่ — ส่งไปเครื่องอื่นเปิดได้เลย',
           className:'px-3 py-2 bg-sky-600 hover:bg-sky-700 text-white rounded font-medium text-sm' },
@@ -499,14 +605,14 @@ function RecipesTab({ state, update }){
           h('div', { className:'mb-2' }, 'ยังไม่มีสูตร'),
           h('button', { onClick:loadBase,
             className:'px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold' },
-            '📦 โหลดสูตร Base 6 สูตร'))
+            '📦 โหลดสูตรส่วนกลาง ' + SEED_RECIPES.length + ' สูตร'))
       : h('div', { className:'grid gap-2 md:grid-cols-2' },
           recipes.map(r=>h('div', { key:r.id, className:'bg-white rounded-lg shadow p-3' },
             h('div', { className:'flex justify-between items-start' },
               h('div', null,
                 h('div', { className:'font-bold' }, r.name),
                 h('div', { className:'text-xs text-gray-500' }, r.items.length, ' วัตถุดิบ · รวม ',
-                  fmt(r.items.reduce((s,it)=>s+(it.unit==='kg'?it.target*1000:Number(it.target)||0),0)), ' g')),
+                  fmt(r.items.reduce((s,it)=>s+toGrams(it.target, it.unit),0)), ' g')),
               h('div', { className:'flex gap-1' },
                 h('button', { onClick:()=>setEditing(JSON.parse(JSON.stringify(r))),
                   className:'text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded' }, '✏️'),
@@ -514,259 +620,369 @@ function RecipesTab({ state, update }){
                   className:'text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded' }, '🗑'))),
             h('div', { className:'mt-2 text-xs text-gray-600 space-y-0.5' },
               r.items.slice(0,5).map((it,i)=>h('div',{key:i},'• ',it.name,' ',fmt(it.target),' ',it.unit,
-                it.tol>0&&h('span',{className:'text-gray-400'},' ±',it.tol))),
+                h('span',{className:'text-gray-400'},' ±', it.tol>0 ? it.tol : calcTol(toGrams(it.target, it.unit))))),
               r.items.length>5&&h('div',{className:'italic'},'+',r.items.length-5,' รายการ'))))));
 }
 
 // ==================== WEIGH TAB ====================
-function WeighTab({ state, update }){
-  const scale = useScale();
-  const [recipeId, setRecipeId] = useState('');
-  const [scale2, setScale2] = useState(1);  // multiplier
-  const [operator, setOperator] = useState(state.settings?.lastOperator||'');
-  const [note, setNote] = useState('');
-  const [entries, setEntries] = useState({});  // itemIdx → {value, locked, source}
-  const [activeIdx, setActiveIdx] = useState(null);
+function WeighTab({ state, update, scale, visible }){
   const recipes = state.recipes||[];
+  const settings = state.settings||{};
+  // 🆕 กู้ชุดที่ชั่งค้างไว้ (refresh/จอดับ/เผลอสลับแท็บ) — ค่าที่ล็อกแล้วอยู่ครบ ตัวที่ยังไม่ล็อกต้องตั้ง 0 ใหม่
+  const sess = useMemo(loadSession, []);
+  const [recipeId, setRecipeId] = useState(sess && recipes.some(r=>r.id===sess.recipeId) ? sess.recipeId : '');
+  const [mult, setMult] = useState(sess && Number(sess.mult)>0 ? Number(sess.mult) : 1);
+  const [operator, setOperator] = useState(sess?.operator ?? (settings.lastOperator||''));
+  const [note, setNote] = useState(sess?.note || '');
+  const [entries, setEntries] = useState(()=>{
+    const e = (sess && sess.entries) || {};
+    const out = {};
+    Object.keys(e).forEach(k=>{ const x=e[k]||{}; out[k] = x.locked ? x : {}; });   // ตัวที่ยังไม่ล็อก → เริ่ม zero-gate ใหม่
+    return out;
+  });
+  const [activeIdx, setActiveIdx] = useState(sess && sess.activeIdx!=null ? sess.activeIdx : null);
+  const [toast, setToast] = useState('');
+  const [dropNotice, setDropNotice] = useState('');
   const recipe = recipes.find(r=>r.id===recipeId);
-  const autoPrint = state.settings?.autoPrint !== false;
-  const autoFinish = state.settings?.autoFinish !== false;  // 🆕 ชั่งครบ → finish เอง
-  const copies = Number(state.settings?.copies)||1;
+  const autoPrint = settings.autoPrint !== false;
+  const autoFinish = settings.autoFinish !== false;
+  const copies = Number(settings.copies)||1;
   const [countdown, setCountdown] = useState(0);
   const finishedRef = useRef(false);
-  const dwellRef = useRef(null);        // 🆕 { idx, value, since } — กันล็อกค่าตอนยังเทไม่เสร็จ
-  const [tick, setTick] = useState(0);  // 🆕 บังคับ re-check dwell แม้เครื่องชั่งหยุดสตรีมค่า
+  const dwellRef = useRef(null);        // { idx, value, since } — กันล็อกค่าตอนยังเทไม่เสร็จ
+  const maxSeenRef = useRef(null);      // 🆕 { idx, max } — น้ำหนักสูงสุดที่เห็นหลังตั้ง 0 (จับ TARE/auto-zero กลางคัน)
+  const advanceTimerRef = useRef(null);
+  const [tick, setTick] = useState(0);  // บังคับ re-check ทุก 400ms แม้เครื่องชั่งหยุดสตรีมค่า
 
-  // Scaled items
-  const items = useMemo(()=> !recipe ? [] : recipe.items.map((it,i)=>{
-    const mul = Number(scale2)||1;
-    const targetG = (it.unit==='kg'?it.target*1000:Number(it.target)||0) * mul;
-    const tolG = (it.unit==='kg'?(Number(it.tol)||0)*1000:(Number(it.tol)||0)) * mul;
-    return { idx:i, name:it.name, target:targetG, tol:tolG||Math.max(1,targetG*0.02), unit:'g',
-      origUnit:it.unit, origTarget:Number(it.target)||0 };
-  }), [recipe, scale2]);
+  const showToast = (m) => { setToast(m); setTimeout(()=>setToast(''), 2500); };
+  const buzz = (pat) => { try { navigator.vibrate && navigator.vibrate(pat); } catch(e){} };
 
-  // 🆕 Zero-gate: ต้องตั้งเครื่องชั่งเป็น 0 ก่อนถึงจะชั่งตัวนี้ได้
-  const zeroTol = Number(state.settings?.zeroTol) || 2;  // ±2g ถือว่าเป็น 0
-  const requireZero = state.settings?.requireZero !== false;  // default เปิด
-
-  // ตรวจว่า active item ผ่าน zero gate แล้ว (scale กลับมา 0 + นิ่ง)
+  // เก็บ session ทุกครั้งที่เปลี่ยน (ไม่มีสูตร = ล้าง)
   useEffect(()=>{
-    if(!requireZero) return;
-    if(!scale.connected || activeIdx==null || scale.liveWeight==null) return;
-    const e = entries[activeIdx]||{};
-    if(e.zeroOk || e.locked) return;
-    if(scale.stable && Math.abs(Number(scale.liveWeight)) <= zeroTol){
-      setEntries(p=>({ ...p, [activeIdx]:{ ...(p[activeIdx]||{}), zeroOk:true } }));
-    }
-  }, [scale.stable, scale.liveWeight, activeIdx, requireZero]);
+    if(!recipeId){ saveSession(null); return; }
+    saveSession({ recipeId, mult, operator, note, entries, activeIdx });
+  }, [recipeId, mult, operator, note, entries, activeIdx]);
+  // เตือนก่อนปิด/รีเฟรชถ้ามีค่าที่ชั่งไปแล้ว
+  const hasAny = Object.values(entries).some(e=>e && e.locked);
+  useEffect(()=>{
+    if(!hasAny) return;
+    const f = (ev)=>{ ev.preventDefault(); ev.returnValue=''; };
+    window.addEventListener('beforeunload', f);
+    return ()=>window.removeEventListener('beforeunload', f);
+  }, [hasAny]);
 
-  // 🆕 เวลาที่ค่าต้อง "นิ่งค้างในเกณฑ์" ก่อนล็อก (กันล็อกตอนยังเทไม่เสร็จ) — ตั้งได้ใน Settings
-  const lockDwellMs = Math.max(0, (Number(state.settings?.lockDwellSec ?? 2.5)||0) * 1000);
+  // Scaled items — 🆕 หน่วย: kg/L ×1000 · ml/g ×1 · tol: ตามสูตร (×ตัวคูณ) ถ้าไม่ตั้ง → ตาราง calcTol ของ target ที่คูณแล้ว
+  //    และไม่ต่ำกว่า minTolG (ค่าเริ่มต้น 1 ก. = ความละเอียดเครื่องชั่งครัวทั่วไป — ±0.5 บนเครื่องก้าว 1 ก. ล็อกไม่ได้เลย)
+  const minTolG = Math.max(0, Number(settings.minTolG ?? 1) || 0);
+  const items = useMemo(()=> !recipe ? [] : recipe.items.map((it,i)=>{
+    const targetG = toGrams(it.target, it.unit) * mult;
+    const tolSet = Number(it.tol)||0;
+    const tolG = tolSet > 0 ? toGrams(tolSet, it.unit) * mult : calcTol(targetG);
+    return { idx:i, name:it.name, target:targetG, tol:Math.max(minTolG, tolG), unit:'g',
+      origUnit:it.unit||'g', origTarget:Number(it.target)||0, tolAuto: !(tolSet>0) };
+  }), [recipe, mult, minTolG]);
 
-  // 🆕 ticker — บังคับ re-check dwell ทุก 400ms แม้เครื่องชั่งจะหยุดสตรีมค่า
+  const zeroTol = Number(settings.zeroTol) || 2;
+  const requireZero = settings.requireZero !== false;
+  // 🆕 บังคับขั้นต่ำ 1 วิ ในโค้ด (เดิมตั้ง 0 ได้ = จับค่าตอนเทผ่านเกณฑ์แวบเดียว)
+  const lockDwellMs = Math.max(1000, (Number(settings.lockDwellSec ?? 2.5)||0) * 1000);
+  const STALE_MS = 2500;   // แพ็กเก็ตเก่ากว่านี้ = สัญญาณค้าง ห้ามล็อก
+
+  // ticker
   useEffect(()=>{
     if(activeIdx==null || !scale.connected) return;
     const iv = setInterval(()=>setTick(t=>(t+1)%100000), 400);
     return ()=>clearInterval(iv);
   }, [activeIdx, scale.connected]);
 
-  // Auto-fill — นิ่ง + เข้าเกณฑ์ + ผ่าน zero gate + "นิ่งค้าง" ครบเวลา → ล็อก + ไปตัวถัดไป
-  // (ไม่ล็อกทันทีที่แตะเกณฑ์ — operator ยังเติมเพิ่มให้ใกล้ target ได้)
+  // 🆕 เปลี่ยนตัวที่ชั่ง — ถ้าตัวเดิมยังไม่ล็อกแต่ผ่านตั้ง 0 ไปแล้ว ต้องล้าง zero-gate (เดิมค้างไว้ → กลับมาเทซ้ำโดยไม่รู้)
+  //    ถ้าบนเครื่องยังมีของค้างอยู่ให้ถามก่อน
+  const activate = (idx, opts) => {
+    if(idx === activeIdx) return;
+    const cur = activeIdx!=null ? (entries[activeIdx]||{}) : null;
+    if(cur && !cur.locked && cur.zeroOk && !(opts && opts.silent)){
+      const live = scale.connected && scale.liveWeight!=null ? Number(scale.liveWeight) : 0;
+      if(Math.abs(live) > zeroTol){
+        const nm = items.find(x=>x.idx===activeIdx)?.name || '';
+        if(!confirm(`"${nm}" เทค้างอยู่บนเครื่อง ${fmt(live)} g ยังไม่ได้ล็อก\n\nจะสลับไปตัวอื่นจริงไหม? (ต้องเอาของออก/ตั้ง 0 ใหม่ก่อนกลับมาชั่ง "${nm}")`)) return;
+      }
+    }
+    if(cur && !cur.locked && cur.zeroOk){
+      setEntries(p=>({ ...p, [activeIdx]:{ ...(p[activeIdx]||{}), zeroOk:false } }));
+    }
+    dwellRef.current = null; maxSeenRef.current = null;
+    setActiveIdx(idx);
+  };
+
+  // scroll ให้ตัวที่ชั่งอยู่ขึ้นมากลางจอ (จอแท็บเล็ต 8" การ์ดตัวที่ 3 ลงไปอยู่ใต้ fold)
+  useEffect(()=>{
+    if(activeIdx==null || !visible) return;
+    const el = document.getElementById('wcard_'+activeIdx);
+    if(el) try { el.scrollIntoView({ block:'center', behavior:'smooth' }); } catch(e){}
+  }, [activeIdx, visible]);
+
+  // 🆕 สัญญาณหลุดกลางคัน → ล้าง zero-gate ของตัวที่ชั่งอยู่ + แจ้ง (เครื่องชั่งดับเอง tare หาย = น้ำหนักที่เห็นต่อจากนี้คือทั้งชาม)
+  useEffect(()=>{
+    scale.onDropRef.current = () => {
+      setEntries(p=>{
+        if(activeIdx==null) return p;
+        const e = p[activeIdx]||{}; if(e.locked || !e.zeroOk) return p;
+        return { ...p, [activeIdx]:{ ...e, zeroOk:false } };
+      });
+      dwellRef.current = null; maxSeenRef.current = null;
+      const nm = activeIdx!=null ? (items.find(x=>x.idx===activeIdx)?.name || '') : '';
+      setDropNotice(nm ? `เครื่องชั่งหลุดระหว่างชั่ง "${nm}" — เช็คว่าเทไปเท่าไหร่แล้ว ตั้ง 0 ใหม่ก่อนชั่งต่อ` : 'เครื่องชั่งหลุด — กำลังต่อใหม่');
+      buzz([60,60,60]);
+    };
+    return ()=>{ scale.onDropRef.current = null; };
+  }, [activeIdx, items]);
+  useEffect(()=>{ if(scale.connected && dropNotice) setTimeout(()=>setDropNotice(''), 6000); }, [scale.connected]);
+
+  // Zero-gate: ต้องเห็น 0 นิ่ง ก่อนเริ่มเทตัวนี้ (deps มี tick — เดิมค่า 0 ซ้ำ ๆ ไม่ re-render → ค้างที่ "ตั้ง 0 ก่อน")
+  useEffect(()=>{
+    if(!requireZero) return;
+    if(!scale.connected || activeIdx==null || scale.liveWeight==null) return;
+    const e = entries[activeIdx]||{};
+    if(e.zeroOk || e.locked) return;
+    if(scale.stable && Math.abs(Number(scale.liveWeight)) <= zeroTol && scale.packetAge() < STALE_MS){
+      maxSeenRef.current = { idx:activeIdx, max:0 };
+      setEntries(p=>({ ...p, [activeIdx]:{ ...(p[activeIdx]||{}), zeroOk:true, zeroLost:false } }));
+    }
+  }, [scale.stable, scale.liveWeight, activeIdx, requireZero, tick]);
+
+  const nextUnlocked = (afterIdx, ents) =>
+    items.find(x=>x.idx>afterIdx && !(ents[x.idx]?.locked)) || items.find(x=>x.idx!==afterIdx && !(ents[x.idx]?.locked)) || null;
+
+  // Auto-lock: นิ่ง + เข้าเกณฑ์ + ผ่าน zero gate + นิ่งค้างครบเวลา + สัญญาณสด → ล็อก + ไปตัวถัดไป
   useEffect(()=>{
     if(!scale.connected){ dwellRef.current=null; return; }
     if(activeIdx==null || scale.liveWeight==null) return;
     const it = items.find(x=>x.idx===activeIdx); if(!it) return;
     const e = entries[activeIdx]||{};
     if(e.locked) return;
-    // ยังไม่ผ่าน zero gate → ห้าม capture (ต้อง TARE/รอ 0 ก่อน)
     if(requireZero && !e.zeroOk){ dwellRef.current=null; return; }
     const v = Number(scale.liveWeight);
-    if(Math.abs(v) <= zeroTol){ dwellRef.current=null; return; }  // ใกล้ 0 = รอเทของ
+    // 🆕 จำน้ำหนักสูงสุดที่เห็นหลังตั้ง 0 — ถ้าตกกลับเป็น 0 ทั้งที่เทไปแล้ว = มีคนกด TARE/เครื่อง auto-zero กลางคัน
+    const ms = maxSeenRef.current;
+    if(!ms || ms.idx!==activeIdx) maxSeenRef.current = { idx:activeIdx, max:Math.max(0,v) };
+    else if(v > ms.max) ms.max = v;
+    if(Math.abs(v) <= zeroTol){
+      dwellRef.current=null;
+      const seen = maxSeenRef.current ? maxSeenRef.current.max : 0;
+      if(requireZero && e.zeroOk && seen > Math.max(10, zeroTol*5)){
+        maxSeenRef.current = null;
+        setEntries(p=>({ ...p, [activeIdx]:{ ...(p[activeIdx]||{}), zeroOk:false, zeroLost:seen } }));
+        buzz([60,60,60]);
+      }
+      return;
+    }
+    if(scale.packetAge() > STALE_MS){ dwellRef.current=null; return; }   // สัญญาณค้าง — ค่าที่เห็นอาจไม่ใช่ของจริง
     const inRange = Math.abs(v - it.target) <= it.tol;
-    // ยังไม่นิ่ง หรือ ยังไม่เข้าเกณฑ์ → operator กำลังเทเพิ่ม → รีเซ็ตตัวจับเวลา
     if(!scale.stable || !inRange){ dwellRef.current=null; return; }
-    // นิ่ง + เข้าเกณฑ์ → เริ่ม/นับ "นิ่งค้าง" · ถ้าค่าขยับ >3g (เทเพิ่ม) ให้เริ่มจับใหม่
     const now = Date.now();
     const d = dwellRef.current;
     if(!d || d.idx!==activeIdx || Math.abs(d.value - v) > 3){
       dwellRef.current = { idx:activeIdx, value:v, since:now };
       return;
     }
-    // ค่าล่าสุดเข้าใกล้ target กว่าเดิม → เก็บค่าที่ดีที่สุดไว้ล็อก
     if(Math.abs(v - it.target) < Math.abs(d.value - it.target)) d.value = v;
     if(now - d.since >= lockDwellMs){
       const finalV = d.value;
-      dwellRef.current = null;
+      dwellRef.current = null; maxSeenRef.current = null;
       setEntries(p=>({ ...p, [activeIdx]:{ ...(p[activeIdx]||{}),
-        value:String(finalV), source:'scale', locked:true } }));
-      // auto-advance to next unweighed
-      const next = items.find(x=>x.idx>activeIdx && !(entries[x.idx]?.locked));
-      if(next) setTimeout(()=>setActiveIdx(next.idx), 600);
+        value:String(finalV), source:'scale', locked:true, lockedAt:Date.now() } }));
+      buzz([80]);
+      const nxt = nextUnlocked(activeIdx, { ...entries, [activeIdx]:{ locked:true } });
+      if(advanceTimerRef.current) clearTimeout(advanceTimerRef.current);
+      if(nxt) advanceTimerRef.current = setTimeout(()=>{ advanceTimerRef.current=null; setActiveIdx(nxt.idx); }, 600);
     }
   }, [scale.stable, scale.liveWeight, activeIdx, tick]);
 
-  // 🆕 allDone = ทุกตัวมีค่า + อยู่ในเกณฑ์ (target ± tol) — ไม่ใช่แค่ "มีค่า"
-  const allDone = items.length>0 && items.every(it=>{
-    const e=entries[it.idx];
-    if(!e || e.value==='' || e.value==null) return false;
-    const v = Number(e.value);
-    return !isNaN(v) && Math.abs(v - it.target) <= it.tol;  // ต้องอยู่ในเกณฑ์
-  });
-  // 🆕 มีตัวที่ใส่ค่าแล้วแต่ออกนอกเกณฑ์ (กันสับสนว่าทำไมยังไม่เสร็จ)
-  const hasOffSpec = items.some(it=>{
-    const e=entries[it.idx];
-    if(!e || e.value==='' || e.value==null) return false;
-    return Math.abs(Number(e.value) - it.target) > it.tol;
-  });
-
-  const labelRotate = !!state.settings?.labelRotate;  // 🆕 หมุน 90° (thermal ม้วน)
-  const doPrint = (data) => printHTML(buildLabel(data, copies, labelRotate));
-
-  const finish = () => {
-    if(!allDone) return alert('ชั่งให้ครบทุกตัวก่อน');
-    const lot = `${(recipe.name||'WEIGH').slice(0,6).toUpperCase().replace(/\s/g,'')}-${new Date().toISOString().slice(2,10).replace(/-/g,'')}-${String(Date.now()).slice(-3)}`;
-    const resultItems = items.map(it=>({ name:it.name, value:Number(entries[it.idx].value)||0, unit:'g',
-      target:it.target, pass: Math.abs((Number(entries[it.idx].value)||0)-it.target)<=it.tol }));
-    const total = resultItems.reduce((s,r)=>s+r.value,0);
-    const data = { recipeName:recipe.name, lot, items:resultItems, total, operator,
-      note, ts:Date.now() };
-    // Save log
-    update({ logs:[{ ...data, id:'log_'+Date.now().toString(36) }, ...(state.logs||[])].slice(0,200),
-      settings:{ ...state.settings, lastOperator:operator } });
-    // Auto-print
-    if(autoPrint) doPrint(data);
-    // Reset for next
-    setEntries({}); setActiveIdx(null); setCountdown(0);
-    if(!autoPrint) alert('✅ บันทึกแล้ว — กดพิมพ์ในประวัติได้');
+  // 🆕 บันทึกแบบ "นอกเกณฑ์" — ของเหลว/เทเกินแล้วตักออกไม่ได้ ต้องใส่เหตุผล บันทึกค่าจริง ติดธง ⚠️ (เดิมไม่มีทางออก → คนไปขยาย tol ในสูตรหรือไม่บันทึกเลย)
+  const lockOffSpec = (it) => {
+    if(!scale.connected || scale.liveWeight==null) return;
+    if(!scale.stable){ showToast('รอให้เครื่องชั่งนิ่งก่อน'); return; }
+    const v = Number(scale.liveWeight);
+    const reason = prompt(`บันทึก "${it.name}" = ${fmt(v)} g ทั้งที่เป้า ${fmt(it.target)} ± ${fmt(it.tol)} g\n\nใส่เหตุผล (จำเป็น) — จะติดธง ⚠️ นอกเกณฑ์ ในประวัติและเลข LOT`);
+    if(reason == null) return;
+    if(!reason.trim()){ showToast('ต้องใส่เหตุผล'); return; }
+    dwellRef.current = null; maxSeenRef.current = null;
+    setEntries(p=>({ ...p, [it.idx]:{ ...(p[it.idx]||{}), value:String(v), source:'scale', locked:true,
+      offSpec:true, reason:reason.trim(), lockedAt:Date.now() } }));
+    const nxt = nextUnlocked(it.idx, { ...entries, [it.idx]:{ locked:true } });
+    if(nxt) setTimeout(()=>setActiveIdx(nxt.idx), 400);
   };
 
-  // 🆕 Auto-finish: ชั่งครบทุกตัว → นับถอยหลัง 3 วิ → finish + พิมพ์อัตโนมัติ
+  const allDone = items.length>0 && items.every(it=>entries[it.idx]?.locked);
+  const lockedCount = items.filter(it=>entries[it.idx]?.locked).length;
+  const offSpecCount = items.filter(it=>entries[it.idx]?.offSpec).length;
+  const totalG = items.reduce((s,it)=>s+(Number(entries[it.idx]?.value)||0),0);
+
+  const labelRotate = !!settings.labelRotate;
+  const doPrint = (data) => printHTML(buildLabel(data, copies, labelRotate));
+
+  // 🆕 เลข LOT: ชื่อสูตร-วันที่ท้องถิ่น-ลำดับของวันนี้-รหัสเครื่อง (เดิมใช้วันที่ UTC → ก่อน 7 โมงเช้าเป็นวันเมื่อวาน · 3 หลักท้าย ms สุ่มชนกันได้)
+  const genLot = (recipeName, offSpec) => {
+    const d = new Date();
+    const ymd = String(d.getFullYear()+543).slice(-2) + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+    const todayStr = d.toDateString();
+    const n = (state.logs||[]).filter(l => l.recipeName === recipeName && new Date(l.ts).toDateString() === todayStr).length + 1;
+    const pre = (recipeName||'WEIGH').replace(/[\s\-_.]+/g,'').slice(0,8).toUpperCase() || 'WEIGH';  // ตัดขีด/ช่องว่างออก ให้ LOT แยกส่วนด้วยขีดได้ชัด
+    return `${pre}-${ymd}-${String(n).padStart(2,'0')}${getDeviceId()}${offSpec ? '-X' : ''}`;
+  };
+
+  const resetForNext = () => {
+    if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current=null; }
+    dwellRef.current = null; maxSeenRef.current = null;
+    setEntries({}); setCountdown(0); setNote(''); setMult(1);
+    setActiveIdx(items.length ? items[0].idx : null);
+  };
+
+  const finish = () => {
+    if(!allDone) return showToast('ชั่งให้ครบทุกตัวก่อน');
+    const resultItems = items.map(it=>{
+      const e = entries[it.idx]||{}; const v = Number(e.value)||0;
+      return { name:it.name, value:v, unit:'g', target:it.target, tol:it.tol,
+        pass: !e.offSpec && Math.abs(v-it.target)<=it.tol,
+        ...(e.offSpec ? { offSpec:true, reason:e.reason||'' } : {}) };
+    });
+    const anyOff = resultItems.some(r=>!r.pass);
+    const lot = genLot(recipe.name, anyOff);
+    const total = resultItems.reduce((s,r)=>s+r.value,0);
+    const data = { recipeName:recipe.name, recipeId:recipe.id, lot, items:resultItems, total, operator, note, ts:Date.now(),
+      multiplier: mult, scaleMode: scale.mode, scaleDevice: scale.device?.name||'', deviceId: getDeviceId(),
+      ...(anyOff ? { offSpec:true } : {}) };
+    update({ logs:[{ ...data, id:'log_'+Date.now().toString(36) }, ...(state.logs||[])].slice(0,LOG_CAP),
+      settings:{ ...settings, lastOperator:operator } });
+    if(autoPrint) doPrint(data);
+    resetForNext();
+    showToast(autoPrint ? `✅ บันทึก ${lot} แล้ว · ส่งพิมพ์ Label` : `✅ บันทึก ${lot} แล้ว`);
+    buzz([100,50,100]);
+  };
+
+  // Auto-finish countdown
   useEffect(()=>{
-    if(allDone && autoFinish && !finishedRef.current){
-      finishedRef.current = true;
-      setCountdown(3);
-    }
+    if(allDone && autoFinish && !finishedRef.current){ finishedRef.current = true; setCountdown(3); }
     if(!allDone){ finishedRef.current = false; if(countdown>0) setCountdown(0); }
   }, [allDone, autoFinish]);
-
   useEffect(()=>{
     if(countdown<=0) return;
-    if(countdown===1){
-      const t = setTimeout(()=>{ setCountdown(0); finish(); }, 1000);
-      return ()=>clearTimeout(t);
-    }
+    if(countdown===1){ const t = setTimeout(()=>{ setCountdown(0); finish(); }, 1000); return ()=>clearTimeout(t); }
     const t = setTimeout(()=>setCountdown(c=>c-1), 1000);
     return ()=>clearTimeout(t);
   }, [countdown]);
+  const cancelAuto = ()=>{ setCountdown(0); };
 
-  const cancelAuto = ()=>{ setCountdown(0); /* คงไว้ไม่ให้ trigger ซ้ำจนกว่าจะแก้ */ };
+  const pickRecipe = (id) => {
+    if(hasAny && !confirm('มีค่าที่ชั่งไว้แล้วในชุดนี้ — เปลี่ยนสูตรจะล้างทิ้งทั้งหมด ยืนยัน?')) return;
+    if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current=null; }
+    dwellRef.current = null; maxSeenRef.current = null;
+    setRecipeId(id); setEntries({}); setMult(1); setCountdown(0);
+    const r = recipes.find(x=>x.id===id);
+    setActiveIdx(r && r.items.length ? 0 : null);   // เริ่มที่ตัวแรกเลย ไม่ต้องแตะเพิ่ม
+  };
+  const pickMult = (m) => {
+    if(m === mult) return;
+    if(hasAny && !confirm(`เปลี่ยนตัวคูณเป็น ×${m} จะล้างค่าที่ชั่งไว้แล้ว (${lockedCount} ตัว) ยืนยัน?`)) return;
+    setEntries({}); setMult(m); setActiveIdx(items.length ? items[0].idx : null);
+    dwellRef.current = null; maxSeenRef.current = null;
+  };
+
+  const showDebugBtns = !IS_MOBILE || DEBUG;
+  const todayLogs = recipe ? (state.logs||[]).filter(l => l.recipeName === recipe.name && new Date(l.ts).toDateString() === new Date().toDateString()) : [];
 
   return h('div', { className:'space-y-3' },
-    // Scale bar
+    toast && h('div', { className:'fixed top-16 left-1/2 -translate-x-1/2 z-30 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg text-sm' }, toast),
+
+    // ===== Scale bar =====
     h('div', { className: cls('rounded-lg p-3 border-2',
-      scale.connected ? 'bg-green-50 border-green-300' : 'bg-gray-50 border-gray-300') },
-      h('div', { className:'flex items-center gap-2 flex-wrap' },
-        h('span', { className:'font-bold' }, '⚖️ เครื่องชั่ง:'),
-        !scale.connected && [
+      scale.connected ? 'bg-green-50 border-green-300' : scale.connecting ? 'bg-blue-50 border-blue-300' : 'bg-gray-50 border-gray-300') },
+      !scale.connected && !scale.connecting && h('div', { className:'flex items-center gap-2 flex-wrap' },
+        h('button', { onClick:scale.connectBLE,
+          className:'flex-1 min-w-[200px] px-4 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-lg text-lg font-bold' },
+          '🔵 ต่อเครื่องชั่ง (Bluetooth)'),
+        showDebugBtns && [
           h('label', { key:'b', className:'flex items-center gap-1 text-xs' }, 'Baud:',
             h('select', { value:scale.baudRate, onChange:e=>scale.setBaudRate(Number(e.target.value)),
               className:'px-1 py-0.5 border rounded text-xs' },
               [2400,4800,9600,19200,38400,57600,115200].map(b=>h('option',{key:b,value:b},b)))),
           h('button', { key:'s', onClick:()=>scale.connectSerial(scale.baudRate),
-            className:'px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-xs' }, '🔌 USB-Serial'),
-          h('button', { key:'bt', onClick:scale.connectBLE,
-            className:'px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs' }, '🔵 BLE'),
+            className:'px-2 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded text-xs' }, '🔌 USB-Serial'),
           h('button', { key:'m', onClick:scale.connectMock,
-            className:'px-2 py-1 bg-gray-500 hover:bg-gray-600 text-white rounded text-xs' }, '🎭 Mock'),
-          h('span', { key:'h', className:'text-xs text-gray-500' }, '— Chrome/Edge'),
-        ],
-        scale.connected && [
-          h('span', { key:'d', className:'text-xs bg-white px-2 py-0.5 rounded' }, '✓ ', scale.device?.name),
-          h('span', { key:'w', className:'text-2xl font-mono font-bold ml-2' },
-            scale.liveWeight!=null ? fmt(scale.liveWeight)+' g' : '—'),
-          h('span', { key:'st', className: cls('text-xs px-2 py-0.5 rounded',
-            scale.stable ? 'bg-green-200 text-green-900' : 'bg-amber-200 text-amber-900 animate-pulse') },
-            scale.stable ? '🟢 นิ่ง' : '🟡 รอนิ่ง'),
-          h('button', { key:'t', onClick:scale.tare,
-            className:'px-2 py-0.5 bg-amber-100 hover:bg-amber-200 rounded text-xs' }, '⊘ Tare'),
-          h('button', { key:'x', onClick:scale.disconnect,
-            className:'px-2 py-0.5 text-red-600 hover:bg-red-50 rounded text-xs' }, '✗ ตัด'),
+            className:'px-2 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded text-xs' }, '🎭 Mock'),
         ]),
+      scale.connecting && !scale.connected && h('div', { className:'flex items-center gap-2 text-blue-900' },
+        h('span', { className:'text-2xl animate-pulse' }, '⏳'),
+        h('span', { className:'font-bold' }, scale.connecting),
+        h('button', { onClick:scale.disconnect, className:'ml-auto px-3 py-1.5 text-red-600 hover:bg-red-50 rounded text-sm' }, 'ยกเลิก')),
+      scale.connected && h('div', { className:'flex items-center gap-2 flex-wrap' },
+        h('span', { className:'text-sm bg-white px-2 py-1 rounded' }, '✓ ', scale.device?.name),
+        h('span', { className:'text-3xl font-mono font-bold ml-1' },
+          scale.liveWeight!=null ? fmt(scale.liveWeight)+' g' : '—'),
+        h('span', { className: cls('text-sm px-2 py-1 rounded',
+          scale.stable ? 'bg-green-200 text-green-900' : 'bg-amber-200 text-amber-900 animate-pulse') },
+          scale.stable ? '🟢 นิ่ง' : '🟡 รอนิ่ง'),
+        scale.packetAge() > STALE_MS && scale.mode!=='mock' && h('span', { className:'text-sm px-2 py-1 rounded bg-red-100 text-red-800' }, '📵 สัญญาณค้าง'),
+        h('button', { onClick:()=>{ if(confirm('ตัดการเชื่อมต่อเครื่องชั่ง?')) scale.disconnect(); },
+          className:'ml-auto px-3 py-1.5 text-red-600 hover:bg-red-50 rounded text-sm' }, '✗ ตัด')),
       scale.connected && scale.rawLog.length>0 && h('details', { className:'mt-1' },
         h('summary', { className:'text-[10px] text-gray-500 cursor-pointer' }, '📜 Raw data (debug)'),
         h('pre', { className:'bg-gray-900 text-green-400 text-[10px] p-2 rounded mt-1 max-h-24 overflow-y-auto' },
           scale.rawLog.join('\n')))),
+    dropNotice && h('div', { className:'bg-red-100 border-2 border-red-400 text-red-900 rounded-lg p-3 font-bold' }, '⚠️ ', dropNotice),
 
-    // Recipe picker
+    // ===== Recipe picker =====
     h('div', { className:'bg-white rounded-lg shadow p-3 space-y-2' },
       h('div', { className:'flex gap-2 items-center flex-wrap' },
         h('span', { className:'text-sm font-medium' }, '📋 สูตร:'),
-        h('select', { value:recipeId, onChange:e=>{setRecipeId(e.target.value);setEntries({});setActiveIdx(null);},
+        h('select', { value:recipeId, onChange:e=>pickRecipe(e.target.value),
           className:'flex-1 min-w-[180px] px-3 py-2 border-2 rounded text-base' },
           h('option', { value:'' }, '— เลือกสูตร —'),
           recipes.map(r=>h('option',{key:r.id,value:r.id},r.name))),
-        h('span', { className:'text-sm' }, '× สเกล:'),
-        h('input', { type:'number', value:scale2, step:'any', min:0.01,
-          onChange:e=>setScale2(Number(e.target.value)||1),
-          className:'w-20 px-2 py-2 border-2 rounded text-right text-base' }),
         h('input', { type:'text', value:operator, onChange:e=>setOperator(e.target.value),
           placeholder:'ชื่อผู้ชั่ง', className:'w-32 px-2 py-2 border rounded text-sm' })),
-      // 🆕 จำนวนที่ทำสูตรนี้ไปแล้ววันนี้
-      recipe && (()=>{
-        const todayStr = new Date().toDateString();
-        const todayLogs = (state.logs||[]).filter(l =>
-          l.recipeName === recipe.name && new Date(l.ts).toDateString() === todayStr);
-        const todayCnt = todayLogs.length;
-        const todaySum = todayLogs.reduce((s,l)=>s+(Number(l.total)||0),0);
-        return h('div', { className: cls('rounded-lg p-2 text-sm flex items-center gap-3 flex-wrap',
-          todayCnt > 0 ? 'bg-indigo-50 border border-indigo-300' : 'bg-gray-50 border border-gray-200') },
-          h('span', { className:'font-bold text-indigo-900' },
-            '📊 "', recipe.name, '" วันนี้ทำแล้ว: ',
-            h('span', { className:'text-xl' }, todayCnt), ' ครั้ง'),
-          todaySum > 0 && h('span', { className:'text-indigo-700' },
-            '· รวม ', h('b',null,fmt(todaySum)), ' g'),
-          todayCnt > 0 && h('span', { className:'text-xs text-gray-500' },
-            '· ล่าสุด ', new Date(todayLogs[0].ts).toLocaleTimeString('th-TH').slice(0,5)),
-          todayCnt === 0 && h('span', { className:'text-gray-500 text-xs' },
-            '— ยังไม่ได้ทำสูตรนี้วันนี้'));
-      })()),
+      recipe && h('div', { className:'flex gap-2 items-center flex-wrap' },
+        h('span', { className:'text-sm font-medium' }, '× ตัวคูณ:'),
+        [0.5,1,2,3].map(m=>h('button', { key:m, onClick:()=>pickMult(m),
+          className: cls('px-3 py-1.5 rounded border-2 text-sm font-bold',
+            mult===m ? (m===1 ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-orange-500 text-white border-orange-600') : 'bg-white border-gray-300') }, '×'+m)),
+        mult!==1 && h('span', { className:'text-sm font-bold text-orange-700 bg-orange-100 px-2 py-1 rounded' }, '⚠️ ทุกตัวคูณ ', mult, ' เท่า')),
+      recipe && h('div', { className: cls('rounded-lg p-2 text-sm flex items-center gap-3 flex-wrap',
+          todayLogs.length > 0 ? 'bg-indigo-50 border border-indigo-300' : 'bg-gray-50 border border-gray-200') },
+        h('span', { className:'font-bold text-indigo-900' }, '📊 "', recipe.name, '" วันนี้ทำแล้ว: ',
+          h('span', { className:'text-xl' }, todayLogs.length), ' ครั้ง'),
+        todayLogs.length > 0 && h('span', { className:'text-indigo-700' }, '· รวม ',
+          h('b',null,fmt(todayLogs.reduce((s,l)=>s+(Number(l.total)||0),0))), ' g',
+          ' · ล่าสุด ', new Date(todayLogs[0].ts).toLocaleTimeString('th-TH').slice(0,5)))),
 
     !recipe
-      ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
-          'เลือกสูตรเพื่อเริ่มชั่ง')
+      ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' }, 'เลือกสูตรเพื่อเริ่มชั่ง')
       : h('div', { className:'space-y-2' },
+          h('div', { className:'text-2xl font-bold text-gray-800 px-1' }, recipe.name,
+            mult!==1 && h('span', { className:'ml-2 text-orange-600' }, '×', mult)),
           items.map(it=>{
             const e = entries[it.idx]||{};
             const v = Number(e.value);
-            const hasV = e.value!=='' && e.value!=null;
-            const inRange = hasV && Math.abs(v-it.target)<=it.tol;
-            const off = hasV && !inRange;
             const isActive = activeIdx===it.idx;
-            // 🆕 กำลัง "นิ่งค้าง" รอล็อก — บอก operator ว่ายังเติมเพิ่มได้
             const dw = dwellRef.current;
             const settlingMs = (isActive && !e.locked && dw && dw.idx===it.idx && scale.connected)
               ? Math.max(0, lockDwellMs - (Date.now() - dw.since)) : null;
-            // 🆕 ค่าที่ใช้แสดง: locked=ค่าที่ล็อก · active=ค่าสดจากเครื่อง · อื่น=ค่าเดิม(ถ้ามี)
             const liveActive = isActive && scale.connected && scale.liveWeight!=null && !e.locked;
-            const dispV = e.locked ? (Number(e.value)||0)
-                         : liveActive ? Number(scale.liveWeight)
-                         : (hasV ? v : null);
-            // 🆕 gauge: โดเมน 0..(target+2·tol) · แถบเขียว = ช่วงรับได้
+            const dispV = e.locked ? (Number(e.value)||0) : liveActive ? Number(scale.liveWeight) : null;
             const tolG = it.tol||1;
             const gMax = Math.max(1, it.target + tolG*2);
             const P = x => Math.max(0, Math.min(100, (x/gMax)*100));
             const lowP=P(it.target-tolG), highP=P(it.target+tolG), tgtP=P(it.target);
             const valP = dispV==null ? 0 : P(dispV);
-            const stt = dispV==null ? 'none'
-                       : dispV < it.target-tolG ? 'under'
-                       : dispV > it.target+tolG ? 'over' : 'in';
+            const stt = dispV==null ? 'none' : dispV < it.target-tolG ? 'under' : dispV > it.target+tolG ? 'over' : 'in';
             const cTxt = stt==='over'?'text-red-600' : stt==='in'?'text-green-600' : stt==='under'?'text-amber-600' : 'text-gray-400';
             const cFill = stt==='over'?'bg-red-400' : stt==='in'?'bg-green-500' : 'bg-amber-300';
-            return h('div', { key:it.idx,
-              onClick:()=>{ if(scale.connected && !e.locked) setActiveIdx(it.idx); },
+            const stale = liveActive && scale.mode!=='mock' && scale.packetAge() > STALE_MS;
+            return h('div', { key:it.idx, id:'wcard_'+it.idx,
+              onClick:()=>{ if(!e.locked) activate(it.idx); },
               className: cls('rounded-lg p-3 border-2 transition',
-                scale.connected && !e.locked && 'cursor-pointer',
+                !e.locked && 'cursor-pointer',
+                e.locked && e.offSpec ? 'bg-orange-50 border-orange-400' :
                 e.locked ? 'bg-green-50 border-green-400' :
                 isActive && stt==='over' ? 'bg-red-50 border-red-400 ring-2 ring-red-200' :
                 isActive && stt==='in' ? 'bg-green-50 border-green-500 ring-2 ring-green-200' :
@@ -774,100 +990,93 @@ function WeighTab({ state, update }){
                 'bg-white border-gray-200') },
               h('div', { className:'flex items-center justify-between flex-wrap gap-1 mb-1' },
                 h('div', null,
+                  h('span', { className:'text-gray-400 text-sm mr-1' }, it.idx+1, '.'),
                   h('span', { className:'font-bold text-lg' }, it.name),
                   h('span', { className:'ml-2 text-base text-gray-700 font-semibold' },
                     '🎯 ', fmt(it.target), ' g ',
                     h('span', { className:'text-sm text-gray-500 font-normal' }, '± '+fmt(it.tol))),
-                  it.origUnit!=='g' && h('span', { className:'ml-1 text-xs text-gray-400' },
-                    '(', fmt(it.origTarget), ' ', it.origUnit, ' × ', scale2, ')')),
-                e.locked && h('span', { className:'text-xs bg-green-600 text-white px-2 py-0.5 rounded font-bold' }, '🔒 ล็อก')),
-              // 🆕 Zero-gate status — active item ต้องตั้ง 0 ก่อนถึงชั่งได้
+                  (it.origUnit!=='g' || mult!==1) && h('span', { className:'ml-1 text-xs text-gray-500' },
+                    '(', fmt(it.origTarget), ' ', it.origUnit, mult!==1 ? ' × '+mult : '',
+                    (it.origUnit==='ml'||it.origUnit==='L') ? ' · ตวงเป็นกรัม 1 มล.=1 ก.' : '', ')')),
+                e.locked && h('span', { className: cls('text-xs text-white px-2 py-0.5 rounded font-bold', e.offSpec ? 'bg-orange-500' : 'bg-green-600') },
+                  e.offSpec ? '⚠️ นอกเกณฑ์' : '🔒 ล็อก')),
+              // Zero-gate
               requireZero && isActive && !e.locked && scale.connected && h('div', {
-                className: cls('rounded p-2 mb-2 text-sm flex items-center gap-2',
+                className: cls('rounded p-2 mb-2 text-base flex items-center gap-2',
                   e.zeroOk ? 'bg-green-50 border border-green-300 text-green-800'
                            : 'bg-amber-50 border-2 border-amber-400 text-amber-900') },
                 e.zeroOk
                   ? h('span', null, '✅ ตั้ง 0 ผ่านแล้ว — เทวัตถุดิบได้เลย')
-                  : h('span', null, '⏳ ', h('b',null,'ตั้งเครื่องชั่งให้เป็น 0 ก่อน'),
-                      ' (กด TARE / เอาของออก) — ตอนนี้ ',
-                      h('b', { className:'font-mono' },
-                        scale.liveWeight!=null ? fmt(scale.liveWeight)+' g' : '—'))),
-              // ===== ACTIVE: ตัวเลขใหญ่ + เกจ =====
+                  : h('span', null,
+                      e.zeroLost ? h('span', { className:'block text-red-700 font-bold mb-1' }, '⚠️ น้ำหนักกลับเป็น 0 หลังเทไปแล้ว ', fmt(e.zeroLost), ' g — มีการกด TARE กลางคัน? เช็คของในชามแล้วเริ่มตัวนี้ใหม่') : null,
+                      '⏳ ', h('b',{ className:'text-lg' },'กด TARE/ZERO ที่ตัวเครื่องชั่ง'), ' (หรือเอาของออกให้เป็น 0) — ตอนนี้ ',
+                      h('b', { className:'font-mono' }, scale.liveWeight!=null ? fmt(scale.liveWeight)+' g' : '—'))),
               isActive && !e.locked
                 ? h('div', null,
                     h('div', { className:'flex items-end justify-center gap-2 mt-1 mb-2' },
-                      h('span', { className: cls('font-mono font-extrabold leading-none', cTxt),
-                        style:{ fontSize:'4.25rem' } }, dispV==null ? '—' : fmt(dispV)),
+                      h('span', { className: cls('font-mono font-extrabold leading-none', cTxt), style:{ fontSize:'4.25rem' } }, dispV==null ? '—' : fmt(dispV)),
                       h('span', { className:'text-2xl text-gray-500 font-bold mb-2' }, 'g')),
                     h('div', { className:'relative h-9 rounded-full bg-gray-200 overflow-hidden' },
-                      h('div', { className:'absolute inset-y-0 bg-green-300',
-                        style:{ left:lowP+'%', width:Math.max(0,highP-lowP)+'%' } }),
-                      h('div', { className: cls('absolute inset-y-0 left-0', cFill),
-                        style:{ width:valP+'%', opacity:0.55 } }),
-                      h('div', { className:'absolute inset-y-0 bg-gray-800',
-                        style:{ left:'calc('+tgtP+'% - 1px)', width:'2px' } }),
-                      h('div', { className:'absolute inset-y-0 bg-black',
-                        style:{ left:'calc('+valP+'% - 2px)', width:'4px' } })),
+                      h('div', { className:'absolute inset-y-0 bg-green-300', style:{ left:lowP+'%', width:Math.max(0,highP-lowP)+'%' } }),
+                      h('div', { className: cls('absolute inset-y-0 left-0', cFill), style:{ width:valP+'%', opacity:0.55 } }),
+                      h('div', { className:'absolute inset-y-0 bg-gray-800', style:{ left:'calc('+tgtP+'% - 1px)', width:'2px' } }),
+                      h('div', { className:'absolute inset-y-0 bg-black', style:{ left:'calc('+valP+'% - 2px)', width:'4px' } })),
                     h('div', { className:'flex justify-between text-xs text-gray-400 mt-0.5 px-0.5' },
-                      h('span', null, '0'),
-                      h('span', { className:'font-bold text-gray-600' }, '🎯 '+fmt(it.target)),
-                      h('span', null, fmt(gMax))),
+                      h('span', null, '0'), h('span', { className:'font-bold text-gray-600' }, '🎯 '+fmt(it.target)), h('span', null, fmt(gMax))),
                     h('div', { className: cls('text-center font-extrabold text-xl mt-1', cTxt) },
-                      stt==='none' ? 'รอเทวัตถุดิบ…'
+                      !scale.connected ? '🔌 ต่อเครื่องชั่งก่อน'
+                      : stale ? '📵 สัญญาณค้าง — เช็คเครื่องชั่ง'
+                      : stt==='none' ? 'รอเทวัตถุดิบ…'
                       : stt==='under' ? '⬆️ ใส่เพิ่มอีก '+fmt(Math.max(0,it.target-dispV))+' g'
                       : stt==='over'  ? '⚠️ เกิน '+fmt(dispV-it.target)+' g — ตักออก'
                       : '✅ พอดี อยู่ในเกณฑ์'),
                     settlingMs!=null && h('div', { className:'text-center text-base text-green-800 font-bold mt-0.5' },
                       '🟢 นิ่งแล้ว — ล็อกใน ', (settlingMs/1000).toFixed(1), ' วิ ',
-                      h('span', { className:'text-xs text-gray-500 font-normal' }, '(ยังเติมเพิ่มได้)')))
+                      h('span', { className:'text-xs text-gray-500 font-normal' }, '(ยังเติมเพิ่มได้)')),
+                    stt==='over' && scale.stable && !stale && h('div', { className:'text-center mt-2' },
+                      h('button', { onClick:(ev)=>{ ev.stopPropagation(); lockOffSpec(it); },
+                        className:'px-3 py-1.5 bg-orange-100 hover:bg-orange-200 border border-orange-400 text-orange-900 rounded text-sm' },
+                        'ตักออกไม่ได้ → บันทึกค่านี้แบบ "นอกเกณฑ์" (ต้องใส่เหตุผล)')))
               : e.locked
-                ? h('div', { className:'flex items-center justify-between mt-1' },
-                    h('div', { className:'flex items-end gap-2' },
-                      h('span', { className:'font-mono font-extrabold text-4xl text-green-700' }, fmt(Number(e.value)||0)),
+                ? h('div', { className:'flex items-center justify-between mt-1 flex-wrap gap-2' },
+                    h('div', { className:'flex items-end gap-2 flex-wrap' },
+                      h('span', { className: cls('font-mono font-extrabold text-4xl', e.offSpec ? 'text-orange-700' : 'text-green-700') }, fmt(Number(e.value)||0)),
                       h('span', { className:'text-lg text-gray-500 mb-1' }, 'g'),
-                      h('span', { className:'text-sm text-green-700 mb-1.5' },
-                        '✓ ต่างจากเป้า ', fmt(Math.abs((Number(e.value)||0)-it.target)), ' g')),
-                    h('button', { onClick:(ev)=>{ ev.stopPropagation(); setEntries(p=>{const c={...p};delete c[it.idx];return c;}); setActiveIdx(it.idx); },
+                      h('span', { className: cls('text-sm mb-1.5', e.offSpec ? 'text-orange-700' : 'text-green-700') },
+                        e.offSpec ? '⚠️ นอกเกณฑ์ · ' + (e.reason||'') : '✓ ต่างจากเป้า ' + fmt(Math.abs((Number(e.value)||0)-it.target)) + ' g')),
+                    h('button', { onClick:(ev)=>{ ev.stopPropagation();
+                        if(!confirm(`ชั่ง "${it.name}" ใหม่? — ต้องเอาของที่เทไปแล้วออกจากชาม แล้วตั้ง 0 ใหม่`)) return;
+                        setEntries(p=>{const c={...p};delete c[it.idx];return c;}); activate(it.idx, { silent:true }); },
                       className:'px-3 py-1.5 bg-amber-100 hover:bg-amber-200 rounded text-sm font-medium' }, '🔓 ชั่งใหม่'))
                 : h('div', { className:'flex items-center justify-between mt-1 text-gray-400' },
-                    h('span', { className:'text-base' }, hasV ? fmt(v)+' g' : 'ยังไม่ได้ชั่ง'),
+                    h('span', { className:'text-base' }, 'ยังไม่ได้ชั่ง'),
                     h('span', { className:'text-sm' }, scale.connected ? '👆 แตะเพื่อชั่งตัวนี้' : '🔌 ต่อเครื่องชั่งก่อน')));
           }),
-          // Summary + finish
+          // ===== Summary + finish =====
           countdown > 0
             ? h('div', { className:'bg-green-100 border-2 border-green-500 rounded-lg p-4 sticky bottom-2 text-center' },
                 h('div', { className:'text-lg font-bold text-green-900' },
-                  '✅ ชั่งครบแล้ว — พิมพ์ Label อัตโนมัติใน ',
+                  '✅ ชั่งครบแล้ว — ', autoPrint ? 'บันทึก + พิมพ์ Label' : 'บันทึก', 'อัตโนมัติใน ',
                   h('span', { className:'text-3xl' }, countdown), ' วิ...'),
-                h('div', { className:'text-sm text-green-700 mt-1' },
-                  'รวม ', h('b', null, fmt(items.reduce((s,it)=>s+(Number(entries[it.idx]?.value)||0),0))), ' g'),
+                h('div', { className:'text-sm text-green-700 mt-1' }, 'รวม ', h('b', null, fmt(totalG)), ' g',
+                  offSpecCount>0 && h('span', { className:'text-orange-700 font-bold' }, ' · มี ', offSpecCount, ' ตัวนอกเกณฑ์ ⚠️')),
                 h('div', { className:'flex gap-2 justify-center mt-3' },
                   h('button', { onClick:()=>{ setCountdown(0); finish(); },
-                    className:'px-5 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold' },
-                    '🖨️ พิมพ์เลย'),
-                  h('button', { onClick:cancelAuto,
-                    className:'px-5 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg' },
-                    '✋ รอก่อน (แก้ค่า)')))
+                    className:'px-5 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold' }, autoPrint ? '🖨️ บันทึก+พิมพ์เลย' : '✅ บันทึกเลย'),
+                  h('button', { onClick:cancelAuto, className:'px-5 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg' }, '✋ รอก่อน (แก้ค่า)')))
             : h('div', { className:'bg-indigo-50 border-2 border-indigo-300 rounded-lg p-3 sticky bottom-2' },
                 h('div', { className:'flex justify-between items-center flex-wrap gap-2' },
                   h('div', null,
-                    h('div', { className:'text-sm' }, 'ชั่งแล้ว: ',
-                      h('b', null, items.filter(it=>entries[it.idx]?.value).length, '/', items.length),
-                      ' · รวม: ',
-                      h('b', { className:'text-lg text-indigo-800' },
-                        fmt(items.reduce((s,it)=>s+(Number(entries[it.idx]?.value)||0),0)), ' g')),
-                    // 🆕 เตือนถ้ามีตัวออกนอกเกณฑ์ (กันสับสนว่าทำไมยังไม่เสร็จ)
-                    hasOffSpec
-                      ? h('div', { className:'text-xs text-orange-700 font-bold' },
-                          '⚠️ มีบางตัว "ออกนอกเกณฑ์" — แก้ให้อยู่ในช่วง target ± ก่อนถึงจะเสร็จได้')
-                      : autoFinish
-                        ? h('div', { className:'text-xs text-green-700' }, '⚡ ชั่งครบ+ตรงเกณฑ์ → พิมพ์ Label อัตโนมัติ (ไม่ต้องกด)')
-                        : autoPrint && h('div', { className:'text-xs text-green-700' }, '⚡ พิมพ์ Label อัตโนมัติเมื่อกดเสร็จ')),
+                    h('div', { className:'text-sm' }, 'ชั่งแล้ว: ', h('b', null, lockedCount, '/', items.length),
+                      ' · รวม: ', h('b', { className:'text-lg text-indigo-800' }, fmt(totalG), ' g'),
+                      offSpecCount>0 && h('span', { className:'ml-2 text-orange-700 font-bold' }, '⚠️ นอกเกณฑ์ ', offSpecCount)),
+                    autoFinish
+                      ? h('div', { className:'text-xs text-green-700' }, '⚡ ชั่งครบ → ', autoPrint ? 'บันทึก+พิมพ์ Label' : 'บันทึก', 'อัตโนมัติ (ไม่ต้องกด)')
+                      : autoPrint && h('div', { className:'text-xs text-green-700' }, '⚡ พิมพ์ Label อัตโนมัติเมื่อกดเสร็จ')),
                   h('button', { onClick:finish, disabled:!allDone,
                     className: cls('px-6 py-3 rounded-lg font-bold text-base',
                       allDone ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-gray-200 text-gray-400 cursor-not-allowed') },
-                    allDone ? '✅ เสร็จ + พิมพ์ Label'
-                      : hasOffSpec ? '⚠️ แก้ตัวที่ออกนอกเกณฑ์ก่อน' : 'ชั่งให้ครบก่อน')),
+                    allDone ? (autoPrint ? '✅ เสร็จ + พิมพ์ Label' : '✅ เสร็จ (บันทึก)') : 'ชั่งให้ครบก่อน')),
                 h('input', { type:'text', value:note, onChange:e=>setNote(e.target.value),
                   placeholder:'หมายเหตุ (optional)', className:'w-full mt-2 px-2 py-1 border rounded text-sm' }))));
 }
@@ -884,15 +1093,19 @@ function LogsTab({ state }){
           h('div', { className:'flex justify-between items-start flex-wrap gap-2' },
             h('div', null,
               h('div', { className:'font-bold' }, log.recipeName,
-                h('span', { className:'ml-2 text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded' }, log.lot)),
+                log.multiplier && log.multiplier!==1 && h('span', { className:'ml-1 text-orange-600' }, '×', log.multiplier),
+                h('span', { className:'ml-2 text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded' }, log.lot),
+                log.offSpec && h('span', { className:'ml-1 text-xs bg-orange-500 text-white px-1.5 py-0.5 rounded font-bold' }, '⚠️ นอกเกณฑ์')),
               h('div', { className:'text-xs text-gray-500' },
                 new Date(log.ts).toLocaleString('th-TH'), ' · ', log.operator||'-',
-                ' · รวม ', fmt(log.total), ' g')),
+                ' · รวม ', fmt(log.total), ' g',
+                log.scaleMode ? ' · ' + (log.scaleMode==='mock' ? '🎭 MOCK (ทดสอบ)' : (log.scaleDevice||log.scaleMode)) : '',
+                log.note ? ' · ' + log.note : '')),
             h('button', { onClick:()=>reprint(log),
               className:'px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded text-xs' }, '🖨️ พิมพ์ซ้ำ')),
           h('div', { className:'mt-1 text-xs text-gray-600 flex flex-wrap gap-x-3' },
-            log.items.map((it,i)=>h('span',{key:i, className: it.pass?'':'text-orange-600'},
-              it.name,': ',fmt(it.value),'g',it.pass?'':' ⚠️'))))));
+            log.items.map((it,i)=>h('span',{key:i, className: it.pass?'':'text-orange-600 font-bold', title: it.reason||'' },
+              it.name,': ',fmt(it.value),'g',it.pass?'':' ⚠️'+(it.reason?' ('+it.reason+')':'')))))));
 }
 
 // ==================== SETTINGS TAB ====================
@@ -908,7 +1121,14 @@ function SettingsTab({ state, update }){
     const f = e.target.files?.[0]; if(!f) return;
     const r = new FileReader();
     r.onload = () => { try { const d=JSON.parse(r.result);
-      if(confirm('โหลดข้อมูลทับของเดิม?')){ update({ recipes:d.recipes||[], logs:d.logs||[], settings:d.settings||{} }); }
+      // 🆕 รวมตาม id (เดิมทับทั้งก้อน → ประวัติ/สูตรที่ใหม่กว่าไฟล์สำรองหาย)
+      const byId = (a,b) => { const m = new Map(); [...(a||[]), ...(b||[])].forEach(x=>{ if(x && x.id && !m.has(x.id)) m.set(x.id, x); }); return [...m.values()]; };
+      if(confirm('นำเข้าข้อมูลจากไฟล์สำรอง? (รวมกับของเดิม — ไม่ลบของที่มีอยู่)')){
+        update({ recipes: byId(d.recipes, state.recipes),
+          logs: byId(d.logs, state.logs).sort((x,y)=>(y.ts||0)-(x.ts||0)).slice(0,LOG_CAP),
+          settings: settingsWithDefaults({ ...(state.settings||{}), ...(d.settings||{}) }) });
+        alert('✅ นำเข้าแล้ว');
+      }
     } catch(err){ alert('ไฟล์ไม่ถูกต้อง'); } };
     r.readAsText(f);
   };
@@ -944,10 +1164,17 @@ function SettingsTab({ state, update }){
         h('span', { className:'ml-2 text-xs text-gray-500' }, '· ±2g = ปกติ · เพิ่มถ้าเครื่องนิ่งยาก')),
       h('div', null,
         h('label', { className:'block text-sm font-medium mb-1' }, 'เวลานิ่งค้างก่อนล็อกค่า (วินาที)'),
-        h('input', { type:'number', value: s.lockDwellSec ?? 2.5, min:0, step:0.5,
-          onChange:e=>set({lockDwellSec:Math.max(0,Number(e.target.value)||0)}),
+        h('input', { type:'number', value: s.lockDwellSec ?? 2.5, min:1, step:0.5,
+          onChange:e=>set({lockDwellSec:Math.max(1,Number(e.target.value)||1)}),
           className:'w-24 px-3 py-2 border-2 rounded text-center' }),
-        h('span', { className:'ml-2 text-xs text-gray-500' }, '· ค่าต้องนิ่ง "ในเกณฑ์" ค้างเท่านี้ก่อน ถึงจะล็อก+ไปตัวถัดไป (กันล็อกตอนเทยังไม่พอ) · 0 = ล็อกทันที')),
+        h('span', { className:'ml-2 text-xs text-gray-500' }, '· ค่าต้องนิ่ง "ในเกณฑ์" ค้างเท่านี้ก่อน ถึงจะล็อก+ไปตัวถัดไป (กันล็อกตอนเทยังไม่พอ) · ขั้นต่ำ 1 วิ')),
+      h('div', null,
+        h('label', { className:'block text-sm font-medium mb-1' }, 'ค่า ± ต่ำสุดที่ยอมรับ (กรัม)'),
+        h('input', { type:'number', value: s.minTolG ?? 1, min:0, step:0.5,
+          onChange:e=>set({minTolG:Math.max(0,Number(e.target.value)||0)}),
+          className:'w-24 px-3 py-2 border-2 rounded text-center' }),
+        h('span', { className:'ml-2 text-xs text-gray-500' }, '· ตั้งเท่าความละเอียดเครื่องชั่ง (ส่วนใหญ่ 1 ก.) — สูตรที่ตั้ง ±0.5 บนเครื่องก้าว 1 ก. จะล็อกไม่ได้เลย')),
+      h('div', { className:'text-xs text-gray-500' }, '🆔 รหัสเครื่องนี้ (ต่อท้ายเลข LOT): ', h('b', { className:'font-mono' }, getDeviceId())),
       h('div', null,
         h('label', { className:'block text-sm font-medium mb-1' }, 'จำนวน copy ต่อครั้ง'),
         h('input', { type:'number', value:s.copies||1, min:1, max:10,
@@ -1002,10 +1229,11 @@ function SettingsTab({ state, update }){
           h('input', { type:'file', accept:'.json', onChange:importData, className:'hidden' })))),
     h('div', { className:'bg-white rounded-lg shadow p-4 text-xs text-gray-600' },
       h('b', null, '📋 วิธีใช้ด่วน:'), h('br',null),
-      '1. แท็บ "สูตร" → สร้างสูตร (วัตถุดิบ + target + ±tolerance)', h('br',null),
-      '2. แท็บ "ชั่ง" → เชื่อมเครื่องชั่ง (USB/BLE/Mock) → เลือกสูตร', h('br',null),
-      '3. คลิกช่องน้ำหนัก → ชั่ง → นิ่ง 2 วิ + ในเกณฑ์ = ล็อกอัตโนมัติ', h('br',null),
-      '4. ครบทุกตัว → กด "เสร็จ + พิมพ์ Label" → Label เด้งพิมพ์อัตโนมัติ'));
+      '1. แท็บ "ชั่ง" → กด "ต่อเครื่องชั่ง (Bluetooth)" → เลือกเครื่องจากรายการ (ครั้งแรกอาจต้องอนุญาต Bluetooth/ตำแหน่ง)', h('br',null),
+      '2. เลือกสูตร → ระบบชี้ตัวแรกให้เอง · วางชามแล้ว "กด TARE ที่ตัวเครื่องชั่ง" ให้เป็น 0', h('br',null),
+      '3. เทจนเข้าเกณฑ์ (เขียว) → นิ่ง ' + (s.lockDwellSec ?? 2.5) + ' วิ = ล็อกเอง + ไปตัวถัดไป', h('br',null),
+      '4. ครบทุกตัว → บันทึกอัตโนมัติ (ได้เลข LOT) · เผลอรีเฟรช/สลับแท็บ กลับมาชั่งต่อได้ค่าไม่หาย', h('br',null),
+      '· เทเกินแล้วตักออกไม่ได้ → มีปุ่ม "บันทึกแบบนอกเกณฑ์" ต้องใส่เหตุผล'));
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(h(App));
