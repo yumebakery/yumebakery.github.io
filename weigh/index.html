@@ -95,19 +95,41 @@ const recipeCode = (r) => cleanCode(r && r.code) || ('R' + cleanCode(String(r &&
 // เปิดปุ่มทดสอบ (Mock/Serial บนมือถือ) ด้วย ?debug=1
 const DEBUG = /[?&]debug=1/.test(location.search);
 
+// ==================== ROLES / PERMISSIONS ====================
+// แอปแม่ (เว็บสาขา) ส่ง role หรือ permissions มากับ config → กำหนดว่าเห็น/แก้อะไรได้
+//   recipes : 'edit' | 'view' | 'none'   ·  logs : 'view' | 'none'
+//   settings: 'edit' | 'none'            ·  offSpec : true | false (บันทึกค่านอกเกณฑ์ได้ไหม)
+//   เปิดเดี่ยว ๆ (ไม่ผ่านแอปแม่) = ทำได้ทุกอย่าง (role 'admin')
+const ROLE_PRESETS = {
+  staff:   { recipes:'view', logs:'view', settings:'none', offSpec:true },   // พนักงานสาขา: ชั่งอย่างเดียว ดูสูตร/ประวัติได้ แก้ไม่ได้
+  manager: { recipes:'edit', logs:'view', settings:'edit', offSpec:true },   // ผู้จัดการสาขา
+  admin:   { recipes:'edit', logs:'view', settings:'edit', offSpec:true },   // ส่วนกลาง
+  viewer:  { recipes:'view', logs:'view', settings:'none', offSpec:false },
+};
+const resolvePerms = (settings) => {
+  const st = settings || {};
+  if(!EMBED) return { role:'admin', recipesView:true, recipesEdit:true, logsView:true, settingsEdit:true, offSpec:true };  // เปิดเดี่ยว = ครบ (ค่า role ที่แอปแม่เคยส่งไม่ค้าง)
+  const base = ROLE_PRESETS[st.role] || ROLE_PRESETS.admin;
+  const p = { ...base, ...(st.permissions && typeof st.permissions === 'object' ? st.permissions : {}) };
+  return { role: st.role || 'admin',
+    recipesView: p.recipes !== 'none', recipesEdit: p.recipes === 'edit',
+    logsView: p.logs !== 'none', settingsEdit: p.settings === 'edit', offSpec: p.offSpec !== false };
+};
+
 // ==================== EMBED API (postMessage) ====================
 // ฝังใน iframe ของแอปอื่นได้ (เช่น เว็บพนักงานหน้าสาขา) — ดู README.md
-//   แอปแม่ → เรา : { target:'weigh-system', type:'config', operator?, lockOperator?, branchId?, recipes?, settings? }
+//   แอปแม่ → เรา : { target:'weigh-system', type:'config', operator?, lockOperator?, branchId?, role?, permissions?, recipes?, settings? }
 //                  { target:'weigh-system', type:'select-recipe', code | recipeId }
 //   เรา → แอปแม่ : { source:'weigh-system', type:'ready', version }
 //                  { source:'weigh-system', type:'finished', log }        ← ชั่งครบ 1 ชุด (log เดียวกับที่เก็บในประวัติ)
 //                  { source:'weigh-system', type:'scale', connected, device }
 //                  { source:'weigh-system', type:'height', px }           ← ให้แอปแม่ปรับความสูง iframe
-const EMBED = (()=>{ try { return window.parent && window.parent !== window; } catch(e){ return false; } })();
+const EMBED = (()=>{ try { return window.parent && window.parent !== window && /[?&]embed=1/.test(location.search); } catch(e){ return false; } })();
 const embedPost = (msg) => { if(!EMBED) return; try { window.parent.postMessage({ source:'weigh-system', version:WEIGH_VERSION, ...msg }, '*'); } catch(e){} };
 const embedListeners = new Set();
 if(EMBED){
   window.addEventListener('message', (ev) => {
+    if(ev.source !== window.parent) return;   // รับเฉพาะจากหน้าแม่ (ไม่รับจาก frame อื่นในหน้าเดียวกัน)
     const d = ev.data;
     if(!d || typeof d !== 'object' || d.target !== 'weigh-system') return;
     embedListeners.forEach(fn => { try { fn(d); } catch(e){ console.warn('embed msg', e); } });
@@ -742,6 +764,8 @@ function App(){
           if(d.operator != null) settings.lastOperator = String(d.operator);
           if(d.lockOperator != null) settings.operatorLocked = !!d.lockOperator;
           if(d.branchId != null) settings.branchId = String(d.branchId);
+          if(d.role != null) settings.role = String(d.role);
+          if(d.permissions && typeof d.permissions === 'object') settings.permissions = d.permissions;
           return { ...s, recipes, settings };
         });
       } else if(d.type === 'select-recipe'){
@@ -790,7 +814,9 @@ function App(){
     } catch(e){ console.warn('seed-merge failed', e); }
   }, []);  // รันครั้งเดียวตอนเปิด
 
-  const TABS = [['weigh','⚖️ ชั่ง'],['recipes','📋 สูตร'],['logs','📜 ประวัติ'],['settings','⚙️ ตั้งค่า']];
+  const perms = resolvePerms(state.settings);
+  const TABS = [['weigh','⚖️ ชั่ง'], perms.recipesView && ['recipes','📋 สูตร'], perms.logsView && ['logs','📜 ประวัติ'], perms.settingsEdit && ['settings','⚙️ ตั้งค่า']].filter(Boolean);
+  useEffect(()=>{ if(!TABS.some(t=>t[0]===tab)) setTab('weigh'); }, [perms.recipesView, perms.logsView, perms.settingsEdit]);
   // ใน iframe ห้ามใช้ min-h-screen (100vh = ความสูง iframe → รายงานความสูงวนเพิ่มไม่รู้จบ)
   return h('div', { className: EMBED ? '' : 'min-h-screen' },
     // Header
@@ -812,10 +838,10 @@ function App(){
                 tab===k ? 'bg-white text-indigo-700' : 'bg-indigo-500/50 hover:bg-indigo-500') }, lbl))))),
     h('div', { className:'max-w-5xl mx-auto p-3' },
       // WeighTab ไม่ถูก unmount ตอนสลับแท็บ (ซ่อนแทน) → ชุดที่ชั่งอยู่ไม่หาย
-      h('div', { hidden: tab!=='weigh' }, h(WeighTab, { state, update, scale, printer, visible: tab==='weigh', embedSelect, onEmbedSelected: ()=>setEmbedSelect(null) })),
-      tab==='recipes'  && h(RecipesTab, { state, update }),
-      tab==='logs'     && h(LogsTab, { state, printer }),
-      tab==='settings' && h(SettingsTab, { state, update, printer }))
+      h('div', { hidden: tab!=='weigh' }, h(WeighTab, { state, update, scale, printer, perms, visible: tab==='weigh', embedSelect, onEmbedSelected: ()=>setEmbedSelect(null) })),
+      tab==='recipes'  && perms.recipesView && h(RecipesTab, { state, update, perms }),
+      tab==='logs'     && perms.logsView && h(LogsTab, { state, printer }),
+      tab==='settings' && perms.settingsEdit && h(SettingsTab, { state, update, printer }))
   );
 }
 
@@ -858,7 +884,8 @@ function exportRecipesToHtml(recipes){
   }
 }
 
-function RecipesTab({ state, update }){
+function RecipesTab({ state, update, perms }){
+  const canEdit = !perms || perms.recipesEdit;
   const [editing, setEditing] = useState(null);  // recipe object or null
   const recipes = state.recipes || [];
 
@@ -943,8 +970,9 @@ function RecipesTab({ state, update }){
   };
   return h('div', { className:'space-y-3' },
     h('div', { className:'flex justify-between items-center flex-wrap gap-2' },
-      h('h2', { className:'font-bold text-lg' }, '📋 สูตร (', recipes.length, ')'),
-      h('div', { className:'flex gap-2 flex-wrap' },
+      h('h2', { className:'font-bold text-lg' }, '📋 สูตร (', recipes.length, ')',
+        !canEdit && h('span', { className:'ml-2 text-xs font-normal text-gray-500' }, '(ดูอย่างเดียว — แก้สูตรได้เฉพาะผู้จัดการ/ส่วนกลาง)')),
+      canEdit && h('div', { className:'flex gap-2 flex-wrap' },
         h('button', { onClick:loadBase,
           className:'px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium text-sm' },
           '📦 โหลดสูตรส่วนกลาง (' + SEED_RECIPES.length + ')'),
@@ -957,7 +985,7 @@ function RecipesTab({ state, update }){
     recipes.length===0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
           h('div', { className:'mb-2' }, 'ยังไม่มีสูตร'),
-          h('button', { onClick:loadBase,
+          canEdit && h('button', { onClick:loadBase,
             className:'px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold' },
             '📦 โหลดสูตรส่วนกลาง ' + SEED_RECIPES.length + ' สูตร'))
       : h('div', { className:'grid gap-2 md:grid-cols-2' },
@@ -968,7 +996,7 @@ function RecipesTab({ state, update }){
                   h('span', { className:'ml-2 text-xs font-mono bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded' }, recipeCode(r))),
                 h('div', { className:'text-xs text-gray-500' }, r.items.length, ' วัตถุดิบ · รวม ',
                   fmt(r.items.reduce((s,it)=>s+toGrams(it.target, it.unit),0)), ' g')),
-              h('div', { className:'flex gap-1' },
+              canEdit && h('div', { className:'flex gap-1' },
                 h('button', { onClick:()=>setEditing(JSON.parse(JSON.stringify(r))),
                   className:'text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded' }, '✏️'),
                 h('button', { onClick:()=>delRecipe(r.id),
@@ -980,14 +1008,15 @@ function RecipesTab({ state, update }){
 }
 
 // ==================== WEIGH TAB ====================
-function WeighTab({ state, update, scale, printer, visible, embedSelect, onEmbedSelected }){
+function WeighTab({ state, update, scale, printer, perms, visible, embedSelect, onEmbedSelected }){
+  const canOffSpec = !perms || perms.offSpec;
   const recipes = state.recipes||[];
   const settings = state.settings||{};
   // 🆕 กู้ชุดที่ชั่งค้างไว้ (refresh/จอดับ/เผลอสลับแท็บ) — ค่าที่ล็อกแล้วอยู่ครบ ตัวที่ยังไม่ล็อกต้องตั้ง 0 ใหม่
   const sess = useMemo(loadSession, []);
   const [recipeId, setRecipeId] = useState(sess && recipes.some(r=>r.id===sess.recipeId) ? sess.recipeId : '');
   const [mult, setMult] = useState(sess && Number(sess.mult)>0 ? Number(sess.mult) : 1);
-  const operatorLocked = !!settings.operatorLocked;
+  const operatorLocked = EMBED && !!settings.operatorLocked;   // ล็อกเฉพาะตอนฝังในแอปแม่
   const [operator, setOperator] = useState(operatorLocked ? (settings.lastOperator||'') : (sess?.operator ?? (settings.lastOperator||'')));
   useEffect(()=>{ if(operatorLocked) setOperator(settings.lastOperator||''); }, [operatorLocked, settings.lastOperator]);
   const [note, setNote] = useState(sess?.note || '');
@@ -1300,6 +1329,14 @@ function WeighTab({ state, update, scale, printer, visible, embedSelect, onEmbed
         scale.packetAge() > STALE_MS && scale.mode!=='mock' && h('span', { className:'text-sm px-2 py-1 rounded bg-red-100 text-red-800' }, '📵 สัญญาณค้าง'),
         h('button', { onClick:()=>{ if(confirm('ตัดการเชื่อมต่อเครื่องชั่ง?')) scale.disconnect(); },
           className:'ml-auto px-3 py-1.5 text-red-600 hover:bg-red-50 rounded text-sm' }, '✗ ตัด')),
+      // 🖨️ เครื่องพิมพ์ USB — ต่อ/ดูสถานะได้จากหน้าชั่ง (พนักงานที่ไม่มีแท็บตั้งค่าก็ต่อได้ · ตั้งค่าละเอียดอยู่ในตั้งค่า)
+      printer && printer.supported && h('div', { className:'mt-2 flex items-center gap-2 flex-wrap text-sm' },
+        printer.connected
+          ? h('span', { className:'bg-white px-2 py-1 rounded text-green-800' }, '🖨️ ✓ ', printer.name, printer.busy ? ' · ' + printer.busy : '')
+          : h('button', { onClick:()=>printer.connect(false), disabled:!!printer.busy,
+              className:'px-3 py-1.5 bg-white border-2 border-sky-400 text-sky-900 rounded font-medium disabled:opacity-50' },
+              printer.busy || '🖨️ ต่อเครื่องพิมพ์ USB'),
+        !printer.connected && printer.lastErr && h('span', { className:'text-xs text-red-700' }, printer.lastErr)),
       scale.connected && scale.rawLog.length>0 && h('details', { className:'mt-1' },
         h('summary', { className:'text-[10px] text-gray-500 cursor-pointer' }, '📜 Raw data (debug)'),
         h('pre', { className:'bg-gray-900 text-green-400 text-[10px] p-2 rounded mt-1 max-h-24 overflow-y-auto' },
@@ -1409,9 +1446,11 @@ function WeighTab({ state, update, scale, printer, visible, embedSelect, onEmbed
                       '🟢 นิ่งแล้ว — ล็อกใน ', (settlingMs/1000).toFixed(1), ' วิ ',
                       h('span', { className:'text-xs text-gray-500 font-normal' }, '(ยังเติมเพิ่มได้)')),
                     stt==='over' && scale.stable && !stale && h('div', { className:'text-center mt-2' },
-                      h('button', { onClick:(ev)=>{ ev.stopPropagation(); lockOffSpec(it); },
-                        className:'px-3 py-1.5 bg-orange-100 hover:bg-orange-200 border border-orange-400 text-orange-900 rounded text-sm' },
-                        'ตักออกไม่ได้ → บันทึกค่านี้แบบ "นอกเกณฑ์" (ต้องใส่เหตุผล)')))
+                      canOffSpec
+                        ? h('button', { onClick:(ev)=>{ ev.stopPropagation(); lockOffSpec(it); },
+                            className:'px-3 py-1.5 bg-orange-100 hover:bg-orange-200 border border-orange-400 text-orange-900 rounded text-sm' },
+                            'ตักออกไม่ได้ → บันทึกค่านี้แบบ "นอกเกณฑ์" (ต้องใส่เหตุผล)')
+                        : h('div', { className:'text-sm text-orange-800' }, 'ตักออกไม่ได้ → แจ้งผู้จัดการ (สิทธิ์นี้บันทึกค่านอกเกณฑ์ไม่ได้)')))
               : e.locked
                 ? h('div', { className:'flex items-center justify-between mt-1 flex-wrap gap-2' },
                     h('div', { className:'flex items-end gap-2 flex-wrap' },
