@@ -12,7 +12,7 @@
 <script>
 (function(){
 'use strict';
-const WEIGH_VERSION = '2026.09.14';
+const WEIGH_VERSION = '2026.09.15';
 const h = React.createElement;
 const { useState, useEffect, useRef, useMemo } = React;
 const cls = (...a)=>a.filter(Boolean).join(' ');
@@ -278,7 +278,7 @@ function useScale(){
     nc.addEventListener('characteristicvaluechanged', onVal);
     appendLog('✅ subscribed');
     cleanupRef.current=async()=>{ try{ nc.removeEventListener('characteristicvaluechanged',onVal); await nc.stopNotifications(); dev.gatt.disconnect(); }catch{} };
-    setMode('bluetooth'); setDevice({ name:dev.name||'BLE' }); setConnected(true); setConnecting('');
+    setMode('bluetooth'); setDevice({ name:dev.name||'BLE', id:dev.id }); setConnected(true); setConnecting('');
   };
 
   const connectBLE = async () => {
@@ -608,19 +608,34 @@ function buildESCPOS(cv, opt, copies){
 // คำสั่งทดสอบแบบข้อความล้วน (ASCII) — ใช้เช็คว่า "สายถึงเครื่อง + ภาษาถูก" โดยยังไม่พึ่งการวาดรูป
 function buildTestText(opt){
   if(opt.lang === 'escpos'){
-    return _cat([_enc.encode('\x1B@\x1B!\x30YUME WEIGH TEST\n\x1B!\x00USB OK ' + new Date().toLocaleTimeString('th-TH') + '\n\n'), new Uint8Array([0x0C])]);
+    return _cat([_enc.encode('\x1B@\x1B!\x30YUME WEIGH TEST\n\x1B!\x00' + (opt.via||'USB') + ' OK ' + new Date().toLocaleTimeString('th-TH') + '\n\n'), new Uint8Array([0x0C])]);
   }
-  return _enc.encode(`SIZE ${opt.wmm} mm,${opt.hmm} mm\r\nGAP ${opt.gapmm} mm,0\r\nDIRECTION ${opt.direction},0\r\nDENSITY ${opt.density}\r\nCLS\r\nTEXT 16,16,"3",0,1,1,"YUME WEIGH TEST"\r\nTEXT 16,60,"2",0,1,1,"USB OK ${new Date().toLocaleTimeString('th-TH')}"\r\nBARCODE 16,100,"128",${Math.round(opt.hmm*8*0.3)},1,0,2,2,"TEST-690912-01"\r\nPRINT 1,1\r\n`);
+  return _enc.encode(`SIZE ${opt.wmm} mm,${opt.hmm} mm\r\nGAP ${opt.gapmm} mm,0\r\nDIRECTION ${opt.direction},0\r\nDENSITY ${opt.density}\r\nCLS\r\nTEXT 16,16,"3",0,1,1,"YUME WEIGH TEST"\r\nTEXT 16,60,"2",0,1,1,"${opt.via||'USB'} OK ${new Date().toLocaleTimeString('th-TH')}"\r\nBARCODE 16,100,"128",${Math.round(opt.hmm*8*0.3)},1,0,2,2,"TEST-690912-01"\r\nPRINT 1,1\r\n`);
 }
 
-// hook: การเชื่อมต่อ WebUSB — จำอุปกรณ์ที่เคยอนุญาต (getDevices) ต่อใหม่เองตอนเปิดหน้า ไม่ต้องกดทุกครั้ง
-function useUSBPrinter(){
+// hook: การเชื่อมต่อเครื่องพิมพ์ 3 ทาง — ใช้ตัววาดฉลาก/TSPL ชุดเดียวกัน ต่างกันแค่ช่องทางส่ง
+//   'usb' = WebUSB (สาย OTG) — จำอุปกรณ์ที่เคยอนุญาต (getDevices) ต่อใหม่เองตอนเปิดหน้า
+//   'bt'  = Bluetooth แบบคลาสสิก (SPP) ผ่าน Web Serial — Xprinter/TSC ที่มี BT ส่วนใหญ่เป็นแบบนี้ · Android ต้อง Chrome 138+ และจับคู่ในตั้งค่า Android ก่อน
+//   'ble' = Bluetooth LE (GATT write) — เครื่องใบเสร็จพกพาบางรุ่น · หา characteristic ที่เขียนได้ตัวแรกจาก service ที่รู้จัก
+const BT_SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb';
+const BLE_PRINTER_SERVICES = ['000018f0-0000-1000-8000-00805f9b34fb', '0000ff00-0000-1000-8000-00805f9b34fb', '0000ae30-0000-1000-8000-00805f9b34fb',
+  '0000ff12-0000-1000-8000-00805f9b34fb', '49535343-fe7d-4ae5-8fa9-9fafd205e455', '0000fee7-0000-1000-8000-00805f9b34fb', '0000ffe0-0000-1000-8000-00805f9b34fb'];
+const TRANSPORT_LABEL = { usb:'USB', bt:'Bluetooth', serial:'Serial', ble:'Bluetooth LE' };
+const PAIR_HINT = IS_MOBILE ? 'จับคู่เครื่องพิมพ์ใน ตั้งค่า Android → Bluetooth ก่อน (เปิดเครื่องพิมพ์ ไฟ BT กะพริบ)' : 'จับคู่เครื่องพิมพ์ใน ตั้งค่า Bluetooth ของ Windows/Mac ก่อน · ถ้าคอมไม่มี Bluetooth ให้เสียบ USB แทน';
+function useUSBPrinter(opts){
+  opts = opts || {};
   const [connected, setConnected] = useState(false);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState('');
   const [lastErr, setLastErr] = useState('');
+  const [transport, setTransport] = useState('');   // 'usb' | 'bt' | 'ble' | ''
   const devRef = useRef(null), epRef = useRef(null), ifaceRef = useRef(null);
-  const supported = typeof navigator !== 'undefined' && !!navigator.usb;
+  const portRef = useRef(null), writerRef = useRef(null);      // Web Serial (bt)
+  const bleRef = useRef(null), bleCharRef = useRef(null);     // Web Bluetooth (ble)
+  const supportedUSB = typeof navigator !== 'undefined' && !!navigator.usb;
+  const supportedBT  = typeof navigator !== 'undefined' && !!navigator.serial;
+  const supportedBLE = typeof navigator !== 'undefined' && !!navigator.bluetooth;
+  const supported = supportedUSB || supportedBT || supportedBLE;
 
   const attach = async (dev) => {
     await dev.open();
@@ -639,7 +654,81 @@ function useUSBPrinter(){
     catch(e){ throw new Error('จองช่องเครื่องพิมพ์ไม่ได้ (' + e.message + ') — ระบบ Android อาจจับเครื่องพิมพ์ไว้เอง: ถอดสายเสียบใหม่ / ปิดแอปเครื่องพิมพ์อื่นที่เปิดอยู่'); }
     if(found.alt.alternateSetting) try { await dev.selectAlternateInterface(found.iface.interfaceNumber, found.alt.alternateSetting); } catch(e){}
     devRef.current = dev; epRef.current = found.ep.endpointNumber; ifaceRef.current = found.iface.interfaceNumber;
-    setName((dev.manufacturerName||'') + ' ' + (dev.productName||'USB Printer')); setConnected(true); setLastErr('');
+    setName((dev.manufacturerName||'') + ' ' + (dev.productName||'USB Printer')); setTransport('usb'); setConnected(true); setLastErr('');
+  };
+  // --- Bluetooth SPP (Web Serial) ---
+  const attachPort = async (port) => {
+    const openOpts = { baudRate: 9600 };   // SPP ไม่สน baud แต่ API บังคับใส่
+    try { await port.open(openOpts); }
+    catch(e){
+      if(/already open/i.test(e.message)){ try { await port.close(); } catch(_e){} await port.open(openOpts); }   // ค้างจากรอบก่อน → ปิดแล้วเปิดใหม่จริง
+      else if(/in progress/i.test(e.message)) throw new Error('กำลังต่อเครื่องพิมพ์อยู่ — รอสักครู่แล้วลองใหม่');
+      else throw new Error('เปิดช่องต่อเครื่องพิมพ์ไม่ได้ (' + e.message + ') — เครื่องพิมพ์เปิดอยู่ไหม · ' + PAIR_HINT);
+    }
+    if(!port.writable){ try { await port.close(); } catch(_e){} throw new Error('เครื่องพิมพ์ไม่ตอบ (ปิดอยู่/อยู่ไกล) — เปิดเครื่องพิมพ์แล้วกดต่อใหม่'); }
+    if(portRef.current && portRef.current !== port){ try { await portRef.current.close(); } catch(_e){} }   // เปลี่ยนเครื่อง → ปิดตัวเก่า ไม่ให้ช่องรั่ว
+    portRef.current = port;
+    const info = (port.getInfo && port.getInfo()) || {};
+    const isBt = !!info.bluetoothServiceClassId;
+    setName(isBt ? 'เครื่องพิมพ์' : ('เครื่องพิมพ์ Serial' + (info.usbProductId ? ' (USB)' : '')));
+    setTransport(isBt ? 'bt' : 'serial'); setConnected(true); setLastErr('');
+    // เครื่องพิมพ์ถูก unpair/หายไป → รีเซ็ตสถานะทันที (ไม่ต้องรอพิมพ์ครั้งถัดไป)
+    try { port.addEventListener('disconnect', () => { if(portRef.current === port){ portRef.current = null; setConnected(false); setName(''); setTransport(''); setLastErr('เครื่องพิมพ์ Bluetooth หลุด/ปิด — เปิดเครื่องแล้วกดต่อใหม่'); } }, { once:true }); } catch(_e){}
+  };
+  const grantedBtPort = async () => {
+    if(!supportedBT || !navigator.serial.getPorts) return null;
+    try { const ports = await navigator.serial.getPorts(); return ports.find(pt => { const i = (pt.getInfo && pt.getInfo()) || {}; return !!i.bluetoothServiceClassId; }) || null; }
+    catch(e){ return null; }
+  };
+  const connectBT = async () => {
+    if(!supportedBT){ alert('❌ เบราว์เซอร์นี้ไม่รองรับ Web Serial — Android ต้องเป็น Chrome 138 ขึ้นไป (อัปเดต Chrome ใน Play Store) · iPad/iPhone ใช้ไม่ได้'); return; }
+    setBusy('กำลังต่อเครื่องพิมพ์ Bluetooth…'); setLastErr('');
+    try {
+      // เคยอนุญาตแล้ว (เช่น เมื่อวาน) → ต่อให้เลยไม่ต้องเลือกจากรายการอีก · ต่อไม่ได้ (เครื่องปิด) ค่อยเปิดรายการ
+      const known = await grantedBtPort();
+      if(known){ try { await attachPort(known); return; } catch(e){ /* ตกไปเปิดรายการ */ } }
+      setBusy('เลือกเครื่องพิมพ์ Bluetooth…');
+      const port = await navigator.serial.requestPort({ filters:[{ bluetoothServiceClassId: BT_SPP_UUID }] });   // โชว์เฉพาะอุปกรณ์ Bluetooth ที่จับคู่แล้ว
+      setBusy('กำลังเปิดเครื่องพิมพ์…');
+      await attachPort(port);
+    } catch(e){
+      if(e.name==='NotFoundError') setLastErr('ไม่ได้เลือกเครื่อง — รายการว่าง? ' + PAIR_HINT + ' แล้วกดต่ออีกครั้ง');
+      else if(e.name==='SecurityError') setLastErr('กดปุ่มต่ออีกครั้ง (เบราว์เซอร์ต้องการให้กดปุ่มก่อนเปิดรายการอุปกรณ์)');
+      else { setLastErr(e.message); alert('❌ ' + e.message); }
+    } finally { setBusy(''); }
+  };
+  // --- Bluetooth LE (GATT) ---
+  const bleChunkRef = useRef(180);   // ลดเหลือ 20 อัตโนมัติถ้าเครื่องต่อรอง MTU ไม่ได้
+  const bleDisRef = useRef(null);
+  const attachBLE = async (dev) => {
+    if(opts.isScaleDevice && opts.isScaleDevice(dev)) throw new Error('เครื่องที่เลือกคือเครื่องชั่ง ไม่ใช่เครื่องพิมพ์ — เลือกชื่อเครื่องพิมพ์ในรายการ');
+    const server = await dev.gatt.connect();
+    let chr = null;
+    for(const svcId of BLE_PRINTER_SERVICES){
+      let svc; try { svc = await server.getPrimaryService(svcId); } catch(e){ if(e.name === 'NotFoundError') continue; throw e; }
+      const chars = await svc.getCharacteristics();
+      chr = chars.find(c => c.properties.writeWithoutResponse) || chars.find(c => c.properties.write);
+      if(chr) break;
+    }
+    if(!chr){ try { dev.gatt.disconnect(); } catch(e){} throw new Error('เครื่องนี้ไม่มีช่องรับข้อมูลพิมพ์แบบ BLE ที่รู้จัก — ถ้าเป็น Xprinter/TSC ให้ใช้ปุ่ม "ต่อเครื่องพิมพ์ Bluetooth" (ไม่ใช่ LE)'); }
+    if(bleRef.current && bleRef.current !== dev){ try { bleRef.current.removeEventListener('gattserverdisconnected', bleDisRef.current); if(bleRef.current.gatt.connected) bleRef.current.gatt.disconnect(); } catch(e){} }
+    bleRef.current = dev; bleCharRef.current = chr; bleChunkRef.current = 180;
+    if(bleDisRef.current) try { dev.removeEventListener('gattserverdisconnected', bleDisRef.current); } catch(e){}
+    bleDisRef.current = () => { if(bleRef.current === dev){ bleRef.current=null; bleCharRef.current=null; setConnected(false); setName(''); setTransport(''); setLastErr('Bluetooth หลุด/เครื่องพิมพ์ปิด — กดต่อใหม่'); } };
+    dev.addEventListener('gattserverdisconnected', bleDisRef.current);
+    setName(dev.name || 'เครื่องพิมพ์ BLE'); setTransport('ble'); setConnected(true); setLastErr('');
+  };
+  const connectBLE = async () => {
+    if(!supportedBLE){ alert('❌ เบราว์เซอร์นี้ไม่รองรับ Web Bluetooth — ใช้ Chrome บน Android/คอม'); return; }
+    setBusy('เลือกเครื่องพิมพ์ BLE…'); setLastErr('');
+    try {
+      const dev = await navigator.bluetooth.requestDevice({ acceptAllDevices:true, optionalServices: BLE_PRINTER_SERVICES });
+      setBusy('กำลังเปิดเครื่องพิมพ์…');
+      await attachBLE(dev);
+    } catch(e){
+      if(e.name==='NotFoundError') setLastErr('ไม่ได้เลือกเครื่อง — เปิดเครื่องพิมพ์และ Bluetooth ของเครื่องนี้' + (IS_MOBILE ? ' (Android ต้องเปิด "ตำแหน่ง" ด้วย)' : '') + ' แล้วลองใหม่ · อย่าเลือกเครื่องชั่ง');
+      else { setLastErr(e.message); alert('❌ ' + e.message); }
+    } finally { setBusy(''); }
   };
   // allDevices=true → โชว์ทุกอุปกรณ์ USB (เผื่อเครื่องพิมพ์ไม่ประกาศตัวเป็น class 7)
   //   ⚠️ ต้องเรียกจากการกดปุ่มโดยตรง — เรียกซ้อนหลัง dialog แรกปิดจะโดน "Must be handling a user gesture" ถ้าช้าเกิน ~5 วิ
@@ -662,32 +751,59 @@ function useUSBPrinter(){
       }
     } finally { setBusy(''); }
   };
-  // ต่อใหม่จากอุปกรณ์ที่เคยอนุญาตแล้ว (ไม่ต้องมี user gesture)
+  // ต่อใหม่จากอุปกรณ์ที่เคยอนุญาตแล้ว (ไม่ต้องมี user gesture) — USB ก่อน แล้วค่อย Bluetooth SPP (ช่องที่เคยอนุญาต) · BLE ต้องกดต่อเอง
   const reconnect = async () => {
-    if(!supported) return false;
-    try {
-      const list = await navigator.usb.getDevices();
-      if(!list.length) return false;
-      await attach(list[0]); return true;
-    } catch(e){ setLastErr(e.message); return false; }
+    if(supportedUSB){
+      try { const list = await navigator.usb.getDevices(); if(list.length){ await attach(list[0]); return true; } }
+      catch(e){ setLastErr(e.message); }
+    }
+    if(supportedBT && navigator.serial.getPorts){
+      try { const ports = await navigator.serial.getPorts(); if(ports.length){ await attachPort(ports[0]); return true; } }
+      catch(e){ /* เครื่องพิมพ์ปิดอยู่ = ปกติ ไม่ต้องเตือน */ }
+    }
+    return false;
   };
   const disconnect = async () => {
     const d = devRef.current; devRef.current=null; epRef.current=null;
     try { if(d){ if(ifaceRef.current!=null) await d.releaseInterface(ifaceRef.current); await d.close(); } } catch(e){}
-    setConnected(false); setName('');
+    const w = writerRef.current; writerRef.current=null;
+    try { if(w){ w.releaseLock(); } } catch(e){}
+    const pt = portRef.current; portRef.current=null;
+    try { if(pt) await pt.close(); } catch(e){}
+    const b = bleRef.current; bleRef.current=null; bleCharRef.current=null;
+    try { if(b){ if(bleDisRef.current) b.removeEventListener('gattserverdisconnected', bleDisRef.current); if(b.gatt && b.gatt.connected && !(opts.isScaleDevice && opts.isScaleDevice(b))) b.gatt.disconnect(); } } catch(e){}
+    setConnected(false); setName(''); setTransport('');
   };
   useEffect(()=>{
     reconnect();
-    if(!supported) return;
+    if(!supportedUSB) return;
     const onDis = (ev)=>{ if(devRef.current && ev.device === devRef.current){ devRef.current=null; setConnected(false); setName(''); setLastErr('สายหลุด/เครื่องพิมพ์ปิด'); } };
-    const onCon = ()=>{ if(!devRef.current) reconnect(); };
+    const onCon = ()=>{ if(!devRef.current && !portRef.current && !bleRef.current) reconnect(); };   // ต่อ Bluetooth อยู่ → ไม่แย่งไปต่อ USB
     navigator.usb.addEventListener('disconnect', onDis);
     navigator.usb.addEventListener('connect', onCon);
     return ()=>{ navigator.usb.removeEventListener('disconnect', onDis); navigator.usb.removeEventListener('connect', onCon); };
   }, []);
   const send = async (bytes) => {
+    if(portRef.current){                 // Bluetooth SPP / serial
+      const port = portRef.current;
+      if(!port.writable){ await disconnect(); throw new Error('เครื่องพิมพ์หลุด/ปิดอยู่ — ระบบตัดการเชื่อมต่อแล้ว เปิดเครื่องพิมพ์แล้วกดต่อใหม่'); }
+      const w = port.writable.getWriter(); writerRef.current = w;
+      try { const CH = 4096; for(let i=0;i<bytes.length;i+=CH) await w.write(bytes.subarray(i, i+CH)); }
+      finally { writerRef.current=null; try { w.releaseLock(); } catch(e){} }
+      return;
+    }
+    if(bleCharRef.current){              // Bluetooth LE — เขียนทีละก้อนเล็ก (MTU ~20–512) · ก้อนแรกล้มเหลว → ลดเหลือ 20 แล้วส่งใหม่
+      const chr = bleCharRef.current;
+      const w = (part) => chr.properties.writeWithoutResponse ? chr.writeValueWithoutResponse(part) : chr.writeValue(part);
+      for(let i=0;i<bytes.length;){
+        const CH = bleChunkRef.current, part = bytes.subarray(i, i+CH);
+        try { await w(part); i += CH; }
+        catch(e){ if(CH > 20 && /NetworkError|InvalidModification|GATT/i.test((e.name||'') + ' ' + (e.message||''))){ bleChunkRef.current = 20; continue; } throw e; }
+      }
+      return;
+    }
     const dev = devRef.current, ep = epRef.current;
-    if(!dev || ep==null) throw new Error('ยังไม่ได้ต่อเครื่องพิมพ์ USB');
+    if(!dev || ep==null) throw new Error('ยังไม่ได้ต่อเครื่องพิมพ์');
     const CH = 16384;
     for(let i=0;i<bytes.length;i+=CH){
       const r = await dev.transferOut(ep, bytes.subarray(i, i+CH));
@@ -698,18 +814,25 @@ function useUSBPrinter(){
     if(busy) throw new Error('กำลังพิมพ์งานก่อนหน้าอยู่');
     setBusy(label);
     try { await fn(); setLastErr(''); }
-    catch(e){ setLastErr(e.message); if(/disconnected|not found|NetworkError/i.test(e.message)){ devRef.current=null; setConnected(false); } throw e; }
+    catch(e){
+      const sig = (e.name||'') + ' ' + (e.message||'');
+      if(/NetworkError|NotFoundError|InvalidStateError|disconnected|lost|closed|หลุด|ปิดอยู่|ปิดไปแล้ว/i.test(sig)){ await disconnect(); setLastErr((/หลุด|ปิด/.test(e.message||'') ? e.message : 'เครื่องพิมพ์หลุด/ปิดอยู่ (' + e.message + ') — ระบบตัดการเชื่อมต่อแล้ว กดต่อใหม่')); }
+      else setLastErr(e.message);
+      throw e;
+    }
     finally { setBusy(''); }
   };
+  const viaLabel = () => TRANSPORT_LABEL[transport] || 'USB';
   const printLabel = (data, settings, copies) => run('กำลังพิมพ์ฉลาก…', async () => {
     const opt = printerOpts(settings);
     const cv = renderLabelCanvas(data, opt);
     const job = opt.lang==='escpos' ? buildESCPOS(cv, opt, copies||1) : buildTSPL(cv, opt, copies||1);
     await send(job);
   });
-  const testText = (settings) => run('พิมพ์ทดสอบ…', async () => { await send(buildTestText(printerOpts(settings))); });
-  const testLabel = (settings) => printLabel({ recipeName:'ทดสอบพิมพ์ฉลาก ภาษาไทย', lot:'TEST-690912-01', total:2410.5, operator:'ทดสอบ', note:'พิมพ์ทดสอบ', ts:Date.now() }, settings, 1);
-  return { supported, connected, name, busy, lastErr, connect, disconnect, printLabel, testText, testLabel };
+  const testText = (settings) => run('พิมพ์ทดสอบ…', async () => { await send(buildTestText({ ...printerOpts(settings), via: viaLabel() })); });
+  const testLabel = (settings) => printLabel({ recipeName:'ทดสอบพิมพ์ฉลาก ภาษาไทย', lot:'TEST-690912-01', total:2410.5, operator:'ทดสอบ', note:'พิมพ์ทดสอบ ' + viaLabel(), ts:Date.now() }, settings, 1);
+  return { supported, supportedUSB, supportedBT, supportedBLE, connected, name, busy, lastErr, transport, transportLabel: viaLabel(),
+    connect, connectBT, connectBLE, disconnect, printLabel, testText, testLabel };
 }
 
 // ==================== MAIN APP ====================
@@ -721,7 +844,7 @@ function App(){
   // 🆕 เครื่องชั่งอยู่ระดับแอป — สลับไปดูสูตร/ประวัติแล้วกลับมา การเชื่อมต่อ+ชุดที่ชั่งอยู่ยังอยู่ครบ
   //    (เดิมอยู่ใน WeighTab ซึ่งถูก unmount ตอนสลับแท็บ → หลุดหมด + BLE ค้างเบื้องหลัง)
   const scale = useScale();
-  const printer = useUSBPrinter();   // 🆕 เครื่องพิมพ์ USB (WebUSB) — อยู่ระดับแอปเช่นกัน
+  const printer = useUSBPrinter({ isScaleDevice: (dev) => !!(dev && scale.device && scale.device.id && scale.device.id === dev.id) });   // 🆕 เครื่องพิมพ์ USB/Bluetooth — อยู่ระดับแอปเช่นกัน
   const [embedSelect, setEmbedSelect] = useState(null);   // คำสั่งเลือกสูตรจากแอปแม่
 
   // ---- EMBED: รับค่าจากแอปแม่ + รายงานสถานะ ----
@@ -804,7 +927,7 @@ function App(){
             scale.connected
               ? h('span', null, '🟢 ', scale.device?.name || 'เครื่องชั่ง', ' · ',
                   h('b', { className:'font-mono' }, scale.liveWeight!=null ? fmt(scale.liveWeight)+' g' : '—'),
-                  printer.connected ? ' · 🖨️ USB' : '')
+                  printer.connected ? ' · 🖨️ ' + printer.transportLabel : '')
               : scale.connecting ? h('span', { className:'animate-pulse' }, '⏳ ', scale.connecting)
               : (IS_MOBILE ? 'ต่อเครื่องชั่งบลูทูธ · สูตร · ประวัติ' : 'สูตร + พิมพ์ Label อัตโนมัติ (100×75mm)'))),
         h('div', { className:'flex gap-1' },
@@ -1181,7 +1304,7 @@ function WeighTab({ state, update, scale, printer, perms, visible, embedSelect, 
   const totalG = items.reduce((s,it)=>s+(Number(entries[it.idx]?.value)||0),0);
 
   const labelRotate = !!settings.labelRotate;
-  // 🆕 เส้นทางพิมพ์: มีเครื่องพิมพ์ USB ต่ออยู่ → ส่ง TSPL/ESC-POS ตรง · ไม่มี → หน้าจอพิมพ์ของระบบ (คอม/PDF)
+  // 🆕 เส้นทางพิมพ์: มีเครื่องพิมพ์ต่ออยู่ (USB/Bluetooth) → ส่ง TSPL/ESC-POS ตรง · ไม่มี → หน้าจอพิมพ์ของระบบ (คอม/PDF)
   const usbReady = printer && printer.connected;
   const willPrint = usbReady ? (settings.usbAutoPrint !== false) : autoPrint;
   const doPrint = (data) => {
@@ -1305,14 +1428,19 @@ function WeighTab({ state, update, scale, printer, perms, visible, embedSelect, 
         scale.packetAge() > STALE_MS && scale.mode!=='mock' && h('span', { className:'text-sm px-2 py-1 rounded bg-red-100 text-red-800' }, '📵 สัญญาณค้าง'),
         h('button', { onClick:()=>{ if(confirm('ตัดการเชื่อมต่อเครื่องชั่ง?')) scale.disconnect(); },
           className:'ml-auto px-3 py-1.5 text-red-600 hover:bg-red-50 rounded text-sm' }, '✗ ตัด')),
-      // 🖨️ เครื่องพิมพ์ USB — ต่อ/ดูสถานะได้จากหน้าชั่ง (พนักงานที่ไม่มีแท็บตั้งค่าก็ต่อได้ · ตั้งค่าละเอียดอยู่ในตั้งค่า)
+      // 🖨️ เครื่องพิมพ์ (USB / Bluetooth) — ต่อ/ดูสถานะได้จากหน้าชั่ง (พนักงานที่ไม่มีแท็บตั้งค่าก็ต่อได้ · ตั้งค่าละเอียดอยู่ในตั้งค่า)
       printer && printer.supported && h('div', { className:'mt-2 flex items-center gap-2 flex-wrap text-sm' },
         printer.connected
-          ? h('span', { className:'bg-white px-2 py-1 rounded text-green-800' }, '🖨️ ✓ ', printer.name, printer.busy ? ' · ' + printer.busy : '')
-          : h('button', { onClick:()=>printer.connect(false), disabled:!!printer.busy,
-              className:'px-3 py-1.5 bg-white border-2 border-sky-400 text-sky-900 rounded font-medium disabled:opacity-50' },
-              printer.busy || '🖨️ ต่อเครื่องพิมพ์ USB'),
-        !printer.connected && printer.lastErr && h('span', { className:'text-xs text-red-700' }, printer.lastErr)),
+          ? [ h('span', { key:'s', className:'bg-white px-2 py-1 rounded text-green-800' }, '🖨️ ✓ ', printer.name, ' (', printer.transportLabel, ')', printer.busy ? ' · ' + printer.busy : ''),
+              h('button', { key:'x', onClick:()=>{ if(confirm('ตัดการเชื่อมต่อเครื่องพิมพ์?')) printer.disconnect(); }, className:'px-2 py-1 text-red-600 hover:bg-red-50 rounded text-xs' }, '✗ ตัด') ]
+          : [ printer.supportedUSB && h('button', { key:'u', onClick:()=>printer.connect(false), disabled:!!printer.busy,
+                className:'px-3 py-1.5 bg-white border-2 border-sky-400 text-sky-900 rounded font-medium disabled:opacity-50' },
+                printer.busy || '🖨️ ต่อเครื่องพิมพ์ USB'),
+              printer.supportedBT && h('button', { key:'b', onClick:()=>printer.connectBT(), disabled:!!printer.busy,
+                className:'px-3 py-1.5 bg-white border-2 border-blue-400 text-blue-900 rounded font-medium disabled:opacity-50' },
+                '🔵 ต่อเครื่องพิมพ์ Bluetooth'),
+              printer.supportedBT && h('span', { key:'h', className:'text-xs text-gray-600 basis-full' }, 'ครั้งแรก: ' + PAIR_HINT + ' · ครั้งต่อไปกดปุ่มเดียวต่อให้เลย') ],
+        printer.lastErr && h('span', { className:'text-sm text-red-800 bg-red-50 border border-red-200 rounded px-2 py-1 basis-full' }, '⚠️ ', printer.lastErr)),
       scale.connected && scale.rawLog.length>0 && h('details', { className:'mt-1' },
         h('summary', { className:'text-[10px] text-gray-500 cursor-pointer' }, '📜 Raw data (debug)'),
         h('pre', { className:'bg-gray-900 text-green-400 text-[10px] p-2 rounded mt-1 max-h-24 overflow-y-auto' },
@@ -1497,7 +1625,7 @@ function LogsTab({ state, printer }){
                 log.scaleMode ? ' · ' + (log.scaleMode==='mock' ? '🎭 MOCK (ทดสอบ)' : (log.scaleDevice||log.scaleMode)) : '',
                 log.note ? ' · ' + log.note : '')),
             h('button', { onClick:()=>reprint(log),
-              className:'px-3 py-1.5 bg-blue-100 hover:bg-blue-200 rounded text-sm' }, '🖨️ พิมพ์ซ้ำ', printer && printer.connected ? ' (USB)' : '')),
+              className:'px-3 py-1.5 bg-blue-100 hover:bg-blue-200 rounded text-sm' }, '🖨️ พิมพ์ซ้ำ', printer && printer.connected ? ' (' + printer.transportLabel + ')' : '')),
           h('div', { className:'mt-1 text-xs text-gray-600 flex flex-wrap gap-x-3' },
             log.items.map((it,i)=>h('span',{key:i, className: it.pass?'':'text-orange-600 font-bold', title: it.reason||'' },
               it.name,': ',fmt(it.value),'g',it.pass?'':' ⚠️'+(it.reason?' ('+it.reason+')':'')))))));
@@ -1513,21 +1641,34 @@ function PrinterSettings({ s, set, printer }){
   const on = 'bg-indigo-600 text-white border-indigo-700', off = 'bg-white border-gray-300';
   const doPreview = () => { try { setPreview(renderLabelCanvas({ recipeName:'ทดสอบพิมพ์ฉลาก ภาษาไทย', lot:'TEST-690912-01', total:2410.5, operator:'ทดสอบ', note:'ตัวอย่าง', ts:Date.now() }, opt).toDataURL()); } catch(e){ alert(e.message); } };
   return h('div', { className:'bg-sky-50 border-2 border-sky-300 rounded p-3 space-y-3' },
-    h('div', { className:'font-bold text-sky-900' }, '🖨️ เครื่องพิมพ์ฉลาก USB (เสียบสาย OTG/hub เข้าแท็บเล็ต)'),
+    h('div', { className:'font-bold text-sky-900' }, '🖨️ เครื่องพิมพ์ฉลาก — USB (สาย OTG/hub) หรือ Bluetooth'),
     !printer.supported
-      ? h('div', { className:'text-sm text-red-700' }, '❌ เบราว์เซอร์นี้ไม่รองรับ WebUSB — ต้องเป็น Chrome บน Android หรือคอม (iPad/iPhone ใช้ไม่ได้)')
+      ? h('div', { className:'text-sm text-red-700' }, '❌ เบราว์เซอร์นี้ไม่รองรับ WebUSB/Web Serial — ต้องเป็น Chrome บน Android หรือคอม (iPad/iPhone ใช้ไม่ได้)')
       : h('div', { className:'flex items-center gap-2 flex-wrap' },
           printer.connected
-            ? [ h('span', { key:'n', className:'text-sm bg-green-100 text-green-900 px-2 py-1 rounded font-medium' }, '✓ ', printer.name),
+            ? [ h('span', { key:'n', className:'text-sm bg-green-100 text-green-900 px-2 py-1 rounded font-medium' }, '✓ ', printer.name, ' · ', printer.transportLabel),
                 h('button', { key:'d', onClick:printer.disconnect, className:'px-3 py-1.5 text-red-600 hover:bg-red-50 rounded text-sm' }, '✗ ตัด') ]
-            : [ h('button', { key:'c', onClick:()=>printer.connect(false), disabled:!!printer.busy,
+            : [ printer.supportedUSB && h('button', { key:'c', onClick:()=>printer.connect(false), disabled:!!printer.busy,
                   className:'px-4 py-3 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-base font-bold disabled:opacity-50' },
                   printer.busy || '🔌 ต่อเครื่องพิมพ์ USB'),
-                h('button', { key:'a', onClick:()=>printer.connect(true), disabled:!!printer.busy,
+                printer.supportedBT && h('button', { key:'b', onClick:()=>printer.connectBT(), disabled:!!printer.busy,
+                  className:'px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-base font-bold disabled:opacity-50' },
+                  '🔵 ต่อเครื่องพิมพ์ Bluetooth'),
+                !printer.supportedBT && printer.supportedBLE && h('span', { key:'nb', className:'text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1' },
+                  'เครื่องพิมพ์ Bluetooth (XP-420B/TSC) ต้อง Chrome 138 ขึ้นไป — อัปเดต Chrome ใน Play Store แล้วเปิดใหม่'),
+                printer.supportedUSB && h('button', { key:'a', onClick:()=>printer.connect(true), disabled:!!printer.busy,
                   className:'px-3 py-2 bg-white border-2 border-sky-300 text-sky-800 rounded text-sm disabled:opacity-50' },
-                  'รายการว่าง? แสดงทุกอุปกรณ์ USB') ],
+                  'รายการ USB ว่าง? แสดงทุกอุปกรณ์'),
+                printer.supportedBLE && h('details', { key:'l', className:'basis-full text-xs text-gray-600' },
+                  h('summary', { className:'cursor-pointer' }, 'ตัวเลือกอื่น: เครื่องใบเสร็จพกพาแบบ Bluetooth LE (ไม่ใช่ XP-420B / TSC)'),
+                  h('button', { onClick:()=>printer.connectBLE(), disabled:!!printer.busy,
+                    className:'mt-1 px-3 py-2 bg-white border-2 border-blue-300 text-blue-800 rounded text-sm disabled:opacity-50' },
+                    'ต่อเครื่องพิมพ์ Bluetooth LE')) ],
           printer.lastErr && h('span', { className:'text-xs text-red-700 basis-full' }, '⚠️ ', printer.lastErr)),
-    h('div', { className:'text-xs text-sky-800' }, 'ครั้งแรกกดต่อแล้วเลือกเครื่องพิมพ์จากรายการ · ครั้งต่อไประบบต่อให้เองตอนเปิดหน้า (ถ้าสายเสียบอยู่)'),
+    h('ul', { className:'text-sm text-sky-900 list-disc pl-5 space-y-0.5' },
+      h('li', null, h('b', null, 'USB: '), 'ครั้งแรกกดต่อแล้วเลือกเครื่องพิมพ์จากรายการ · ครั้งต่อไประบบต่อให้เองตอนเปิดหน้า (ถ้าสายเสียบอยู่)'),
+      h('li', null, h('b', null, 'Bluetooth (Xprinter/TSC รุ่นที่มี BT เช่น XP-420B BT): '), PAIR_HINT, ' แล้วกด "ต่อเครื่องพิมพ์ Bluetooth" เลือกชื่อเครื่อง 1 ครั้ง · ครั้งต่อไปกดปุ่มเดียวต่อให้เลย · ต่อพร้อมเครื่องชั่ง Bluetooth ได้'),
+      h('li', null, h('b', null, 'ไม่มีเครื่องพิมพ์ต่ออยู่: '), 'ใช้หน้าจอพิมพ์ของระบบ (เหมาะกับคอม)')),
     // ภาษา
     h('div', { className:'flex items-center gap-2 flex-wrap' },
       h('span', { className:'text-sm font-medium w-28' }, 'ภาษาเครื่องพิมพ์'),
@@ -1559,12 +1700,12 @@ function PrinterSettings({ s, set, printer }){
         h('input', { type:'number', value:opt.threshold, min:60, max:230, step:10, onChange:e=>setP({threshold:Number(e.target.value)||160}), className:'w-16 px-2 py-1 border rounded text-right' })),
       h('label', { className:'flex items-center gap-2 cursor-pointer' },
         h('input', { type:'checkbox', checked:s.usbAutoPrint!==false, onChange:e=>set({usbAutoPrint:e.target.checked}), className:'w-5 h-5' }),
-        'พิมพ์ฉลากอัตโนมัติเมื่อชั่งครบ (เมื่อต่อ USB อยู่)')),
+        'พิมพ์ฉลากอัตโนมัติเมื่อชั่งครบ (เมื่อต่อเครื่องพิมพ์อยู่)')),
     // ทดสอบ
     h('div', { className:'flex gap-2 flex-wrap' },
       h('button', { onClick:()=>printer.testText(s).catch(e=>alert('❌ '+e.message)), disabled:!printer.connected||!!printer.busy,
         className:'px-3 py-2 bg-white border-2 border-sky-400 text-sky-900 rounded text-sm font-medium disabled:opacity-40' },
-        '1️⃣ ทดสอบสาย+ภาษา (ข้อความอังกฤษ)'),
+        '1️⃣ ทดสอบการเชื่อมต่อ+ภาษา (ข้อความอังกฤษ)'),
       h('button', { onClick:()=>printer.testLabel(s).catch(e=>alert('❌ '+e.message)), disabled:!printer.connected||!!printer.busy,
         className:'px-3 py-2 bg-sky-600 text-white rounded text-sm font-bold disabled:opacity-40' },
         '2️⃣ พิมพ์ฉลากทดสอบ (ภาษาไทย+บาร์โค้ด)'),
@@ -1573,7 +1714,7 @@ function PrinterSettings({ s, set, printer }){
       h('img', { src:preview, alt:'preview', style:{ maxWidth:'100%', imageRendering:'pixelated', border:'1px solid #999' } }),
       h('div', { className:'text-xs text-gray-500 mt-1' }, 'ภาพจริงที่จะส่งเข้าเครื่องพิมพ์ (', opt.wmm, '×', opt.hmm, ' มม. @', opt.dpi, 'dpi)')),
     h('div', { className:'text-xs text-sky-900 bg-white rounded p-2' },
-      h('b', null, 'ลำดับทดสอบ: '), '1️⃣ ออกเป็นข้อความอังกฤษ = สายถึงและภาษาถูก (ถ้าออกเป็นตัวประหลาด/ไม่ออก → สลับภาษาอีกอันแล้วลองใหม่) → 2️⃣ ฉลากไทย+บาร์โค้ด ยิงสแกนดูว่าติดไหม → ถ้าดวงเลื่อน ปรับ "ช่องว่างระหว่างดวง" ให้ตรงกระดาษ · ถ้าจาง/เข้มเกิน ปรับ "ความเข้ม" หรือ "เกณฑ์ขาว/ดำ"')
+      h('b', null, 'ลำดับทดสอบ: '), !printer.connected ? 'ต่อเครื่องพิมพ์ด้านบนก่อนถึงจะกดทดสอบได้ · ' : '', '1️⃣ ออกเป็นข้อความอังกฤษ = เชื่อมต่อถึงและภาษาถูก (ถ้าออกเป็นตัวประหลาด/ไม่ออก → สลับภาษาอีกอันแล้วลองใหม่) → 2️⃣ ฉลากไทย+บาร์โค้ด ยิงสแกนดูว่าติดไหม → ถ้าดวงเลื่อน ปรับ "ช่องว่างระหว่างดวง" ให้ตรงกระดาษ · ถ้าจาง/เข้มเกิน ปรับ "ความเข้ม" หรือ "เกณฑ์ขาว/ดำ"')
   );
 }
 function SettingsTab({ state, update, printer }){
@@ -1649,10 +1790,10 @@ function SettingsTab({ state, update, printer }){
           className:'w-24 px-3 py-2 border-2 rounded text-center' })),
       // 🆕 เครื่องพิมพ์ USB (WebUSB) — แท็บเล็ต Android เสียบสาย OTG/hub
       h(PrinterSettings, { s, set, printer }),
-      // Label orientation toggle — แก้ปัญหาพิมพ์เนื้อหาหมุนผิด (เส้นทางหน้าจอพิมพ์ของระบบ)
-      h('div', { className:'bg-amber-50 border-2 border-amber-300 rounded p-3 space-y-2' },
-        h('div', { className:'font-bold text-amber-900 text-sm' },
-          '🔄 ทิศทาง Label (ถ้าพิมพ์ออกมาสลับ/หมุนผิด)'),
+      // Label orientation toggle — แก้ปัญหาพิมพ์เนื้อหาหมุนผิด (เส้นทางหน้าจอพิมพ์ของระบบ — ใช้บนคอม · ไม่เกี่ยวกับ USB/Bluetooth ซึ่งใช้ "ทิศ" ในกล่องฟ้าด้านบน)
+      h('details', { className:'bg-amber-50 border-2 border-amber-300 rounded p-3 space-y-2', open: !IS_MOBILE && !(printer && printer.connected) },
+        h('summary', { className:'font-bold text-amber-900 text-sm cursor-pointer' },
+          '🔄 หน้าจอพิมพ์ของระบบ (คอม): ทิศทาง Label ถ้าพิมพ์ออกมาสลับ/หมุนผิด'),
         h('div', { className:'flex gap-2 flex-wrap' },
           h('button', { type:'button', onClick:()=>set({labelRotate:false}),
             className: cls('px-3 py-2 rounded border-2 text-sm font-medium',
@@ -1666,18 +1807,18 @@ function SettingsTab({ state, update, printer }){
           '💡 ถ้าพิมพ์แล้ว ', h('b',null,'เนื้อหาตะแคง/หมุนผิด'), ' → กดสลับโหมดอีกอันแล้วทดสอบใหม่',
           h('br',null),
           '· ดวงสติกเกอร์ขนาดเท่ากันทั้ง 2 โหมด (100×75) ต่างแค่ทิศเนื้อหา'),
-        // 🆕 ปุ่มทดสอบพิมพ์ทันที (ไม่ต้องชั่ง)
-        h('button', { type:'button',
+        // 🆕 ปุ่มทดสอบพิมพ์ทันที (ไม่ต้องชั่ง) — เส้นทางหน้าจอพิมพ์ของระบบ (คอม) · ถ้าต่อเครื่องพิมพ์ USB/Bluetooth อยู่ ให้ใช้ปุ่ม 2️⃣ ด้านบนแทน
+        !(printer && printer.connected) && h('button', { type:'button',
           onClick:()=>{
             const demo = { recipeName:'🧪 ทดสอบ Label', lot:'TEST-001',
               total:1234, operator:'ทดสอบ', note:'พิมพ์ทดสอบ', ts:Date.now() };
             printHTML(buildLabel(demo, 1, !!s.labelRotate));
           },
-          className:'w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-bold' },
-          '🖨️ ทดสอบพิมพ์ Label เลย (ไม่ต้องชั่ง)')),
+          className:'px-3 py-2 bg-white border-2 border-amber-400 text-amber-900 rounded text-sm font-medium' },
+          '🖨️ ทดสอบผ่านหน้าจอพิมพ์ของระบบ (คอม/PDF)')),
 
-      h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-900 space-y-1' },
-        h('div', null, h('b', null, '🖨️ Label ขนาด 100 × 75 mm (แนวนอน)')),
+      h('details', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-900 space-y-1', open: !IS_MOBILE && !(printer && printer.connected) },
+        h('summary', { className:'cursor-pointer' }, h('b', null, '🖨️ ตั้งค่า Driver บนคอม (Windows) — Label ขนาด 100 × 75 mm (แนวนอน)')),
         h('div', { className:'pl-3' },
           '· Print dialog → Paper = ', h('b',null,'Custom 100 × 75 mm'), h('br',null),
           '· Margin = None · Scale 100%'),
