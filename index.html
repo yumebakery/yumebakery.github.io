@@ -4579,6 +4579,7 @@ const INIT_STATE = {
     approvalExpiryDays: 30,   // pending approval > N วัน → expired
     warehouseSeeValue: false, // 🆕 warehouse role เห็นมูลค่าเงิน (default ไม่เห็น)
     pettyPayMax: 0,           // 🆕 ACCT-V2: เพดานจ่ายจากเงินสดย่อยต่อ PI (0 = ไม่จำกัด — user ตัดสิน 2026-09-17; ผู้อนุมัติตรวจย้อนหลังแทน)
+    pettyRecordOnly: true,    // 🆕 ACCT-V2 (user 2026-09-18): เงินสดย่อย = บันทึกอย่างเดียว — จ่ายได้โดยไม่ต้องเติมเงินเข้าระบบก่อน (ยอดคงเหลือติดลบได้) · ปิด = บังคับ ≤ คงเหลือ
   },
 
   // ---------- Stock / FIFO ----------
@@ -7138,9 +7139,18 @@ function reducer(s, a){
       const locked = _checkDateLock(s, a.data.date, 'จ่ายเงิน');
       if(locked) return locked;
       // 🆕 กันจ่ายเต็มทั้งที่คืนของไปแล้วแต่จัดซื้อยังไม่ตัดสินใจ (ระบบจ่ายตามที่รับจริง)
-      {
-        const _b = _blockIfPendingRtv(s, a.data.invId || a.data.invoiceId);
+      //   🆕 PV-GROUP: คำขอรวมหลาย PI (invoiceIds[]) → ตรวจทุกใบ
+      for(const _iid of (a.data.invId ? [a.data.invId] : (a.data.invoiceIds || [a.data.invoiceId]))){
+        const _b = _iid ? _blockIfPendingRtv(s, _iid) : null;
         if(_b) return _b;
+      }
+      // 🆕 PV-GROUP: คำขอรวมต้องเป็น supplier เดียวกันทุกใบ (วางบิล) — reducer กันไว้ด้วย
+      if(Array.isArray(a.data.invoiceIds) && a.data.invoiceIds.length > 1){
+        const _sups = new Set(a.data.invoiceIds.map(id => ((s.invoices||[]).find(i => i.id === id) || {}).supplierId || null));
+        if(_sups.size > 1){ alert('⛔ รวมจ่ายได้เฉพาะ PI ของ supplier เดียวกัน'); return s; }
+        const _alloc = a.data.allocations || [];
+        const _sumAlloc = _alloc.reduce((t,x) => t + (Number(x.amount)||0), 0);
+        if(_alloc.length !== a.data.invoiceIds.length || Math.abs(_sumAlloc - (Number(a.data.amount)||0)) > 0.01){ alert('⛔ ยอดแบ่งจ่ายต่อใบ (allocations) ไม่ตรงกับยอดรวม'); return s; }
       }
       // 🆕 PIPV-C: generate pvNumber (ใบสำคัญจ่าย) — ออกทุกครั้งที่ post payment (รวม partial)
       // ถ้า approvalStatus='pending' หรือ status='cancelled' → ยังไม่ออก PV
@@ -7164,8 +7174,10 @@ function reducer(s, a){
       if((a.data.approvalStatus || '') === 'approved'){
         const _prev = (s.payments||[]).find(x => x.id === a.data.id);
         if(!_prev || _prev.approvalStatus !== 'approved'){   // เพิ่งเปลี่ยนเป็นอนุมัติ
-          const _b = _blockIfPendingRtv(s, a.data.invId || a.data.invoiceId);
-          if(_b) return _b;
+          for(const _iid of (a.data.invId ? [a.data.invId] : (a.data.invoiceIds || [a.data.invoiceId]))){   // 🆕 PV-GROUP: ทุกใบในคำขอรวม
+            const _b = _iid ? _blockIfPendingRtv(s, _iid) : null;
+            if(_b) return _b;
+          }
           // 🆕 ACCT-V2 UAT (บัญชี): วันจ่ายจริงต้องไม่อยู่ในงวดที่ปิดแล้ว/อนาคตเกินกำหนด (backstop — modal เช็คก่อนแล้ว)
           const _dl = _checkDateLock(s, a.data.payDate || a.data.date, 'อนุมัติจ่าย'); if(_dl) return _dl;
         }
@@ -7223,11 +7235,79 @@ function reducer(s, a){
 
     // 🗑️ VOID INV — ยกเลิกใบตั้งหนี้ (ไม่ลบ — เก็บ audit) + reverse JE + ปลด GR
     // a.data: { invId, reason, by }
+    // 🆕 ACCT-V2 WHT-EDIT: แก้ WHT ของใบตั้งหนี้ที่ยังไม่จ่าย (บรรทัด/อัตรา/แบบนำส่ง) — คำนวณ whtAmount/netPayable ใหม่ + JE ส่วนต่าง 2100↔2130 + ออกใบ 50ทวิ ใหม่ (ใบเก่า void) + ประวัติ
+    //   a.data = { invId, whtLines:[{category, sub5, rate, base, whtAmount, customLabel, form}], whtForm, splitCert?, reason, by }
+    case 'ADJUST_INV_WHT': {
+      const d = a.data || {};
+      const inv = (s.invoices||[]).find(i => i.id === d.invId);
+      if(!inv){ alert('ไม่พบใบตั้งหนี้'); return s; }
+      if(inv.voided){ alert('ใบตั้งหนี้นี้ยกเลิกไปแล้ว'); return s; }
+      if(inv._migrated === true || inv.createdBy === 'migration'){ alert('⛔ PI นำเข้าจาก Ecount — ยื่น ภ.ง.ด. ในระบบเดิมแล้ว แก้ WHT ทางนี้ไม่ได้'); return s; }
+      if((inv.paidAmount||0) > 0 || ['paid','partial'].includes(inv.paymentStatus)){ alert('⛔ ใบนี้จ่ายไปแล้ว — แก้ WHT ทางนี้ไม่ได้ (ใช้ 🧾 เพิ่ม WHT ย้อนหลัง หรือยกเลิก PV ก่อน)'); return s; }
+      if((s.payments||[]).some(p => (p.invId === inv.id || (p.invoiceIds||[]).includes(inv.id)) && p.approvalStatus === 'pending')){ alert('⛔ มีคำขอจ่ายค้างอยู่ — ยกเลิกคำขอจ่ายก่อน'); return s; }
+      if(!String(d.reason||'').trim()){ alert('ใส่เหตุผลที่แก้ WHT'); return s; }
+      const jeDate = getToday();
+      const locked = _checkDateLock(s, jeDate, 'แก้ WHT ใบตั้งหนี้'); if(locked) return locked;
+      // งวด ภ.ง.ด. ของใบ (เดือนที่ตั้งหนี้) ยื่นแล้ว (period lock) → ห้ามแก้เงียบ ๆ
+      if(_rtvPeriodLocked(s, inv.invDate)){ alert('⛔ งวดภาษีของใบนี้ (' + String(inv.invDate||'').slice(0,7) + ') ปิด/ยื่น ภ.ง.ด. แล้ว — ให้ admin ปลดล็อกงวดแล้วยื่นเพิ่มเติม'); return s; }
+      const lines = (d.whtLines||[]).map(l => ({ category:l.category||'00017', sub5:l.sub5||null, rate:Number(l.rate)||0, base:Number(l.base)||0,
+        whtAmount:Number(Number(l.whtAmount||0).toFixed(2)), customLabel:l.customLabel||'', form:l.form||d.whtForm||inv.whtForm||'53' })).filter(l => l.whtAmount > 0 || l.base > 0);
+      const amount = Number(inv.amount)||0;
+      const sumBase = lines.reduce((t,l) => t + l.base, 0);
+      const newWht = Number(lines.reduce((t,l) => t + l.whtAmount, 0).toFixed(2));
+      if(sumBase > amount + 0.01){ alert('⛔ รวมฐาน WHT (' + sumBase.toLocaleString('th-TH') + ') เกินยอดใบ (' + amount.toLocaleString('th-TH') + ')'); return s; }
+      if(newWht > amount + 0.01){ alert('⛔ ยอดหัก WHT รวมเกินยอดใบก่อน VAT'); return s; }
+      const oldWht = Number(inv.whtAmount)||0;
+      const delta = Number((newWht - oldWht).toFixed(2));
+      const now = Date.now();
+      let journalEntries = s.journalEntries || [];
+      let seqJe = ((s.seq && s.seq.je) || 0) + 1;   // ตรงกับ ADD_JE (seq.je = เลขล่าสุดที่ใช้)
+      let seqUsed = false;
+      if(Math.abs(delta) >= 0.005){
+        const ap = _acc(s, '2100') || (() => { const x = (s.chartOfAccounts||[]).find(y => y.type === 'liability' && String(y.name||'').includes('เจ้าหนี้')); return x ? { accountId:x.id, accountCode:x.code, account:x.code, accountName:x.name } : null; })();
+        const wh = _acc(s, '2130') || (() => { const x = (s.chartOfAccounts||[]).find(y => y.type === 'liability' && String(y.name||'').includes('หัก')); return x ? { accountId:x.id, accountCode:x.code, account:x.code, accountName:x.name } : null; })();
+        if(!ap || !wh){ alert('⚠️ ไม่พบบัญชีเจ้าหนี้ (2100) / ภาษีหัก ณ ที่จ่ายค้างนำส่ง (2130) ในผังบัญชี'); return s; }
+        const amt = Math.abs(delta);
+        const jeLines = delta > 0
+          ? [{ ...ap, debit:amt, credit:0, description:'ลดเจ้าหนี้ — แก้ WHT ' + (inv.invNumber||''), branchId: inv.branch || s.currentBranch },
+             { ...wh, debit:0, credit:amt, description:'เพิ่มภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber||'') }]
+          : [{ ...wh, debit:amt, credit:0, description:'ลดภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber||'') },
+             { ...ap, debit:0, credit:amt, description:'เพิ่มเจ้าหนี้ — แก้ WHT ' + (inv.invNumber||''), branchId: inv.branch || s.currentBranch }];
+        const dj = new Date(jeDate);
+        journalEntries = [...journalEntries, { id:'je_wht_'+now.toString(36)+Math.random().toString(36).slice(2,5),
+          jeNumber:`JE-${dj.getFullYear()}-${String(dj.getMonth()+1).padStart(2,'0')}-${String(seqJe).padStart(4,'0')}`, date: jeDate,
+          description:`แก้ WHT ${inv.invNumber||''}: ${oldWht.toLocaleString('th-TH')} → ${newWht.toLocaleString('th-TH')} — ${String(d.reason).trim()}`,
+          source:'inv', sourceId: inv.id, sourceRef: inv.invNumber, refType:'wht_adjust', branchId: inv.branch || s.currentBranch,
+          lines: jeLines, totalDebit: amt, totalCredit: amt, status:'posted', createdBy:d.by, postedBy:d.by, createdAt: now, postedAt: now }];
+        seqUsed = true;
+      }
+      // ใบ 50ทวิ: ใบเก่า void (เก็บ trace) → ออกชุดใหม่จากบรรทัดใหม่ (ใช้ buildWHTCerts ของ core เหมือนตอนตั้งหนี้)
+      const build = global.ERP.buildWHTCerts;
+      const oldCerts = (inv.whtCertificates||[]).map(c => c.voided ? c : ({ ...c, voided:true, voidedAt: now, voidedBy: d.by, voidReason:'แก้ WHT — ออกใบใหม่' }));
+      const newCerts = (typeof build === 'function' && newWht > 0) ? build(lines.filter(l => l.whtAmount > 0), d.whtForm || inv.whtForm || '53', { splitPerLine: !!d.splitCert, state: s }) : [];
+      // เลขที่ใบ 50ทวิ บนใบตั้งหนี้ = เลขของใบใหม่ (ใบเก่า void แล้ว — รายงานที่อ่าน inv.whtNumber ต้องไม่โชว์เลขที่ยกเลิก)
+      const whtNumber = (newCerts[0] && newCerts[0].certNumber) || (newWht > 0 ? (inv.whtNumber || (typeof global.ERP.genWHNumber === 'function' ? global.ERP.genWHNumber(s) : '')) : '');
+      const invNext = { ...inv,
+        whtLines: lines, whtForm: d.whtForm || inv.whtForm || '53', whtAmount: newWht,
+        whtRate: amount > 0 ? Number((newWht / amount * 100).toFixed(4)) : 0,
+        netPayable: Number(((Number(inv.netPayable)||0) + oldWht - newWht).toFixed(2)),
+        whtCertificates: [...oldCerts, ...newCerts], whtNumber,
+        whtAdjustHistory: [...(inv.whtAdjustHistory||[]), { ts: now, by: d.by, reason: String(d.reason).trim(), prevWht: oldWht, newWht, prevLines: inv.whtLines || [], prevForm: inv.whtForm || null }],
+      };
+      const al = { id:'al_'+now.toString(36)+Math.random().toString(36).slice(2,5), ts: now, type:'inv_wht_adjust', by: d.by, entityId: inv.id, entityRef: inv.invNumber,
+        amount: Math.abs(delta), note: `WHT ${oldWht} → ${newWht} · ${String(d.reason).trim()}` };
+      return { ...s, invoices: (s.invoices||[]).map(i => i.id === inv.id ? invNext : i), journalEntries, seq: seqUsed ? { ...(s.seq||{}), je: seqJe } : s.seq, auditLog: [...(s.auditLog||[]), al] };
+    }
     case 'VOID_INV': {
       const { invId, reason, by } = a.data;
       const inv = (s.invoices||[]).find(i => i.id === invId);
       if(!inv) return s;
       if(inv.voided) { alert('INV นี้ยกเลิกไปแล้ว'); return s; }
+      // 🆕 PV-GROUP: ใบนี้อยู่ใน PV รวมหลายใบที่จ่ายแล้ว → ต้องยกเลิก PV รวมทั้งใบก่อน (chain reverse ต่อใบเดียวจะทำให้ PV กับ JE ไม่ตรง)
+      {
+        const _grp = (s.payments||[]).find(p => !p.invId && (p.invoiceIds||[]).length > 1 && (p.invoiceIds||[]).includes(invId) && p.approvalStatus === 'approved' && !p.reversed);
+        if(_grp){ alert('⛔ ใบนี้ถูกจ่ายรวมใน ' + (_grp.pvNumber||'PV') + ' กับใบอื่น — ให้ยกเลิก PV รวมนั้นก่อน (✅ รายการที่จ่ายแล้ว → 🔄 ยกเลิก) แล้วค่อยยกเลิกใบตั้งหนี้'); return s; }
+      }
       // 🆕 FX-4: period lock check
       const locked = _checkDateLock(s, inv.invDate, 'ยกเลิก INV');
       if(locked) return locked;
@@ -7309,7 +7389,7 @@ function reducer(s, a){
       // 🆕 Chain reverse: ล้างคำขอจ่าย pending + reverse payment ที่ approved/posted
       // 1. ลบ pending pay request ที่ผูก INV นี้ (กันถูก approve หลัง void)
       let payments = (s.payments||[]).filter(p =>
-        !(p.invId === invId && p.approvalStatus === 'pending'));
+        !((p.invId === invId || (!p.invId && (p.invoiceIds||[]).includes(invId))) && p.approvalStatus === 'pending'));   // 🆕 PV-GROUP: คำขอรวมที่มีใบนี้ก็ยกเลิกทั้งคำขอ
       // 2. reverse approved/posted payment ที่ผูก INV นี้ (mark reversed + คืน bank/เงินสดย่อย + reverse JE)
       let bankAccounts = s.bankAccounts || [];
       let pettyTxnsV = s.pettyTxns || [];   // 🆕 ACCT-V2
@@ -12723,26 +12803,28 @@ function executeApprovedAction(req, state, dispatch, user){
     case 'approve_payment': {
       // payload: { payId, bankId, slip }
       const pay = state.payments.find(x => x.id === p.payId);
-      const inv = pay ? state.invoices.find(i => i.id === pay.invId) : null;
-      if(!pay || !inv){ alert('⛔ ไม่พบรายการจ่าย/บิลที่อ้างถึง'); return false; }
-      // 🆕 กันจ่ายเกิน ณ เวลาอนุมัติ (คำขอ ≥100k ค้างนาน ยอดอาจลดจากใบลดหนี้)
-      {
-        const _remain = Number(((inv.netPayable||0) - (inv.paidAmount||0)).toFixed(2));
-        if(Number(pay.amount) > _remain + 0.01){
-          alert('⛔ จ่ายไม่ได้ — ' + (inv.invNumber||'') + ' ขอจ่ายเกินยอดค้าง (คงเหลือ ' + _remain.toLocaleString('th-TH') + ')');
+      // 🆕 PV-GROUP: คำขอรวมหลาย PI (invoiceIds[] + allocations[]) → ตรวจ/ตัดยอดทุกใบตาม allocation · ใบเดี่ยว = allocation เดียว
+      const _allocs = pay ? (pay.invId ? [{ invoiceId: pay.invId, amount: Number(pay.amount)||0 }]
+        : ((pay.allocations && pay.allocations.length) ? pay.allocations : (pay.invoiceIds||[]).map(id => ({ invoiceId:id, amount:0 })))) : [];
+      const _invs = _allocs.map(al => ({ al, inv: state.invoices.find(i => i.id === al.invoiceId) }));
+      const inv = _invs.length ? _invs[0].inv : null;
+      if(!pay || !inv || _invs.some(x => !x.inv)){ alert('⛔ ไม่พบรายการจ่าย/บิลที่อ้างถึง'); return false; }
+      for(const { al, inv: iv } of _invs){
+        // 🆕 กันจ่ายเกิน ณ เวลาอนุมัติ (คำขอ ≥100k ค้างนาน ยอดอาจลดจากใบลดหนี้)
+        const _remain = Number(((iv.netPayable||0) - (iv.paidAmount||0)).toFixed(2));
+        if(Number(al.amount) > _remain + 0.01){
+          alert('⛔ จ่ายไม่ได้ — ' + (iv.invNumber||'') + ' ขอจ่ายเกินยอดค้าง (คงเหลือ ' + _remain.toLocaleString('th-TH') + ')');
           return false;
         }
-      }
-      // 🆕 หยุดก่อนตัดเงิน — executor นี้จ่ายจริงตอนอนุมัติครบ step (ยอด ≥100k)
-      {
-        const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, pay.invId || pay.invoiceId);
+        // 🆕 หยุดก่อนตัดเงิน — executor นี้จ่ายจริงตอนอนุมัติครบ step (ยอด ≥100k)
+        const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, iv.id);
         if(_pr.length > 0){
-          alert('⛔ จ่ายไม่ได้ — บิล ' + (inv.invNumber||'') + ' มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\nให้จัดซื้อปิดเคสของคืนก่อน');
+          alert('⛔ จ่ายไม่ได้ — บิล ' + (iv.invNumber||'') + ' มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\nให้จัดซื้อปิดเคสของคืนก่อน');
           return false;
         }
         // 🆕 VAT-FIX: มีคำขอปรับ VAT/แก้ไขใบค้างอยู่ → ยอดจะเปลี่ยน ห้ามจ่ายทับ
-        const _pc = global.ERP.pendingInvChangeReq && global.ERP.pendingInvChangeReq(state, inv.id);
-        if(_pc){ alert('⛔ จ่ายไม่ได้ — บิล ' + (inv.invNumber||'') + ' มีคำขอ' + (_pc.action === 'adjust_inv_vat' ? 'ปรับ VAT' : 'แก้ไข') + 'ค้างอยู่ (ขอโดย ' + (_pc.requestedBy||'-') + ')\nรอผลอนุมัติคำขอนั้นก่อน แล้วขอจ่ายใหม่'); return false; }
+        const _pc = global.ERP.pendingInvChangeReq && global.ERP.pendingInvChangeReq(state, iv.id);
+        if(_pc){ alert('⛔ จ่ายไม่ได้ — บิล ' + (iv.invNumber||'') + ' มีคำขอ' + (_pc.action === 'adjust_inv_vat' ? 'ปรับ VAT' : 'แก้ไข') + 'ค้างอยู่ (ขอโดย ' + (_pc.requestedBy||'-') + ')\nรอผลอนุมัติคำขอนั้นก่อน แล้วขอจ่ายใหม่'); return false; }
       }
       const bank = p.bankId ? state.bankAccounts.find(b => b.id === p.bankId) : null;
       const purchaseMod = global.ERP.MODULES.purchase;
@@ -12757,13 +12839,16 @@ function executeApprovedAction(req, state, dispatch, user){
       if(bank && pay.method === 'transfer'){
         dispatch({ type:'UPDATE_BANK', data:{ ...bank, balance:(bank.balance||0) - Number(pay.amount) }});
       }
-      const newPaid = (inv.paidAmount||0) + Number(pay.amount);
-      const newStatus = newPaid >= (inv.netPayable||0) - 0.01 ? 'paid' : 'partial';
-      dispatch({ type:'UPDATE_INV', data:{ ...inv, paidAmount:newPaid, paymentStatus:newStatus }});
+      for(const { al, inv: iv } of _invs){
+        const newPaid = (iv.paidAmount||0) + Number(al.amount);
+        const newStatus = newPaid >= (iv.netPayable||0) - 0.01 ? 'paid' : 'partial';
+        dispatch({ type:'UPDATE_INV', data:{ ...iv, paidAmount:newPaid, paymentStatus:newStatus }});
+      }
+      // JE จ่าย 1 ใบต่อ PV (autoPostPayment รองรับ invoiceIds/allocations — บรรยายรวมทุกใบ)
       if(purchaseMod?.autoPostPayment) purchaseMod.autoPostPayment(_approvedPay, inv, bank, state, dispatch, user);
       dispatch({ type:'APPEND_AUDIT_LOG', data:{ type:'payment_approve', by:user.username,
-        entityId:pay.id, entityRef:inv.invNumber, amount:pay.amount||0,
-        note:`อนุมัติจ่าย INV ${inv.invNumber}` }});
+        entityId:pay.id, entityRef:_invs.map(x => x.inv.invNumber).join(', '), amount:pay.amount||0,
+        note:`อนุมัติจ่าย ${_invs.length > 1 ? 'PV รวม ' + _invs.length + ' ใบ: ' : 'INV '}${_invs.map(x => x.inv.invNumber).join(', ')}` }});
       break;
     }
     case 'delete_po': {
@@ -40964,10 +41049,32 @@ function _payDatesSummary(pays, state){
   return { nextPayDate, nextPayBank, nextPayOverdue: !!nextPayDate && nextPayDate < today, pendingNoDate,
     lastPaidDate, lastPaidBank, lastPaidPv, hasPendingApproval };
 }
+// 🆕 PV-GROUP: payment "วางบิล" รวมหลาย PI ของ supplier เดียว (invId null · invoiceIds[] > 1 · allocations[{invoiceId, amount}])
+//   ยอดของ "ใบนี้" ต้องอ่านจาก allocation ไม่ใช่ pay.amount (ยอดรวมทั้ง PV) · ใบเดี่ยว/ข้อมูลเก่าไม่มี allocation → pay.amount
+const _payInvIds = (p) => (p && p.invoiceIds && p.invoiceIds.length) ? p.invoiceIds : (p && p.invId ? [p.invId] : []);
+const _isGroupPay = (p) => !!p && !p.invId && (p.invoiceIds||[]).length > 1;
+const _payAllocFor = (p, invId) => {
+  const al = (p && p.allocations || []).find(a => a && a.invoiceId === invId);
+  return al ? (Number(al.amount)||0) : (Number(p && p.amount)||0);
+};
+// ป้าย "PV รวม n ใบ" (title = รายชื่อ PI สมาชิก + ยอดรวม) — ใช้ในตาราง payment ของ INV/PO/slip viewer
+function GroupPayTag({ pay, state, size }){
+  if(!_isGroupPay(pay)) return null;
+  const ids = _payInvIds(pay);
+  const names = ids.map(id => ((state.invoices||[]).find(i => i.id === id)||{}).invNumber || id);
+  return h('span', { title: `PV รวม ${ids.length} ใบ · ยอดรวม ${fmtCur(pay.amount||0)}\n${names.join(', ')}`,
+    className: cls('inline-block rounded bg-purple-100 text-purple-800 font-medium whitespace-nowrap', size === 'xs' ? 'px-1 py-0.5 text-[10px]' : 'px-1.5 py-0.5 text-xs') },
+    `PV รวม ${ids.length} ใบ`);
+}
 // 🆕 ACCT-V2 G: สรุปวันจ่ายของ INV ใบเดียว (แถว INV list / GR detail) — shape เดียวกับ getPOPaymentSummary (ใช้กับ PayDateTag ได้)
+//   🆕 PV-GROUP: payRows ต่อใบ — amount = ส่วนของใบนี้ (allocation) · groupCount/totalAmount บอกว่าเป็น PV รวม
 function getINVPaySummary(inv, state){
   const pays = (state.payments||[]).filter(p => p.invId === inv.id || (p.invoiceIds||[]).includes(inv.id));
-  return { invs:[inv], ..._payDatesSummary(pays, state) };
+  const eff = global.ERP.payEffectiveDate || (p => p.payDate || p.date || '');
+  const payRows = pays.filter(p => !p.voided && (p.status||'posted') !== 'cancelled').map(p => ({
+    id:p.id, status:p.approvalStatus || 'approved', reversed:!!p.reversed, date: eff(p) || '', pv: p.pvNumber || '',
+    amount: _payAllocFor(p, inv.id), totalAmount: Number(p.amount)||0, groupCount: _isGroupPay(p) ? _payInvIds(p).length : 1 }));
+  return { invs:[inv], ..._payDatesSummary(pays, state), payRows };
 }
 function getPOPaymentSummary(po, state){
   const grIdSet = new Set((state.grs||[]).filter(g => g.poId === po.id).map(g => g.id));
@@ -41004,11 +41111,15 @@ function getPOPaymentSummary(po, state){
     .map(p => {
       const st = p.approvalStatus || 'approved';
       const d = eff(p) || '';
-      const ids = (p.invoiceIds && p.invoiceIds.length) ? p.invoiceIds : (p.invId ? [p.invId] : []);
+      const ids = _payInvIds(p);
+      // 🆕 PV-GROUP: PV รวมหลายใบ → จำนวนของแถว = Σ allocation เฉพาะ PI ที่อยู่ใน PO นี้ (ไม่ใช่ยอดรวมทั้ง PV ที่อาจมีใบของ PO อื่น) · ไม่มี allocation (ข้อมูลเก่า) → pay.amount
+      const grouped = _isGroupPay(p);
+      const myIds = ids.filter(id => invIdSet.has(id));
+      const amount = (grouped && (p.allocations||[]).length) ? Number(myIds.reduce((t,id) => t + _payAllocFor(p, id), 0).toFixed(2)) : (Number(p.amount)||0);
       return { id:p.id, status:st, reversed:!!p.reversed, date:d, overdue: st === 'pending' && !!d && d < today,
         bank: p.method === 'petty_cash' ? 'เงินสดย่อย' : (p.bankName || (banks.find(b => b.id === p.bankId)||{}).name || (st === 'pending' ? '— ผู้อนุมัติเลือก —' : (PAY_METHODS.find(m => m.v === p.method)||{}).label || '')),
-        amount: Number(p.amount)||0, pv: p.pvNumber || '',
-        invNumbers: ids.filter(id => invIdSet.has(id)).map(id => (invs.find(i => i.id === id)||{}).invNumber || id) };
+        amount, totalAmount: Number(p.amount)||0, groupCount: grouped ? ids.length : 1, pv: p.pvNumber || '',
+        invNumbers: myIds.map(id => (invs.find(i => i.id === id)||{}).invNumber || id) };
     })
     .sort((a,b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1) || (b.date||'').localeCompare(a.date||''));
   return { invs, totalNet, totalPaid, remain, status, slips, ...dates, payRows };
@@ -41157,15 +41268,20 @@ function PaymentSlipViewer({ po, inv, state, onClose }){
             g.pays.map(p => h('div', { key:p.id, className:'border-t pt-2 mt-2 first:border-t-0 first:pt-0 first:mt-0' },
               h('div', { className:'flex justify-between text-sm mb-1' },
                 // 🆕 ACCT-V2 G: approved → วันจ่ายจริง (payDate) · pending → 📅 นัดจ่าย (requestedPayDate)
-                h('span', null,
+                h('span', { className:'inline-flex items-center gap-1 flex-wrap' },
                   p.approvalStatus === 'pending'
                     ? h('span', { className:'px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-xs' }, `📅 นัดจ่าย ${fmtDate(p.requestedPayDate||p.payDate||p.date)}`)
                     : p.approvalStatus === 'rejected'
                     ? h('span', { className:'px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-xs' }, `❌ ปฏิเสธ · ขอ ${fmtDate(p.date)}`)
                     : h('span', { className: cls('px-1.5 py-0.5 rounded text-xs', p.reversed ? 'bg-gray-100 text-gray-600 line-through' : 'bg-green-100 text-green-700') },
-                        `${p.reversed ? '🔄 ยกเลิกแล้ว' : '✅ จ่ายแล้ว'} ${fmtDate(_eff(p))}`, p.method === 'petty_cash' ? ' · เงินสดย่อย' : '')
+                        `${p.reversed ? '🔄 ยกเลิกแล้ว' : '✅ จ่ายแล้ว'} ${fmtDate(_eff(p))}`, p.method === 'petty_cash' ? ' · เงินสดย่อย' : ''),
+                  // 🆕 PV-GROUP: PV รวมหลายใบ → ป้าย + ยอดที่โชว์ = ส่วนของ PI ใบนี้ (allocation) ไม่ใช่ยอดรวมทั้ง PV
+                  h(GroupPayTag, { pay:p, state, size:'xs' }),
+                  p.pvNumber && h('span', { className:'font-mono text-xs text-purple-700' }, p.pvNumber)
                 ),
-                h('span', { className:'font-bold text-green-700' }, fmtCur(p.amount))
+                h('span', { className:'font-bold text-green-700', title: _isGroupPay(p) ? `ส่วนของ ${g.inv.invNumber} · ยอดรวมทั้ง PV ${fmtCur(p.amount||0)}` : '' },
+                  fmtCur(_payAllocFor(p, g.inv.id)),
+                  _isGroupPay(p) && h('span', { className:'ml-1 text-[10px] font-normal text-gray-500' }, `/ รวม ${fmtCur(p.amount||0)}`))
               ),
               h('div', { className:'text-xs text-gray-600 space-y-0.5' },
                 p.bankName && h('div', null, `🏦 ${p.bankName} ${p.bankNumber||''}`),
@@ -43007,7 +43123,10 @@ function PODetailModal({ po:poProp, state, dispatch, user, onClose }){
                 h('th', { className:'px-2 py-1 text-right' }, 'จำนวน'))),
             h('tbody', { className:'divide-y' },
               paySum.payRows.map(r => h('tr', { key:r.id, className: r.reversed ? 'opacity-60 line-through' : '' },
-                h('td', { className:'px-2 py-1 font-mono text-red-700' }, r.invNumbers.join(', ')),
+                // 🆕 PV-GROUP: PV รวมหลายใบ → ป้าย "PV รวม n ใบ" + จำนวน = ส่วนของ PI ใน PO นี้ (title บอกยอดรวมทั้ง PV)
+                h('td', { className:'px-2 py-1 font-mono text-red-700' }, r.invNumbers.join(', '),
+                  (r.groupCount||1) > 1 && h('span', { className:'ml-1 px-1 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-sans font-medium whitespace-nowrap',
+                    title:`PV รวม ${r.groupCount} ใบ · ยอดรวมทั้ง PV ${fmtCur(r.totalAmount||0)}` }, `PV รวม ${r.groupCount} ใบ`)),
                 h('td', { className: cls('px-2 py-1 whitespace-nowrap', r.status === 'pending' && r.overdue && 'text-red-700 font-bold') }, r.date ? fmtDate(r.date) : '—'),
                 h('td', { className:'px-2 py-1' }, r.bank || '—'),
                 h('td', { className:'px-2 py-1' },
@@ -47566,8 +47685,10 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
   const [editWhtCertIdx, setEditWhtCertIdx] = useState(null);  // 🆕 PP-5
   const [showAddWHT, setShowAddWHT] = useState(false);          // 🆕 RW: เพิ่ม WHT ย้อนหลัง
   const [showAdjustVat, setShowAdjustVat] = useState(false);    // 🆕 VAT-FIX: ปรับ VAT ตามใบกำกับ (หลัง PI ยังไม่จ่าย)
+  const [showAdjustWht, setShowAdjustWht] = useState(false);    // 🆕 WHT-EDIT: แก้ WHT หลังตั้งหนี้ (ยังไม่จ่าย) → ADJUST_INV_WHT
   const vatOvList = inv.vatLineOverrides || [];
   const vatAdjList = inv.vatAdjustHistory || [];
+  const whtAdjList = inv.whtAdjustHistory || [];                 // 🆕 WHT-EDIT: ประวัติแก้ WHT (reducer ADJUST_INV_WHT append)
   const hasVatBadge = vatOvList.length > 0 || vatAdjList.length > 0;
   const [poDetail, setPoDetail] = useState(null);
   const [grDetail, setGrDetail] = useState(null);
@@ -47597,6 +47718,13 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
   const rtvTied = _rtvTiedInv(state, inv);
   const hasPendingPay = (state.payments||[]).some(p => (p.invId===inv.id || p.invoiceIds?.includes(inv.id)) && p.approvalStatus==='pending');
   const canChangeInv = !inv.voided && hasPerm(user,'purchase','inv','edit') && (inv.paidAmount||0) === 0 && !hasPendingPay;
+  // 🆕 WHT-EDIT: ปุ่ม ✏️ แก้ WHT — โชว์เมื่อ ยังไม่ยกเลิก · ยังไม่จ่าย (paidAmount 0 + status ไม่ใช่ paid/partial) · ไม่ใช่ PI นำเข้า · มีสิทธิ์แก้ INV
+  //   เหตุที่ใช้ไม่ได้ชั่วคราว (คำขอจ่ายค้าง / งวดปิด) → ปุ่ม disabled + บอกเหตุผล (mirror reducer ADJUST_INV_WHT)
+  const showWhtEdit = !inv.voided && (inv.paidAmount||0) === 0 && !['paid','partial'].includes(inv.paymentStatus) && !isMigratedInv && hasPerm(user,'purchase','inv','edit');
+  const whtEditBlock = hasPendingPay ? 'มีคำขอจ่ายค้างอยู่ — ยกเลิกคำขอจ่ายก่อน'
+    : _periodLocked(state, getToday()) ? `งวด ≤ ${fmtDate(state.settings?.periodLockUntil)} ปิดแล้ว — ลง JE วันนี้ไม่ได้ (ให้ admin ปลด period lock)`
+    : _periodLocked(state, inv.invDate) ? `งวดภาษีของใบนี้ (${String(inv.invDate||'').slice(0,7)}) ปิด/ยื่น ภ.ง.ด. แล้ว — ให้ admin ปลดล็อกงวดแล้วยื่นเพิ่มเติม`
+    : null;
   // เหตุผลที่ปุ่ม 🧾 ปรับ VAT ใช้ไม่ได้ (โชว์ปุ่ม disabled + บอกเหตุผล แทนการซ่อนเงียบ ๆ) · migrate → ซ่อน (สอดคล้องฝั่งบัญชี)
   const vatAdjustBlock = (() => {
     if(rtvTied) return 'ใบนี้มีการคืนของ (RTV) ผูกอยู่ — ปรับ VAT ราย line ไม่ได้ → ให้ supplier ออกใบเพิ่ม/ลดหนี้ แล้วบันทึก CN/DN';
@@ -47645,6 +47773,10 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
         vatAdjList.length > 0 && h('div', { className:'text-xs text-amber-800' },
           h('b', null, '🧾 ปรับ VAT ตามใบกำกับ (หลังตั้งหนี้): '), `${vatAdjList.length} ครั้ง`,
           ` · ล่าสุด ${fmtCur(vatAdjList[vatAdjList.length-1].prevVat||0)} → ${fmtCur(vatAdjList[vatAdjList.length-1].newVat||0)}`),
+        // 🆕 WHT-EDIT: badge แก้ WHT หลังตั้งหนี้ — รายละเอียดอยู่ในกล่อง ✏️ ประวัติแก้ WHT ด้านล่าง
+        whtAdjList.length > 0 && h('div', { className:'text-xs text-rose-800' },
+          h('b', null, '✏️ แก้ WHT หลังตั้งหนี้: '), `${whtAdjList.length} ครั้ง`,
+          ` · ล่าสุด ${fmtCur(whtAdjList[whtAdjList.length-1].prevWht||0)} → ${fmtCur(whtAdjList[whtAdjList.length-1].newWht||0)}`),
         inv.source === 'direct_expense' && h('div', { className:'text-purple-700 font-medium' },
           h('b', null, 'ประเภท: '),
           // 🆕 ACCT-V2: PI ค่าใช้จ่ายที่บรรทัดครอบคลุมหลายกลุ่ม → โชว์ทุกกลุ่มพร้อมยอด · ⛔ ต้องห้าม (จ่ายเงินสดย่อยแบบ non_deductible → reclass 5900 แล้ว)
@@ -47826,9 +47958,20 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
           h('span', null, '- ' + fmtCur(inv.whtAmount||0))
         ),
         // 🆕 PP-5: WHT cert list + edit button (Mode 1: แก้ info)
-        (inv.whtCertificates||[]).filter(c => !c.voided).length > 0 && h('div', { className:'pt-2 mt-1 border-t border-red-200' },
-          h('div', { className:'text-xs font-bold text-red-800 mb-1' }, '📋 ใบหัก ณ ที่จ่าย:'),
-          (inv.whtCertificates||[]).map((c, ci) => c.voided ? null : h('div', { key:ci,
+        // 🆕 WHT-EDIT: ใบที่ถูก void (แก้ WHT ออกใบใหม่ / ยกเลิก) โชว์ขีดฆ่า + เหตุผล — ไม่ซ่อน (ต้องยื่นแก้ ภ.ง.ด. ตามใบเดิม)
+        (inv.whtCertificates||[]).length > 0 && h('div', { className:'pt-2 mt-1 border-t border-red-200' },
+          h('div', { className:'text-xs font-bold text-red-800 mb-1' }, '📋 ใบหัก ณ ที่จ่าย:',
+            (inv.whtCertificates||[]).some(c => c.voided) && h('span', { className:'ml-2 font-normal text-gray-500' },
+              `(ยกเลิกแล้ว ${(inv.whtCertificates||[]).filter(c => c.voided).length} ใบ)`)),
+          (inv.whtCertificates||[]).map((c, ci) => c.voided
+            ? h('div', { key:ci, className:'flex items-center justify-between bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs mb-1 text-gray-500' },
+                h('div', null,
+                  h('span', { className:'font-mono line-through' }, c.certNumber||'(ไม่มีเลข)'),
+                  h('span', { className:'ml-2 line-through' }, 'ภงด.', c.form||'-', ' · ', fmtCur(c.totalAmount != null ? c.totalAmount : (c.whtAmount||0))),
+                  h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, '🗑️ ยกเลิก', c.voidReason ? `: ${c.voidReason}` : '',
+                    c.voidedBy ? ` · ${c.voidedBy}` : '', c.voidedAt ? ` · ${new Date(c.voidedAt).toLocaleDateString('th-TH')}` : '')),
+                h('span', { className:'text-[10px] px-2 py-1 bg-gray-200 text-gray-600 rounded' }, 'ยกเลิกแล้ว'))
+            : h('div', { key:ci,
             className:'flex items-center justify-between bg-red-50 border border-red-200 rounded px-2 py-1 text-xs mb-1' },
             h('div', null,
               h('span', { className:'font-mono font-bold text-red-700' }, c.certNumber||'(ไม่มีเลข)'),
@@ -47880,8 +48023,12 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
                   h('td', { className:'px-2 py-1 text-xs whitespace-nowrap' }, statusCell),
                   h('td', { className:'px-2 py-1 text-xs' }, PAY_METHODS.find(m => m.v === p.method)?.label || p.method || 'โอนเงิน',
                     p.selfApproved && h('span', { className:'ml-1 text-[10px] text-amber-700' }, '(self)')),
-                  h('td', { className:'px-2 py-1 text-xs font-mono' }, p.pvNumber ? h('span', { className:'text-purple-700' }, p.pvNumber) : null, p.pvNumber && p.ref ? ' · ' : '', p.ref || (p.pvNumber ? '' : '-')),
-                  h('td', { className:'px-2 py-1 text-right font-medium' }, fmtCur(p.amount||0)));
+                  // 🆕 PV-GROUP: PV รวมหลายใบ → ป้าย "PV รวม n ใบ" (title = รายชื่อ PI) + จำนวน = ส่วนของใบนี้ (allocation) ไม่ใช่ยอดรวม PV
+                  h('td', { className:'px-2 py-1 text-xs font-mono' }, p.pvNumber ? h('span', { className:'text-purple-700' }, p.pvNumber) : null, p.pvNumber && p.ref ? ' · ' : '', p.ref || (p.pvNumber ? '' : '-'),
+                    _isGroupPay(p) && h('span', { className:'ml-1 font-sans' }, h(GroupPayTag, { pay:p, state, size:'xs' }))),
+                  h('td', { className:'px-2 py-1 text-right font-medium', title: _isGroupPay(p) ? `ส่วนของ ${inv.invNumber} · ยอดรวมทั้ง PV ${fmtCur(p.amount||0)}` : '' },
+                    fmtCur(_payAllocFor(p, inv.id)),
+                    _isGroupPay(p) && h('div', { className:'text-[10px] font-normal text-gray-500' }, `รวม PV ${fmtCur(p.amount||0)}`)));
               })
             )
           )
@@ -47961,6 +48108,26 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
         h('div', { className:'text-[11px] text-gray-600 mt-1' },
           'ฐาน VAT ', fmtCur(inv.vatableBase||0), ' · ยกเว้น ', fmtCur(inv.exemptBase != null ? inv.exemptBase : Math.max(0, (inv.amount||0) - (inv.vatableBase||0))),
           ' · VAT ', fmtCur(inv.vat||0))),
+
+      // 🆕 WHT-EDIT: ประวัติแก้ WHT หลังตั้งหนี้ (reducer ADJUST_INV_WHT) — เหมือนกล่อง vatAdjustHistory
+      whtAdjList.length > 0 && h('div', { className:'bg-rose-50 border-2 border-rose-300 rounded p-3' },
+        h('div', { className:'font-bold text-rose-900 mb-1' }, `✏️ ประวัติแก้ WHT (${whtAdjList.length} ครั้ง — JE ส่วนต่าง 2100 ↔ 2130 · ใบ 50ทวิ เดิมยกเลิกและออกใหม่)`),
+        h('div', { className:'text-xs text-rose-900 space-y-1' },
+          whtAdjList.map((a, i) => {
+            const dlt = Number(((a.newWht||0) - (a.prevWht||0)).toFixed(2));
+            const je = (state.journalEntries||[]).find(j => j.source === 'inv' && j.sourceId === inv.id && j.refType === 'wht_adjust' && Math.abs((j.createdAt||0) - (a.ts||0)) < 5000);
+            return h('div', { key:i, className:'bg-white rounded p-1.5 border border-rose-200' },
+              h('div', { className:'font-mono text-[11px]' },
+                `#${i+1} WHT ${fmtCur(a.prevWht||0)} → ${fmtCur(a.newWht||0)} (${dlt > 0 ? '+' : ''}${fmtCur(dlt)})`,
+                a.prevForm && ` · ภงด.${a.prevForm}${inv.whtForm && inv.whtForm !== a.prevForm && i === whtAdjList.length - 1 ? ' → ' + inv.whtForm : ''}`,
+                je && h('span', { className:'ml-2 text-blue-700' }, je.jeNumber),
+                Math.abs(dlt) < 0.005 && h('span', { className:'ml-2 text-gray-500' }, '(ยอดเท่าเดิม — ออกใบ 50ทวิ ใหม่)')),
+              (a.prevLines||[]).length > 0 && h('div', { className:'text-[10px] text-gray-600' },
+                'บรรทัดเดิม: ', (a.prevLines||[]).map((l, j) => h('span', { key:j, className:'mr-2' },
+                  `• ${(global.ERP.WHT_CATEGORIES||[]).find(c => c.code === l.category)?.label || l.customLabel || l.category || '-'} ${l.rate||0}% ฐาน ${fmtCur(l.base||0)} = ${fmtCur(l.whtAmount||0)}`))),
+              h('div', { className:'text-gray-600 text-[10px]' },
+                '💬 ', a.reason || '-', ' · 👤 ', a.by || '-', a.ts && ` · ${new Date(a.ts).toLocaleString('th-TH')}`));
+          }))),
 
       // 📜 Edit history
       Array.isArray(inv.editHistory) && inv.editHistory.length > 0 && h('details', { className:'bg-amber-50 border border-amber-200 rounded p-2' },
@@ -48131,6 +48298,12 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
               alert('⚠️ ไม่พบ approval rule ของ request_po_reopen — ตั้งค่าใน Settings → Approval Rules ก่อน');
             }
           }, '↺ ขอแก้ PO'),
+        // 🆕 WHT-EDIT: แก้ WHT หลังตั้งหนี้ (ยังไม่จ่าย) — บรรทัด/อัตรา/แบบนำส่ง · JE ส่วนต่าง 2100↔2130 · ใบ 50ทวิ เดิม void + ออกใหม่ (reducer ADJUST_INV_WHT)
+        showWhtEdit && h('span', { title: whtEditBlock || 'แก้บรรทัด/อัตรา/แบบนำส่ง WHT ของใบนี้ — ระบบลง JE ส่วนต่างเจ้าหนี้ ↔ ภาษีหัก ณ ที่จ่ายค้างนำส่ง และออกใบ 50ทวิ ใหม่' },
+          h(Button, { variant:'warning', disabled: !!whtEditBlock,
+            onClick:()=>{ if(!global.ERP.restoreMinimized || !global.ERP.restoreMinimized('inv:wht:'+inv.id)) setShowAdjustWht(true); } },
+            '✏️ แก้ WHT')),
+        showWhtEdit && whtEditBlock && h('div', { className:'basis-full text-[11px] text-gray-600 -mt-1' }, '✏️ แก้ WHT ใช้ไม่ได้: ', whtEditBlock),
         (inv.whtAmount||0) > 0 && h(Button, { variant:'secondary',
           onClick:()=>printWHTCert(inv, state) }, '🖨️ พิมพ์ใบ WHT'),
         // 🆕 RW: เพิ่ม WHT ย้อนหลัง — ทุก status รวม paid
@@ -48147,6 +48320,9 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
     // 🆕 VAT-FIX: จอปรับ VAT ตามใบกำกับ (key + docKey ตามกติกา modal ที่รับเอกสาร)
     showAdjustVat && h(AdjustINVVatModal, { key:'vat_'+inv.id, inv, state, dispatch, user,
       onClose:()=>setShowAdjustVat(false), onDone:onClose }),
+    // 🆕 WHT-EDIT: จอแก้ WHT — ปิดแล้วหน้าต่าง INV นี้ (อ่าน inv สดจาก state) โชว์ใบ 50ทวิ ชุดใหม่ + ประวัติทันที
+    showAdjustWht && h(AdjustINVWhtModal, { key:'wht_'+inv.id, inv, state, dispatch, user,
+      onClose:()=>setShowAdjustWht(false), onDone:()=>setShowAdjustWht(false) }),
     showAddWHT && h(AddWHTRetroModal, { inv, state, dispatch, user,
       onClose:()=>setShowAddWHT(false), onDone:onClose }),
     // 🆕 PP-5: Edit WHT cert info modal (Mode 1)
@@ -49053,6 +49229,205 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
 }
 
 // ================================================================
+// 🆕 WHT-EDIT: แก้ WHT หลังตั้งหนี้ (ใบยังไม่จ่าย) — reducer ADJUST_INV_WHT (01-state)
+//   • ใช้เมื่อ ตั้งหนี้แล้วพบว่า อัตรา/ประเภท/ฐาน/แบบนำส่ง WHT ผิด (เช่น 3% → 5% ค่าเช่า) ก่อนจ่ายเงิน
+//   • reuse WHTLinesEditor (บรรทัดเดียวกับตอนตั้งหนี้) + radio แบบนำส่ง ภ.ง.ด.3/53 (propagate ไปบรรทัดที่ไม่ได้เลือกเอง เหมือน DirectExpenseModal)
+//   • preview สด: WHT เดิม → ใหม่ · ต้องจ่ายสุทธิใหม่ · JE ส่วนต่างที่จะลง (DR/CR 2100 เจ้าหนี้ ↔ 2130 WHT ค้างนำส่ง)
+//   • guard mirror reducer (ยกเลิก / นำเข้า / จ่ายแล้ว / คำขอจ่ายค้าง / งวดปิด / Σฐาน ≤ ยอดใบ / เหตุผล) — บล็อกก่อน dispatch ด้วยข้อความเดียวกัน
+//   • submit → dispatch ADJUST_INV_WHT { invId, whtLines, whtForm, splitCert, reason, by } → ปิดจอ · INVDetailModal (อ่าน inv สด) โชว์ใบ 50ทวิ ชุดใหม่ + ประวัติ
+// ================================================================
+function AdjustINVWhtModal({ inv:invProp, state, dispatch, user, onClose, onDone }){
+  const { WHT_CATEGORIES } = global.ERP;
+  const inv = (state.invoices||[]).find(i => i.id === invProp.id) || invProp;
+  const r2 = v => Number((Number(v)||0).toFixed(2));
+  const amount = Number(inv.amount)||0;
+  const vat = Number(inv.vat)||0;
+  const oldWht = r2(inv.whtAmount||0);
+  const oldForm = inv.whtForm || ((inv.whtLines||[]).find(l => l.form)||{}).form || '53';
+  // บรรทัดตั้งต้น = inv.whtLines (schema ใหม่) · legacy whtCategory/whtAmount → 1 บรรทัด · ไม่มีเลย → เริ่มว่าง (เพิ่มเองได้)
+  const seedLines = () => {
+    let src = Array.isArray(inv.whtLines) ? inv.whtLines : [];
+    if(src.length === 0 && inv.whtCategory && (inv.whtAmount||0) > 0){
+      src = [{ category: inv.whtCategory, sub5: inv.whtSub5 || null, rate: Number(inv.whtRate)||0, base: amount, whtAmount: Number(inv.whtAmount)||0, form: oldForm }];
+    }
+    return src.map((l, i) => {
+      const base = Number(l.base)||0, rate = Number(l.rate)||0, wa = r2(l.whtAmount||0);
+      const calc = r2(base * rate / 100);
+      return { id: 'wl_' + i + '_' + Date.now(), category: l.category || '00017', sub5: l.sub5 || null, rate, base, whtAmount: wa,
+        whtOverride: Math.abs(calc - wa) > 0.005 ? wa : null, customLabel: l.customLabel || '', form: l.form || oldForm,
+        _formManual: !!l.form && l.form !== oldForm };
+    });
+  };
+  const [whtLines, setWhtLines] = useState(seedLines);
+  const [whtForm, setWhtForm] = useState(oldForm === '3' ? '3' : '53');
+  const [splitCert, setSplitCert] = useState(!!((inv.whtCertificates||[]).find(c => !c.voided) || {}).splitCert);
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  // radio แบบนำส่ง (หัว) → กำหนดทุกบรรทัดที่ user ไม่ได้เลือก ภงด. รายบรรทัดเอง (เหมือน DirectExpenseModal.pickWhtForm)
+  const pickWhtForm = (f) => { setWhtForm(f); setWhtLines(prev => prev.map(l => (l._formManual || l.form === f) ? l : { ...l, form:f })); };
+  const addWHT = () => {
+    const usedBase = whtLines.reduce((t,l) => t + (Number(l.base)||0), 0);
+    const newBase = whtLines.length === 0 ? amount : Math.max(0, amount - usedBase);
+    setWhtLines(prev => [...prev, { id: 'wl_new_' + Date.now() + Math.random(), category:'00017', sub5:'service', rate:3,
+      base: newBase, whtAmount: r2(newBase * 3 / 100), whtOverride:null, form: whtForm, customLabel:'' }]);
+  };
+  const updateWHTLine = (idx, patch) => setWhtLines(whtLines.map((l,i) => i === idx ? { ...l, ...patch, ...(patch && 'form' in patch ? { _formManual:true } : {}) } : l));
+  const removeWHT = (idx) => setWhtLines(whtLines.filter((_,i) => i !== idx));
+  const resolveWHT = (line) => (line.whtOverride !== null && line.whtOverride !== undefined) ? Number(line.whtOverride) : (Number(line.base)||0) * (Number(line.rate)||0) / 100;
+
+  // ---- คำนวณ preview (สูตรเดียวกับ reducer) ----
+  const validLines = whtLines.filter(l => (Number(l.whtAmount)||0) > 0 || (Number(l.base)||0) > 0);
+  const newWht = r2(validLines.reduce((t,l) => t + r2(l.whtAmount), 0));
+  const sumBase = r2(validLines.reduce((t,l) => t + (Number(l.base)||0), 0));
+  const delta = r2(newWht - oldWht);
+  const newNet = r2((Number(inv.netPayable)||0) + oldWht - newWht);
+  const overBase = sumBase > amount + 0.01;
+  const overWht = newWht > amount + 0.01;
+  const missingCat = validLines.some(l => (Number(l.whtAmount)||0) > 0 && !l.category);
+  const missingCustom = validLines.some(l => l.category === '00018' && (Number(l.whtAmount)||0) > 0 && !String(l.customLabel||'').trim());
+  // อะไรเปลี่ยนบ้าง (ยอด / แบบนำส่ง / บรรทัด) — ไม่เปลี่ยนเลย → ไม่ต้องบันทึก
+  const norm = (ls, f) => JSON.stringify((ls||[]).map(l => [l.category||'00017', l.sub5||null, Number(l.rate)||0, r2(l.base), r2(l.whtAmount), String(l.customLabel||''), l.form || f || '53']));
+  const oldNorm = norm((inv.whtLines && inv.whtLines.length) ? inv.whtLines : (inv.whtCategory && (inv.whtAmount||0) > 0 ? [{ category:inv.whtCategory, sub5:inv.whtSub5, rate:inv.whtRate, base:amount, whtAmount:inv.whtAmount }] : []), oldForm);
+  const newNorm = norm(validLines, whtForm);
+  const formChanged = whtForm !== oldForm;
+  const linesChanged = oldNorm !== newNorm;
+  const anyChange = Math.abs(delta) >= 0.005 || formChanged || linesChanged;
+  const activeCerts = (inv.whtCertificates||[]).filter(c => !c.voided);
+  const newCertCount = (() => {
+    const ls = validLines.filter(l => (Number(l.whtAmount)||0) > 0);
+    if(!ls.length) return 0;
+    if(splitCert) return ls.length;
+    return new Set(ls.map(l => l.form || whtForm || '53')).size;
+  })();
+  // ---- guards (mirror reducer ADJUST_INV_WHT — ลำดับเดียวกัน) ----
+  const isMigratedInv = _isMigratedInv(inv);
+  const isPaid = (inv.paidAmount||0) > 0 || ['paid','partial'].includes(inv.paymentStatus);
+  const pendingPay = (state.payments||[]).some(p => (p.invId === inv.id || (p.invoiceIds||[]).includes(inv.id)) && p.approvalStatus === 'pending');
+  const todayLocked = _periodLocked(state, getToday());
+  const invPeriodLocked = _periodLocked(state, inv.invDate);
+  const coa = state.chartOfAccounts || [];
+  const apAcc = coa.find(a => a.code === '2100') || coa.find(a => a.type === 'liability' && String(a.name||'').includes('เจ้าหนี้'));
+  const whAcc = coa.find(a => a.code === '2130') || coa.find(a => a.type === 'liability' && String(a.name||'').includes('หัก'));
+  const coaMissing = Math.abs(delta) >= 0.005 && (!apAcc || !whAcc);
+  const blocked = inv.voided || isMigratedInv || isPaid || pendingPay || todayLocked || invPeriodLocked;
+  const canSubmit = !blocked && !saving && anyChange && !overBase && !overWht && !missingCat && !missingCustom && !coaMissing && !!reason.trim();
+  const sup = (state.suppliers||[]).find(x => x.id === inv.supplierId);
+
+  const save = () => {
+    if(saving) return;
+    if(inv.voided) return alert('ใบตั้งหนี้นี้ยกเลิกไปแล้ว');
+    if(isMigratedInv) return alert('⛔ PI นำเข้าจาก Ecount — ยื่น ภ.ง.ด. ในระบบเดิมแล้ว แก้ WHT ทางนี้ไม่ได้');
+    if(isPaid) return alert('⛔ ใบนี้จ่ายไปแล้ว — แก้ WHT ทางนี้ไม่ได้ (ใช้ 🧾 เพิ่ม WHT ย้อนหลัง หรือยกเลิก PV ก่อน)');
+    if(pendingPay) return alert('⛔ มีคำขอจ่ายค้างอยู่ — ยกเลิกคำขอจ่ายก่อน');
+    if(!reason.trim()) return alert('ใส่เหตุผลที่แก้ WHT');
+    if(todayLocked) return alert(`📅 งวด ≤ ${state.settings?.periodLockUntil} ถูกปิดแล้ว — แก้ WHT ใบตั้งหนี้ วันที่ ${getToday()} บันทึกไม่ได้\nให้ admin ปลด period lock ใน Settings`);
+    if(invPeriodLocked) return alert('⛔ งวดภาษีของใบนี้ (' + String(inv.invDate||'').slice(0,7) + ') ปิด/ยื่น ภ.ง.ด. แล้ว — ให้ admin ปลดล็อกงวดแล้วยื่นเพิ่มเติม');
+    if(overBase) return alert('⛔ รวมฐาน WHT (' + sumBase.toLocaleString('th-TH') + ') เกินยอดใบ (' + amount.toLocaleString('th-TH') + ')');
+    if(overWht) return alert('⛔ ยอดหัก WHT รวมเกินยอดใบก่อน VAT');
+    if(missingCat) return alert('เลือกประเภทรายการ WHT ให้ครบทุกบรรทัดที่มียอด');
+    if(missingCustom) return alert('บรรทัด "6. อื่น ๆ (ระบุ)" ต้องพิมพ์ชื่อรายการ (ขึ้นบนใบ 50ทวิ)');
+    if(coaMissing) return alert('⚠️ ไม่พบบัญชีเจ้าหนี้ (2100) / ภาษีหัก ณ ที่จ่ายค้างนำส่ง (2130) ในผังบัญชี');
+    if(!anyChange) return alert('ยังไม่ได้เปลี่ยนอะไร — WHT / แบบนำส่ง / บรรทัด เท่าเดิม');
+    const lines = validLines.map(l => ({ category: l.category || '00017', sub5: l.sub5 || null, rate: Number(l.rate)||0, base: r2(l.base),
+      whtAmount: r2(l.whtAmount), customLabel: String(l.customLabel||'').trim(), form: l.form || whtForm }));
+    const msg = `✏️ แก้ WHT ${inv.invNumber}\n\nWHT: ${fmtCur(oldWht)} → ${fmtCur(newWht)} (${delta > 0 ? '+' : ''}${fmtCur(delta)})\nต้องจ่ายสุทธิ: ${fmtCur(inv.netPayable||0)} → ${fmtCur(newNet)}\nแบบนำส่ง: ภ.ง.ด.${whtForm}` +
+      (Math.abs(delta) >= 0.005 ? `\nJE: ${delta > 0 ? 'DR 2100 เจ้าหนี้ / CR 2130 WHT ค้างนำส่ง' : 'DR 2130 WHT ค้างนำส่ง / CR 2100 เจ้าหนี้'} ${fmtCur(Math.abs(delta))}` : '\n(ยอดเท่าเดิม — ไม่ลง JE)') +
+      (activeCerts.length ? `\n\n⚠️ ใบ 50ทวิ เดิม ${activeCerts.length} ใบ (${activeCerts.map(c => c.certNumber||'-').join(', ')}) จะถูกยกเลิก และออกใหม่ ${newCertCount} ใบ` : (newCertCount ? `\n\nออกใบ 50ทวิ ใหม่ ${newCertCount} ใบ` : '')) +
+      '\n\nยืนยัน?';
+    if(!confirm(msg)) return;
+    setSaving(true);
+    dispatch({ type:'ADJUST_INV_WHT', data:{ invId: inv.id, whtLines: lines, whtForm, splitCert, reason: reason.trim(), by: user.username } });
+    if(global.ERP.toast) global.ERP.toast(`✏️ แก้ WHT ${inv.invNumber}: ${fmtCur(oldWht)} → ${fmtCur(newWht)} — ตรวจใบ 50ทวิ ชุดใหม่/ประวัติในหน้า INV`, 'info');
+    onClose(); onDone && onDone();
+  };
+
+  // แถว JE ที่จะลง (สูตรเดียวกับ reducer: WHT เพิ่ม → DR 2100 / CR 2130 · WHT ลด → DR 2130 / CR 2100)
+  const AP = { acc: apAcc, code:'2100', name:'เจ้าหนี้การค้า' }, WH = { acc: whAcc, code:'2130', name:'ภาษีหัก ณ ที่จ่ายค้างนำส่ง' };
+  const jeRows = Math.abs(delta) >= 0.005 ? (delta > 0
+    ? [{ ...AP, dr: Math.abs(delta), cr: 0, desc: 'ลดเจ้าหนี้ — แก้ WHT ' + (inv.invNumber||'') },
+       { ...WH, dr: 0, cr: Math.abs(delta), desc: 'เพิ่มภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber||'') }]
+    : [{ ...WH, dr: Math.abs(delta), cr: 0, desc: 'ลดภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber||'') },
+       { ...AP, dr: 0, cr: Math.abs(delta), desc: 'เพิ่มเจ้าหนี้ — แก้ WHT ' + (inv.invNumber||'') }]) : [];
+  const accLabel = (r) => r.acc ? `${r.acc.code} ${r.acc.name}` : `${r.code} ${r.name} (ไม่พบในผัง)`;
+  const banner = (cls_, title, body) => h('div', { className: cls('border-2 rounded p-3 text-sm', cls_) }, h('div', { className:'font-bold' }, title), body && h('div', { className:'text-xs mt-1' }, body));
+
+  return h(Modal, { isOpen:true, title:`✏️ แก้ WHT หลังตั้งหนี้: ${inv.invNumber}`, onClose, size:'lg', docKey:'inv:wht:'+inv.id },
+    h('div', { className:'space-y-3' },
+      h('div', { className:'bg-rose-50 border border-rose-200 rounded p-2 text-xs text-rose-900' },
+        '💡 ใช้เมื่อตั้งหนี้แล้วพบว่า ', h('b', null, 'อัตรา / ประเภท / ฐาน / แบบนำส่ง WHT ผิด'), ' ก่อนจ่ายเงิน — ',
+        'ระบบคำนวณยอดหัก + ต้องจ่ายสุทธิใหม่ · ลง JE ส่วนต่าง ', h('b', null, 'เจ้าหนี้ (2100) ↔ ภาษีหัก ณ ที่จ่ายค้างนำส่ง (2130)'), ' วันนี้ · ',
+        h('b', null, 'ใบ 50ทวิ เดิมจะถูกยกเลิกและออกใหม่'), ' · มูลค่าสินค้า/VAT ไม่ขยับ'),
+      h('div', { className:'text-xs text-gray-700 flex flex-wrap gap-x-3' },
+        h('span', null, '🏭 ', h('b', null, sup?.name || inv.supplierNameFreeform || '-')),
+        h('span', null, 'มูลค่าสินค้า ', h('b', null, fmtCur(amount))),
+        vat > 0 && h('span', null, 'VAT ', fmtCur(vat)),
+        h('span', null, 'ต้องจ่ายสุทธิปัจจุบัน ', h('b', null, fmtCur(inv.netPayable||0)))),
+      // guards (mirror reducer — ข้อความบอกทางออก)
+      inv.voided && banner('bg-red-50 border-red-300 text-red-800', '🗑️ INV นี้ยกเลิกแล้ว — แก้ WHT ไม่ได้'),
+      !inv.voided && isMigratedInv && banner('bg-red-50 border-red-300 text-red-900', '⛔ PI นำเข้าจาก Ecount — แก้ WHT ที่นี่ไม่ได้', 'ภ.ง.ด. ของใบนี้ยื่นในระบบเดิมแล้ว → ยื่นเพิ่มเติมและลง JE ปรับปรุงเอง'),
+      !inv.voided && !isMigratedInv && isPaid && banner('bg-orange-50 border-orange-300 text-orange-900', `💰 INV นี้จ่ายแล้ว${(inv.paidAmount||0) > 0 ? ' ' + fmtCur(inv.paidAmount||0) : ''} — แก้ WHT ทางนี้ไม่ได้`,
+        h('span', null, '→ ใช้ ', h('b', null, '🧾 เพิ่ม WHT ย้อนหลัง'), ' (ลง JE เครดิต supplier) หรือ ', h('b', null, 'ยกเลิก PV'), ' ที่ ✅ รายการที่จ่ายแล้ว ก่อน')),
+      !inv.voided && pendingPay && banner('bg-yellow-50 border-yellow-300 text-yellow-900', '⏳ มีคำขอจ่ายรออนุมัติ — ยกเลิกคำขอจ่ายก่อน จึงจะแก้ WHT ได้', 'ยอดต้องจ่ายจะเปลี่ยน → คำขอที่ค้างอยู่จะจ่ายผิดยอด'),
+      !inv.voided && todayLocked && banner('bg-red-50 border-red-300 text-red-900', `📅 งวด ≤ ${fmtDate(state.settings?.periodLockUntil)} ปิดแล้ว — ลง JE วันนี้ (${fmtDate(getToday())}) ไม่ได้`, 'ให้ admin ปลด period lock ใน Settings ก่อน'),
+      !inv.voided && !todayLocked && invPeriodLocked && banner('bg-red-50 border-red-300 text-red-900', `📅 งวดภาษีของใบนี้ (${String(inv.invDate||'').slice(0,7)}) ปิด/ยื่น ภ.ง.ด. แล้ว — แก้ WHT ย้อนหลังไม่ได้`, 'ยอด ภ.ง.ด. เดือนที่ยื่นแล้วจะเปลี่ยน → ให้ admin ปลดล็อกงวด แล้วยื่นเพิ่มเติม'),
+
+      // บรรทัด WHT (editor เดียวกับตอนตั้งหนี้)
+      h('div', { className: blocked ? 'opacity-60 pointer-events-none' : '' },
+        h(WHTLinesEditor, { whtLines, setWhtLines, amount, vat, addWHT, updateWHTLine, removeWHT, resolveWHT, defaultForm: whtForm, splitCert, setSplitCert })),
+
+      // แบบนำส่ง
+      h('div', { className: cls('bg-indigo-50 border border-indigo-200 rounded p-2 text-sm', blocked && 'opacity-60 pointer-events-none') },
+        h('div', { className:'font-medium text-indigo-900 mb-1' }, '📋 แบบนำส่ง:',
+          formChanged && h('span', { className:'ml-2 text-xs font-normal text-amber-800' }, `(เดิม ภ.ง.ด.${oldForm})`)),
+        h('div', { className:'flex gap-4' },
+          h('label', { className:'flex items-center gap-1 cursor-pointer' },
+            h('input', { type:'radio', name:'adj-wht-form', checked:whtForm==='3', onChange:()=>pickWhtForm('3') }), h('span', null, 'ภ.ง.ด.3 (บุคคลธรรมดา)')),
+          h('label', { className:'flex items-center gap-1 cursor-pointer' },
+            h('input', { type:'radio', name:'adj-wht-form', checked:whtForm==='53', onChange:()=>pickWhtForm('53') }), h('span', null, 'ภ.ง.ด.53 (นิติบุคคล)'))),
+        whtLines.some(l => (Number(l.whtAmount)||0) > 0 && l.form && l.form !== whtForm) && h('div', { className:'mt-1 text-[11px] text-amber-800' },
+          '⚠️ มีบรรทัด WHT ที่เลือก ภงด. รายบรรทัดต่างจากแบบนำส่งหัว — ใบ 50ทวิ/รายงาน WHT จะแยกตามบรรทัด')),
+
+      // preview
+      h('div', { className:'bg-white border-2 border-rose-200 rounded p-3 text-sm space-y-1' },
+        h('div', { className:'font-bold text-rose-900 mb-1' }, '🔎 ผลที่จะเกิด'),
+        h('div', { className:'flex justify-between' }, h('span', null, 'หัก ณ ที่จ่าย:'),
+          h('span', { className:'font-mono' }, h('span', { className:'text-gray-500' }, fmtCur(oldWht)), ' → ', h('b', { className: delta > 0 ? 'text-red-700' : delta < 0 ? 'text-green-700' : '' }, fmtCur(newWht)),
+            Math.abs(delta) >= 0.005 && h('span', { className:'ml-1 text-xs text-gray-600' }, `(${delta > 0 ? '+' : ''}${fmtCur(delta)})`))),
+        h('div', { className:'flex justify-between' }, h('span', null, 'ต้องจ่ายสุทธิ:'),
+          h('span', { className:'font-mono' }, h('span', { className:'text-gray-500' }, fmtCur(inv.netPayable||0)), ' → ', h('b', null, fmtCur(newNet)))),
+        h('div', { className:'flex justify-between' }, h('span', null, 'แบบนำส่ง:'),
+          h('span', { className:'font-mono' }, formChanged ? h('span', null, h('span', { className:'text-gray-500' }, `ภ.ง.ด.${oldForm}`), ' → ', h('b', null, `ภ.ง.ด.${whtForm}`)) : `ภ.ง.ด.${whtForm}`)),
+        jeRows.length > 0
+          ? h('div', { className:'mt-1 border rounded overflow-hidden' },
+              h('div', { className:'px-2 py-1 bg-gray-50 text-xs font-medium text-gray-700' }, `📒 JE ส่วนต่างที่จะลง (วันที่ ${fmtDate(getToday())})`),
+              h('table', { className:'w-full text-xs' },
+                h('tbody', null, jeRows.map((r, i) => h('tr', { key:i, className:'border-t' },
+                  h('td', { className:'px-2 py-1' }, (r.dr ? 'DR ' : 'CR ') + accLabel(r),
+                    h('div', { className:'text-[10px] text-gray-500' }, r.desc)),
+                  h('td', { className:'px-2 py-1 text-right font-mono w-24' }, r.dr ? fmtCur(r.dr) : ''),
+                  h('td', { className:'px-2 py-1 text-right font-mono w-24' }, r.cr ? fmtCur(r.cr) : ''))))))
+          : h('div', { className:'text-xs text-gray-600' }, anyChange ? '📒 ยอด WHT เท่าเดิม — ไม่ลง JE (ออกใบ 50ทวิ ใหม่ / บันทึกแบบนำส่ง-บรรทัดใหม่เท่านั้น)' : '— ยังไม่ได้เปลี่ยนอะไร —'),
+        coaMissing && h('div', { className:'text-xs text-red-700 font-medium' }, '⚠️ ไม่พบบัญชี 2100 / 2130 ในผังบัญชี — ลง JE ส่วนต่างไม่ได้'),
+        (activeCerts.length > 0 || newCertCount > 0) && h('div', { className:'mt-1 bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900' },
+          '⚠️ ', h('b', null, 'ใบ 50ทวิ เดิมจะถูกยกเลิกและออกใหม่'),
+          activeCerts.length > 0 && ` — ยกเลิก ${activeCerts.length} ใบ (${activeCerts.map(c => c.certNumber||'-').join(', ')})`,
+          newCertCount > 0 ? ` · ออกใหม่ ${newCertCount} ใบ${splitCert ? ' (แยกต่อบรรทัด)' : ''}` : ' · ไม่ออกใบใหม่ (WHT = 0)',
+          h('div', { className:'text-[10px] mt-0.5' }, 'ถ้าส่งใบเดิมให้ supplier ไปแล้ว ให้แจ้งเปลี่ยนใบ (ใบเดิมยังเห็นในรายการแบบขีดฆ่า + รายงาน Voided WHT)'))),
+
+      h('div', null,
+        h('label', { className:'block text-xs font-medium mb-1' }, 'เหตุผลที่แก้ ', h('span', { className:'text-red-500' }, '*')),
+        h('textarea', { value:reason, onChange:e=>setReason(e.target.value), rows:2, placeholder:'เช่น ค่าเช่าต้องหัก 5% ไม่ใช่ 3% / supplier เป็นบุคคลธรรมดา → ภ.ง.ด.3',
+          className:'w-full px-3 py-2 border-2 rounded text-sm', disabled: blocked })),
+
+      h('div', { className:'flex gap-2 justify-end pt-2 border-t' },
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
+        h('span', { title: !canSubmit ? (blocked ? 'ใบนี้แก้ WHT ไม่ได้ (ดูเหตุผลด้านบน)' : !anyChange ? 'ยังไม่ได้เปลี่ยนอะไร' : overBase ? 'ฐานรวมเกินยอดใบ' : overWht ? 'ยอดหักรวมเกินยอดใบ' : missingCat ? 'เลือกประเภทให้ครบ' : missingCustom ? 'พิมพ์ชื่อรายการ "อื่น ๆ"' : coaMissing ? 'ไม่พบบัญชี 2100/2130' : !reason.trim() ? 'ใส่เหตุผล' : '') : '' },
+          h(Button, { variant:'warning', disabled: !canSubmit, onClick:save }, '💾 บันทึกแก้ WHT + JE ส่วนต่าง')))
+    )
+  );
+}
+
+// ================================================================
 // WHT CERTIFICATE PRINT (หนังสือรับรองการหักภาษี ณ ที่จ่าย — ม.50 ทวิ)
 // ================================================================
 function printWHTCert(inv, state){
@@ -49132,17 +49507,17 @@ function printWHTCert(inv, state){
   const sub5Label = section5Data?.sub5 ? WHT_SUB5_TYPES.find(s => s.code === section5Data.sub5)?.label : '';
   // ใช้ข้อความเต็มตาม ภงด.53 ของกรมสรรพากร (เทียบ PDF reference)
   const FULL_SEC5 = '5. การจ่ายเงินได้ที่ต้องหักภาษี ณ ที่จ่าย ตามคำสั่งกรมสรรพากรที่ออกตามมาตรา 3 เตรส เช่น รางวัล ส่วนลดหรือประโยชน์ใด ๆ เนื่องจากการส่งเสริมการขาย รางวัลในการประกวด การแข่งขัน การชิงโชค ค่าแสดงของนักแสดงสาธารณะ ค่าจ้างทำของ ค่าโฆษณา ค่าเช่า ค่าขนส่ง ค่าบริการ ค่าเบี้ยประกันวินาศภัย ฯลฯ';
-  const row5Label = sub5Label
-    ? `${FULL_SEC5}<br/><span class="indent1" style="font-style:italic;color:#555">(${sub5Label})</span>`
-    : FULL_SEC5;
-  // หา customLabel จาก line ที่เป็น category 00018 (อื่นๆ) — ให้ขึ้นหน้าใบ
+  // 🆕 WHT-FORM (user 2026-09-17): คงข้อความมาตรฐานของแบบฟอร์มทุกข้อ — ข้อ 5 ไม่ใส่ประเภทย่อย (ค่าเช่า/โฆษณา) ทับข้อความมาตรฐาน · รายละเอียดที่เรากรอกพิมพ์เฉพาะข้อ 6 "อื่น ๆ (ระบุ)" บนจุดไข่ปลา
+  void sub5Label;
+  const row5Label = FULL_SEC5;
+  // หา customLabel จาก line ที่เป็น category 00018 (อื่นๆ) — ให้ขึ้นหน้าใบ (บนจุดไข่ปลาของข้อ 6)
   const customLine = lines.find(l => l.category === '00018');
-  const customOtherLabel = customLine?.customLabel || inv.note || '';
-  const row6Label = byCategory['00018']
-    ? `6. อื่น ๆ (ระบุ) ${customOtherLabel || '........................................'}`
-    : '6. อื่น ๆ (ระบุ) ........................................';
+  const customOtherLabel = String(customLine?.customLabel || (byCategory['00018'] ? (inv.note || '') : '')).trim();
+  const _escC = (v) => String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const row6Label = `6. อื่น ๆ (ระบุ) <span class="dotfill">${customOtherLabel ? _escC(customOtherLabel) : ''}</span>`;
 
-  const bookNumber = inv.whtNumber || inv.invNumber;
+  // 🆕 WHT-EDIT: เลขที่ใบ = ใบรับรองที่ยังไม่ void ใบแรก (หลังแก้ WHT ใบเดิม void แล้ว inv.whtNumber ยังเป็นเลขชุดเก่า) → fallback whtNumber/invNumber
+  const bookNumber = ((inv.whtCertificates||[]).find(c => !c.voided) || {}).certNumber || inv.whtNumber || inv.invNumber;
 
   // Render N digit boxes — fill from tax ID (strip non-digits), pad blank
   const digitBoxes = (tid, count, cls) => {
@@ -49212,6 +49587,8 @@ function printWHTCert(inv, state){
   .party .row1 .val.full { flex: 1 1 auto; min-width: 350px; }
   .party .row1 .taxid-inline { margin-left: auto; font-size: 8.5pt; display: flex; align-items: center; gap: 4px; }
   .party .hint { font-size: 7.5pt; color: #555; margin-left: 12px; font-style: italic; line-height: 1.15; margin-bottom: 2px; }
+  /* 🆕 WHT-FORM: ข้อ 6 อื่น ๆ (ระบุ) — ข้อความที่กรอกพิมพ์บนจุดไข่ปลา */
+  .dotfill { display: inline-block; min-width: 62mm; border-bottom: 1px dotted #000; padding: 0 3px; line-height: 1.1; vertical-align: baseline; }
   /* Form block — ลำดับ + ภงด checkboxes */
   .form-block { padding: 4px 8px 2px; border-bottom: 1px solid #000; }
   .form-row { display: flex; align-items: baseline; gap: 12px; font-size: 9.5pt; margin-bottom: 2px; }
@@ -49434,31 +49811,13 @@ function printWHTCert(inv, state){
   }
   // Section 5: ถ้ามีหลาย sub5 → แสดงหัวข้อรวม + sub-rows แยก ·  ถ้ามีอันเดียว → แสดงแถวเดียวเหมือนเดิม
   function renderSection5(){
+    // 🆕 WHT-FORM: ข้อ 5 = แถวเดียวตามแบบฟอร์มมาตรฐานเสมอ (หลายประเภทย่อย เช่น ค่าเช่า+ค่าโฆษณา → รวมยอด/ภาษีในแถวเดียว ไม่แตกเป็น 5.1/5.2)
     if(section5Lines.length === 0){
       return renderRow(row5Label, { date:'', amt:'', tax:'' });
     }
-    if(section5Lines.length === 1){
-      // แถวเดียว — แสดงรวมกับ label ด้วย sub5 ในวงเล็บ
-      const l = section5Lines[0];
-      return renderRow(row5Label, {
-        date: thDate(inv.invDate),
-        amt: fmtAmt(l.base),
-        tax: fmtAmt(l.tax),
-      });
-    }
-    // หลาย sub5 — แสดง header + sub-rows (5.1, 5.2, ...)
-    const headerRow = renderRow(
-      '5. การจ่ายเงินได้ที่ต้องหักภาษี ณ ที่จ่าย ตามคำสั่งกรมสรรพากรฯ ท.ป.4/2528',
-      { date:'', amt:'', tax:'' }
-    );
-    const subRows = section5Lines.map((l, idx) => {
-      const subLabel = l.sub5 ? (WHT_SUB5_TYPES.find(s => s.code === l.sub5)?.label || l.sub5) : '(ไม่ระบุ)';
-      return renderRow(
-        `<span class="indent1">5.${idx+1} ${subLabel} (${l.rate}%)</span>`,
-        { date: thDate(inv.invDate), amt: fmtAmt(l.base), tax: fmtAmt(l.tax) }
-      );
-    }).join('');
-    return headerRow + subRows;
+    const sumBase = section5Lines.reduce((s,l) => s + (Number(l.base)||0), 0);
+    const sumTax = section5Lines.reduce((s,l) => s + (Number(l.tax)||0), 0);
+    return renderRow(row5Label, { date: thDate(inv.invDate), amt: fmtAmt(sumBase), tax: fmtAmt(sumTax) });
   }
 
   const win = window.open('', '_blank');
@@ -50367,15 +50726,19 @@ function printPV(pay, inv, state){
     ? pay.invoiceIds : (pay.invId ? [pay.invId] : []);
   const invs = invIds.map(id => state.invoices.find(i => i.id === id)).filter(Boolean);
   if(invs.length === 0 && inv) invs.push(inv);
+  // 🆕 PV-GROUP: PV รวมหลายใบ → หัวบอก "รวม n ใบ" · คอลัมน์ "จ่ายครั้งนี้" = ส่วนของแต่ละใบ (allocation) · ยอดรวม/ตัวอักษร = pay.amount
+  const isGroupPV = invs.length > 1;
+  const payAmtOf = (iv) => isGroupPV ? _payAllocFor(pay, iv.id) : (Number(pay.amount)||0);
+  const _escP = (v) => String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const piRows = invs.map((iv, i) => {
     const isup = state.suppliers.find(s => s.id === iv.supplierId);
     return `<tr>
       <td style="text-align:center;width:8mm">${i+1}</td>
-      <td style="font-family:monospace;font-size:9pt;color:#c00">${iv.invNumber}</td>
-      <td style="font-size:9pt">${isup?.name||'-'}</td>
+      <td style="font-family:monospace;font-size:9pt;color:#c00">${_escP(iv.invNumber)}${iv.supInvNumber ? `<br/><span style="font-size:7.5pt;color:#666">Sup: ${_escP(iv.supInvNumber)}</span>` : ''}</td>
+      <td style="font-size:9pt">${_escP(isup?.name||'-')}</td>
       <td style="font-size:9pt">${thPrintDate(iv.invDate)}</td>
       <td style="text-align:right;font-family:monospace;font-size:9pt">${fmtAmt(iv.netPayable||0)}</td>
-      <td style="text-align:right;font-family:monospace;font-weight:bold">${fmtAmt((iv.paidAmount||0))}</td>
+      <td style="text-align:right;font-family:monospace;font-weight:bold">${fmtAmt(payAmtOf(iv))}</td>
     </tr>`;
   }).join('');
 
@@ -50394,7 +50757,7 @@ function printPV(pay, inv, state){
   <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3mm">
     <div>
       <h1 style="margin:0">ใบสำคัญจ่าย / Payment Voucher (PV)</h1>
-      <div class="sub" style="text-align:left;font-size:11pt;margin-top:1mm">เลขที่ <b style="color:#7c3aed">${docNumber}</b></div>
+      <div class="sub" style="text-align:left;font-size:11pt;margin-top:1mm">เลขที่ <b style="color:#7c3aed">${docNumber}</b>${isGroupPV ? ` <span style="display:inline-block;margin-left:3mm;padding:0.5mm 2.5mm;border:1.2px solid #7c3aed;border-radius:3mm;color:#5b21b6;font-size:9.5pt;font-weight:bold">วางบิล — รวม ${invs.length} ใบ</span>` : ''}</div>
     </div>
     <img src="${qrUrl}" alt="QR" style="width:24mm;height:24mm"/>
   </div>
@@ -50418,10 +50781,10 @@ function printPV(pay, inv, state){
     ${pay.requestedPayDate && pay.requestedPayDate !== payDateEff ? `<div>วันนัดจ่าย: <b>${thPrintDate(pay.requestedPayDate)}</b></div>` : ''}
   </div>
 
-  <div style="margin-top:4mm;font-size:11pt"><b>รายการใบตั้งหนี้ที่จ่าย:</b></div>
+  <div style="margin-top:4mm;font-size:11pt"><b>รายการใบตั้งหนี้ที่จ่าย${isGroupPV ? ` (รวม ${invs.length} ใบ)` : ''}:</b></div>
   <table class="items">
     <thead><tr>
-      <th>#</th><th>เลขที่ PI</th><th>เจ้าหนี้</th><th>วันที่</th><th>ยอดสุทธิ</th><th>จ่ายแล้ว</th>
+      <th>#</th><th>เลขที่ PI</th><th>เจ้าหนี้</th><th>วันที่</th><th>ยอดสุทธิ</th><th>จ่ายครั้งนี้</th>
     </tr></thead>
     <tbody>${piRows || '<tr><td colspan="6" style="text-align:center;color:#999">— ไม่มีรายการ —</td></tr>'}</tbody>
   </table>
@@ -50514,6 +50877,8 @@ function printRTV(rtv, state){
 
 // Auto-post JE for Payment
 // 🆕 ACCT-V2 D10: method-aware — petty_cash → CR 1120 เงินสดย่อย (by code) · method อื่นคงเดิม (เงินฝาก 1110 · cash ยังไม่แยก 1100 รอบนี้ §7-4)
+// 🆕 PV-GROUP: PV รวมหลาย PI (pay.invoiceIds.length > 1) → JE เดียวยอด pay.amount · คำอธิบาย/sourceRef/บรรทัด DR เจ้าหนี้ ไล่ชื่อทุก PI (+ ส่วนของแต่ละใบจาก allocations)
+//   ตัวเรียกส่ง inv = ใบแรกของกลุ่มได้ (executor 03-shell / ApprovePaymentModal) — ฟังก์ชันนี้หาใบสมาชิกที่เหลือจาก state เอง
 function autoPostPayment(pay, inv, bank, state, dispatch, user){
   const accounts = state.chartOfAccounts || [];
   const find = (type, hint) => accounts.find(a => a.type===type && (a.name||'').includes(hint))
@@ -50525,9 +50890,18 @@ function autoPostPayment(pay, inv, bank, state, dispatch, user){
     : (find('asset', 'เงินฝาก') || find('asset', 'เงินสด'));
   if(!apAcc || !cashAcc) return;
 
+  // ใบสมาชิกของ PV (เรียงตาม invoiceIds) — ใบเดี่ยว = [inv]
+  const memberIds = _payInvIds(pay);
+  const members = memberIds.map(id => (id === (inv && inv.id) ? inv : null) || (state.invoices||[]).find(i => i.id === id)).filter(Boolean);
+  if(members.length === 0 && inv) members.push(inv);
+  const isGroup = members.length > 1;
+  const piList = members.map(i => i.invNumber || i.id).join(', ');
+  const piListWithAmt = members.map(i => `${i.invNumber || i.id}${(pay.allocations||[]).length ? ` (${fmtCur(_payAllocFor(pay, i.id))})` : ''}`).join(', ');
+  const invLabel = isGroup ? piList : ((inv && inv.invNumber) || piList);
+
   const lines = [
     { accountId:apAcc.id, accountCode:apAcc.code, accountName:apAcc.name,
-      debit: pay.amount, credit: 0, description: `จ่าย ${inv.invNumber}` },
+      debit: pay.amount, credit: 0, description: isGroup ? `จ่าย PV รวม ${members.length} ใบ: ${piListWithAmt}` : `จ่าย ${invLabel}` },
     { accountId:cashAcc.id, accountCode:cashAcc.code, accountName:cashAcc.name,
       debit: 0, credit: pay.amount,
       description: isPetty ? 'จ่ายจากเงินสดย่อย' : (bank ? `${bank.bank||''} ${bank.name}` : pay.method) },
@@ -50538,8 +50912,9 @@ function autoPostPayment(pay, inv, bank, state, dispatch, user){
 
   dispatch({ type:'ADD_JE', data:{
     id: genId('je'), jeNumber, date: pay.payDate || pay.date,   // 🆕 ลง GL ตามวันจ่ายจริง ไม่ใช่วันที่ขอ
-    description: `จ่ายชำระ ${inv.invNumber}` + (isPetty ? ' (เงินสดย่อย)' : ''),
-    source:'payment', sourceId: pay.id, sourceRef: inv.invNumber,
+    description: (isGroup ? `จ่ายชำระ PV รวม ${members.length} ใบ: ${piList}` : `จ่ายชำระ ${invLabel}`) + (isPetty ? ' (เงินสดย่อย)' : ''),
+    source:'payment', sourceId: pay.id, sourceRef: invLabel,
+    ...(isGroup ? { invoiceIds: memberIds.slice() } : {}),   // trace ใบสมาชิกของ PV รวม (REVERSE_PAYMENT หา JE ด้วย source/sourceId อยู่แล้ว)
     lines, totalDebit: pay.amount, totalCredit: pay.amount,
     status: 'posted',
     createdBy: user.username, postedBy: user.username,
@@ -51016,6 +51391,8 @@ function PettyCashTab({ state, dispatch, user }){
         h('div', { className: cls('text-2xl font-bold', balance < 0 ? 'text-red-600' : 'text-emerald-600') }, fmtCur(balance)),
         // 🆕 ACCT-V2 D: เพดานจ่ายต่อ PI (ตั้งค่า → นโยบายระบบ) — 0 = ไม่จำกัด · ผู้อนุมัติตรวจย้อนหลังที่ ✅ รายการที่จ่ายแล้ว → 💵 ตรวจเงินสดย่อย
         h('div', { className:'text-[11px] text-gray-500 mt-1' }, 'เพดานจ่ายต่อ PI: ', h('b', null, pettyPayMax > 0 ? fmtCur(pettyPayMax) : 'ไม่จำกัด')),
+        // 🆕 ACCT-V2 (user 2026-09-18): โหมดบันทึกอย่างเดียว — ยังไม่ต้องเติมเงินเข้าระบบ ยอดติดลบได้ (ตั้งค่า → นโยบายระบบ)
+        (state.settings?.pettyRecordOnly !== false) && h('div', { className:'text-[11px] text-amber-700 mt-1' }, '📝 โหมดบันทึกอย่างเดียว — ยอดคงเหลือติดลบได้ (ยังไม่ต้องเติมเงินเข้าระบบ)'),
         canManage && h(Button, { variant:'success', size:'sm', className:'mt-2',
           onClick:()=>setTopup(true) }, '➕ เติมเงินสดย่อย')),
       showAdvance
@@ -54289,6 +54666,9 @@ global.ERP.registerModule('purchase', {
   EditPOPostGRModal,
   CreditDebitMemoModal,
   AdjustINVVatModal,            // 🆕 VAT-FIX: ปรับ VAT ตามใบกำกับ (หลัง PI)
+  AdjustINVWhtModal,            // 🆕 WHT-EDIT: แก้ WHT หลังตั้งหนี้ (ยังไม่จ่าย) → ADJUST_INV_WHT
+  GroupPayTag,                  // 🆕 PV-GROUP: ป้าย "PV รวม n ใบ" (ใช้ร่วมกับฝั่งบัญชี)
+  PaymentSlipViewer,            // 🆕 PV-GROUP: ดูสลิป/หลักฐานจ่ายของ PO/INV (แถว PV รวมโชว์ส่วนของใบนี้)
   calcGRVatBreakdown,           // 🆕 VAT-FIX: helper VAT ราย line จาก GR (ใช้ร่วมกับ accounting/รายงาน)
   calcPOVatBreakdown,           // 🆕 VAT-FIX: helper VAT ราย line จาก PO (INV ล่วงหน้า)
   resolveVatableBase,           // 🆕 VAT-FIX §7: ฐาน VAT เมื่อ override ยอด VAT
@@ -57646,21 +58026,22 @@ function VATByPaymentReport({ state }){
       .filter(p => !p.reversed && p.approvalStatus !== 'pending' && p.approvalStatus !== 'rejected')
       .filter(p => inDateRange(p.date, dr.startDate, dr.endDate))
       .sort((a,b) => (a.date||'').localeCompare(b.date||''));
-    return pays.map(p => {
-      const inv = (state.invoices||[]).find(i => i.id === p.invId);
+    // 🆕 PV-GROUP (UAT): PV รวมหลาย PI (invId null + invoiceIds/allocations) → แตกเป็นแถวต่อใบตาม allocation (ใบเดี่ยว _payMembers คืน amount = p.amount เหมือนเดิม)
+    return pays.flatMap(p => _payMembers(state, p).map((m, mIdx) => {
+      const inv = m.inv;
       if(!inv) return null;
       const sup = state.suppliers.find(s => s.id === inv.supplierId);
       const supName = sup?.name || inv.supplierNameFreeform || '-';
       const taxId = sup?.taxId || '-';
       const vatRate = Number(inv.vatRate)||0;
-      // จำนวนจ่ายเป็นสัดส่วนของ netPayable → คำนวณ VAT สัดส่วน
-      const portion = (inv.netPayable||0) > 0 ? (p.amount/inv.netPayable) : 1;
+      // จำนวนจ่ายเป็นสัดส่วนของ netPayable → คำนวณ VAT สัดส่วน (PV รวม = allocation ของใบนี้)
+      const portion = (inv.netPayable||0) > 0 ? (Number(m.amount)/inv.netPayable) : 1;
       const total = (inv.amount||0) * portion + (inv.vat||0) * portion;
       // 🆕 ฐาน VAT = สัดส่วนของ invVatBase (vatableBase per-line ถ้ามี · INV ผสม 7%/0% หรือปรับ VAT ตามใบกำกับ) — เดิมใช้ amount ทั้งก้อน = ฐานเกินจริง
       // 🆕 ACCT-V2 (ม.82/5): หักภาษีซื้อ/ฐานที่ "PV ใบนี้" โอนไป 5900 (pay.nonDeductibleVat/Base — บันทึกตอนจ่าย petty ต้องห้าม) — cash-basis ต้องหักต่อ PV
       //   ไม่ใช่ portion × invClaimVat: INV ที่แบ่งจ่าย petty ต้องห้าม + โอนธนาคาร ยอดรวมเท่ากันแต่แถวธนาคารจะโดนหักไปด้วย · ndVat โชว์ "⛔ ไม่เคลม" บนแถว
-      const ndVat = Number(p.nonDeductibleVat) || 0;
-      const ndBase = Number(p.nonDeductibleVatBase) || 0;
+      const ndVat = mIdx === 0 ? (Number(p.nonDeductibleVat) || 0) : 0;   // PV รวมเป็น bank เท่านั้น — กันหักซ้ำไว้ก่อน
+      const ndBase = mIdx === 0 ? (Number(p.nonDeductibleVatBase) || 0) : 0;
       const vatableBase = vatRate > 0 ? Math.max(0, invVatBase(inv) * portion - ndBase) : 0;
       const vatAmt = Math.max(0, (inv.vat||0) * portion - ndVat);
       const vatableTotal = vatableBase + vatAmt;
@@ -57671,7 +58052,7 @@ function VATByPaymentReport({ state }){
         bankAcc: p.bankNumber || '',
         payPortion: portion < 0.99 ? `(${Math.round(portion*100)}%)` : '',
       };
-    }).filter(Boolean);
+    })).filter(Boolean);
   }, [state.payments, state.invoices, state.suppliers, dr.startDate, dr.endDate]);
   const pg = usePaged(rows, 50);
 
@@ -60204,7 +60585,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
     }
     if(search) setSearch('');
     if(statusFilter !== 'all'){
-      const pendingPay = (state.payments||[]).some(p => p.invId === inv.id && p.approvalStatus === 'pending');
+      const pendingPay = (state.payments||[]).some(p => _payInvIds(p).includes(inv.id) && p.approvalStatus === 'pending');
       const st = pendingPay ? 'pending_approval' : (inv.paymentStatus || 'unpaid');
       if(st !== statusFilter) setStatusFilter('all');
     }
@@ -60229,7 +60610,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
     }
     if(statusFilter !== 'all'){
       list = list.filter(i => {
-        const pendingPay = (state.payments||[]).some(p => p.invId === i.id && p.approvalStatus === 'pending');
+        const pendingPay = (state.payments||[]).some(p => _payInvIds(p).includes(i.id) && p.approvalStatus === 'pending');
         const st = pendingPay ? 'pending_approval' : (i.paymentStatus || 'unpaid');
         return st === statusFilter;
       });
@@ -60362,7 +60743,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
                 const pos = Array.from(poIds).map(pid => state.pos.find(p => p.id === pid)).filter(Boolean);
                 const po = pos[0] || null;
                 const remain = (i.netPayable||0) - (i.paidAmount||0);
-                const pendingPay = (state.payments||[]).some(p => p.invId === i.id && p.approvalStatus === 'pending');
+                const pendingPay = (state.payments||[]).some(p => _payInvIds(p).includes(i.id) && p.approvalStatus === 'pending');
                 const st = pendingPay ? 'pending_approval' : (i.paymentStatus || 'unpaid');
                 const [lbl, clr] = STATUS_LBL[st] || [st, 'bg-gray-100'];
                 return h('tr', { key:i.id, ref: i.id === focusId ? focus.ref : undefined,
@@ -61209,6 +61590,34 @@ function INVQueueTab({ state, dispatch, user }){
 // ================================================================
 // PAYMENT APPROVAL — อนุมัติคำขอจ่าย
 // ================================================================
+// 🆕 PV-GROUP: helper กลาง "วางบิล" — 1 payment จ่ายได้หลาย PI ของ supplier เดียวกัน (invId:null + invoiceIds[] + allocations[{invoiceId, amount}])
+//   ใบเดี่ยว = { invId } แบบเดิม · ทุกจอในไฟล์นี้อ่าน PI สมาชิกผ่าน helper ชุดนี้ (ห้าม find(i => i.id === p.invId) ตรง ๆ อีก)
+const _payInvIds = (p) => !p ? [] : (p.invId ? [p.invId]
+  : (Array.isArray(p.invoiceIds) && p.invoiceIds.length ? p.invoiceIds : (p.invoiceId ? [p.invoiceId] : [])));
+const _isGroupPay = (p) => !!p && !p.invId && Array.isArray(p.invoiceIds) && p.invoiceIds.length > 1;
+// 🆕 PV-GROUP: allocation ต่อใบ [{ invoiceId, amount }] เรียงตาม invoiceIds — ใบเดี่ยว = ยอดทั้งก้อน · รวมแต่ไม่มี allocations (ข้อมูลไม่ครบ) → 0 ให้เห็นชัด
+function _payAllocs(p){
+  if(!p) return [];
+  if(p.invId) return [{ invoiceId:p.invId, amount:Number(p.amount)||0 }];
+  const ids = _payInvIds(p);
+  if(Array.isArray(p.allocations) && p.allocations.length){
+    return ids.map(id => { const a = p.allocations.find(x => x.invoiceId === id); return { invoiceId:id, amount: a ? (Number(a.amount)||0) : 0 }; });
+  }
+  return ids.map(id => ({ invoiceId:id, amount: ids.length === 1 ? (Number(p.amount)||0) : 0 }));
+}
+// 🆕 PV-GROUP: PI สมาชิกพร้อมยอดที่จัดสรร [{ inv, invoiceId, amount }] (inv = null ถ้าหาไม่เจอ/ถูกลบ)
+function _payMembers(state, p){
+  const invs = (state && state.invoices) || [];
+  return _payAllocs(p).map(a => ({ inv: invs.find(i => i.id === a.invoiceId) || null, invoiceId:a.invoiceId, amount:a.amount }));
+}
+// 🆕 PV-GROUP: เลข PI ทุกใบของ payment (เรียงตาม invoiceIds) · ป้ายสั้น "n ใบ: PI-1, PI-2 +k" สำหรับคอลัมน์ PI
+const _payPiNos = (state, p) => _payMembers(state, p).map(m => (m.inv && m.inv.invNumber) || m.invoiceId || '-');
+function _payPiLabel(state, p, max){
+  const nos = _payPiNos(state, p);
+  if(nos.length <= 1) return nos[0] || '-';
+  const k = max || 2;
+  return `${nos.length} ใบ: ${nos.slice(0, k).join(', ')}${nos.length > k ? ` +${nos.length - k}` : ''}`;
+}
 // 🆕 ACCT-V2 (E): จัดกลุ่มคิวรออนุมัติตาม "วันนัดจ่าย" — pure function ใช้ทั้งจอและใบพิมพ์
 //   { id:dateISO|'_none', key, date, pays (เรียง supplier th → PI), total, count }[] เรียงวันจากน้อยไปมาก · 'ไม่ระบุวันนัด' ท้ายสุด
 const _reqDateOf = (p) => p.requestedPayDate || p.payDate || '';
@@ -61245,6 +61654,9 @@ function PayApprovalTab({ state, dispatch, user }){
   const [q, setQ] = useState('');             // 🆕 1.8 ค้นหา
   // 🆕 คำค้นเปลี่ยน → ล้างรายการที่ติ๊กไว้ ไม่งั้นกดอนุมัติแล้วรวมบิลที่มองไม่เห็นบนจอไปด้วย
   useEffect(() => { setSelectedIds([]); }, [q]);
+  // 🆕 PV-GROUP: คำขอรวมหลายใบ (วางบิล) ที่กด ▸ ขยายรายการ PI สมาชิกไว้ (คำค้นตรงกับ PI สมาชิก → ขยายให้อัตโนมัติ)
+  const [expandedIds, setExpandedIds] = useState([]);
+  const toggleExpand = (id) => setExpandedIds(expandedIds.includes(id) ? expandedIds.filter(x => x !== id) : [...expandedIds, id]);
 
   const pending = (state.payments||[]).filter(p => p.approvalStatus === 'pending')
     .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
@@ -61254,6 +61666,11 @@ function PayApprovalTab({ state, dispatch, user }){
   const supOf = (id) => (state.suppliers||[]).find(s => s.id === id);
   const invOf = (p) => (state.invoices||[]).find(i => i.id === p.invId)
     || (state.invoices||[]).find(i => (p.invoiceIds||[]).includes(i.id));
+  // 🆕 PV-GROUP: PI สมาชิกทุกใบของคำขอ [{ inv, invoiceId, amount }] — ใบเดี่ยว = 1 รายการ · คำขอรวม = ตาม allocations
+  const invsOf = (p) => _payMembers(state, p);
+  const isGroup = (p) => _isGroupPay(p);
+  const memberMatches = (p) => q.trim() && invsOf(p).some(m => m.inv && apMatch(q, [m.inv.invNumber, m.inv.supInvNumber, m.inv.supTaxInvNumber]));
+  const isExpanded = (p) => expandedIds.includes(p.id) || !!memberMatches(p);
   // 🆕 ACCT-V2: บัญชีที่ผู้ขอเลือกไว้ (bankId → ทะเบียนธนาคาร · fallback ชื่อที่ snapshot ไว้ · ว่าง = ผู้อนุมัติเลือกตอนอนุมัติ)
   const bankOf = (p) => (state.bankAccounts||[]).find(b => b.id === (p.bankId || p.requestedBankId));
   const bankLabelOf = (p) => { const b = bankOf(p); return b ? `${b.bank||''} ${b.name}`.trim() : (p.bankName || '— ผู้อนุมัติเลือก —'); };
@@ -61264,11 +61681,12 @@ function PayApprovalTab({ state, dispatch, user }){
     .filter(r => r.status === 'pending' && r.action === 'approve_payment')
     .map(r => r.entityId || (r.context && r.context.entityId) || (r.payload && r.payload.payId)).filter(Boolean)), [state.approvalRequests]);
 
-  // 🆕 1.8: กรองด้วยคำค้น — กรองก่อนจัดกลุ่ม/ก่อนเข้า usePaged
+  // 🆕 1.8: กรองด้วยคำค้น — กรองก่อนจัดกลุ่ม/ก่อนเข้า usePaged · 🆕 PV-GROUP: ค้นเจอจาก PI สมาชิกทุกใบของคำขอรวม
   const pendingF = useMemo(() => pending.filter(p => {
-    const inv = invOf(p); const sup = supOf(p.supplierId);
-    return apMatch(q, [sup && sup.name, sup && sup.taxId, p.pvNumber, p.ref, p.by, bankLabelOf(p),
-      inv && inv.invNumber, inv && inv.supInvNumber, inv && inv.supTaxInvNumber]);
+    const sup = supOf(p.supplierId);
+    const memberFields = [];
+    for(const m of invsOf(p)) if(m.inv) memberFields.push(m.inv.invNumber, m.inv.supInvNumber, m.inv.supTaxInvNumber);
+    return apMatch(q, [sup && sup.name, sup && sup.taxId, p.pvNumber, p.ref, p.by, bankLabelOf(p), ...memberFields]);
   }), [state.payments, state.invoices, state.suppliers, state.bankAccounts, q]);
 
   // 🆕 ACCT-V2 (E): จัดกลุ่มตามวันนัดจ่าย (1 ตาราง/วัน) — paginate ที่ "วัน" บิลในวันแสดงครบเสมอ (ยอดรวมวันจึงถูกต้อง)
@@ -61294,7 +61712,7 @@ function PayApprovalTab({ state, dispatch, user }){
     dispatch({ type:'UPDATE_PAY', data:{ ...pay, approvalStatus:'rejected',
       rejectedBy:user.username, rejectedAt:Date.now(), rejectReason:reason } });
     dispatch({ type:'APPEND_AUDIT_LOG', data:{ type:'payment_reject', by:user.username,
-      entityId:pay.id, entityRef:pay.invId||'-', amount:pay.amount||0, note:reason } });
+      entityId:pay.id, entityRef:_payPiNos(state, pay).join(', ')||'-', amount:pay.amount||0, note:reason } });   // 🆕 PV-GROUP: อ้างทุก PI ในคำขอรวม
     alert('✅ ปฏิเสธแล้ว');
   };
 
@@ -61319,6 +61737,27 @@ function PayApprovalTab({ state, dispatch, user }){
     const tables = groups.map(g => {
       const trs = g.pays.map((p,i) => {
         const inv = invOf(p); const sup = supOf(p.supplierId); const doc = supDocOf(inv);
+        // 🆕 PV-GROUP: คำขอรวม = แถวหลัก "PV รวม n ใบ" + แถวย่อย (↳) ต่อ PI สมาชิก: PI · ใบกำกับ/ใบแจ้งหนี้ · ครบกำหนด · ยอดที่จัดสรร
+        if(isGroup(p)){
+          const ms = invsOf(p);
+          const subs = ms.map(m => `<tr class="sub">
+        <td></td>
+        <td class="sub-l" colspan="2">↳</td>
+        <td class="mono">${esc((m.inv && m.inv.invNumber) || m.invoiceId || '-')}</td>
+        <td class="mono">${(() => { const d = supDocOf(m.inv); return d ? esc(d.kind + ' ' + d.no) : '-'; })()}</td>
+        <td></td>
+        <td class="c">${m.inv && m.inv.dueDate ? esc(fmtDate(m.inv.dueDate)) : '-'}</td>
+        <td class="r mono">${_money(m.amount)}</td></tr>`).join('');
+          return `<tr>
+        <td class="c">${i+1}</td>
+        <td>${esc(sup?.name || inv?.supplierNameFreeform || '-')}</td>
+        <td class="mono">${esc(sup?.taxId||'')}</td>
+        <td><b>PV รวม ${ms.length} ใบ</b> <span class="tag">วางบิล</span></td>
+        <td class="mono">${ms.filter(m => supDocOf(m.inv)).length} ใบมีเลขเอกสาร</td>
+        <td>${esc(bankLabelOf(p))}${gmPendingIds.has(p.id) ? ' <span class="tag">รอ GM</span>' : ''}</td>
+        <td class="c">-</td>
+        <td class="r mono b">${_money(p.amount)}</td></tr>${subs}`;
+        }
         return `<tr>
         <td class="c">${i+1}</td>
         <td>${esc(sup?.name || inv?.supplierNameFreeform || '-')}</td>
@@ -61356,6 +61795,8 @@ function PayApprovalTab({ state, dispatch, user }){
   tr { page-break-inside:avoid; }
   tfoot td { background:#f5f5f5; font-weight:bold; }
   .tag { font-size:8pt; border:1px solid #b45309; color:#b45309; border-radius:3px; padding:0 2px; }
+  tr.sub td { font-size:9pt; color:#444; background:#fafafa; border-top:none; padding-top:0.6mm; padding-bottom:0.6mm; }
+  tr.sub td.sub-l { text-align:right; color:#888; }
   .sum { display:grid; grid-template-columns:1fr 1fr; gap:8mm; margin-top:6mm; }
   .sum h3 { font-size:11pt; margin:0 0 1mm; }
   .grand { margin-top:4mm; text-align:right; font-size:13pt; font-weight:bold; color:#c00; }
@@ -61468,14 +61909,17 @@ function PayApprovalTab({ state, dispatch, user }){
                 )),
               h('tbody', { className:'divide-y' },
                 pgHistory.shown.map(p => {
-                  const inv = state.invoices.find(i => i.id === p.invId);
+                  const inv = invOf(p);   // 🆕 PV-GROUP: ใบแรกของคำขอรวม (ปุ่ม +PI)
                   const sup = state.suppliers.find(s => s.id === p.supplierId);
                   const ts = p.approvedAt || p.rejectedAt;
                   const status = p.approvalStatus;
                   return h('tr', { key:p.id, className:'hover:bg-gray-50' },
                     h('td', { className:'px-3 py-2 text-xs' }, ts ? fmtDate(_tsToISO(ts)) : '-'),
                     h('td', { className:'px-3 py-2 font-mono text-xs text-purple-700 font-bold' }, p.pvNumber||'-'),
-                    h('td', { className:'px-3 py-2 font-mono text-xs text-red-700' }, inv?.invNumber||'-'),
+                    h('td', { className:'px-3 py-2 font-mono text-xs text-red-700', title: isGroup(p) ? _payPiNos(state, p).join(', ') : '' },
+                      isGroup(p) ? h('span', { className:'contents' },
+                        h('span', { className:'inline-block text-[10px] font-sans bg-indigo-100 text-indigo-800 rounded px-1 mr-1' }, `PV รวม ${_payInvIds(p).length} ใบ`),
+                        _payPiLabel(state, p)) : (inv?.invNumber||'-')),
                     h('td', { className:'px-3 py-2 text-sm' }, sup?.name||'-'),
                     h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(p.amount||0)),
                     h('td', { className:'px-3 py-2 text-center' },
@@ -61578,17 +62022,32 @@ function PayApprovalTab({ state, dispatch, user }){
                       const inv = invOf(p); const sup = supOf(p.supplierId); const doc = supDocOf(inv);
                       const checked = selectedIds.includes(p.id);
                       const waitGm = gmPendingIds.has(p.id);
-                      return h('tr', { key:p.id, className: cls('hover:bg-gray-50', checked && 'bg-blue-50') },
+                      // 🆕 PV-GROUP: คำขอรวม (วางบิล) = 1 แถว ยอดรวม + ป้าย "PV รวม n ใบ" · ▸ ขยายรายการ PI สมาชิกเป็นแถวย่อยในตารางวันเดียวกัน
+                      const grp = isGroup(p); const members = grp ? invsOf(p) : [];
+                      const open = grp && isExpanded(p);
+                      const mainRow = h('tr', { key:p.id, className: cls('hover:bg-gray-50', checked && 'bg-blue-50', grp && 'align-top') },
                         h('td', { className:'px-2 py-2 text-center' },
                           h('input', { type:'checkbox', checked, onChange:()=>toggleSel(p.id) })),
                         h('td', { className:'px-3 py-2' },
-                          h('div', { className:'font-medium text-gray-800' }, sup?.name || inv?.supplierNameFreeform || '(ไม่ระบุ supplier)'),
+                          h('div', { className:'font-medium text-gray-800' }, sup?.name || inv?.supplierNameFreeform || '(ไม่ระบุ supplier)',
+                            grp && h('span', { className:'ml-1 text-[10px] font-normal bg-indigo-100 text-indigo-800 border border-indigo-200 rounded px-1.5 py-0.5 whitespace-nowrap',
+                              title:'วางบิล — คำขอเดียวจ่ายหลาย PI ของ supplier นี้ (1 PV · 1 JE)' }, `PV รวม ${members.length} ใบ`)),
                           sup?.taxId && h('div', { className:'text-[10px] text-gray-500 font-mono' }, sup.taxId)),
                         h('td', { className:'px-3 py-2' },
-                          h('div', { className:'font-mono text-xs text-red-700' }, inv?.invNumber || '-', inv && h(VatAdjPill, { inv })),   // 🆕 VAT ปรับตามใบกำกับ
-                          inv?.dueDate && h('div', { className:'text-[10px] text-gray-500' }, 'ครบกำหนด ', fmtDate(inv.dueDate))),
+                          grp
+                            ? h('div', null,
+                                h('button', { onClick:()=>toggleExpand(p.id), 'data-testid':'pv-group-toggle',
+                                    className:'font-mono text-xs text-indigo-800 font-bold hover:underline',
+                                    title: open ? 'ซ่อนรายการ PI' : 'แสดงรายการ PI ที่รวมในคำขอนี้' },
+                                  open ? '▾ ' : '▸ ', `${members.length} ใบ`),
+                                h('div', { className:'text-[10px] text-gray-500 font-mono' }, _payPiNos(state, p).slice(0, 2).join(', '), members.length > 2 ? ' …' : ''))
+                            : h('div', null,
+                                h('div', { className:'font-mono text-xs text-red-700' }, inv?.invNumber || '-', inv && h(VatAdjPill, { inv })),   // 🆕 VAT ปรับตามใบกำกับ
+                                inv?.dueDate && h('div', { className:'text-[10px] text-gray-500' }, 'ครบกำหนด ', fmtDate(inv.dueDate)))),
                         h('td', { className:'px-3 py-2 text-xs font-mono' },
-                          doc ? h('div', null, h('span', { className:'text-[10px] text-gray-500 font-sans' }, doc.kind, ' '), doc.no) : h('span', { className:'text-gray-400' }, '-')),
+                          grp
+                            ? h('span', { className:'text-gray-500 font-sans text-[10px]' }, `${members.filter(m => supDocOf(m.inv)).length}/${members.length} ใบมีเลขเอกสาร`)
+                            : (doc ? h('div', null, h('span', { className:'text-[10px] text-gray-500 font-sans' }, doc.kind, ' '), doc.no) : h('span', { className:'text-gray-400' }, '-'))),
                         h('td', { className:'px-3 py-2 text-xs' },
                           h('div', { className: (p.bankId || p.requestedBankId) ? 'text-gray-800' : 'text-gray-400 italic' }, bankLabelOf(p)),
                           h('div', { className:'text-[10px] text-gray-500' }, PAY_METHODS.find(m=>m.v===p.method)?.label || p.method || 'โอนธนาคาร'),
@@ -61598,8 +62057,12 @@ function PayApprovalTab({ state, dispatch, user }){
                           h('div', { className:'text-[10px] text-gray-400' }, 'ขอ ', fmtDate(p.date))),
                         h('td', { className:'px-3 py-2 text-center' },
                           h('div', { className:'flex gap-1 justify-center flex-wrap' },
-                            printPayApprovalSheet && h(Button, { variant:'secondary', size:'sm',
-                              onClick:()=>printPayApprovalSheet(p, inv, state) }, '🖨️'),
+                            // 🆕 PV-GROUP: ใบพิมพ์ของคำขอรวม = ใบสรุปคิว (แถวหลัก + PI สมาชิก) · ใบเดี่ยว = ใบขออนุมัติจ่ายเดิม (PUR)
+                            grp
+                              ? h(Button, { variant:'secondary', size:'sm', title:'พิมพ์ใบสรุปคำขอรวม (ทุก PI)',
+                                  onClick:()=>printQueueSheet([p], `PV รวม ${sup?.name || ''}`.trim()) }, '🖨️')
+                              : printPayApprovalSheet && h(Button, { variant:'secondary', size:'sm',
+                                  onClick:()=>printPayApprovalSheet(p, inv, state) }, '🖨️'),
                             canApprove && (canApproveThis(p)
                               ? h(Button, { variant:'success', size:'sm', onClick:()=>setApproveTarget(p) }, '✅')
                               : h('span', { className:'text-[10px] text-orange-600 bg-orange-100 rounded px-1.5 py-1',
@@ -61609,6 +62072,27 @@ function PayApprovalTab({ state, dispatch, user }){
                           )
                         )
                       );
+                      if(!open) return mainRow;
+                      // 🆕 PV-GROUP: แถวย่อย PI สมาชิก — PI · ใบกำกับ/ใบแจ้งหนี้ Sup · ครบกำหนด · ยอดที่จัดสรร (คอลัมน์ตรงกับแถวหลัก)
+                      return h(global.ERP.Fragment, { key:p.id },
+                        mainRow,
+                        members.map(m => {
+                          const mi = m.inv; const md = supDocOf(mi);
+                          return h('tr', { key:p.id + '_' + m.invoiceId, 'data-testid':'pv-group-member',
+                              className: cls('text-xs bg-indigo-50/40', checked && 'bg-blue-50/60') },
+                            h('td', { className:'px-2 py-1' }, ''),
+                            h('td', { className:'px-3 py-1 text-right text-gray-400' }, '↳'),
+                            h('td', { className:'px-3 py-1' },
+                              mi
+                                ? h('span', { className:'font-mono text-red-700' }, mi.invNumber, h(VatAdjPill, { inv:mi }))
+                                : h('span', { className:'font-mono text-gray-400', title:m.invoiceId }, '(ไม่พบ PI)'),
+                              mi?.dueDate && h('span', { className:'ml-2 text-[10px] text-gray-500' }, 'ครบกำหนด ', fmtDate(mi.dueDate))),
+                            h('td', { className:'px-3 py-1 font-mono' },
+                              md ? h('span', null, h('span', { className:'text-[10px] text-gray-500 font-sans' }, md.kind, ' '), md.no) : h('span', { className:'text-gray-400' }, '-')),
+                            h('td', { className:'px-3 py-1 text-[10px] text-gray-400' }, mi ? `ค้าง ${fmtCur(Number(((mi.netPayable||0) - (mi.paidAmount||0)).toFixed(2)))}` : ''),
+                            h('td', { className:'px-3 py-1 text-right font-mono text-gray-800' }, fmtCur(m.amount)),
+                            h('td', { colSpan:2, className:'px-3 py-1' }, ''));
+                        }));
                     })),
                   h('tfoot', null,
                     h('tr', { className:'bg-gray-50 font-bold' },
@@ -61677,10 +62161,12 @@ function payNeedsHighApproval(state, amount){
 function requestPayApproval({ pay, inv, bankId, slip, state, dispatch, user }){
   const fn = global.ERP.requestApprovalIfNeeded;
   if(!fn) return false;
+  // 🆕 PV-GROUP: คำขอรวม → entityRef = ทุก PI (executor approve_payment ใน 03-shell ตัดยอดตาม allocations เอง)
+  const _nos = _payPiNos(state, pay);
   return fn({
     action:'approve_payment', user, state, dispatch,
     context:{
-      entityType:'payment', entityId:pay.id, entityRef: inv?.invNumber || pay.invId || '-',
+      entityType:'payment', entityId:pay.id, entityRef: _nos.length > 1 ? `PV รวม ${_nos.length} ใบ: ${_nos.join(', ')}` : (inv?.invNumber || pay.invId || '-'),
       scope:'accounting', amount: Number(pay.amount)||0,
       reason:'อนุมัติจ่าย ≥100,000 — ต้อง GM อนุมัติเพิ่ม',
       // payload → executor 'approve_payment' ใน 03-shell ใช้จ่ายจริงตอน approved
@@ -61736,8 +62222,11 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
     // 🆕 ใช้ ADJUST_BANK_BALANCE atomic delta (กัน stale-closure ของ UPDATE_BANK ปลายลูป)
     let paidCount = 0, paidTotal = 0, gatedCount = 0, gatedTotal = 0;
     for(const pay of pays){
-      const inv = state.invoices.find(i => i.id === pay.invId);
-      if(!inv) continue;
+      // 🆕 PV-GROUP: PI สมาชิกทุกใบ (ใบเดี่ยว = 1 รายการ · คำขอรวม = ตาม allocations) — guard ทุกใบก่อนตัดเงิน · ตัดยอดต่อใบตาม allocation
+      const members = _payMembers(state, pay);
+      const inv = members.length ? members[0].inv : null;
+      if(!inv || members.some(m => !m.inv)){ alert('⛔ ข้าม ' + (pay.pvNumber || pay.id) + ' — ไม่พบ PI ที่คำขอนี้อ้างถึง (อาจถูกลบ)'); continue; }
+      const _piList = members.map(m => m.inv.invNumber).join(', ');
       // 🆕 F1 (CRITICAL): เช็คต่อรายการ — ยอด ≥100,000 ต้องผ่าน approval engine (manager→GM)
       //   ส่งคำขอแทนการจ่ายทันที, executor จ่ายจริงตอนอนุมัติครบ — รายการปกติจ่ายต่อตามเดิม
       if(payNeedsHighApproval(state, pay.amount)){
@@ -61745,25 +62234,33 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
         if(sent){ gatedCount++; gatedTotal += Number(pay.amount)||0; continue; }
       }
       // 🆕 หยุดที่ตัวเรียก — reducer alert+return s อย่างเดียวไม่พอ (dispatch ตัวถัดไปจะตัดเงิน/ลง JE ต่อ ทั้งที่ payment ไม่อัปเดต)
-      {
-        const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, pay.invId || pay.invoiceId);
+      //    🆕 PV-GROUP: ตรวจทุก PI สมาชิก — ติดใบเดียวข้ามทั้งคำขอ (PV/JE ต้องครบทุกใบ)
+      let blocked = false;
+      for(const m of members){
+        const mi = m.inv;
+        const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, mi.id);
         if(_pr.length > 0){
-          alert('⛔ ข้าม ' + ((inv && inv.invNumber) || 'บิลนี้') + ' — มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\n'
+          alert('⛔ ข้าม ' + (members.length > 1 ? 'คำขอรวม ' + _piList : (mi.invNumber || 'บิลนี้')) + ' — ' + (mi.invNumber||'') + ' มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\n'
             + _pr.map(function(r){ return '• ' + (r.rtvNumber||r.id); }).join('\n')
             + '\n\nให้จัดซื้อปิดเคสของคืนก่อน จึงจะอนุมัติจ่ายบิลนี้ได้');
-          continue;
+          blocked = true; break;
         }
-      }
-      // 🆕 กันจ่ายเกิน ณ เวลาอนุมัติ (ยอดค้างอาจลดลงหลังส่งคำขอ เช่น CN เข้ามา)
-      {
-        const _remain = Number((((inv && inv.netPayable)||0) - ((inv && inv.paidAmount)||0)).toFixed(2));
-        if(Number(pay.amount) > _remain + 0.01){
-          alert('⛔ ข้าม ' + ((inv && inv.invNumber)||'บิลนี้') + ' — ขอจ่าย ' + fmtCur(pay.amount)
+        // 🆕 VAT-FIX / WHT-EDIT: มีคำขอปรับ VAT/WHT/แก้ไขใบค้างอยู่ → ยอดจะเปลี่ยน ห้ามจ่ายทับ
+        const _pc = pendingInvChange(state, mi.id);
+        if(_pc){
+          alert('⛔ ข้าม ' + (members.length > 1 ? 'คำขอรวม ' + _piList : (mi.invNumber || 'บิลนี้')) + ' — ' + (mi.invNumber||'') + ' มีคำขอ' + (_pc.action === 'adjust_inv_vat' ? 'ปรับ VAT' : 'แก้ไข') + 'ค้างอยู่ (ขอโดย ' + (_pc.requestedByName || _pc.requestedBy || '-') + ')\nรอผลอนุมัติคำขอนั้นก่อน');
+          blocked = true; break;
+        }
+        // 🆕 กันจ่ายเกิน ณ เวลาอนุมัติ (ยอดค้างอาจลดลงหลังส่งคำขอ เช่น CN เข้ามา) — ต่อใบตาม allocation
+        const _remain = Number(((mi.netPayable||0) - (mi.paidAmount||0)).toFixed(2));
+        if(Number(m.amount) > _remain + 0.01){
+          alert('⛔ ข้าม ' + (members.length > 1 ? 'คำขอรวม ' + _piList : (mi.invNumber || 'บิลนี้')) + ' — ' + (mi.invNumber||'') + ' ขอจ่าย ' + fmtCur(m.amount)
             + ' แต่ยอดค้างเหลือ ' + fmtCur(_remain) + '\n(ยอดลดลงหลังส่งคำขอ เช่น มีใบลดหนี้เข้ามา)'
             + '\n\nให้ยกเลิกคำขอนี้แล้วขอใหม่ตามยอดจริง');
-          continue;
+          blocked = true; break;
         }
       }
+      if(blocked) continue;
       const updatedPay = {
         // 🆕 อย่าทับ "วันที่นัดจ่าย" ที่ตอนขออนุมัติคีย์ไว้ด้วยวันที่ผู้อนุมัติกด
         //    (จัดซื้อดูวันนี้เพื่อไปตอบ supplier — เดิมเปลี่ยนเงียบตอนอนุมัติ) · เก็บวันที่อนุมัติแยกไว้
@@ -61778,15 +62275,19 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
         approvalNote: note,
       };
       dispatch({ type:'UPDATE_PAY', data: updatedPay });
-      dispatch({ type:'ADJUST_BANK_BALANCE', data:{ bankId, delta:-Number(pay.amount) } });
-      const newPaid = (inv.paidAmount||0) + Number(pay.amount);
-      const newStatus = newPaid >= (inv.netPayable||0) - 0.01 ? 'paid' : 'partial';
-      dispatch({ type:'UPDATE_INV', data:{ ...inv, paidAmount:newPaid, paymentStatus:newStatus }});
+      dispatch({ type:'ADJUST_BANK_BALANCE', data:{ bankId, delta:-Number(pay.amount) } });   // ตัดธนาคาร 1 ครั้งต่อ PV (ยอดรวม)
+      // 🆕 PV-GROUP: ตัดยอดค้างต่อ PI ตาม allocation (ใบเดี่ยว = ยอดทั้งก้อน)
+      for(const m of members){
+        const newPaid = Number(((m.inv.paidAmount||0) + Number(m.amount)).toFixed(2));
+        const newStatus = newPaid >= (m.inv.netPayable||0) - 0.01 ? 'paid' : 'partial';
+        dispatch({ type:'UPDATE_INV', data:{ ...m.inv, paidAmount:newPaid, paymentStatus:newStatus }});
+      }
+      // JE จ่าย 1 ใบต่อ PV — autoPostPayment (PUR) บรรยายทุก PI เมื่อ pay.invoiceIds มีค่า · ส่งใบแรกเป็น inv อ้างอิง
       if(autoPostPayment) autoPostPayment(updatedPay, inv, bank, state, dispatch, user);
       const _reqB = pay.requestedBankId || pay.bankId || null;
       dispatch({ type:'APPEND_AUDIT_LOG', data:{ type:'payment_approve', by:user.username,
-        entityId:pay.id, entityRef:inv.invNumber, amount:pay.amount||0,
-        note:`bulk approve · ${note||''}` + ((_reqB && _reqB !== bankId) ? ` · requestedBankId≠bankId (ขอ ${pay.bankName||_reqB} → โอน ${bank?.name||bankId})` : '') }});
+        entityId:pay.id, entityRef:_piList, amount:pay.amount||0,
+        note:`bulk approve${members.length > 1 ? ` · PV รวม ${members.length} ใบ` : ''} · ${note||''}` + ((_reqB && _reqB !== bankId) ? ` · requestedBankId≠bankId (ขอ ${pay.bankName||_reqB} → โอน ${bank?.name||bankId})` : '') }});
       paidCount++; paidTotal += Number(pay.amount)||0;
     }
     // bank balance ถูก ADJUST_BANK_BALANCE ระหว่างลูปแล้ว — atomic delta · ไม่มี stale closure
@@ -61824,8 +62325,8 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
       reqBankMixed && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900' },
         h('div', { className:'font-bold' }, '⚠️ บัญชีที่ขอโอนต่างกัน — จ่ายรวมจะใช้บัญชีเดียวข้างบนกับทุกใบ'),
         h('ul', { className:'mt-1 space-y-0.5 list-disc pl-4' },
-          pays.map(p => { const inv = state.invoices.find(i => i.id === p.invId); const b = banks.find(x => x.id === (p.bankId || p.requestedBankId));
-            return h('li', { key:p.id }, h('span', { className:'font-mono' }, p.pvNumber || inv?.invNumber || p.id), ' · ',
+          pays.map(p => { const b = banks.find(x => x.id === (p.bankId || p.requestedBankId));
+            return h('li', { key:p.id }, h('span', { className:'font-mono' }, p.pvNumber || _payPiLabel(state, p) || p.id), ' · ',   // 🆕 PV-GROUP: คำขอรวมโชว์ "n ใบ: …"
               b ? `${b.bank||''} ${b.name}` : (p.bankName || '— ผู้อนุมัติเลือก —')); })),
         h('div', { className:'mt-1 text-[11px]' }, 'ถ้าต้องการโอนคนละบัญชี ให้อนุมัติทีละใบ (ปุ่ม ✅ ในแถว)')),
       h('label', { className:'block' }, 'หมายเหตุการอนุมัติ',
@@ -61840,10 +62341,18 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
               h('th', { className:'px-2 py-1 text-right text-xs' }, 'จำนวน'))),
           h('tbody', { className:'divide-y' },
             pays.map(p => {
-              const inv = state.invoices.find(i => i.id === p.invId);
+              // 🆕 PV-GROUP: คำขอรวม → ป้าย "PV รวม n ใบ" + รายการ PI · ยอดต่อใบ ใต้แถว
+              const members = _payMembers(state, p);
               const sup = state.suppliers.find(s => s.id === p.supplierId);
-              return h('tr', { key:p.id },
-                h('td', { className:'px-2 py-1 font-mono text-xs text-red-700' }, inv?.invNumber||'-'),
+              const grp = _isGroupPay(p);
+              return h('tr', { key:p.id, className: cls(grp && 'align-top') },
+                h('td', { className:'px-2 py-1 font-mono text-xs text-red-700' },
+                  grp
+                    ? h('div', null,
+                        h('span', { className:'inline-block text-[10px] font-sans bg-indigo-100 text-indigo-800 rounded px-1' }, `PV รวม ${members.length} ใบ`),
+                        members.map(m => h('div', { key:m.invoiceId, className:'text-[11px] text-gray-700' },
+                          h('span', { className:'text-red-700' }, (m.inv && m.inv.invNumber) || '(ไม่พบ PI)'), h('span', { className:'text-gray-400' }, ' · ', fmtCur(m.amount)))))
+                    : ((members[0] && members[0].inv && members[0].inv.invNumber) || '-')),
                 h('td', { className:'px-2 py-1 text-xs' }, sup?.name||'-'),
                 h('td', { className:'px-2 py-1 text-right font-medium' }, fmtCur(p.amount)));
             })))),
@@ -61859,7 +62368,11 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
   const purchaseMod = global.ERP.MODULES.purchase;
   const autoPostPayment = purchaseMod?.autoPostPayment;
   const PAY_METHODS = purchaseMod?.PAY_METHODS || [];
-  const inv = state.invoices.find(i => i.id === pay.invId);
+  // 🆕 PV-GROUP: PI สมาชิกทุกใบ (ใบเดี่ยว = 1 · คำขอรวม = ตาม allocations) · inv = ใบแรก (อ้างอิง autoPostPayment/พิมพ์)
+  const members = _payMembers(state, pay);
+  const isGroup = _isGroupPay(pay);
+  const inv = members.length ? members[0].inv : null;
+  const supDocOf = (i) => !i ? null : i.supTaxInvNumber ? { kind:'ใบกำกับ', no:i.supTaxInvNumber } : i.supInvNumber ? { kind:'ใบแจ้งหนี้', no:i.supInvNumber } : null;
   const banks = state.bankAccounts || [];
   const [bankId, setBankId] = useState(pay.bankId || banks[0]?.id || '');
   const [method, setMethod] = useState(pay.method || 'transfer');
@@ -61881,23 +62394,27 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
 
   const confirm_ = () => {
     if(!inv) return alert('ไม่พบ INV');
+    if(members.some(m => !m.inv)) return alert('⛔ อนุมัติไม่ได้ — ไม่พบ PI บางใบที่คำขอรวมนี้อ้างถึง (อาจถูกลบ) → ยกเลิกคำขอแล้วขอใหม่');
     if(method === 'transfer' && !bankId) return alert('เลือกบัญชีที่ใช้โอน');
     // 🆕 UAT: หยุดก่อน dispatch ตัวแรก ถ้าวันจ่ายจริงอยู่ในงวดที่ปิด/อนาคตเกินกำหนด (reducer บล็อกแค่ ADD_JE → จะได้ payment/bank/INV ที่ไม่มี JE)
     { const _m = _payDateBlocked(state, payDate || pay.payDate || getToday()); if(_m) return alert(_m); }
     // 🆕 หยุดก่อนตัดเงิน (reducer guard อย่างเดียวไม่พอ — dispatch ตัวถัดไปยังตัดเงิน/ลง JE)
-    {
-      const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, pay.invId || pay.invoiceId);
+    //    🆕 PV-GROUP: ตรวจทุก PI สมาชิก — ติดใบเดียว = อนุมัติทั้งคำขอไม่ได้ (PV/JE ต้องครบทุกใบ)
+    for(const m of members){
+      const mi = m.inv;
+      const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){return [];})(state, mi.id);
       if(_pr.length > 0){
-        return alert('⛔ อนุมัติจ่ายไม่ได้ — มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\n'
+        return alert('⛔ อนุมัติจ่ายไม่ได้ — ' + (mi.invNumber||'') + ' มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\n'
           + _pr.map(function(r){ return '• ' + (r.rtvNumber||r.id); }).join('\n')
           + '\n\nให้จัดซื้อปิดเคสของคืนก่อน จึงจะจ่ายบิลนี้ได้');
       }
-    }
-    // 🆕 กันจ่ายเกิน ณ เวลาอนุมัติ
-    {
-      const _remain = Number((((inv && inv.netPayable)||0) - ((inv && inv.paidAmount)||0)).toFixed(2));
-      if(Number(pay.amount) > _remain + 0.01){
-        return alert('⛔ อนุมัติไม่ได้ — ขอจ่าย ' + fmtCur(pay.amount) + ' แต่ยอดค้างเหลือ ' + fmtCur(_remain)
+      // 🆕 VAT-FIX / WHT-EDIT: มีคำขอปรับ VAT/WHT/แก้ไขใบค้างอยู่ → ยอดจะเปลี่ยน ห้ามจ่ายทับ
+      const _pc = pendingInvChange(state, mi.id);
+      if(_pc) return alert('⛔ อนุมัติจ่ายไม่ได้ — ' + (mi.invNumber||'') + ' มีคำขอ' + (_pc.action === 'adjust_inv_vat' ? 'ปรับ VAT' : 'แก้ไข') + 'ค้างอยู่ (ขอโดย ' + (_pc.requestedByName || _pc.requestedBy || '-') + ')\nรอผลอนุมัติคำขอนั้นก่อน');
+      // 🆕 กันจ่ายเกิน ณ เวลาอนุมัติ — ต่อใบตาม allocation
+      const _remain = Number(((mi.netPayable||0) - (mi.paidAmount||0)).toFixed(2));
+      if(Number(m.amount) > _remain + 0.01){
+        return alert('⛔ อนุมัติไม่ได้ — ' + (mi.invNumber||'') + ' ขอจ่าย ' + fmtCur(m.amount) + ' แต่ยอดค้างเหลือ ' + fmtCur(_remain)
           + '\n(ยอดลดลงหลังส่งคำขอ เช่น มีใบลดหนี้เข้ามา)\n\nให้ยกเลิกคำขอนี้แล้วขอใหม่ตามยอดจริง');
       }
     }
@@ -61925,23 +62442,48 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
     dispatch({ type:'UPDATE_PAY', data: updatedPay });
 
     if(bank && method === 'transfer'){
-      dispatch({ type:'UPDATE_BANK', data:{ ...bank, balance:(bank.balance||0) - Number(pay.amount) } });
+      dispatch({ type:'UPDATE_BANK', data:{ ...bank, balance:(bank.balance||0) - Number(pay.amount) } });   // ตัดธนาคาร 1 ครั้งต่อ PV (ยอดรวม)
     }
-    const newPaidAmount = (inv.paidAmount||0) + Number(pay.amount);
-    const newStatus = newPaidAmount >= inv.netPayable - 0.01 ? 'paid' : 'partial';
-    dispatch({ type:'UPDATE_INV', data:{ ...inv, paidAmount:newPaidAmount, paymentStatus:newStatus } });
+    // 🆕 PV-GROUP: ตัดยอดค้างต่อ PI ตาม allocation (ใบเดี่ยว = ยอดทั้งก้อน)
+    for(const m of members){
+      const newPaidAmount = Number(((m.inv.paidAmount||0) + Number(m.amount)).toFixed(2));
+      const newStatus = newPaidAmount >= (m.inv.netPayable||0) - 0.01 ? 'paid' : 'partial';
+      dispatch({ type:'UPDATE_INV', data:{ ...m.inv, paidAmount:newPaidAmount, paymentStatus:newStatus } });
+    }
+    // JE จ่าย 1 ใบต่อ PV — autoPostPayment (PUR) บรรยายทุก PI เมื่อ pay.invoiceIds มีค่า · ส่งใบแรกเป็น inv อ้างอิง
     if(autoPostPayment) autoPostPayment(updatedPay, inv, bank, state, dispatch, user);
 
-    alert(`✅ อนุมัติแล้ว ${fmtCur(pay.amount)} · ${inv.invNumber}\n📅 วันที่จ่ายจริง ${fmtDate(updatedPay.payDate)} · JE จ่ายลงตามวันที่นี้`);
+    const _piList = members.map(m => m.inv.invNumber).join(', ');
+    alert(`✅ อนุมัติแล้ว ${fmtCur(pay.amount)} · ${isGroup ? `PV รวม ${members.length} ใบ: ${_piList}` : inv.invNumber}\n📅 วันที่จ่ายจริง ${fmtDate(updatedPay.payDate)} · JE จ่ายลงตามวันที่นี้${isGroup ? ' (1 PV · 1 JE)' : ''}`);
     onClose();
   };
 
-  return h(Modal, { isOpen:true, title:`✅ อนุมัติจ่าย: ${inv?.invNumber || '-'}`, onClose, size:'md' },
+  const _supName = ((state.suppliers||[]).find(s => s.id === pay.supplierId) || {}).name || inv?.supplierNameFreeform || '';
+  return h(Modal, { isOpen:true, title: isGroup ? `✅ อนุมัติจ่าย: PV รวม ${members.length} ใบ${_supName ? ' · ' + _supName : ''}` : `✅ อนุมัติจ่าย: ${inv?.invNumber || '-'}`, onClose, size:'md' },
     h('div', { className:'space-y-3' },
       h('div', { className:'bg-red-50 border border-red-200 rounded p-3 text-center' },
-        h('div', { className:'text-xs text-red-700' }, 'จำนวนที่ขอจ่าย'),
+        h('div', { className:'text-xs text-red-700' }, isGroup ? `จำนวนที่ขอจ่าย (วางบิล ${members.length} ใบ)` : 'จำนวนที่ขอจ่าย'),
         h('div', { className:'text-2xl font-bold text-red-800' }, fmtCur(pay.amount))
       ),
+      // 🆕 PV-GROUP: รายการ PI สมาชิก — PI · ใบกำกับ/ใบแจ้งหนี้ · ครบกำหนด · ยอดที่จัดสรร (ผู้อนุมัติเห็นครบก่อนกด)
+      isGroup && h('div', { className:'bg-white border border-indigo-200 rounded overflow-hidden', 'data-testid':'pv-group-members' },
+        h('div', { className:'px-2 py-1 bg-indigo-50 text-[11px] font-bold text-indigo-900' }, `🧾 PI ที่รวมในคำขอนี้ (${members.length} ใบ · 1 PV · 1 JE)`),
+        h('table', { className:'w-full text-xs' },
+          h('thead', { className:'bg-gray-50' }, h('tr', null,
+            h('th', { className:'px-2 py-1 text-left' }, 'PI'),
+            h('th', { className:'px-2 py-1 text-left' }, 'ใบกำกับ/ใบแจ้งหนี้'),
+            h('th', { className:'px-2 py-1 text-left' }, 'ครบกำหนด'),
+            h('th', { className:'px-2 py-1 text-right' }, 'ค้าง'),
+            h('th', { className:'px-2 py-1 text-right' }, 'จ่ายใบนี้'))),
+          h('tbody', { className:'divide-y' }, members.map(m => {
+            const mi = m.inv; const md = supDocOf(mi);
+            return h('tr', { key:m.invoiceId },
+              h('td', { className:'px-2 py-1 font-mono text-red-700' }, mi ? mi.invNumber : h('span', { className:'text-gray-400' }, '(ไม่พบ PI)')),
+              h('td', { className:'px-2 py-1 font-mono' }, md ? `${md.kind} ${md.no}` : '-'),
+              h('td', { className:'px-2 py-1' }, mi?.dueDate ? fmtDate(mi.dueDate) : '-'),
+              h('td', { className:'px-2 py-1 text-right font-mono text-gray-500' }, mi ? fmtCur(Number(((mi.netPayable||0) - (mi.paidAmount||0)).toFixed(2))) : '-'),
+              h('td', { className:'px-2 py-1 text-right font-mono font-bold' }, fmtCur(m.amount)));
+          })))),
       h('div', { className:'grid grid-cols-2 gap-2 text-sm' },
         h('label', null, 'วิธีจ่าย',
           h('select', { value:method, onChange:e=>setMethod(e.target.value),
@@ -62028,11 +62570,10 @@ function PaymentCenter({ state, dispatch, user }){
 
   const canPay = hasPerm(user, 'purchase','payment','create');
 
-  // INVs ที่ต้องจ่าย — กัน pending ที่ขออนุมัติไปแล้ว
+  // INVs ที่ต้องจ่าย — กัน pending ที่ขออนุมัติไปแล้ว · 🆕 PV-GROUP: PI ทุกใบในคำขอรวม (invoiceIds[]) ก็ออกจากคิวจนกว่าจะอนุมัติ/ยกเลิกคำขอ
   const invsToPay = useMemo(() => {
-    const pendingInvIds = new Set((state.payments||[])
-      .filter(p => p.approvalStatus === 'pending')
-      .map(p => p.invId));
+    const pendingInvIds = new Set();
+    for(const p of (state.payments||[])){ if(p.approvalStatus === 'pending') for(const id of _payInvIds(p)) pendingInvIds.add(id); }
     return (state.invoices||[])
       .filter(i => !i.voided && i.paymentStatus !== 'paid' && !pendingInvIds.has(i.id))
       .sort((a,b) => (a.dueDate||'').localeCompare(b.dueDate||''));
@@ -62043,6 +62584,8 @@ function PaymentCenter({ state, dispatch, user }){
     (state.invoices||[]).filter(i => !i.voided && i.paymentStatus !== 'paid' && i.rtvHoldPayment),
     [state.invoices]);
   const pendingRequests = (state.payments||[]).filter(p => p.approvalStatus === 'pending');
+  // 🆕 PV-GROUP: จำนวน PI ที่ติดอยู่ในคำขอ (คำขอรวมนับทุกใบ) — ป้าย "⏳ รออนุมัติอยู่ n คำขอ (m ใบ)"
+  const pendingInvCount = pendingRequests.reduce((s,p) => s + _payInvIds(p).length, 0);
 
   // 🆕 F3 — toggle: paid only vs all INV (รวม unpaid)
   const [taxInvIncludeUnpaid, setTaxInvIncludeUnpaid] = useState(false);
@@ -62125,7 +62668,7 @@ function PaymentCenter({ state, dispatch, user }){
         onClick: () => setShowBulk(true),
       }, `📋 ขออนุมัติจ่าย (${selectedIds.length})`),
       tab === 'tobay' && pendingRequests.length > 0 && h('span', { className:'text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded' },
-        `⏳ รออนุมัติอยู่ ${pendingRequests.length} ใบ → ดูที่แท็บ 🔒 รออนุมัติ`)
+        `⏳ รออนุมัติอยู่ ${pendingRequests.length} คำขอ${pendingInvCount !== pendingRequests.length ? ` (${pendingInvCount} ใบ)` : ''} → ดูที่แท็บ 🔒 รออนุมัติ`)
     ),
 
     // 🆕 1.8: ช่องค้นหา — ใช้ได้ทุก sub-tab (รอจ่าย / รอ Tax INV)
@@ -62136,25 +62679,33 @@ function PaymentCenter({ state, dispatch, user }){
 
     tab === 'tobay' && pendingRequests.length > 0 && h('div', { className:'bg-amber-50 border-2 border-amber-300 rounded-lg p-3 mb-3' },
       h('div', { className:'font-bold text-amber-900 text-sm mb-2' },
-        `⏳ INV ที่ส่งขออนุมัติจ่ายอยู่ — ${pendingRequests.length} ใบ`,
+        `⏳ INV ที่ส่งขออนุมัติจ่ายอยู่ — ${pendingRequests.length} คำขอ${pendingInvCount !== pendingRequests.length ? ` (${pendingInvCount} ใบ)` : ''}`,
         h('span', { className:'font-normal text-xs ml-1' }, '(ยังไม่ถูกหักเงิน · ยกเลิกคำขอเพื่อกลับมาจ่าย/แก้ไขใหม่)')),
       h('div', { className:'space-y-1' },
         pendingRequests.map(p => {
-          const inv = (state.invoices||[]).find(i => i.id === p.invId);
-          const sup = inv && state.suppliers.find(s => s.id === inv.supplierId);
+          // 🆕 PV-GROUP: คำขอรวม → "PV รวม n ใบ" + รายการ PI · ยกเลิกคำขอ = ปล่อยทุกใบกลับคิวรอจ่าย (reducer ลบ payment ทั้งก้อน)
+          const members = _payMembers(state, p);
+          const inv = members.length ? members[0].inv : null;
+          const grp = _isGroupPay(p);
+          const sup = state.suppliers.find(s => s.id === p.supplierId) || (inv && state.suppliers.find(s => s.id === inv.supplierId));
+          const piNos = members.map(m => (m.inv && m.inv.invNumber) || m.invoiceId);
           return h('div', { key:p.id, className:'bg-white border border-amber-200 rounded p-2 flex items-center justify-between gap-2 flex-wrap text-sm' },
             h('div', null,
-              h('span', { className:'font-mono text-xs text-red-700' }, inv?.invNumber || p.invId),
-              ' · ', sup?.name || '-',
+              grp
+                ? h('span', { className:'contents' },
+                    h('span', { className:'inline-block text-[10px] bg-indigo-100 text-indigo-800 border border-indigo-200 rounded px-1.5 py-0.5 mr-1', title: piNos.join(', ') }, `PV รวม ${members.length} ใบ`),
+                    h('span', { className:'font-mono text-xs text-red-700' }, piNos.slice(0, 3).join(', '), members.length > 3 ? ` +${members.length - 3}` : ''))
+                : h('span', { className:'font-mono text-xs text-red-700' }, inv?.invNumber || p.invId),
+              ' · ', sup?.name || inv?.supplierNameFreeform || '-',
               h('span', { className:'ml-2 text-gray-600' }, 'ขอจ่าย ', h('b', null, fmtCur(p.amount||0))),
               h('span', { className:'ml-2 text-[11px] text-gray-500' }, 'โดย ', p.by||'-')),
             canPay && h('button', {
               onClick:()=>{
-                if(!confirm(`ยกเลิกคำขออนุมัติจ่าย ${fmtCur(p.amount||0)} ?\n\nINV จะกลับมาอยู่รายการ "รอจ่าย" — จ่าย/แก้ไขใหม่ได้\n(ยังไม่ถูกหักเงิน — ไม่มี JE ต้อง reverse)`)) return;
+                if(!confirm(`ยกเลิกคำขออนุมัติจ่าย ${fmtCur(p.amount||0)}${grp ? ` (PV รวม ${members.length} ใบ: ${piNos.join(', ')})` : ''} ?\n\nINV ${grp ? 'ทุกใบ' : ''}จะกลับมาอยู่รายการ "รอจ่าย" — จ่าย/แก้ไขใหม่ได้\n(ยังไม่ถูกหักเงิน — ไม่มี JE ต้อง reverse)`)) return;
                 dispatch({ type:'CANCEL_PAY_REQUEST', data:{ paymentId:p.id, by:user.username, reason:'ยกเลิกเพื่อจ่าย/แก้ใหม่' } });
               },
               className:'text-xs px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded font-medium' },
-              '✖ ยกเลิกคำขอ → กลับมาจ่าย'));
+              grp ? `✖ ยกเลิกคำขอ → ปล่อย ${members.length} ใบกลับมาจ่าย` : '✖ ยกเลิกคำขอ → กลับมาจ่าย'));
         }))),
 
     tab === 'tobay'
@@ -63398,8 +63949,24 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
 
   const total = invs.reduce((s,i) => s + (Number(amounts[i.id])||0), 0);
   const isPetty = paySource === 'petty';
+  // 🆕 PV-GROUP (วางบิล): ทางธนาคาร — PI ของ supplier เดียวกัน ≥2 ใบ → รวมเป็น 1 คำขอ/1 PV (invId:null + invoiceIds[] + allocations[])
+  //   default รวม · toggle "แยกเป็นคำขอละใบ" = แบบเดิม (คำขอละใบ) · ใบที่ไม่มี supplierId (ชื่อ freeform) แยกใบเสมอ · ทางเงินสดย่อยไม่รวม (ต่อใบเหมือนเดิม)
+  const [groupBySup, setGroupBySup] = useState(true);
+  const supNameOf = (sid, i) => ((state.suppliers||[]).find(s => s.id === sid) || {}).name || (i && i.supplierNameFreeform) || sid || '-';
+  const _groupable = (() => { const c = {}; for(const i of invs) if(i.supplierId) c[i.supplierId] = (c[i.supplierId]||0) + 1; return Object.values(c).some(n => n > 1); })();
+  const bankGroups = (() => {
+    if(isPetty || !groupBySup) return [];
+    const m = {};
+    for(const i of invs){ const amt = Number(amounts[i.id])||0; if(amt <= 0 || !i.supplierId) continue; (m[i.supplierId] = m[i.supplierId] || []).push({ inv:i, amt }); }
+    return Object.entries(m).filter(([, l]) => l.length > 1)
+      .map(([sid, l]) => ({ supplierId:sid, name: supNameOf(sid, l[0].inv), items:l, total: Number(l.reduce((s,x) => s + x.amt, 0).toFixed(2)) }));
+  })();
+  const bankReqCount = isPetty ? invs.length : (invs.filter(i => (Number(amounts[i.id])||0) > 0).length - bankGroups.reduce((s,g) => s + g.items.length, 0) + bankGroups.length);
   // guards petty (ปิดปุ่มส่ง + บอกเหตุผล): (a) ยอดรวม > เงินสดย่อยคงเหลือ (b) เพดานต่อ PI เมื่อตั้งไว้ (c) ต้องห้าม ใช้ได้เฉพาะ PI ค่าใช้จ่าย (ไม่มี PO)
-  const pettyOverBal = isPetty && total > pettyBalance + 0.01;
+  // 🆕 ACCT-V2 (user 2026-09-18): โหมด "บันทึกอย่างเดียว" (settings.pettyRecordOnly ≠ false = ค่าตั้งต้น) → ไม่บังคับให้เติมเงินเข้าระบบก่อน ยอดคงเหลือติดลบได้ (แค่เตือน)
+  const pettyRecordOnly = state.settings?.pettyRecordOnly !== false;
+  const pettyOverBal = isPetty && !pettyRecordOnly && total > pettyBalance + 0.01;
+  const pettyGoesNegative = isPetty && pettyRecordOnly && total > pettyBalance + 0.01;
   const pettyOverMax = isPetty && pettyPayMax > 0 ? invs.filter(i => (Number(amounts[i.id])||0) > pettyPayMax + 0.01) : [];
   const pettyNonDirect = isPetty && pettyKind === 'non_deductible' ? invs.filter(i => i.source !== 'direct_expense' && (Number(amounts[i.id])||0) > 0) : [];
   // 🆕 UAT (d) period lock: petty จ่าย "วันนี้" เสมอ → ถ้า settings.periodLockUntil > วันนี้ reducer จะปฏิเสธ ADD_PAY/ADD_JE แต่ ADD_PETTY_TXN/UPDATE_INV ไม่มี guard
@@ -63498,6 +64065,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
     const today = getToday();
     const bank = !isPetty ? banks.find(b => b.id === bankId) : null;
     let sent = 0, capped = 0; const skipped = [];
+    const bankItems = [];   // 🆕 PV-GROUP: ทางธนาคารเก็บ {inv, amt} ไว้ก่อน → จัดกลุ่มตาม supplier แล้วค่อย ADD_PAY (ไม่ dispatch กลางลูป — ยกเลิกกลางคันไม่เหลือคำขอครึ่งชุด)
     for(const inv of invs){
       // ตรวจซ้ำ ณ ตอนกดส่ง (คำขอปรับ VAT อาจถูกส่งระหว่างเปิดหน้านี้)
       if(heldByChange(inv)){ alert('⏳ ข้าม ' + (inv.invNumber||'') + ' — รอปรับ VAT/แก้ไข ขอจ่ายหลังอนุมัติ'); continue; }
@@ -63515,20 +64083,28 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         amt = _remain; capped++;
       }
       amt = Number(amt.toFixed(2));
-      if(isPetty){
-        // 🆕 ACCT-V2: เงินออกจริงที่สเต็ปนี้ → caller-side guards เหมือนตอนอนุมัติ (reducer alert+return s อย่างเดียวไม่พอ — dispatch ถัดไปจะตัดเงินสดย่อย/ลง JE ต่อ)
+      // 🆕 UAT (คลัง): guard ของคืน (RTV รอจัดซื้อตัดสินใจ / hold) ใช้ทั้งทางเงินสดย่อยและทางธนาคาร — ใบที่ติดข้ามไป ใบอื่นของ supplier เดียวกันยังรวมคำขอได้
+      {
         const _pr = ((global.ERP && global.ERP.pendingRtvForInv) || function(){ return []; })(state, inv.id);
         if(_pr.length > 0){ skipped.push((inv.invNumber||'') + ' — มีของคืน (RTV) ยังไม่ปิดเคส ' + _pr.length + ' ใบ'); continue; }
         if(inv.rtvHoldPayment){ skipped.push((inv.invNumber||'') + ' — ถูก hold รอปิดเคสของคืน'); continue; }
+      }
+      if(isPetty){
+        // 🆕 ACCT-V2: เงินออกจริงที่สเต็ปนี้ → caller-side guards เหมือนตอนอนุมัติ (reducer alert+return s อย่างเดียวไม่พอ — dispatch ถัดไปจะตัดเงินสดย่อย/ลง JE ต่อ)
         if(pettyKind === 'non_deductible' && inv.source !== 'direct_expense'){ skipped.push((inv.invNumber||'') + ' — ต้องห้ามใช้ได้เฉพาะ PI ค่าใช้จ่าย'); continue; }
         payPetty(inv, amt, today);
         sent++;
         continue;
       }
-      const payData = {
+      bankItems.push({ inv, amt });
+    }
+    // 🆕 PV-GROUP: ทางธนาคาร — จัดกลุ่มตาม supplier (≥2 ใบ → 1 คำขอรวม) · ใบเดี่ยว/ไม่มี supplierId/ปิด toggle → record แบบเดิม (invId)
+    const requests = [];   // { label, nos:[], total, group:bool } สำหรับ alert สรุป
+    if(!isPetty && bankItems.length){
+      // field ชุดเดียวกับ record เดิม — invId/supplierId/invoiceIds/allocations/amount ใส่ต่อคำขอ
+      const mkPay = (extra) => ({
         id: genId('pay'),
-        invId: inv.id, supplierId: inv.supplierId,
-        date, amount: amt,
+        date,
         // 🆕 1.6: เก็บ "วันที่ผู้ขอนัดจ่าย" เท่านั้น
         // ⛔ ห้ามเขียน payDate ตอนนี้ — payDate = วันที่เงินออกจริง ซึ่งกำหนด
         //    งวดของ JE · เดือนของเลข PV · VAT เกณฑ์เงินสด · เดือนยื่น ภ.ง.ด.3/53
@@ -63544,9 +64120,27 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         by: user.username, createdBy: user.username, createdAt: Date.now(),
         approvalStatus: 'pending',
         approvedBy: null, approvedAt: null,
-      };
-      dispatch({ type:'ADD_PAY', data: payData });
-      sent++;
+        ...extra,
+      });
+      const bySup = {}; const singles = [];
+      for(const it of bankItems){
+        if(groupBySup && it.inv.supplierId) (bySup[it.inv.supplierId] = bySup[it.inv.supplierId] || []).push(it);
+        else singles.push(it);
+      }
+      for(const [sid, items] of Object.entries(bySup)){
+        if(items.length < 2){ singles.push(items[0]); continue; }
+        const gTotal = Number(items.reduce((s,x) => s + x.amt, 0).toFixed(2));
+        // record คำขอรวม (วางบิล): invId:null · supplierId เดียว · invoiceIds[] · allocations[{invoiceId, amount}] · amount = Σ allocations (reducer ADD_PAY ตรวจ Σ + supplier เดียว)
+        dispatch({ type:'ADD_PAY', data: mkPay({ invId:null, supplierId:sid,
+          invoiceIds: items.map(x => x.inv.id), allocations: items.map(x => ({ invoiceId:x.inv.id, amount:x.amt })), amount: gTotal }) });
+        requests.push({ group:true, label: supNameOf(sid, items[0].inv), nos: items.map(x => x.inv.invNumber), total:gTotal });
+        sent += items.length;
+      }
+      for(const it of singles){
+        dispatch({ type:'ADD_PAY', data: mkPay({ invId: it.inv.id, supplierId: it.inv.supplierId, amount: it.amt }) });
+        requests.push({ group:false, label: supNameOf(it.inv.supplierId, it.inv), nos:[it.inv.invNumber], total:it.amt });
+        sent++;
+      }
     }
     if(isPetty){
       alert(`💵 จ่ายจากเงินสดย่อยแล้ว ${sent} ใบ · ${kindLabel}`
@@ -63554,11 +64148,17 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         + (skipped.length ? `\n⛔ ข้าม ${skipped.length} ใบ:\n• ` + skipped.join('\n• ') : '')
         + `\n→ ออกเลข PV แล้ว — ดูที่ ✅ รายการที่จ่ายแล้ว`);
     } else {
-      alert(`📋 ส่งคำขออนุมัติจ่าย ${sent} ใบ`
+      const nGroup = requests.filter(r => r.group).length;
+      alert(`📋 ส่งคำขออนุมัติจ่าย ${requests.length} คำขอ (${sent} ใบ)`
+        + (nGroup ? ` · วางบิลรวม ${nGroup} คำขอ` : '')
+        + (requests.length ? '\n' + requests.map(r => r.group
+            ? `• PV รวม ${r.nos.length} ใบ · ${r.label} · ${fmtCur(r.total)} — ${r.nos.join(', ')}`
+            : `• ${r.nos[0]} · ${r.label} · ${fmtCur(r.total)}`).join('\n') : '')
         + `\n📅 วันที่ต้องการจ่าย: ${fmtDate(payDate)}`
         + (bank ? `\n🏦 บัญชีที่ขอโอน: ${bank.bank||''} ${bank.name}` : '')
         + (capped ? `\n(ปรับยอดลงให้พอดียอดค้าง ${capped} ใบ)` : '')
-        + `\n→ รออนุมัติที่แท็บ 🔒 รออนุมัติ`);
+        + (skipped.length ? `\n⛔ ข้าม ${skipped.length} ใบ:\n• ` + skipped.join('\n• ') : '')
+        + `\n→ รออนุมัติที่แท็บ 🔒 รออนุมัติ${nGroup ? ' (คำขอรวมแสดงเป็น 1 แถว กด ▸ ดูรายการ PI)' : ''}`);
     }
     onClose();
     onDone && onDone();
@@ -63602,6 +64202,8 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
                 'data-testid':'petty-vat-claimable' }),
               h('span', { onClick:()=>setPettyVatClaimable(v => !v) }, 'ภาษีซื้อของทุกบิลในชุดนี้เคลมได้ (กรณีพิเศษ — ปกติเคลมไม่ได้ ม.82/5)'))))),
       isPetty && pettyBlockMsg && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-xs text-red-800 font-medium' }, '⛔ ', pettyBlockMsg),
+      isPetty && !pettyBlockMsg && pettyGoesNegative && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900' },
+        `💵 โหมดบันทึกอย่างเดียว: ยอดเงินสดย่อยในระบบ ${fmtCur(pettyBalance)} → หลังจ่าย ${fmtCur(pettyBalance - total)} (ติดลบได้ — ยังไม่ต้องเติมเงินเข้าระบบ · เปิดบังคับได้ที่ ตั้งค่า → นโยบายระบบ)`),
       // 🆕 ACCT-V2 (ม.82/5): ต้องห้าม + PI มี VAT → แจ้งว่าระบบจะโอน VAT → 5900 + ตัดออกจากรายงานภาษีซื้อ/ภ.พ.30 อัตโนมัติ (หรือ "ยังเคลมตามปกติ" เมื่อติ๊ก opt-out) · ไม่บล็อก
       isPetty && pettyNdVat.length > 0 && (pettyVatClaimable
         ? h('div', { className:'bg-emerald-50 border border-emerald-300 rounded p-2 text-xs text-emerald-900' },
@@ -63612,6 +64214,21 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
             ' เป็นค่าใช้จ่ายต้องห้าม (5900) และตัดออกจากรายงานภาษีซื้อ/ภ.พ.30 ให้อัตโนมัติ (ม.82/5)')),
       !isPetty && h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-sm text-blue-800' },
         '💡 ขออนุมัติโดยไม่ต้องแนบสลิป → ผู้อนุมัติเห็นบัญชีที่ขอโอนไว้ในคิว (เปลี่ยนได้ตอนอนุมัติ)'),
+      // 🆕 PV-GROUP (วางบิล): preview คำขอรวมต่อ supplier + toggle แยกเป็นคำขอละใบ (default รวม)
+      !isPetty && _groupable && h('div', { className: cls('border rounded p-2 text-xs', groupBySup ? 'bg-indigo-50 border-indigo-200 text-indigo-900' : 'bg-gray-50 border-gray-200 text-gray-700'), 'data-testid':'pv-group-preview' },
+        h('div', { className:'flex items-center gap-2 flex-wrap' },
+          h('div', { className:'font-bold' }, groupBySup ? '🧾 วางบิล — PI ของ supplier เดียวกันรวมเป็น 1 คำขอ / 1 PV / 1 JE' : '🧾 แยกเป็นคำขอละใบ (ไม่รวม PV)'),
+          h('label', { className:'ml-auto flex items-center gap-1 cursor-pointer font-medium' },
+            h('input', { type:'checkbox', checked:!groupBySup, onChange:e=>setGroupBySup(!e.target.checked), 'data-testid':'pv-group-split' }),
+            'แยกเป็นคำขอละใบ')),
+        groupBySup && (bankGroups.length
+          ? h('ul', { className:'mt-1 space-y-0.5 list-disc pl-4' },
+              bankGroups.map(g => h('li', { key:g.supplierId },
+                `จะรวมเป็น 1 PV: ${g.name} · ${g.items.length} ใบ · ${fmtCur(g.total)}`,
+                h('span', { className:'ml-1 font-mono text-[10px] text-indigo-700' }, '(', g.items.map(x => x.inv.invNumber).join(', '), ')'))))
+          : h('div', { className:'mt-1 text-[11px] text-gray-600' }, 'ไม่มีกลุ่มที่รวมได้ (ต้องมี PI ของ supplier เดียวกัน ≥2 ใบ ที่ยอดขอจ่าย > 0)')),
+        groupBySup && bankGroups.length > 0 && h('div', { className:'mt-1 text-[11px] text-indigo-800' },
+          `รวม ${bankReqCount} คำขอ · ผู้อนุมัติเห็นคำขอรวมเป็น 1 แถว (กด ▸ ดูรายการ PI) · อนุมัติ = ทุกใบจ่ายพร้อมกัน · ยกเลิกคำขอ = ปล่อยทุกใบกลับคิว`)),
       // 🆕 ใบที่รอปรับ VAT/แก้ไข — ไม่รวมในคำขอนี้ (ยอดค้างจะเปลี่ยนหลังอนุมัติ)
       heldInvs.length > 0 && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900' },
         h('div', { className:'font-semibold' }, `⏳ ไม่รวม ${heldInvs.length} ใบ — รอปรับ VAT/แก้ไข ขอจ่ายหลังอนุมัติ`),
@@ -63704,7 +64321,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         isPetty
           ? h(Button, { variant:'success', onClick:submit, disabled: submitDisabled, title: pettyBlockMsg || '' },
               `💵 จ่ายจากเงินสดย่อยทันที ${invs.length} ใบ · ${fmtCur(total)}`)
-          : h(Button, { variant:'warning', onClick:submit }, `📋 ส่งขออนุมัติ ${invs.length} ใบ · ${fmtCur(total)}`),
+          : h(Button, { variant:'warning', onClick:submit }, `📋 ส่งขออนุมัติ ${invs.length} ใบ${bankGroups.length ? ` (${bankReqCount} คำขอ)` : ''} · ${fmtCur(total)}`),   // 🆕 PV-GROUP
       )
     )
   );
@@ -63736,7 +64353,8 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
   // 🆕 บิลที่มีคำขอปรับ VAT / แก้ไข INV รออนุมัติ (adjust_inv_vat / edit_inv) — ยอดค้างจะเปลี่ยนหลังอนุมัติ → ยังโชว์ในคิวแต่เลือกไม่ได้ (กันขอจ่ายยอดเก่าทับ · executor ปรับ VAT จะบล็อกใบที่มีคำขอจ่ายค้าง)
   // เลือกทั้งหมด = เฉพาะแถวในหน้าปัจจุบัน (บิลที่ถูกพักจ่าย/รอปรับ VAT ยังเลือกไม่ได้เหมือนเดิม)
   const holdReason = (i) => i.rtvHoldPayment ? 'ถูกพักจ่าย — มีของคืนที่ยังไม่ปิดเคส'
-    : pendingInvChange(state, i.id) ? 'รอปรับ VAT/แก้ไข — ขอจ่ายหลังอนุมัติ' : '';
+    : (((global.ERP && global.ERP.pendingRtvForInv) || function(){ return []; })(state, i.id).length ? 'มีของคืน (RTV) รอจัดซื้อตัดสินใจ — ขอจ่ายหลังปิดเคส'   // 🆕 UAT (คลัง): ติ๊กไม่ได้ตั้งแต่ต้น
+    : pendingInvChange(state, i.id) ? 'รอปรับ VAT/แก้ไข — ขอจ่ายหลังอนุมัติ' : '');
   const selectable = pg.shown.filter(i => !holdReason(i));
   const selectableIds = selectable.map(i => i.id);
   const allChecked = selectable.length > 0 && selectableIds.every(id => selectedIds.includes(id));
@@ -63954,11 +64572,13 @@ function PaidPaymentsTab({ state, dispatch, user }){
     for(const p of (state.payments||[])){
       if((p.approvalStatus||'approved') !== 'approved') continue;
       if((p.status||'posted') === 'cancelled' || p.voided) continue;
-      const inv = invOfPay(p);
+      // 🆕 PV-GROUP: members = PI สมาชิกทุกใบ [{ inv, invoiceId, amount }] · inv = ใบแรก (INVDetail/พิมพ์ PI/Tax INV เปิดใบแรก)
+      const members = _payMembers(state, p);
+      const inv = (members.length && members[0].inv) || invOfPay(p);
       const sup = supOf(p.supplierId) || (inv && supOf(inv.supplierId));
       if(p.invId) paidInvIds.add(p.invId);
       (p.invoiceIds||[]).forEach(id => paidInvIds.add(id));
-      out.push({ id:p.id, kind:'pv', p, inv, sup, payDate:_payDateOf(p), amount:Number(p.amount)||0,
+      out.push({ id:p.id, kind:'pv', p, inv, members, group:_isGroupPay(p), sup, payDate:_payDateOf(p), amount:Number(p.amount)||0,
         reversed: !!p.reversed, ts: p.approvedAt || p.createdAt || 0,
         byName: userName(p.method === 'petty_cash' ? p.by : (p.approvedBy || p.by)), src: sourceLabel(p) });
     }
@@ -63966,7 +64586,7 @@ function PaidPaymentsTab({ state, dispatch, user }){
       if(i.voided || !i.fundedBy || i.fundedBy.type !== 'petty_cash') continue;
       if(paidInvIds.has(i.id)) continue;
       const t = (state.pettyTxns||[]).find(x => x.type === 'expense' && x.ref === i.invNumber);
-      out.push({ id:'legacy_'+i.id, kind:'petty_legacy', p:null, inv:i, sup: supOf(i.supplierId),
+      out.push({ id:'legacy_'+i.id, kind:'petty_legacy', p:null, inv:i, members:[{ inv:i, invoiceId:i.id, amount:Number(i.netPayable)||0 }], group:false, sup: supOf(i.supplierId),
         payDate: (t && t.date) || i.invDate || '', amount: Number(i.netPayable)||0, reversed:false, ts: i.createdAt||0,
         byName: userName((t && t.by) || i.createdBy), src:{ text:'💵 เงินสดย่อย (เดิม)', sub: (i.fundedBy.payerName || '') } });
     }
@@ -63981,8 +64601,11 @@ function PaidPaymentsTab({ state, dispatch, user }){
     if(hideReversed && r.reversed) return false;
     if(!inDateRange(r.payDate, dr.startDate, dr.endDate)) return false;
     const p = r.p || {}; const inv = r.inv || {}; const sup = r.sup || {};
+    // 🆕 PV-GROUP: ค้นเจอจาก PI สมาชิกทุกใบของ PV รวม
+    const memberFields = [];
+    for(const m of (r.members||[])) if(m.inv) memberFields.push(m.inv.invNumber, m.inv.supInvNumber, m.inv.supTaxInvNumber);
     return apMatch(q, [sup.name, sup.taxId, p.pvNumber, p.ref, inv.invNumber, inv.supInvNumber, inv.supTaxInvNumber,
-      inv.supplierNameFreeform, r.byName, p.bankName, p.by, p.approvedBy]);
+      inv.supplierNameFreeform, r.byName, p.bankName, p.by, p.approvedBy, ...memberFields]);
   }), [rowsAll, view, hideReversed, dr.startDate, dr.endDate, q]);
   const pg = usePaged(rows, 50);
   const focus = useFocusRow(rows, pg, focusPvId || null);   // openDoc 'pv': แถวที่ palette ชี้มา
@@ -64147,7 +64770,7 @@ function PaidPaymentsTab({ state, dispatch, user }){
   const exportRows = () => {
     const csv = [['วันที่จ่ายจริง','PV','PI','Supplier','แหล่งเงิน','บัญชี/ประเภท','ต้องห้าม','จำนวน','โดย','สถานะ','ตรวจเงินสดย่อย']];
     for(const r of rows){
-      csv.push([r.payDate, r.p?.pvNumber||'', r.inv?.invNumber||'', r.sup?.name || r.inv?.supplierNameFreeform || '', r.src.text, r.src.sub,
+      csv.push([r.payDate, r.p?.pvNumber||'', r.group ? (r.members||[]).map(m => (m.inv && m.inv.invNumber) || m.invoiceId).join(' | ') : (r.inv?.invNumber||''), r.sup?.name || r.inv?.supplierNameFreeform || '', r.src.text, r.src.sub,   // 🆕 PV-GROUP: PV รวม → ทุก PI คั่น |
         isDisallowed(r.inv) ? 'ต้องห้าม' : '', r.amount.toFixed(2), r.byName, r.reversed ? 'reversed' : 'จ่ายแล้ว',
         r.p && r.p.method === 'petty_cash' ? (r.p.pettyReviewedAt ? (r.p.pettyReviewFlag ? 'ติดปัญหา' : 'ตรวจแล้ว') + ' ' + userName(r.p.pettyReviewedBy) : 'ยังไม่ตรวจ') : '']);
     }
@@ -64162,9 +64785,11 @@ function PaidPaymentsTab({ state, dispatch, user }){
     const reason = prompt('เหตุผลที่ยกเลิก payment:\n(เช่น "ใส่เลขบัญชีผิด · จะออกใหม่")', '');
     if(reason === null) return;
     if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
-    if(!confirm(`⚠️ ยกเลิก Payment ${fmtCur(p.amount||0)}?\n\nระบบจะ:\n• คืน paidAmount ใน INV\n• Post reverse JE\n• Mark payment เป็น reversed (ไม่ลบ)${p.method === 'petty_cash' ? '\n• คืนเงินเข้าเงินสดย่อย' : ''}\n\nเหตุผล: ${reason}`)) return;
+    // 🆕 PV-GROUP: PV รวม → reducer REVERSE_PAYMENT คืน paidAmount ทุกใบตาม allocations (ยกเลิกทั้ง PV — แยกใบไม่ได้)
+    const _grp = _isGroupPay(p); const _nos = _grp ? _payPiNos(state, p) : [];
+    if(!confirm(`⚠️ ยกเลิก Payment ${fmtCur(p.amount||0)}${_grp ? ` (PV รวม ${_nos.length} ใบ: ${_nos.join(', ')})` : ''}?\n\nระบบจะ:\n• คืน paidAmount ใน INV${_grp ? ' ทุกใบตามยอดที่จัดสรร' : ''}\n• Post reverse JE\n• Mark payment เป็น reversed (ไม่ลบ)${p.method === 'petty_cash' ? '\n• คืนเงินเข้าเงินสดย่อย' : ''}\n\nเหตุผล: ${reason}`)) return;
     dispatch({ type:'REVERSE_PAYMENT', data:{ paymentId:p.id, reason, by:user.username, bySuper: isSuperUser(user) } });   // bySuper → reducer ยกเว้น dual-eye ให้ superuser (PV เงินสดย่อยของตัวเอง)
-    alert(`✅ ยกเลิก payment เรียบร้อย\nINV กลับเป็นค้างจ่าย — ออก payment ใหม่ได้`);
+    alert(`✅ ยกเลิก payment เรียบร้อย\nINV ${_grp ? `ทั้ง ${_nos.length} ใบ` : ''}กลับเป็นค้างจ่าย — ออก payment ใหม่ได้`);
   };
   const printPV = (r) => { const fn = purchaseMod?.printPV; if(fn) fn(r.p, r.inv, state); else alert('printPV ยังไม่พร้อม'); };
   const printPI = (inv) => { const fn = purchaseMod?.printPI; if(fn) fn(inv, state); else alert('printPI ยังไม่พร้อม'); };
@@ -64332,9 +64957,19 @@ function PaidPaymentsTab({ state, dispatch, user }){
                           r.reversed && h('div', { className:'text-[10px] text-red-700 font-bold no-underline' }, '🔄 REVERSED'),
                           p && p.selfApproved && h('div', { className:'text-[10px] text-emerald-700 no-underline' }, 'self-approved')),
                         h('td', { className:'px-3 py-2 font-mono text-xs text-purple-700 font-bold' },
-                          p ? (p.pvNumber||'-') : h('span', { className:'text-gray-400 font-normal', title:'รายการเงินสดย่อยแบบเดิม (fundedBy) — ไม่มีใบสำคัญจ่าย' }, '— ไม่มี PV —')),
-                        h('td', { className:'px-3 py-2 font-mono text-xs' },
-                          inv ? h('button', { onClick:()=>openInv(inv), className:'text-red-700 hover:underline no-underline' }, inv.invNumber) : '-'),
+                          p ? (p.pvNumber||'-') : h('span', { className:'text-gray-400 font-normal', title:'รายการเงินสดย่อยแบบเดิม (fundedBy) — ไม่มีใบสำคัญจ่าย' }, '— ไม่มี PV —'),
+                          r.group && h('div', { className:'text-[10px] font-sans font-normal text-indigo-800 no-underline' }, '🧾 วางบิล')),
+                        // 🆕 PV-GROUP: PV รวม → "n ใบ: PI-1, PI-2 +k" (2 ใบแรกกดเปิด INVDetail ได้ · ที่เหลือดูใน title/พิมพ์ PV)
+                        h('td', { className:'px-3 py-2 font-mono text-xs', title: r.group ? (r.members||[]).map(m => (m.inv && m.inv.invNumber) || m.invoiceId).join(', ') : '' },
+                          r.group
+                            ? h('div', null,
+                                h('div', { className:'text-[10px] font-sans text-indigo-800 no-underline' }, `${r.members.length} ใบ:`),
+                                r.members.slice(0, 2).map((m, idx) => h('span', { key:m.invoiceId, className:'contents' },
+                                  idx > 0 && ', ',
+                                  m.inv ? h('button', { onClick:()=>openInv(m.inv), className:'text-red-700 hover:underline no-underline' }, m.inv.invNumber)
+                                    : h('span', { className:'text-gray-400' }, '(ไม่พบ PI)'))),
+                                r.members.length > 2 && h('span', { className:'text-gray-500' }, ` +${r.members.length - 2}`))
+                            : (inv ? h('button', { onClick:()=>openInv(inv), className:'text-red-700 hover:underline no-underline' }, inv.invNumber) : '-')),
                         h('td', { className:'px-3 py-2 text-sm' }, r.sup?.name || inv?.supplierNameFreeform || '-'),
                         h('td', { className:'px-3 py-2 text-xs' }, r.src.text,
                           r.src.sub && h('div', { className:'text-[10px] text-gray-500' }, r.src.sub),
@@ -64353,7 +64988,7 @@ function PaidPaymentsTab({ state, dispatch, user }){
                         h('td', { className:'px-3 py-2 text-center no-underline space-x-1 whitespace-nowrap' },
                           r.kind === 'pv' && p.pvNumber && !r.reversed && h('button', { onClick:()=>printPV(r), title:'พิมพ์ใบสำคัญจ่าย (PV)',
                             className:'text-[10px] px-1.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 rounded no-underline' }, '🖨️ PV'),
-                          inv && h('button', { onClick:()=>printPI(inv), title:'พิมพ์ใบตั้งหนี้ (PI)',
+                          inv && h('button', { onClick:()=>printPI(inv), title: r.group ? `พิมพ์ใบตั้งหนี้ใบแรก (${inv.invNumber}) — ใบอื่นเปิดจากคอลัมน์ PI` : 'พิมพ์ใบตั้งหนี้ (PI)',   // 🆕 PV-GROUP
                             className:'text-[10px] px-1.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded no-underline' }, '🖨️ PI')),
                         h('td', { className:'px-3 py-2 text-center no-underline' },
                           r.kind === 'pv'
@@ -65890,6 +66525,16 @@ function SystemPolicyToggles({ state, dispatch }){
         h('span', { className:'text-sm font-medium' },
           'อนุญาตให้ พนักงานคลังสินค้า เห็นมูลค่าเงิน (฿) ของสต๊อก'))),
 
+    // 🆕 ACCT-V2 (user 2026-09-18): เงินสดย่อย = บันทึกอย่างเดียว (ไม่ต้องเติมเงินเข้าระบบก่อนจ่าย) — settings.pettyRecordOnly (default true)
+    h('div', { className:'bg-emerald-50 border-2 border-emerald-300 rounded p-4', 'data-testid':'policy-petty-record-only' },
+      h('label', { className:'flex items-start gap-3 cursor-pointer' },
+        h('input', { type:'checkbox', className:'mt-1', 'data-testid':'toggle-petty-record-only',
+          checked: st.pettyRecordOnly !== false,
+          onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ pettyRecordOnly: !!e.target.checked } }) }),
+        h('div', null,
+          h('div', { className:'font-bold text-emerald-900' }, '💵 เงินสดย่อย: บันทึกอย่างเดียว (ไม่ต้องเติมเงินเข้าระบบก่อนจ่าย)'),
+          h('div', { className:'text-xs text-emerald-800 mt-1' },
+            'เปิด (ค่าตั้งต้น) = จ่ายจากเงินสดย่อยได้ทันที ยอดคงเหลือในสมุดเงินสดย่อยติดลบได้ (ระบบแค่บันทึก/ออก PV/ลง JE) · ปิด = ต้องเติมเงินสดย่อยเข้าระบบก่อน ยอดจ่ายห้ามเกินคงเหลือ + งานค้างเตือนเมื่อติดลบ')))),
     // 🆕 ACCT-V2: เพดานจ่ายจากเงินสดย่อยต่อ PI — settings.pettyPayMax (default 0 = ไม่จำกัด · user ตัดสินใจ 2026-09-17)
     //   BulkRequestPayModal (บัญชี) บังคับเฉพาะเมื่อ > 0 · ยอดยังต้อง ≤ เงินสดย่อยคงเหลือเสมอ · ผู้อนุมัติตรวจย้อนหลังที่ ✅ รายการที่จ่ายแล้ว → 💵 ตรวจเงินสดย่อย
     h('div', { className:'bg-emerald-50 border-2 border-emerald-300 rounded p-4 space-y-2', 'data-testid':'policy-petty-pay-max' },
@@ -65908,7 +66553,7 @@ function SystemPolicyToggles({ state, dispatch }){
             '✅ รายการที่จ่ายแล้ว → 💵 ตรวจเงินสดย่อย'))),
       h('div', { className:'text-xs text-emerald-900 bg-emerald-100 rounded p-2' },
         'สถานะตอนนี้: ', h('b', null, (Number(st.pettyPayMax)||0) > 0 ? `จำกัดไม่เกิน ${fmtCur(Number(st.pettyPayMax))} ต่อ PI` : 'ไม่จำกัดยอดต่อ PI'),
-        ' · ยอดจ่ายยังต้องไม่เกินเงินสดย่อยคงเหลือเสมอ (เติมเงินสดย่อยที่ บัญชี → 💵 เงินสดย่อย)')));
+        (st.pettyRecordOnly === false ? ' · ยอดจ่ายต้องไม่เกินเงินสดย่อยคงเหลือ (เติมเงินสดย่อยที่ บัญชี → 💵 ก่อน)' : ' · โหมดบันทึกอย่างเดียว — ยอดคงเหลือติดลบได้'))));
 }
 
 // 🏷️ purposeScope ตาม role — แผนกไหนตั้งคอลัมน์หน่วยได้บ้าง (undefined = ตั้งได้ทุกคอลัมน์)
@@ -75081,9 +75726,16 @@ const unpaid = (i) => !i._whtStub && i.paymentStatus !== 'paid' && i.status !== 
 // ชื่อผู้ขาย: ทะเบียน → ชื่ออิสระบน PI ค่าใช้จ่าย (supplierNameFreeform mod-purchase.js:10504) → ชื่อจาก Ecount (supplierName convert_pi.py:93)
 const supLabel = (ctx, i) => { const s = i.supplierId ? ctx.sup.get(i.supplierId) : null; return (s && s.name) || i.supplierNameFreeform || i.supplierName || '-'; };
 const invLabel = (ctx, i) => `${i.invNumber || i.id} · ${supLabel(ctx, i)}`;
-// invId ที่มีคำขอจ่ายรออนุมัติ — mirror PaymentCenter.invsToPay (mod-accounting.js:6784-6790) ไม่งั้น nav ไป 💰 รอจ่าย แล้วหาแถวไม่เจอ
+// 🆕 PV-GROUP: PI ทุกใบของ payment (ใบเดี่ยว invId · PV รวม invoiceIds[]) — mirror _payInvIds ใน mod-accounting.js (ไม่ได้ export)
+const payInvIds = (p) => !p ? [] : (p.invId ? [p.invId] : (Array.isArray(p.invoiceIds) && p.invoiceIds.length ? p.invoiceIds : (p.invoiceId ? [p.invoiceId] : [])));
+const payAllocs = (p) => { const ids = payInvIds(p); return (p && !p.invId && Array.isArray(p.allocations) && p.allocations.length) ? p.allocations : ids.map(id => ({ invoiceId:id, amount:_num(p && p.amount) })); };
+// ป้าย PI ของ payment: ใบเดี่ยว = เลข PI · PV รวม = "PV รวม n ใบ: PI-1, PI-2 +k" (ถ้อยคำเดียวกับหน้ารออนุมัติ)
+const payPiLabel = (ctx, p) => { const inv = invById(ctx); const nos = payInvIds(p).map(id => { const i = inv.get(id); return i ? (i.invNumber || i.id) : id; });
+  return nos.length <= 1 ? (nos[0] || (p && (p.pvNumber || p.id)) || '-') : `PV รวม ${nos.length} ใบ: ${nos.slice(0,2).join(', ')}${nos.length > 2 ? ` +${nos.length-2}` : ''}`; };
+const paySupLabel = (ctx, p) => { const inv = invById(ctx); const i = inv.get(payInvIds(p)[0]); return i ? supLabel(ctx, i) : ctx.supName(p.supplierId); };
+// invId ที่มีคำขอจ่ายรออนุมัติ — mirror PaymentCenter.invsToPay (mod-accounting.js invsToPay ใช้ _payInvIds) ไม่งั้น nav ไป 💰 รอจ่าย แล้วหาแถวไม่เจอ · 🆕 PV-GROUP: รวมสมาชิกของคำขอรวมด้วย
 const pendingPayInvIds = (ctx) => ctx.memo('acct.pendingPayInvIds', () =>
-  new Set((ctx.state.payments||[]).filter(p => p && p.approvalStatus === 'pending').map(p => p.invId)));
+  new Set((ctx.state.payments||[]).filter(p => p && p.approvalStatus === 'pending').flatMap(payInvIds)));
 // PI ที่บัญชีลงมือจ่ายได้จริงจากคิว 💰 รอจ่าย: ไม่มีคำขอค้าง (→ acct_pay_pending_approval) + ไม่ถูกพักเพราะ RTV (→ acct_inv_hold_rtv; _blockIfPendingRtv 01-state.js:2717/2742)
 const payable = (ctx, i) => unpaid(i) && !pendingPayInvIds(ctx).has(i.id) && !i.rtvHoldPayment;
 // การจ่ายที่มีผลจริง (อนุมัติแล้ว ไม่ถูกยกเลิก/กลับรายการ) — REVERSE_PAYMENT ตั้ง reversed:true (01-state.js:3036)
@@ -75226,9 +75878,12 @@ C.registerGroup({
       run: (ctx) => {
         const byInv = new Map();
         for(const p of (ctx.state.payments||[])){
-          if(!p || p.approvalStatus !== 'pending' || !p.invId) continue;
-          const e = byInv.get(p.invId) || { n:0, sum:0 };
-          e.n += 1; e.sum += _num(p.amount); byInv.set(p.invId, e);
+          if(!p || p.approvalStatus !== 'pending') continue;
+          for(const a of payAllocs(p)){   // 🆕 PV-GROUP: กระจายต่อใบตาม allocation
+            if(!a || !a.invoiceId) continue;
+            const e = byInv.get(a.invoiceId) || { n:0, sum:0 };
+            e.n += 1; e.sum += _num(a.amount); byInv.set(a.invoiceId, e);
+          }
         }
         const inv = invById(ctx), l = [];
         for(const [invId, e] of byInv){
@@ -75258,7 +75913,7 @@ C.registerGroup({
         const pays = livePays(ctx).filter(p => !je.pay.has(p.id));
         const inv = invById(ctx);
         const detail = invs.map(i => `PI ${invLabel(ctx,i)} · ${fmtCur(netOf(i))}`)
-          .concat(pays.map(p => { const i = inv.get(p.invId); return `จ่าย ${p.pvNumber || p.id} · ${i ? (i.invNumber || i.id) : '-'} · ${fmtCur(p.amount)}`; }));
+          .concat(pays.map(p => `จ่าย ${p.pvNumber || p.id} · ${payPiLabel(ctx, p)} · ${fmtCur(p.amount)}`));   // 🆕 PV-GROUP
         return { count: invs.length + pays.length, detail };
       } },
 
@@ -75274,8 +75929,7 @@ C.registerGroup({
         const inv = invById(ctx);
         const l = (ctx.state.payments||[]).filter(p => p && p.approvalStatus === 'pending');
         return { count:l.length, amount:l.reduce((s,p) => s + _num(p.amount), 0),
-          detail:l.map(p => { const i = inv.get(p.invId);
-            return `${i ? (i.invNumber||i.id) : (p.id||'-')} · ${i ? supLabel(ctx, i) : ctx.supName(p.supplierId)} · ${fmtCur(p.amount)}`; }) };
+          detail:l.map(p => `${payPiLabel(ctx, p)} · ${paySupLabel(ctx, p)} · ${fmtCur(p.amount)}`) };   // 🆕 PV-GROUP
       } },
 
     // ref: src/00-core.js:2918-2928 countPendingForUser (status==='pending' && requestedBy!==me && canApproveStep(getCurrentStep)) · 01-state.js:661 approvalRequests
@@ -75489,7 +76143,8 @@ C.registerGroup({
     //   petty_topup อยู่ในกฎอนุมัติ (00-core.js:2841) → ถ้าตั้งกฎไว้ ระบบส่งคำขออนุมัติให้เอง
     { key:'acct_petty_negative', label:'เงินสดย่อยติดลบ/หมด — ต้องเติม',
       severity: (ctx, res) => (res.balance < -0.005 ? 'block' : 'warn'),
-      show: (ctx) => ctx.can('accounting') && ctx.perm('accounting','payment','view'),
+      // 🆕 ACCT-V2 (user 2026-09-18): โหมดเงินสดย่อย "บันทึกอย่างเดียว" (settings.pettyRecordOnly ≠ false) → ยอดติดลบเป็นเรื่องปกติ ไม่เตือน
+      show: (ctx) => ctx.can('accounting') && ctx.perm('accounting','payment','view') && ctx.state.settings?.pettyRecordOnly === false,
       nav: { tab:'accounting', subs:{ acct:'petty' } },
       hint: (ctx, res) => `ไปที่ 💵 เงินสดย่อย/สำรองจ่าย → ➕ เติมเงินสดย่อย (ยอดคงเหลือ ${fmtCur(res.balance||0)}; ถ้าตั้งกฎอนุมัติไว้ ระบบจะส่งคำขออนุมัติให้เอง)` +
         (res.balance < -0.005 ? ' · ยอดติดลบ = มีรายการจ่ายเกินเงินที่มี ตรวจรายการเงินสดย่อยย้อนหลังด้วย' : ''),
@@ -75527,8 +76182,7 @@ C.registerGroup({
             && (p.status || 'posted') !== 'cancelled' && (p.approvalStatus || 'approved') === 'approved' && !p.pettyReviewedAt)
           .sort((a,b) => (a.payDate || a.date || '').localeCompare(b.payDate || b.date || ''));
         return { count:l.length, amount:l.reduce((s,p) => s + _num(p.amount), 0), mine:l.filter(p => me && _s(p.by) === me).length,
-          detail:l.map(p => { const i = inv.get(p.invId);
-            return `${p.pvNumber || p.id} · ${i ? (i.invNumber || i.id) : '-'} · ${i ? supLabel(ctx, i) : ctx.supName(p.supplierId)} · ${fmtCur(p.amount)} · จ่ายโดย ${p.by || '-'} (${(p.payDate || p.date || '').slice(0,10)})${p.pettyKind === 'non_deductible' ? ' · ⛔ ต้องห้าม' : ''}`; }) };
+          detail:l.map(p => `${p.pvNumber || p.id} · ${payPiLabel(ctx, p)} · ${paySupLabel(ctx, p)} · ${fmtCur(p.amount)} · จ่ายโดย ${p.by || '-'} (${(p.payDate || p.date || '').slice(0,10)})${p.pettyKind === 'non_deductible' ? ' · ⛔ ต้องห้าม' : ''}`) };
       } },
 
     // 🆕 ACCT-V2: PV เงินสดย่อยต้องมีแถวตัดเงินคู่กันใน pettyTxns (BulkRequestPayModal dispatch ADD_PAY แล้ว ADD_PETTY_TXN { id:pay.pettyTxnId, type:'expense', amount:-amt, payId, invId } — CONTRACT §4.1-D)
@@ -75543,7 +76197,7 @@ C.registerGroup({
         const l = (ctx.state.payments||[]).filter(p => p && p.method === 'petty_cash' && !p.reversed && !p.voided
           && (p.status || 'posted') !== 'cancelled' && !(p.pettyTxnId && txnIds.has(p.pettyTxnId)));
         return { count:l.length, amount:l.reduce((s,p) => s + _num(p.amount), 0),
-          detail:l.map(p => { const i = inv.get(p.invId); return `${p.pvNumber || p.id} · ${i ? (i.invNumber || i.id) : '-'} · ${fmtCur(p.amount)}${p.pettyTxnId ? ` · pettyTxn ${p.pettyTxnId} ไม่พบ` : ' · ไม่มี pettyTxnId'}`; }) };
+          detail:l.map(p => `${p.pvNumber || p.id} · ${payPiLabel(ctx, p)} · ${fmtCur(p.amount)}${p.pettyTxnId ? ` · pettyTxn ${p.pettyTxnId} ไม่พบ` : ' · ไม่มี pettyTxnId'}`) };
       } },
 
     // ref: src/mod-accounting.js:5449-5457 (thisMonth = today.slice(0,7), lastGenerated===thisMonth) · :5525-5527 dueThisMonth + active!==false · :5548 ปุ่ม '▶️ สร้าง INV'
@@ -75576,8 +76230,8 @@ C.registerGroup({
         const inv = invById(ctx);
         // WHT: เดือนยื่นตามวันจ่ายจริงใบแรกของ PI (เหมือน WHTReport)
         const firstPay = new Map();
-        for(const p of livePays(ctx)){ const d = (p.payDate || p.date || '').slice(0,10); if(!d || !p.invId) continue;
-          if(!firstPay.has(p.invId) || d < firstPay.get(p.invId)) firstPay.set(p.invId, d); }
+        for(const p of livePays(ctx)){ const d = (p.payDate || p.date || '').slice(0,10); if(!d) continue;
+          for(const invId of payInvIds(p)){ if(!firstPay.has(invId) || d < firstPay.get(invId)) firstPay.set(invId, d); } }   // 🆕 PV-GROUP
         let wht3 = 0, wht53 = 0;
         for(const [invId, d] of firstPay){
           if(d.slice(0,7) !== period) continue;
@@ -75621,7 +76275,7 @@ C.registerGroup({
         const inv = invById(ctx);
         const l = livePays(ctx).filter(p => (p.method || 'transfer') === 'transfer' && !p.slip && !(Array.isArray(p.slips) && p.slips.length))
           .sort((a,b) => (a.payDate || a.date || '').localeCompare(b.payDate || b.date || ''));
-        return { count:l.length, detail:l.map(p => { const i = inv.get(p.invId); return `${p.pvNumber || p.id} · ${i ? (i.invNumber || i.id) : '-'} · ${fmtCur(p.amount)} (${(p.payDate || p.date || '').slice(0,10)})`; }) };
+        return { count:l.length, detail:l.map(p => `${p.pvNumber || p.id} · ${payPiLabel(ctx, p)} · ${fmtCur(p.amount)} (${(p.payDate || p.date || '').slice(0,10)})`) };
       } },
 
     // ref: src/mod-purchase.js:7929-7934 PayINVModal cap paidAmount ที่ netPayable (ส่วนเกิน → creditDue/refundDue) · src/mod-accounting.js:6538-6547 อนุมัติ bulk เทียบ remain ทีละใบ
