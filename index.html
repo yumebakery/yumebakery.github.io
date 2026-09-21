@@ -14592,7 +14592,9 @@ function HomeGate({ state, dispatch }){
     loadModule('home').then(() => { if(alive) setReady(!!(MODULES.home && MODULES.home.HomePage)); }).catch(e => { console.warn('home load failed', e); if(alive) setFailed(true); });
     return () => { alive = false; };
   }, [ready]);
-  if(ready && MODULES.home && MODULES.home.HomePage) return h(MODULES.home.HomePage, { state, dispatch });
+  // review: ส่ง pending จาก PendingWorkCtx (AppShell คำนวณ collectPendingWork อยู่แล้ว) — mod-home ไม่ต้องคำนวณซ้ำ
+  const pending = R.useContext(PendingWorkCtx);
+  if(ready && MODULES.home && MODULES.home.HomePage) return h(MODULES.home.HomePage, { state, dispatch, pending: pending || null });
   if(failed) return h(DashboardTab, { state, dispatch });
   return h('div', { className:'min-h-[40vh] flex items-center justify-center text-gray-400', 'data-home-loading':'1' }, h(Spinner, { label:'กำลังเปิดหน้าแรก…' }));
 }
@@ -68295,6 +68297,13 @@ function SystemPolicyToggles({ state, dispatch }){
         h('span', { className:'text-sm font-medium' },
           'อนุญาตให้ พนักงานคลังสินค้า เห็นมูลค่าเงิน (฿) ของสต๊อก'))),
 
+    // 🏠 เป้ายอดขายรายวัน (ทุกสาขารวม) — แถบเป้าบนการ์ด "ขายวันนี้" ของหน้าแรกใหม่ (settings.salesTargetDaily · 0/ว่าง = ไม่แสดงแถบ)
+    h('div', { className:'bg-blue-50 border-2 border-blue-300 rounded p-4', 'data-testid':'policy-sales-target' },
+      h('div', { className:'font-bold text-blue-900 mb-1' }, '🎯 เป้ายอดขายต่อวัน (บาท)'),
+      h('div', { className:'text-xs text-blue-800 mb-2' }, 'ใช้วาดแถบความคืบหน้าบนการ์ด "ขายวันนี้" ในหน้าแรก (รวมทุกสาขาที่ผู้ใช้เห็น) · เว้นว่าง = ไม่แสดงแถบ'),
+      h('input', { type:'number', min:0, step:1000, value: st.salesTargetDaily || '', placeholder:'เช่น 60000',
+        onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ salesTargetDaily: Number(e.target.value) || 0 } }), className:'px-3 py-2 border-2 rounded text-sm w-48', 'data-testid':'input-sales-target' })),
+
     // 🖨️ ขนาดสติ๊กเกอร์ล็อต (รับของ/โอน) เมื่อพิมพ์ผ่านเครื่องพิมพ์ Bluetooth/USB — settings.lotLabelSize (user ใช้ม้วน 60×40)
     h('div', { className:'bg-sky-50 border-2 border-sky-300 rounded p-4', 'data-testid':'policy-lot-label-size' },
       h('div', { className:'font-bold text-sky-900 mb-1' }, '🖨️ ขนาดสติ๊กเกอร์ล็อต (พิมพ์ผ่านเครื่องพิมพ์ฉลาก)'),
@@ -80901,6 +80910,883 @@ C.registerGroup({
 });
 })(window);
 // @@FRAG_END@@
+
+</script>
+<!--src/mod-home.js--><script>
+// ==================== mod-home.js — 🏠 หน้าแรกตาม role (UI-v2 เฟส 2 · คลื่น 1) ====================
+// สัญญา: memory/design/HOME_V2_CONTRACT.md §1–§5 · spec: ui-proposal-2026-09-15.spec.json screens[1..3]
+//   · อ่านอย่างเดียว — ไม่แตะ reducer/state · นำทางด้วย navigateTo(tab, subs) + requestOpenDoc(kind, id, nav) เท่านั้น
+//     ยกเว้น 1 action ที่สัญญาอนุญาต: dispatch SET_BRANCH (สลับสาขาจากตาราง "สาขา × วันนี้" / ตัวเลือกสาขาบนหัว)
+//   · โครงหน้า (§2): หัว → ทำเลย → รอฉันตัดสินใจ → ตัวเลขวันนี้ → สาขา × วันนี้ → งานค้าง + เปิดล่าสุด
+//   · ตัวเลข "งานค้าง" มาจาก global.ERP.usePendingWork (collectPendingWork ชุดเดียวกับกระดิ่ง) · KPI "ตัวเลขวันนี้" คำนวณใน HOME_KPIS
+//     (ทุก key มีคอมเมนต์ ref: ไฟล์:บรรทัด ของตรรกะเดิม — ตัวเลขต้องตรงกับหน้าจริง)
+//   · ค่าที่คำนวณไม่ได้ (ไม่มีโมดูล/สิทธิ์/ไม่มีข้อมูลเลย) → compute คืน null → ไม่แสดงการ์ด (ไม่โชว์ 0 ปลอม)
+//   · canSeeStockValue คุมมูลค่าเงินฝั่งต้นทุน/AP/เงินสด (money:true) · ยอดขายเปิดตามสิทธิ์โมดูลขาย (พนักงานสาขาบันทึกเอง — ต้องเห็น)
+//   · data-attribute สำหรับทดสอบ: data-home · data-home-quick · data-home-waiting · data-kpi=<key> · data-home-branches · data-home-pending · data-home-recent
+//   · MODULE_TONE นิยามที่นี่ก่อน (orchestrator ย้ายเข้า TOKENS ใน 00-core ทีหลัง — ถ้ามี TOKENS.MODULE_TONE แล้วให้ใช้ของกลาง)
+
+(function(global){
+'use strict';
+
+const {
+  R, h, useState, useMemo, useEffect, cls, Button, fmtNum, fmtCur, fmtDate, fmtDateBE, getToday,
+  isSuperUser, hasPerm, canAccessModule, getAllowedBranches, getBranch, isHQ, canSeeStockValue,
+  navigateTo, requestOpenDoc, MODULES, TOKENS, countPendingForUser, getCurrentStep, canApproveStep,
+  getLowStockAlerts, getStationsForLine, canSeeOrder, invClaimableVat, payEffectiveDate, APPROVAL_ACTIONS,
+} = global.ERP;
+
+const E = () => global.ERP || {};
+const NAV = () => (global.ERP && global.ERP.NAV) || null;   // 02-nav.js registry (null-safe — ถ้าไม่มี ซ่อนบล็อกที่พึ่ง registry)
+const arr = (v) => Array.isArray(v) ? v : [];
+const num = (v) => Number(v) || 0;
+const pad2 = (n) => String(n).padStart(2, '0');
+const ROW_MAX = 20;   // จำกัด 20 แถว/บล็อก (§2)
+
+// ==================== §4 สี/โทน ====================
+// โทนหมวดโมดูล — dashboard slate · purchase orange · stock amber · transfer teal · production green · accounting emerald(เงิน → green-700)
+//   · sales/sales-light blue · reports indigo · settings gray · executive purple · checklist red/amber ตามความรุนแรง · weigh indigo
+const MODULE_TONE = (TOKENS && TOKENS.MODULE_TONE) || {
+  dashboard:'slate', purchase:'orange', stock:'amber', transfer:'teal', production:'green', accounting:'emerald',
+  'sales-full':'blue', 'sales-light':'blue', reports:'indigo', settings:'gray', executive:'purple', checklist:'red', weigh:'indigo',
+};
+// class เต็มคำ (Tailwind Play CDN สแกน DOM — ห้ามต่อสตริง) · solid ตาม §4: blue-600/green-600/orange-500/red-500/indigo-600/amber-500/teal-600/purple-600
+const TONE = {
+  blue:    { solid:'bg-blue-600',   hover:'hover:bg-blue-700',   bar:'bg-blue-500',   dot:'bg-blue-500',   border:'border-blue-500',   text:'text-blue-700',   soft:'bg-blue-50' },
+  green:   { solid:'bg-green-600',  hover:'hover:bg-green-700',  bar:'bg-green-500',  dot:'bg-green-500',  border:'border-green-500',  text:'text-green-700',  soft:'bg-green-50' },
+  emerald: { solid:'bg-green-700',  hover:'hover:bg-green-800',  bar:'bg-green-600',  dot:'bg-green-600',  border:'border-green-600',  text:'text-green-800',  soft:'bg-green-50' },
+  orange:  { solid:'bg-orange-500', hover:'hover:bg-orange-600', bar:'bg-orange-500', dot:'bg-orange-500', border:'border-orange-500', text:'text-orange-700', soft:'bg-orange-50' },
+  red:     { solid:'bg-red-500',    hover:'hover:bg-red-600',    bar:'bg-red-500',    dot:'bg-red-500',    border:'border-red-500',    text:'text-red-700',    soft:'bg-red-50' },
+  indigo:  { solid:'bg-indigo-600', hover:'hover:bg-indigo-700', bar:'bg-indigo-500', dot:'bg-indigo-500', border:'border-indigo-500', text:'text-indigo-700', soft:'bg-indigo-50' },
+  amber:   { solid:'bg-amber-500',  hover:'hover:bg-amber-600',  bar:'bg-amber-500',  dot:'bg-amber-500',  border:'border-amber-500',  text:'text-amber-800',  soft:'bg-amber-50' },
+  teal:    { solid:'bg-teal-600',   hover:'hover:bg-teal-700',   bar:'bg-teal-500',   dot:'bg-teal-500',   border:'border-teal-500',   text:'text-teal-700',   soft:'bg-teal-50' },
+  purple:  { solid:'bg-purple-600', hover:'hover:bg-purple-700', bar:'bg-purple-500', dot:'bg-purple-500', border:'border-purple-500', text:'text-purple-700', soft:'bg-purple-50' },
+  slate:   { solid:'bg-slate-600',  hover:'hover:bg-slate-700',  bar:'bg-slate-500',  dot:'bg-slate-500',  border:'border-slate-500',  text:'text-slate-700',  soft:'bg-slate-50' },
+  gray:    { solid:'bg-gray-500',   hover:'hover:bg-gray-600',   bar:'bg-gray-400',   dot:'bg-gray-400',   border:'border-gray-300',   text:'text-gray-600',   soft:'bg-gray-50' },
+};
+const toneOf = (t) => TONE[t] || TONE.gray;
+// tone เตือน (แดง/อำพัน) ใช้เฉพาะเมื่อค่า > 0 — ไม่งั้นเทา (spec visualSystem KpiCard)
+const alertTone = (n, tone) => (num(n) > 0 ? tone : 'gray');
+
+// ==================== วันที่ ====================
+const TH_DAY_FULL = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
+function localISO(d){ return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+function addDays(iso, n){ const d = new Date(iso + 'T00:00:00'); if(isNaN(d)) return iso; d.setDate(d.getDate() + n); return localISO(d); }
+function prevMonthOf(ym){ const y = parseInt(ym.slice(0,4), 10), m = parseInt(ym.slice(5,7), 10); const d = new Date(y, m - 2, 1); return d.getFullYear() + '-' + pad2(d.getMonth() + 1); }
+function daysBetween(a, b){ return Math.round((new Date(a) - new Date(b)) / 86400000); }   // a - b (วัน) · ISO ทั้งคู่ parse เป็น UTC → หักกันตรง
+function tsISO(ts){ const d = new Date(num(ts)); return isNaN(d) ? '' : localISO(d); }    // timestamp → วันที่เครื่อง (ตรงกับ getToday)
+function dateTH(iso){
+  if(!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  const day = isNaN(d) ? '' : TH_DAY_FULL[d.getDay()] + ' ';
+  return day + (typeof fmtDateBE === 'function' ? fmtDateBE(iso) : fmtDate(iso));   // "จันทร์ 21 ก.ย. 2569"
+}
+// เปลี่ยนแปลงเป็น % เทียบงวดก่อน — ฐาน 0/ไม่มี → null (ไม่มีลูกศร)
+function pctDelta(cur, prev){
+  if(prev == null || !(num(prev) > 0)) return null;
+  const pct = Math.round((num(cur) - num(prev)) / num(prev) * 100);
+  return { pct, up: pct >= 0 };
+}
+
+// ==================== ctx (§3): { today, branchIds, currentBranch, showValue, isHQ, … } ====================
+function buildHomeCtx(state, user){
+  const today = getToday();
+  const isSuper = (() => { try { return !!isSuperUser(user); } catch(_e){ return false; } })();
+  const branches = (() => { try { return arr(getAllowedBranches(user, state)); } catch(_e){ return []; } })();
+  const branchIds = branches.map(b => b.id);
+  const branchSet = new Set(branchIds);
+  const currentBranch = state.currentBranch;
+  const hq = (() => { try { return !!isHQ(state, currentBranch); } catch(_e){ return false; } })();
+  const showValue = (() => { try { return !!canSeeStockValue(user, state); } catch(_e){ return false; } })();
+  const prodLive = !(state.settings && state.settings.productionLive === false);   // GO-LIVE: false = ยังไม่เปิดระบบผลิต (mod-checklist buildCtx)
+  const ym = today.slice(0, 7);
+  const items = new Map(arr(state.items).map(i => [i.id, i]));
+  const sups = new Map(arr(state.suppliers).map(s => [s.id, s]));
+  const bmap = new Map(arr(state.branches).map(b => [b.id, b]));
+  const _memo = {};
+  return {
+    state, user, today, ym, yesterday: addDays(today, -1), prevYm: prevMonthOf(ym), in7: addDays(today, 7),
+    isSuper, branches, branchIds, branchSet, currentBranch, isHQ: hq, showValue, prodLive,
+    inScope: (bid) => isSuper || branchSet.has(bid),                                   // = mod-checklist buildCtx.inScope
+    can: (m) => { try { return !!canAccessModule(user, m); } catch(_e){ return false; } },
+    perm: (mod, tab, action) => { try { return !!hasPerm(user, mod, tab, action); } catch(_e){ return false; } },
+    item: (id) => items.get(id), itemName: (id) => (items.get(id) || {}).name || id || '-',
+    supName: (id) => (sups.get(id) || {}).name || '-',
+    branchName: (bid) => (bmap.get(bid) || {}).name || bid || '-',
+    memo: (k, fn) => { if(!(k in _memo)) _memo[k] = fn(); return _memo[k]; },
+  };
+}
+
+// ==================== ตรรกะร่วม (สำเนาย่อจากโมดูลจริง — ไม่ได้ export) ====================
+// ref: src/mod-purchase.js:337-353 isPOOverdue — approved/partial · line.expectedDeliveryDate < today && receivedQty < qty · fallback po.dueDate เมื่อยังมีของค้าง
+function isPOOverdue(po, today){
+  if(!['approved','partial'].includes(po.status)) return false;
+  const lines = arr(po.lines);
+  if(lines.some(l => l.expectedDeliveryDate)){
+    return lines.some(l => l.expectedDeliveryDate && l.expectedDeliveryDate < today && num(l.receivedQty) < num(l.qty));
+  }
+  if(po.dueDate && po.dueDate < today){
+    const allReceived = lines.length > 0 && lines.every(l => num(l.receivedQty) >= num(l.qty));
+    return !allReceived;
+  }
+  return false;
+}
+// ref: src/mod-checklist.js (กลุ่ม purchasing) isLegacyPO / isMyPO — PO นำเข้า Ecount ไม่นับ · PO ของฉัน = ไม่ใช่งานที่ฉันต้องกด
+const isMigrated = (d) => !!(d && (d._migrated === true || d.createdBy === 'migration'));
+const isMyPO = (user, p) => !!(user && (p.createdBy === user.username || p.submittedBy === user.username));
+// ref: src/mod-stock.js:46-57 incomingPOs (+ NAV_COUNTS 'stock.incoming' 02-nav.js) — approved/partial หรือ ยังมีของค้างรับและไม่ใช่ draft/pending/cancelled · ปลายทางในขอบเขต
+function incomingPOs(ctx){
+  return ctx.memo('incomingPOs', () => arr(ctx.state.pos).filter(p => {
+    const okStatus = p.status === 'approved' || p.status === 'partial';
+    const hasRemaining = arr(p.lines).some(l => num(l.qty) - num(l.receivedQty) > 0.001);
+    const notDead = !['draft','pending','cancelled'].includes(p.status);
+    if(!(okStatus || (notDead && hasRemaining))) return false;
+    return ctx.inScope(p.destinationBranch);
+  }));
+}
+// ref: src/mod-stock.js:59-65 incomingTOs · src/mod-checklist.js:952-960 wh_to_incoming — TO shipping/partial ที่ปลายทางในขอบเขต
+const incomingTOs = (ctx) => ctx.memo('incomingTOs', () => arr(ctx.state.transferOrders).filter(t => (t.status === 'shipping' || t.status === 'partial') && ctx.inScope(t.toBranch)));
+// ETA ของ PO line = line.expectedDeliveryDate || po.dueDate (src/mod-purchase.js:12527 IncomingScheduleTab)
+const lineETA = (po, l) => l.expectedDeliveryDate || po.dueDate || '';
+// ref: src/mod-checklist.js (กลุ่ม accounting) liveInvs / netOf / remainOf / unpaid — PI migrate ไม่มี netPayable → fallback ลำดับเดียวกับใบพิมพ์ PI
+const liveInvs = (ctx) => ctx.memo('liveInvs', () => arr(ctx.state.invoices).filter(i => i && !i.voided));
+const netOf = (i) => i.netPayable != null ? num(i.netPayable) : (i.total != null ? num(i.total) : num(i.subtotal != null ? i.subtotal : i.amount) + num(i.vat) - num(i.whtAmount));
+const remainOf = (i) => netOf(i) - num(i.paidAmount);
+const unpaid = (i) => !i._whtStub && i.paymentStatus !== 'paid' && i.status !== 'paid';
+// ref: src/mod-checklist.js (กลุ่ม accounting) livePays — จ่ายจริง: approved · ไม่ reversed/voided/cancelled · amount > 0
+const livePays = (ctx) => ctx.memo('livePays', () => arr(ctx.state.payments).filter(p => p && p.approvalStatus === 'approved' && !p.reversed && !p.voided && (p.status || 'posted') !== 'cancelled' && num(p.amount) > 0));
+const payDateOf = (p) => (typeof payEffectiveDate === 'function' ? payEffectiveDate(p) : (p.payDate || p.date || '')) || '';
+// ref: src/mod-checklist.js:769-771 stockedLayers — FIFO remaining > 0 ในขอบเขต
+const stockedLayers = (ctx) => ctx.memo('stockedLayers', () => arr(ctx.state.fifoLayers).filter(l => num(l.remaining) > 0 && ctx.inScope(l.branch)));
+// ref: src/mod-checklist.js:818-831 netLayerByKey — สุทธิต่อตู้ (itemId|branch|locId) · ที่นี่รวมทุกตู้ที่ติดลบสุทธิ
+//   (checklist แยก wh_neg_stock (block) กับ wh_issue_neg_layers (warn — ติดลบจากใบเบิกล้วน) → การ์ด stockNegative = ผลรวมสองข้อ)
+function negativeBins(ctx){
+  return ctx.memo('negativeBins', () => {
+    const net = new Map();
+    for(const x of arr(ctx.state.fifoLayers)){
+      const r = num(x.remaining);
+      if(r === 0 || !x.itemId || !x.branch || !ctx.inScope(x.branch)) continue;
+      const k = x.itemId + '|' + x.branch + '|' + (x.locId || '');
+      const cur = net.get(k) || { itemId:x.itemId, branch:x.branch, qty:0 };
+      cur.qty += r; net.set(k, cur);
+    }
+    return [...net.values()].filter(e => e.qty < -1e-9);
+  });
+}
+// ref: src/mod-checklist.js:1085-1104 wh_lot_expiring_7d — d = daysUntil(expiry) ∈ [0, lim] · lim = shelfLife>0 ? min(7, max(1, ceil(life/3))) : 7
+function lotsExpiring(ctx){
+  return ctx.memo('lotsExpiring', () => {
+    const today = ctx.today;
+    const life = (x) => { const sl = num((ctx.item(x.itemId) || {}).shelfLife); if(sl > 0) return sl;
+      return x.date ? Math.max(0, daysBetween(x.expiryDate, String(x.date).slice(0, 10))) : 0; };
+    return stockedLayers(ctx).filter(x => {
+      if(!x.expiryDate) return false;
+      const d = daysBetween(x.expiryDate, today);
+      const lf = life(x); const lim = lf > 0 ? Math.min(7, Math.max(1, Math.ceil(lf / 3))) : 7;
+      return d >= 0 && d <= lim;
+    });
+  });
+}
+// ref: src/mod-production.js:492-500 orders ของสาขา · src/mod-checklist.js scopedOrders — ออเดอร์ผลิตในขอบเขตสาขาที่เห็น
+const scopedOrders = (ctx) => ctx.memo('scopedOrders', () => arr(ctx.state.productionOrders).filter(o => o && ctx.inScope(o.branchId)));
+const PROD_DONE = ['produced','qc_passed','completed'];   // src/mod-production.js:680 todayProduced
+// ref: src/mod-production.js:12543-12592 MyStationTab — งาน "ของฉัน" = op ที่สถานีตรง (getStationsForLine) และสถานะ ready/in_progress · ออเดอร์ที่มี operations · ยังไม่ completed/cancelled
+function myWorkItems(ctx){
+  return ctx.memo('myWorkItems', () => {
+    const { user, state, currentBranch } = ctx;
+    const stationsFor = (lineId) => (typeof getStationsForLine === 'function' ? getStationsForLine(user, lineId) : (user.assignedStations || [])) || [];
+    const out = [];
+    for(const order of arr(state.productionOrders)){
+      if(!order || order.branchId !== currentBranch) continue;
+      try { if(typeof canSeeOrder === 'function' && !canSeeOrder(user, order)) continue; } catch(_e){}
+      const ops = arr(order.operations);
+      if(!ops.length || ['completed','cancelled'].includes(order.status)) continue;
+      const stations = stationsFor(order.lineId);
+      const batches = arr(order.batches);
+      const hasBatchOps = batches.length > 0 && arr(batches[0].opStates).length > 0;
+      const stateLists = hasBatchOps ? batches.map(b => arr(b.opStates)) : [arr(order.operationStates)];
+      for(const states of stateLists){
+        for(let i = 0; i < ops.length; i++){
+          const op = ops[i];
+          const st = states.find(s => s.opId === op.id) || { status:'pending' };
+          if(!stations.includes(op.stationType)) continue;
+          if(st.status === 'ready' || st.status === 'in_progress') out.push({ order, op, status: st.status });
+        }
+      }
+    }
+    return out;
+  });
+}
+// เห็นประวัติชั่งทุกคนไหม — ref: src/mod-production.js:8177-8179 weighSeesAll (ไม่ได้ export → สำเนา)
+const weighSeesAll = (user) => { try { return isSuperUser(user) || ['manager','production_manager','gm','admin','owner'].includes(user && user.role); } catch(_e){ return false; } };
+
+// nav ไปหน้าขาย: สาขา → บันทึกขาย (sales-light.today) · HQ → ขาย (sales-full.invoices) — เลือกหน้าที่เมนูแสดงอยู่ตอนนี้
+function salesNav(ctx, page){
+  const light = ctx.can('sales-light') && !ctx.isHQ;
+  if(light) return { tab:'sales-light', subs:{ salesLight: page === 'aging' ? 'history' : 'today' } };
+  if(ctx.can('sales-full')) return { tab:'sales-full', subs:{ sales: page || 'invoices' } };
+  return null;
+}
+// ยอดขายตามวัน/เดือน ในขอบเขตสาขา — ref: src/mod-sales-light.js:28-35 (salesLight.branch/date/totalRevenue) · src/mod-sales-full.js:77-79 (salesInvoices !voided · invDate · netTotal · branch = สาขาต้นทาง)
+function salesSum(ctx, match){
+  let total = 0, n = 0;
+  for(const e of arr(ctx.state.salesLight)){ if(!e || !ctx.inScope(e.branch) || !match(e.date || '')) continue; total += num(e.totalRevenue); n++; }
+  for(const i of arr(ctx.state.salesInvoices)){ if(!i || i.voided || !match(i.invDate || '')) continue; if(i.branch && !ctx.inScope(i.branch)) continue; total += num(i.netTotal); n++; }
+  return { total, n };
+}
+const hasSalesData = (ctx) => arr(ctx.state.salesLight).length > 0 || arr(ctx.state.salesInvoices).length > 0;
+const hasSalesModule = (ctx) => ctx.can('sales-light') || ctx.can('sales-full');
+
+// ==================== §3 HOME_KPIS ====================
+// key → { label, icon, tone, money?, compute(state, user, ctx) → { value, sub?, delta?, target?, nav?, tone?, money? } | null }
+//   value: number (แสดง fmtNum / ฿ เมื่อ money) หรือ string (เช่น "32/40") · target: { value, pct? } → แถบเป้า · delta: { pct, up }
+const NAV_ = (tab, subs) => ({ tab, subs });
+const HOME_KPIS = {
+  // ---------- ขาย ----------
+  // ref: src/mod-sales-light.js:33-35 todayRev (branch เดียว) + src/mod-sales-full.js:77-79 (SI !voided) — รวมทุกสาขาที่เห็น · เทียบเมื่อวาน · เป้า settings.salesTargetDaily (ไม่มี → ไม่มีแถบ)
+  salesToday: { label:'ขายวันนี้', icon:'🧾', tone:'blue', compute(state, user, ctx){
+    if(!hasSalesModule(ctx) || !hasSalesData(ctx)) return null;
+    const cur = salesSum(ctx, d => d === ctx.today), prev = salesSum(ctx, d => d === ctx.yesterday);
+    const target = num(state.settings && state.settings.salesTargetDaily);
+    return { value: cur.total, money:true, revenue:true, sub:`${fmtNum(cur.n)} บิล`, delta: pctDelta(cur.total, prev.total),
+      target: target > 0 ? { value: target } : null, nav: salesNav(ctx, 'invoices') };
+  } },
+  // ref: src/mod-sales-full.js:78-79 monthSI/totalThisMonth (+ salesLight เดือนนี้) — เทียบเดือนก่อนทั้งเดือน
+  salesMonth: { label:'ขายเดือนนี้', icon:'📈', tone:'blue', compute(state, user, ctx){
+    if(!hasSalesModule(ctx) || !hasSalesData(ctx)) return null;
+    const cur = salesSum(ctx, d => d.slice(0, 7) === ctx.ym), prev = salesSum(ctx, d => d.slice(0, 7) === ctx.prevYm);
+    return { value: cur.total, money:true, revenue:true, sub:`${fmtNum(cur.n)} ใบ · เดือนก่อน ฿${fmtNum(Math.round(prev.total))}`, delta: pctDelta(cur.total, prev.total), nav: salesNav(ctx, 'invoices') };
+  } },
+  // ref: src/mod-sales-full.js:80-81 unpaid/totalUnpaid — SI !voided · paymentStatus ≠ paid · Σ(netTotal − paidAmount) · revenue:true = ลูกหนี้เป็นฝั่งรายได้ (ฝ่ายขายเห็นได้ ไม่ติด canSeeStockValue)
+  arOpen: { label:'ลูกหนี้ค้าง', icon:'⏰', tone:'amber', money:true, compute(state, user, ctx){
+    if(!ctx.can('sales-full') || !arr(state.salesInvoices).length) return null;
+    const l = arr(state.salesInvoices).filter(i => !i.voided && (i.paymentStatus || 'unpaid') !== 'paid');
+    const amt = l.reduce((s, i) => s + (num(i.netTotal) - num(i.paidAmount)), 0);
+    return { value: amt, money:true, revenue:true, sub:`${fmtNum(l.length)} ใบ`, tone: alertTone(l.length, 'amber'), nav: NAV_('sales-full', { sales:'aging' }) };
+  } },
+  // ref: src/mod-sales-full.js:82-83 overdue/totalOverdue — dueDate < today
+  arOverdue: { label:'ลูกหนี้เลยกำหนด', icon:'⚠️', tone:'red', money:true, compute(state, user, ctx){
+    if(!ctx.can('sales-full') || !arr(state.salesInvoices).length) return null;
+    const l = arr(state.salesInvoices).filter(i => !i.voided && (i.paymentStatus || 'unpaid') !== 'paid' && i.dueDate && i.dueDate < ctx.today);
+    const amt = l.reduce((s, i) => s + (num(i.netTotal) - num(i.paidAmount)), 0);
+    return { value: amt, money:true, revenue:true, sub:`${fmtNum(l.length)} ใบ`, tone: alertTone(l.length, 'red'), nav: NAV_('sales-full', { sales:'aging' }) };
+  } },
+  // ref: src/mod-sales-full.js:39 pendingSlips — salesPayments ที่ไม่มี slip
+  slipMissing: { label:'รับชำระยังไม่แนบสลิป', icon:'📎', tone:'amber', compute(state, user, ctx){
+    if(!ctx.can('sales-full') || !arr(state.salesPayments).length) return null;
+    const n = arr(state.salesPayments).filter(p => !p.slip).length;
+    return { value: n, unit:'รายการ', tone: alertTone(n, 'amber'), nav: NAV_('sales-full', { sales:'receive' }) };
+  } },
+
+  // ---------- ผลิต ----------
+  // ref: src/mod-production.js:679-680 DashboardTab todayOrders (plannedDate === today) / todayProduced (produced|qc_passed|completed) — รวมทุกสาขาที่เห็น
+  productionToday: { label:'ผลิตวันนี้', icon:'🏭', tone:'green', compute(state, user, ctx){
+    if(!ctx.prodLive || !ctx.can('production') || !arr(state.productionOrders).length) return null;
+    const today = scopedOrders(ctx).filter(o => (o.plannedDate || '').slice(0, 10) === ctx.today);
+    const done = today.filter(o => PROD_DONE.includes(o.status)).length;
+    // review: นับทุกสาขาที่เห็น → ผจก./superuser พาไปแท็บ 🌐 ทุกสาขา (หน้าออเดอร์กรองสาขาเดียว)
+    const multi = ctx.branchIds.length > 1 && (ctx.isSuper || user.role === 'production_manager' || user.role === 'manager');
+    return { value:`${fmtNum(done)}/${fmtNum(today.length)}`, sub: (multi ? `รวม ${ctx.branchIds.length} สาขา · ` : '') + 'เสร็จ / ออเดอร์วันนี้', target: today.length > 0 ? { pct: done / today.length, label:`${Math.round(done / today.length * 100)}%` } : null,
+      nav: NAV_('production', { production: multi ? 'allbranch' : 'orders' }) };
+  } },
+  // ref: src/mod-production.js:679 todayOrders + :73-75 แท็บ 🚦 ติดตาม "order ของวัน" (planned|materials_issued|producing|produced)
+  ordersToday: { label:'ออเดอร์วันนี้', icon:'📅', tone:'green', compute(state, user, ctx){
+    if(!ctx.prodLive || !ctx.can('production') || !arr(state.productionOrders).length) return null;
+    const today = scopedOrders(ctx).filter(o => (o.plannedDate || '').slice(0, 10) === ctx.today);
+    const open = today.filter(o => ['planned','materials_issued','producing','produced'].includes(o.status)).length;
+    const done = today.filter(o => ['qc_passed','completed'].includes(o.status)).length;
+    return { value: today.length, unit:'ใบ', sub:`ค้าง ${fmtNum(open)} · เสร็จ ${fmtNum(done)}`, nav: NAV_('production', { production:'orders' }) };
+  } },
+  // ref: src/mod-checklist.js:2389-2399 prod_order_overdue_planned — status planned && plannedDate < today
+  ordersLate: { label:'ออเดอร์เลยวันแผน', icon:'⏱️', tone:'red', compute(state, user, ctx){
+    if(!ctx.prodLive || !ctx.can('production') || !arr(state.productionOrders).length) return null;
+    const n = scopedOrders(ctx).filter(o => o.status === 'planned' && (o.plannedDate || '').slice(0, 10) && (o.plannedDate || '').slice(0, 10) < ctx.today).length;
+    return { value: n, unit:'ใบ', tone: alertTone(n, 'red'), nav: NAV_('production', { production:'orders' }) };
+  } },
+  // ref: src/mod-production.js:499 counts.waitingQc / :515-516 pendingQcAll — status 'produced' ในสาขาที่เข้าถึงได้ (+ canSeeOrder)
+  waitingQc: { label:'รอ QC ตรวจ', icon:'🔬', tone:'amber', compute(state, user, ctx){
+    if(!ctx.prodLive || !ctx.can('production') || !arr(state.productionOrders).length) return null;
+    const n = scopedOrders(ctx).filter(o => o.status === 'produced' && (typeof canSeeOrder !== 'function' || canSeeOrder(user, o))).length;
+    const qcTab = (user && user.canQC === true) ? 'qc' : 'qcall';
+    return { value: n, unit:'ใบ', tone: alertTone(n, 'amber'), nav: NAV_('production', { production: qcTab }) };
+  } },
+  // ref: src/mod-production.js:696-698 scrap7d (Σ scrapQty ของออเดอร์ที่ completedAt ในช่วง) — ที่นี่เฉพาะ completedAt = วันนี้ (ตกจากผลิต ไม่รวมใบตัดของเสียคลัง)
+  scrapToday: { label:'ของเสียจากผลิตวันนี้', icon:'🔻', tone:'red', compute(state, user, ctx){
+    if(!ctx.prodLive || !ctx.can('production') || !arr(state.productionOrders).length) return null;
+    const l = scopedOrders(ctx).filter(o => o.completedAt && tsISO(o.completedAt) === ctx.today);
+    const qty = l.reduce((s, o) => s + num(o.scrapQty), 0);
+    return { value: qty, unit:'หน่วย', sub:`จาก ${fmtNum(l.length)} ออเดอร์ที่ปิดวันนี้`, tone: alertTone(qty, 'red'), nav: NAV_('production', { production:'reports' }) };
+  } },
+  // ref: src/mod-production.js:8505-8513 ประวัติชั่ง (กรอง branchId · seesAll หรือของฉัน · วันที่จาก ts) · src/mod-checklist.js:3206-3225 prod_weigh_offspec_unreviewed (offSpec && !reviewedAt → ผจก.ต้องตัดสิน)
+  weighToday: { label:'ชั่งวันนี้', icon:'⚖️', tone:'indigo', compute(state, user, ctx){
+    if(!ctx.perm('production', 'weigh', 'view') || !arr(state.weighLogs).length) return null;
+    const all = weighSeesAll(user);
+    // review: ประวัติชั่งกรองสาขาที่เปิดอยู่ → นับเฉพาะ currentBranch ให้ตรงหน้าปลายทาง
+    const l = arr(state.weighLogs).filter(w => w && w.type !== 'weigh_truncated' && tsISO(w.ts) === ctx.today
+      && (!w.branchId || w.branchId === ctx.currentBranch) && (all || w.userId === user.id));
+    const off = l.filter(w => w.offSpec).length;
+    const unreviewed = l.filter(w => w.offSpec && !w.reviewedAt).length;
+    return { value: l.length, unit:'ชุด', sub: off > 0 ? `นอกเกณฑ์ ${fmtNum(off)}${all && unreviewed > 0 ? ` · รอตัดสิน ${fmtNum(unreviewed)}` : ''}` : 'ในเกณฑ์ทั้งหมด',
+      tone: (all && unreviewed > 0) ? 'amber' : 'indigo', nav: NAV_('production', { production:'weigh' }) };
+  } },
+  // ref: src/mod-production.js:12543-12592 MyStationTab myWorkItems (ออเดอร์วันนี้ที่มีขั้นถึงตาฉัน) · readyItems/inProgressItems
+  myOrdersToday: { label:'งานของฉันวันนี้', icon:'🧑‍🍳', tone:'green', compute(state, user, ctx){
+    if(!ctx.prodLive || !ctx.can('production') || !arr(user && user.assignedStations).length && !(user && user.stationsByLine)) return null;
+    const w = myWorkItems(ctx).filter(x => (x.order.plannedDate || '').slice(0, 10) === ctx.today);
+    const orders = new Set(w.map(x => x.order.id)).size;
+    return { value: orders, unit:'ออเดอร์', sub:`${fmtNum(w.length)} ขั้นตอน · พร้อมเริ่ม ${fmtNum(w.filter(x => x.status === 'ready').length)}`, nav: NAV_('production', { production:'mystation' }) };
+  } },
+  // ref: src/mod-production.js:12591 inProgressItems — ขั้นที่ฉันกดเริ่มไว้ (ทุกวัน) ยังไม่กดเสร็จ
+  myInProgress: { label:'กำลังทำอยู่', icon:'▶️', tone:'amber', compute(state, user, ctx){
+    if(!ctx.prodLive || !ctx.can('production') || !arr(user && user.assignedStations).length && !(user && user.stationsByLine)) return null;
+    const n = myWorkItems(ctx).filter(x => x.status === 'in_progress').length;
+    return { value: n, unit:'ขั้นตอน', tone: alertTone(n, 'amber'), nav: NAV_('production', { production:'mystation' }) };
+  } },
+  // ref: src/mod-checklist.js:2499-2517 prod_order_qc_failed — status 'qc_failed' รอตัดสินใจ (ไม่มี timestamp ตกวันนี้ → นับที่ยังเปิดอยู่ทั้งหมด · ป้ายบอกชัด)
+  qcFailedToday: { label:'QC ไม่ผ่าน (รอตัดสินใจ)', icon:'❌', tone:'red', compute(state, user, ctx){
+    if(!ctx.prodLive || !ctx.can('production') || !arr(state.productionOrders).length) return null;
+    const l = scopedOrders(ctx).filter(o => o.status === 'qc_failed');
+    const todayN = l.filter(o => (o.plannedDate || '').slice(0, 10) === ctx.today).length;
+    return { value: l.length, unit:'ใบ', sub: todayN > 0 ? `ของวันนี้ ${fmtNum(todayN)}` : '', tone: alertTone(l.length, 'red'), nav: NAV_('production', { production: (user && user.canQC === true) ? 'qc' : 'orders' }) };
+  } },
+
+  // ---------- บัญชี ----------
+  // ref: src/mod-accounting.js:9795-9797 _pettyBalance = Σ pettyTxns.amount · :9261 pettyRecordOnly (settings.pettyRecordOnly !== false → "บันทึกอย่างเดียว" ติดลบได้)
+  pettyCash: { label:'เงินสดย่อยคงเหลือ', icon:'💵', tone:'emerald', money:true, compute(state, user, ctx){
+    if(!ctx.can('accounting') || !ctx.perm('accounting', 'payment', 'view') || !arr(state.pettyTxns).length) return null;
+    const bal = arr(state.pettyTxns).reduce((s, t) => s + num(t.amount), 0);
+    const recordOnly = !(state.settings && state.settings.pettyRecordOnly === false);
+    return { value: bal, money:true, sub: recordOnly ? 'บันทึกอย่างเดียว' : 'Σ สมุดเงินสดย่อย', tone: (bal < 0 && !recordOnly) ? 'red' : 'emerald', nav: NAV_('accounting', { acct:'petty' }) };
+  } },
+  // ref: src/mod-accounting.js:3777-3782 totalAP/overdueAP + src/mod-checklist.js:1468-1483,1603-1610 (unpaid · dueDate เทียบ today · remainOf) — ครบกำหนดภายใน 7 วัน (รวมที่เลยกำหนดแล้ว)
+  apDue7: { label:'AP ครบกำหนด 7 วัน', icon:'💸', tone:'orange', money:true, compute(state, user, ctx){
+    if(!ctx.can('accounting') || !ctx.perm('accounting', 'payment', 'view') || !arr(state.invoices).length) return null;
+    // review: ตัดใบที่ส่งขอจ่ายรออนุมัติแล้ว + ใบที่ RTV ถ่วงจ่าย (ตรงกับแท็บ 💳 รอจ่าย ที่การ์ดพาไป — mirror payInvIds ของ checklist)
+    const pendingIds = new Set();
+    for(const pay of arr(state.payments)){ if(!pay || pay.approvalStatus !== 'pending') continue; if(pay.invId) pendingIds.add(pay.invId); if(pay.invoiceId) pendingIds.add(pay.invoiceId); for(const id of arr(pay.invoiceIds)) pendingIds.add(id); }
+    const l = liveInvs(ctx).filter(i => unpaid(i) && i.dueDate && i.dueDate <= ctx.in7 && remainOf(i) > 0.005 && !pendingIds.has(i.id) && !i.rtvHoldPayment);
+    const over = l.filter(i => i.dueDate < ctx.today).length;
+    const amt = l.reduce((s, i) => s + remainOf(i), 0);
+    return { value: amt, money:true, sub:`${fmtNum(l.length)} ใบ${over > 0 ? ` · เลยกำหนด ${fmtNum(over)}` : ''}`, tone: over > 0 ? 'red' : alertTone(l.length, 'orange'),
+      nav: NAV_('accounting', { acct:'payment', acct_pay:'tobay' }) };
+  } },
+  // ref: src/mod-accounting.js:3792-3794 monthPayments (!reversed · เดือนนี้) + src/mod-checklist.js livePays (approved · ไม่ voided/cancelled) · วันที่จ่ายจริง = payEffectiveDate (00-core.js:2609) — เทียบเดือนก่อน
+  paidMonth: { label:'จ่ายแล้วเดือนนี้', icon:'✅', tone:'emerald', money:true, compute(state, user, ctx){
+    if(!ctx.can('accounting') || !ctx.perm('accounting', 'payment', 'view') || !arr(state.payments).length) return null;
+    const inMonth = (ym) => livePays(ctx).filter(p => payDateOf(p).slice(0, 7) === ym);
+    const cur = inMonth(ctx.ym), prev = inMonth(ctx.prevYm);
+    const sum = (l) => l.reduce((s, p) => s + num(p.amount), 0);
+    return { value: sum(cur), money:true, sub:`${fmtNum(cur.length)} รายการ`, delta: pctDelta(sum(cur), sum(prev)), nav: NAV_('accounting', { acct:'paid' }) };
+  } },
+  // ref: src/mod-checklist.js:1617-1633 acct_inv_no_taxinv — PI live · ไม่ใช่ migrate · ภาษีซื้อที่เคลมได้ (invClaimableVat 00-core.js:2607) > 0 · ยังไม่มี supTaxInvNumber
+  vatAwaitingTaxInv: { label:'VAT รอใบกำกับภาษี', icon:'📄', tone:'amber', compute(state, user, ctx){
+    if(!ctx.can('accounting') || !(ctx.perm('accounting', 'vatByInv', 'view') || ctx.perm('accounting', 'payment', 'view')) || !arr(state.invoices).length) return null;
+    const cv = (i) => (typeof invClaimableVat === 'function') ? invClaimableVat(i) : num(i.vat);
+    const l = liveInvs(ctx).filter(i => !isMigrated(i) && cv(i) > 0 && !String(i.supTaxInvNumber == null ? '' : i.supTaxInvNumber).trim());
+    const vat = l.reduce((s, i) => s + cv(i), 0);
+    return { value: l.length, unit:'ใบ', sub: ctx.showValue ? `ภาษีซื้อรอเคลม ฿${fmtNum(Math.round(vat))}` : '', tone: alertTone(l.length, 'amber'),
+      nav: ctx.perm('accounting', 'vatByInv', 'view') ? NAV_('accounting', { acct:'vatByInv' }) : NAV_('accounting', { acct:'payment', acct_pay:'taxinv' }) };
+  } },
+
+  // ---------- จัดซื้อ ----------
+  // ref: src/mod-purchase.js:794-795 PurchaseDashboard openPOs (pending|approved|partial) · draftPOs
+  poOpen: { label:'PO เปิดอยู่', icon:'📝', tone:'orange', compute(state, user, ctx){
+    if(!ctx.can('purchase') || !arr(state.pos).length) return null;
+    const pos = arr(state.pos);
+    const open = pos.filter(p => ['pending','approved','partial'].includes(p.status)).length;
+    const draft = pos.filter(p => p.status === 'draft').length;
+    return { value: open, unit:'ใบ', sub:`ร่าง ${fmtNum(draft)}`, nav: NAV_('purchase', { purchase:'po' }) };
+  } },
+  // ref: src/02-nav.js NAV_COUNTS['purchase.po'] (status pending = PO_STATUS.pending รออนุมัติ) · src/mod-checklist.js:392-398 po_pending_approval (ไม่ใช่ของฉัน/ไม่ใช่ legacy = รอฉันกด)
+  poPendingApproval: { label:'PO รออนุมัติ', icon:'🔏', tone:'amber', compute(state, user, ctx){
+    if(!ctx.can('purchase') || !arr(state.pos).length) return null;
+    const l = arr(state.pos).filter(p => p.status === 'pending');
+    const mine = ctx.perm('purchase', 'po', 'approve') ? l.filter(p => !isMigrated(p) && !isMyPO(user, p)).length : 0;
+    return { value: l.length, unit:'ใบ', sub: mine > 0 ? `รอคุณอนุมัติ ${fmtNum(mine)}` : '', tone: alertTone(mine, 'amber'), nav: NAV_('purchase', { purchase:'po' }) };
+  } },
+  // ref: src/mod-purchase.js:337-353 isPOOverdue · :796 overduePOs (การ์ด "PO เลยกำหนด" แดง)
+  poOverdue: { label:'PO เลยกำหนดส่ง', icon:'⚠️', tone:'red', compute(state, user, ctx){
+    if(!ctx.can('purchase') || !arr(state.pos).length) return null;
+    const n = arr(state.pos).filter(p => isPOOverdue(p, ctx.today)).length;
+    return { value: n, unit:'ใบ', tone: alertTone(n, 'red'), nav: NAV_('purchase', { purchase:'po' }) };
+  } },
+  // ref: src/mod-purchase.js:12516-12535 IncomingScheduleTab — PO approved/partial ปลายทางในขอบเขต · line remain > 0 · eta = expectedDeliveryDate||dueDate ใน [วันนี้, +7]
+  incoming7: { label:'รอเข้า 7 วัน', icon:'🚚', tone:'orange', compute(state, user, ctx){
+    if(!(ctx.can('purchase') || ctx.can('stock')) || !arr(state.pos).length) return null;
+    const poIds = new Set(); let lines = 0;
+    for(const po of arr(state.pos)){
+      if(!['approved','partial'].includes(po.status) || !ctx.inScope(po.destinationBranch)) continue;
+      for(const l of arr(po.lines)){
+        if(num(l.qty) - num(l.receivedQty) <= 0) continue;
+        const eta = lineETA(po, l);
+        if(!eta || eta < ctx.today || eta > ctx.in7) continue;
+        poIds.add(po.id); lines++;
+      }
+    }
+    return { value: poIds.size, unit:'ใบ', sub:`${fmtNum(lines)} รายการ`, nav: ctx.can('purchase') && ctx.isHQ ? NAV_('purchase', { purchase:'incoming' }) : NAV_('stock', { stock:'schedule' }) };
+  } },
+  // ref: src/mod-purchase.js:797-798 monthPOs/monthValue — poDate เดือนนี้ · Σ po.total (ตามหน้าจริง ไม่ตัด cancelled) — เทียบเดือนก่อน
+  purchaseMonth: { label:'มูลค่าซื้อเดือนนี้', icon:'💰', tone:'purple', money:true, compute(state, user, ctx){
+    if(!ctx.can('purchase') || !arr(state.pos).length) return null;
+    const inMonth = (ym) => arr(state.pos).filter(p => (p.poDate || '').slice(0, 7) === ym);
+    const cur = inMonth(ctx.ym), prev = inMonth(ctx.prevYm);
+    const sum = (l) => l.reduce((s, p) => s + num(p.total), 0);
+    // review: มูลค่า PO เปิดตามสิทธิ์โมดูลจัดซื้อ (หน้าจริง PurchaseDashboard โชว์ให้ purchasing) — ไม่ใช่ต้นทุนสต๊อกที่ต้อง canSeeStockValue
+    return { value: sum(cur), money:true, openValue: ctx.can('purchase'), sub:`${fmtNum(cur.length)} PO`, delta: pctDelta(sum(cur), sum(prev)), nav: NAV_('purchase', { purchase:'reports' }) };
+  } },
+
+  // ---------- คลัง / โอน ----------
+  // ref: src/mod-stock.js:46-67 incomingPOs + incomingTOs (= NAV_COUNTS 'stock.incoming') — "วันนี้" = PO ที่ ETA ≤ วันนี้ (ถึงกำหนด/เลยกำหนด) + TO ที่กำลังมาทั้งหมด
+  incomingToday: { label:'รอรับวันนี้', icon:'📥', tone:'amber', compute(state, user, ctx){
+    if(!ctx.can('stock') || (!arr(state.pos).length && !arr(state.transferOrders).length)) return null;
+    const pos = incomingPOs(ctx);
+    const dueToday = pos.filter(po => arr(po.lines).some(l => num(l.qty) - num(l.receivedQty) > 0.001 && lineETA(po, l) && lineETA(po, l) <= ctx.today)).length;
+    const tos = incomingTOs(ctx).length;
+    return { value: dueToday + tos, unit:'ใบ', sub:`PO ${fmtNum(dueToday)} · TO ${fmtNum(tos)} · รอรับทั้งหมด ${fmtNum(pos.length + tos)}`, tone: alertTone(dueToday + tos, 'amber'), nav: NAV_('stock', { stock:'incoming' }) };
+  } },
+  // ref: src/mod-transfer.js:127 counts.toShipping · src/mod-checklist.js:968 wh_to_outbound_unreceived — TO ที่ส่งออกจากสาขาในขอบเขตแล้ว ปลายทางยังไม่กดรับ (shipping|partial)
+  toPending: { label:'TO ค้างรับปลายทาง', icon:'🚚', tone:'teal', compute(state, user, ctx){
+    if(!ctx.can('transfer') || !arr(state.transferOrders).length) return null;
+    const n = arr(state.transferOrders).filter(t => (t.status === 'shipping' || t.status === 'partial') && ctx.inScope(t.fromBranch)).length;
+    return { value: n, unit:'ใบ', tone: alertTone(n, 'teal'), nav: NAV_('transfer', { transfer:'to' }) };
+  } },
+  // ref: src/mod-stock.js:59-65 incomingTOs · src/mod-checklist.js:952-960 wh_to_incoming — TO กำลังมาสาขาในขอบเขต รอกดรับ
+  toIncoming: { label:'TO กำลังมา (รอรับ)', icon:'📦', tone:'teal', compute(state, user, ctx){
+    if(!(ctx.can('stock') || ctx.can('transfer')) || !arr(state.transferOrders).length) return null;
+    const n = incomingTOs(ctx).length;
+    return { value: n, unit:'ใบ', tone: alertTone(n, 'teal'), nav: ctx.can('stock') ? NAV_('stock', { stock:'incoming' }) : NAV_('transfer', { transfer:'to' }) };
+  } },
+  // ref: src/mod-transfer.js:108-112,126 trs ของสาขาที่เปิดอยู่ (from|to = currentBranch) · TR_STATUS_MAP pending 'รอดำเนินการ' / approved 'อนุมัติแล้ว' — TR ที่สาขานี้ขอ (toBranch) ยังรอ
+  trMine: { label:'TR ที่สาขาขอไว้', icon:'🔀', tone:'teal', compute(state, user, ctx){
+    if(!ctx.can('transfer') || !arr(state.transferRequests).length) return null;
+    const mine = arr(state.transferRequests).filter(t => t.toBranch === ctx.currentBranch);
+    const pending = mine.filter(t => t.status === 'pending').length;
+    const approved = mine.filter(t => t.status === 'approved').length;
+    return { value: pending, unit:'ใบ', sub:`รออนุมัติ${approved > 0 ? ` · อนุมัติแล้ว ${fmtNum(approved)} (รอรับ TO)` : ''}`, nav: NAV_('transfer', { transfer:'tr' }) };
+  } },
+  // ref: src/mod-checklist.js:1034-1044 wh_tr_to_ship — TR pending ที่ต้นทาง (fromBranch) ในขอบเขต = รอฉัน/คลังนี้อนุมัติ+ส่ง · src/mod-transfer.js:1228 canApprove (perm transfer.tr.approve + user.branch === fromBranch)
+  trPending: { label:'TR รออนุมัติ/จัดส่ง', icon:'📝', tone:'amber', compute(state, user, ctx){
+    if(!ctx.can('transfer') || !arr(state.transferRequests).length) return null;
+    const n = arr(state.transferRequests).filter(t => t.status === 'pending' && ctx.inScope(t.fromBranch)).length;
+    return { value: n, unit:'ใบ', tone: alertTone(n, 'amber'), nav: NAV_('transfer', { transfer:'tr' }) };
+  } },
+  // ref: src/mod-checklist.js:1085-1104 wh_lot_expiring_7d (เกณฑ์วันตามอายุสินค้า — ของอายุสั้นขึ้นเฉพาะวันท้าย ๆ)
+  lotsExpiring7: { label:'ล็อตใกล้หมดอายุ', icon:'⏳', tone:'amber', compute(state, user, ctx){
+    if(!ctx.can('stock') || !ctx.perm('stock', 'lots', 'view') || !arr(state.fifoLayers).length) return null;
+    const l = lotsExpiring(ctx);
+    const today = l.filter(x => daysBetween(x.expiryDate, ctx.today) === 0).length;
+    return { value: l.length, unit:'ล็อต', sub: today > 0 ? `หมดอายุวันนี้ ${fmtNum(today)}` : 'ภายใน 7 วัน (ตามอายุสินค้า)', tone: today > 0 ? 'red' : alertTone(l.length, 'amber'), nav: NAV_('stock', { stock:'lots' }) };
+  } },
+  // ref: src/mod-checklist.js:853-865 wh_neg_stock + :872 wh_issue_neg_layers (netLayerByKey :818-831) — ตู้ที่ติดลบสุทธิทั้งหมด
+  stockNegative: { label:'สต๊อกติดลบ', icon:'🔴', tone:'red', compute(state, user, ctx){
+    if(!ctx.can('stock') || !ctx.perm('stock', 'lots', 'view') || !arr(state.fifoLayers).length) return null;
+    const n = negativeBins(ctx).length;
+    return { value: n, unit:'รายการ', sub: n > 0 ? 'ตัดของเกินที่มีในระบบ — รอรับของเข้า/นับจริง' : '', tone: alertTone(n, 'red'), nav: NAV_('stock', { stock:'lots' }) };
+  } },
+  // ref: src/mod-checklist.js:1190-1210 wh_count_awaiting_approval — คำขอ adjust_stock ที่ reason ขึ้นต้น 'นับสต๊อก' รออนุมัติ (ใบนับที่ยังไม่ลงผล)
+  //      + stockCounts ที่มี status open/draft/in_progress ถ้ามี field (src/mod-stock.js:3371 ใบนับบันทึกเป็นชุดสำเร็จ — ปกติไม่มีสถานะ "เปิด")
+  countOpen: { label:'ใบนับสต๊อกค้าง', icon:'📋', tone:'amber', compute(state, user, ctx){
+    if(!ctx.can('stock') || !ctx.perm('stock', 'list', 'edit')) return null;
+    if(!arr(state.stockCounts).length && !arr(state.approvalRequests).length) return null;
+    const openSessions = arr(state.stockCounts).filter(sc => sc && ['open','draft','in_progress'].includes(sc.status) && ctx.inScope(sc.branch)).length;
+    const awaiting = arr(state.approvalRequests).filter(r => r.status === 'pending' && r.action === 'adjust_stock' && String(r.reason || '').startsWith('นับสต๊อก')
+      && (r.payload && r.payload.branch ? ctx.inScope(r.payload.branch) : r.requestedBy === user.username)).length;
+    const n = openSessions + awaiting;
+    return { value: n, unit:'ใบ', sub: awaiting > 0 ? `ผลนับรออนุมัติ ${fmtNum(awaiting)}` : '', tone: alertTone(n, 'amber'), nav: NAV_('stock', { stock:'count' }) };
+  } },
+};
+
+// computeHomeKpis(state, user, keys?) → [{ key, label, icon, tone, value, sub, delta, target, nav, money, unit }]
+//   keys ไม่ระบุ → HOME_CONFIG[navHomeKey(user)].kpis · การ์ดที่ compute คืน null/throw → ข้าม (ไม่โชว์ 0 ปลอม) · money:true ซ่อนเมื่อ !canSeeStockValue (ยกเว้น revenue)
+function computeHomeKpis(state, user, keys, ctxIn){
+  if(!state || !user) return [];
+  const ctx = ctxIn || buildHomeCtx(state, user);
+  let list = keys;
+  if(!Array.isArray(list)){
+    const N = NAV();
+    try { const k = N && N.navHomeKey ? N.navHomeKey(user) : user.role; const cfg = k && N && N.HOME_CONFIG ? N.HOME_CONFIG[k] : null; list = (cfg && cfg.kpis) || []; } catch(_e){ list = []; }
+  }
+  const out = [];
+  for(const key of list){
+    const def = HOME_KPIS[key];
+    if(!def) continue;
+    try {
+      const r = def.compute(state, user, ctx);
+      if(!r) continue;
+      const money = r.money != null ? r.money : !!def.money;
+      if(money && !r.revenue && !r.openValue && !ctx.showValue) continue;   // มูลค่าเงินฝั่งต้นทุน/AP → เฉพาะคนที่เห็นมูลค่า (revenue/openValue = เปิดตามสิทธิ์โมดูล)
+      out.push({ key, label: def.label, icon: def.icon, tone: r.tone || def.tone, unit: r.unit || def.unit || '', money,
+        value: r.value, sub: r.sub || '', delta: r.delta || null, target: r.target || null, nav: r.nav || null });
+    } catch(err){ console.warn('[home] kpi failed:', key, err); }
+  }
+  return out;
+}
+
+// ==================== รอฉันตัดสินใจ (§2) ====================
+// collectWaiting(state, user, ctx) → [{ id, kind:'req'|'po'|'tr'|'pay', title, meta, amount?, at, open() }]
+//   req: ref src/03-shell.js:941-947 ApprovalBell.myRequests (pending · ไม่ใช่ที่ฉันขอ · step ปัจจุบัน canApproveStep) = ตรรกะ countPendingForUser (00-core.js:3133-3144)
+//   po : ref src/mod-purchase.js:2419 canApprove (perm purchase.po.approve · status pending) · src/mod-checklist.js:392-398 (ไม่ใช่ของฉัน · ไม่ใช่ legacy)
+//   tr : ref src/mod-transfer.js:1228-1229 canApprove (perm transfer.tr.approve · pending · superuser หรือ user.branch === fromBranch)
+//   pay: ref src/mod-accounting.js:6944 PayApprovalTab canApprove (perm accounting.payApprove.approve) · :6955 payments approvalStatus pending
+function collectWaiting(state, user, ctx){
+  ctx = ctx || buildHomeCtx(state, user);
+  const out = [];
+  const hideStockAmt = !ctx.showValue;
+  const canApproveReq = (req) => { try { const cur = getCurrentStep(req); return !!(cur && canApproveStep(cur, user, req.entityScope)); } catch(_e){ return false; } };
+  const canSeeApprovalsTab = ctx.isHQ && ctx.can('accounting') && ctx.perm('accounting', 'approvals', 'view');
+  const openReq = () => {
+    if(canSeeApprovalsTab && navigateTo('accounting', { acct:'approvals' }) !== false) return;
+    const fn = E().__openApprovalInbox; if(fn) fn();
+  };
+  for(const req of arr(state.approvalRequests)){
+    if(!req || req.status !== 'pending' || req.requestedBy === user.username || !canApproveReq(req)) continue;
+    const stockAct = ['void_issue','scrap','adjust_stock','reverse_adjust'].includes(req.action);   // src/03-shell.js:1041 _hideAmt
+    const actLabel = (APPROVAL_ACTIONS && APPROVAL_ACTIONS[req.action] && APPROVAL_ACTIONS[req.action].label) || null;
+    out.push({ id:'req:' + req.id, kind:'req', title: req.label || actLabel || 'คำขออนุมัติ', ref: req.entityRef || '',
+      meta: `ส่งโดย ${req.requestedByName || req.requestedBy || '-'}`, amount: (num(req.amount) > 0 && !(stockAct && hideStockAmt)) ? num(req.amount) : null,
+      at: num(req.requestedAt), open: openReq });
+  }
+  if(ctx.isHQ && ctx.can('purchase') && ctx.perm('purchase', 'po', 'approve')){
+    for(const p of arr(state.pos)){
+      if(!p || p.status !== 'pending' || isMigrated(p) || isMyPO(user, p)) continue;
+      out.push({ id:'po:' + p.id, kind:'po', title: `${p.poNumber || p.id} · ${ctx.supName(p.supplierId)}`, ref:'',
+        meta: `ส่งโดย ${p.createdByName || p.submittedBy || p.createdBy || '-'}${p.destinationBranch ? ' · ' + ctx.branchName(p.destinationBranch) : ''}`,
+        amount: (ctx.showValue || ctx.can('purchase')) && num(p.total) > 0 ? num(p.total) : null, at: num(p.submittedAt || p.createdAt),
+        open: () => requestOpenDoc('po', p.id, { tab:'purchase', subs:{ purchase:'po' } }) });
+    }
+  }
+  if(ctx.can('transfer') && ctx.perm('transfer', 'tr', 'approve')){
+    for(const t of arr(state.transferRequests)){
+      if(!t || t.status !== 'pending') continue;
+      if(!(ctx.isSuper || user.branch === t.fromBranch)) continue;
+      const nLines = arr(t.lines).length;
+      out.push({ id:'tr:' + t.id, kind:'tr', title: `${t.trNumber || t.id} · ${ctx.branchName(t.toBranch)} ขอของ ${fmtNum(nLines)} รายการ`, ref:'',
+        meta: `จาก ${ctx.branchName(t.fromBranch)}${t.createdByName || t.createdBy ? ' · โดย ' + (t.createdByName || t.createdBy) : ''}`, amount:null, at: num(t.createdAt),
+        open: () => requestOpenDoc('tr', t.id, { tab:'transfer', subs:{ transfer:'tr' } }) });
+    }
+  }
+  if(ctx.isHQ && ctx.can('accounting') && ctx.perm('accounting', 'payApprove', 'approve')){
+    for(const p of arr(state.payments)){
+      if(!p || p.approvalStatus !== 'pending') continue;
+      const ids = Array.isArray(p.invoiceIds) && p.invoiceIds.length ? p.invoiceIds : (p.invId || p.invoiceId ? [p.invId || p.invoiceId] : []);
+      out.push({ id:'pay:' + p.id, kind:'pay', title: `คำขอจ่าย · ${ctx.supName(p.supplierId)}${ids.length > 1 ? ` · ${fmtNum(ids.length)} ใบ` : ''}`, ref:'',
+        meta: `ผู้ขอ ${p.by || p.createdBy || '-'}${p.requestedPayDate ? ' · นัดจ่าย ' + fmtDate(p.requestedPayDate) : ''}`, amount: ctx.showValue && num(p.amount) > 0 ? num(p.amount) : null,
+        at: num(p.createdAt), open: () => navigateTo('accounting', { acct:'payApprove' }) });
+    }
+  }
+  out.sort((a, b) => (a.at || 0) - (b.at || 0));   // เก่าก่อน — รอนานสุดขึ้นบน
+  return out;
+}
+const WAIT_KIND = { req:{ label:'คำขอ', dot:'bg-purple-500' }, po:{ label:'PO', dot:'bg-orange-500' }, tr:{ label:'TR', dot:'bg-teal-500' }, pay:{ label:'จ่ายเงิน', dot:'bg-green-600' } };
+
+function WaitingForMe({ state, user, ctx, limit, onMore }){
+  const [filter, setFilter] = useState('all');
+  const rows = useMemo(() => { try { return collectWaiting(state, user, ctx); } catch(err){ console.warn('[home] waiting failed', err); return []; } }, [state, user, ctx]);
+  if(!rows.length) return null;
+  const counts = rows.reduce((m, r) => { m[r.kind] = (m[r.kind] || 0) + 1; return m; }, {});
+  const shown = (filter === 'all' ? rows : rows.filter(r => r.kind === filter)).slice(0, limit || ROW_MAX);
+  const chip = (k, label, n) => h('button', { key:k, type:'button', onClick:()=>setFilter(k), 'data-home-waiting-filter':k,
+    className: cls('px-2.5 py-1 rounded-full text-xs font-medium border transition', filter === k ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-700 border-gray-200 hover:border-gray-400') },
+    label, ' ', h('b', null, fmtNum(n)));
+  return h(Section, { title:'รอฉันตัดสินใจ', count: rows.length, tone:'amber', attr:'data-home-waiting',
+      right: h('div', { className:'flex gap-1.5 flex-wrap' }, chip('all', 'ทั้งหมด', rows.length), Object.keys(WAIT_KIND).filter(k => counts[k]).map(k => chip(k, WAIT_KIND[k].label, counts[k]))) },
+    h('ul', { className:'divide-y divide-gray-100' },
+      shown.map(r => h('li', { key:r.id, className:'flex items-center gap-3 py-2.5', 'data-home-waiting-row':r.kind },
+        h('span', { className: cls('w-2 h-2 rounded-full shrink-0', WAIT_KIND[r.kind].dot), title: WAIT_KIND[r.kind].label }),
+        h('div', { className:'flex-1 min-w-0' },
+          h('div', { className:'text-sm font-medium text-gray-800 truncate' }, r.title, r.ref && h('span', { className:'ml-1.5 text-xs font-mono text-gray-500' }, r.ref)),
+          h('div', { className:'text-xs text-gray-500 truncate' }, r.amount != null && h('span', { className:'font-semibold text-gray-800 mr-1.5 tabular-nums' }, '฿' + fmtCur(r.amount)), r.meta)),
+        h('button', { type:'button', onClick:r.open, className:'shrink-0 min-h-[36px] px-3 rounded-lg border border-gray-200 bg-white text-sm text-blue-700 hover:bg-blue-50 hover:border-blue-300' }, 'ดู →'))),
+      rows.length > shown.length && h('li', { className:'py-2 text-xs text-gray-500 flex items-center gap-2' }, `… อีก ${fmtNum(rows.length - shown.length)} รายการ`,
+        onMore && h('button', { type:'button', onClick:onMore, className:'px-2 py-0.5 rounded border bg-white text-blue-700 hover:bg-blue-50' }, 'แสดงทั้งหมด'),
+        h('span', null, '· หรือดูที่ 🔔 กล่องแจ้งเตือน'))));
+}
+
+// ==================== UI atoms ====================
+// หัวส่วน: text-base font-semibold + จุดสีหมวด + เส้นขอบซ้าย 4px สี tone (§4)
+function Section({ title, count, tone, attr, right, children, className }){
+  const t = toneOf(tone);
+  const props = { className: cls('bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-4 border-l-4', t.border, className) };
+  if(attr) props[attr] = '1';
+  return h('section', props,
+    h('div', { className:'flex items-center gap-2 flex-wrap mb-3' },
+      h('span', { className: cls('w-2.5 h-2.5 rounded-full shrink-0', t.dot) }),
+      h('h2', { className:'text-base font-semibold text-gray-800' }, title, count != null && h('span', { className:'ml-1.5 text-gray-500 font-normal' }, `(${fmtNum(count)})`)),
+      right && h('div', { className:'ml-auto' }, right)),
+    children);
+}
+const fmtMoneyShort = (v) => { const n = Math.round(num(v)); return (n < 0 ? '-฿' : '฿') + fmtNum(Math.abs(n)); };   // ติดลบ → -฿500 (ไม่ใช่ ฿-500)
+// KpiCard (§4): ขาว · ไอคอนสีทึบซ้าย 12×12 · ตัวเลข 2xl tabular · delta ▲เขียว/▼แดง · แถบเป้า · ทั้งใบเป็น <button> เมื่อมี nav · data-kpi=<key>
+function KpiCard({ k }){
+  const t = toneOf(k.tone);
+  const clickable = !!(k.nav && k.nav.tab);
+  const valueText = typeof k.value === 'number' ? (k.money ? fmtMoneyShort(k.value) : fmtNum(k.value)) : String(k.value == null ? '-' : k.value);
+  const title = k.money && typeof k.value === 'number' ? '฿' + fmtCur(k.value) : undefined;
+  let pct = null;
+  if(k.target){
+    if(typeof k.target.pct === 'number') pct = k.target.pct;
+    else if(num(k.target.value) > 0 && typeof k.value === 'number') pct = num(k.value) / num(k.target.value);
+  }
+  const body = [
+    h('div', { key:'i', className: cls('w-12 h-12 rounded-lg text-white text-2xl flex items-center justify-center shrink-0', t.solid) }, k.icon),
+    h('div', { key:'b', className:'flex-1 min-w-0' },
+      h('div', { className:'flex items-start gap-1' },
+        h('div', { className:'text-[13px] text-gray-500 leading-5 truncate' }, k.label),
+        clickable && h('span', { className:'ml-auto text-gray-300 text-sm leading-5', 'aria-hidden':'true' }, '→')),
+      h('div', { className:'text-2xl font-bold tabular-nums text-gray-900 leading-tight truncate', title }, valueText,
+        k.unit && typeof k.value === 'number' && h('span', { className:'ml-1 text-sm font-normal text-gray-500' }, k.unit)),
+      (k.sub || k.delta) && h('div', { className:'text-[13px] text-gray-500 mt-0.5 flex items-center gap-1.5 flex-wrap' },
+        k.delta && h('span', { className: cls('font-semibold tabular-nums', k.delta.up ? 'text-green-700' : 'text-red-700') }, (k.delta.up ? '▲' : '▼') + Math.abs(k.delta.pct) + '%'),
+        k.sub && h('span', { className:'truncate' }, k.sub)),
+      pct != null && h('div', { className:'mt-2' },
+        h('div', { className:'flex justify-between text-[11px] text-gray-500 mb-0.5' },
+          h('span', null, k.target.value != null ? `เป้า ${k.money ? fmtMoneyShort(k.target.value) : fmtNum(k.target.value)}` : 'ความคืบหน้า'),
+          h('span', { className:'tabular-nums' }, k.target.label || (Math.round(Math.min(pct, 9.99) * 100) + '%'))),
+        h('div', { className:'h-1.5 rounded bg-gray-100 overflow-hidden' },
+          h('div', { className: cls('h-full rounded', t.bar), style:{ width: Math.max(0, Math.min(100, pct * 100)) + '%' } })))),
+  ];
+  const base = 'bg-white rounded-xl border border-gray-200 shadow-sm p-4 flex gap-3 text-left snap-start min-w-[240px] md:min-w-0 w-full';
+  if(clickable) return h('button', { type:'button', 'data-kpi':k.key, onClick:()=>navigateTo(k.nav.tab, k.nav.subs), title: k.label + ' — กดเพื่อเปิด',
+    className: cls(base, 'hover:border-blue-300 hover:shadow transition focus-visible:ring-2 focus-visible:ring-blue-500') }, body);
+  return h('div', { 'data-kpi':k.key, className: base }, body);
+}
+// กล่องทำเลย (§4): rounded-xl text-white p-4 min-h-[88px] สี solid ตาม tone · ไอคอน 2xl + ป้าย 2 บรรทัด · badge ขาวมุมขวา
+function QuickBox({ q }){
+  const t = toneOf(q.tone);
+  return h('button', { type:'button', onClick:q.onClick, 'data-home-quick-id':q.id, title: q.title || q.label,
+      className: cls('relative rounded-xl text-white p-4 min-h-[88px] text-left flex flex-col justify-between transition shadow-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500', t.solid, t.hover) },
+    q.badge > 0 && h('span', { className:'absolute top-2 right-2 bg-white text-gray-900 text-xs font-bold rounded-full min-w-[22px] h-[22px] px-1.5 flex items-center justify-center shadow' }, q.badge > 99 ? '99+' : fmtNum(q.badge)),
+    h('span', { className:'text-2xl leading-none' }, q.icon),
+    h('span', { className:'mt-2 block' },
+      h('span', { className:'block text-sm font-semibold leading-tight' }, q.label),
+      q.caption && h('span', { className:'block text-[11px] opacity-90 leading-tight mt-0.5 truncate' }, q.caption)));
+}
+
+// ==================== ทำเลย: HOME_CONFIG.shortcuts → ≤4 กล่องที่ user มีสิทธิ์ (ข้าม act.* ในคลื่นนี้) ====================
+function buildQuickActions(state, user, pending){
+  const N = NAV();
+  if(!N || !N.NAV_INDEX || !N.HOME_CONFIG) return [];
+  let cfg = null;
+  try { const k = N.navHomeKey ? N.navHomeKey(user) : user.role; cfg = N.HOME_CONFIG[k] || null; } catch(_e){ cfg = null; }
+  if(!cfg) return [];
+  const out = [];
+  for(const id of arr(cfg.shortcuts)){
+    if(out.length >= 4) break;
+    const e = N.NAV_INDEX[id];
+    if(!e || e.kind === 'action' || e.id === 'dashboard') continue;                 // 'act.*' = คลื่น 4 (erp:action) — ข้ามคลื่นนี้
+    try { if(N.navVisible && !N.navVisible(e, user, state)) continue; } catch(_e){ continue; }
+    const tab = e.tab || e.id;
+    const tone = MODULE_TONE[(e.subs && e.subs.production === 'weigh') ? 'weigh' : tab] || 'slate';
+    const crumbs = arr(e.crumbs);
+    // บรรทัดที่ 2 = caption จาก registry (orchestrator เพิ่มต่อโมดูล) · ไม่มี → ชื่อโมดูลแม่ (crumbs[0]) บอกว่าหน้านี้อยู่หมวดไหน
+    let label = e.label, caption = e.caption || (e.kind !== 'module' && crumbs.length >= 2 ? crumbs[0] : '');
+    // ป้ายหน้าสั้นมาก (เช่น 'วันนี้' / 'ภาพรวม') อ่านลอย ๆ ไม่รู้เรื่อง → นำด้วยชื่อโมดูล แล้วชื่อหน้าเป็นบรรทัดรอง ("บันทึกขาย / วันนี้" ตาม spec screens[2])
+    if(!e.caption && e.kind !== 'module' && caption && String(label).length <= 7){ const t = label; label = caption; caption = t; }
+    let badge = 0;
+    try { badge = N.navCount ? N.navCount(e, state, user) : 0; } catch(_e){ badge = 0; }
+    if(e.id === 'accounting.approvals'){ try { badge = countPendingForUser(state, user) || 0; } catch(_e){} }
+    if(e.id === 'checklist') badge = pending ? (num(pending.counts.block) + num(pending.counts.warn)) : 0;
+    const subs = e.id === 'checklist' ? { checklist_sev:'all', checklist_group:'all' } : (e.subs || {});
+    out.push({ id:e.id, icon:e.icon || '▸', label, caption, tone, badge, title: e.old ? `เดิม: ${e.old}` : e.label, onClick:()=>navigateTo(tab, subs) });
+  }
+  return out;
+}
+
+// ==================== สาขา × วันนี้ (gm/admin/manager/production_manager) ====================
+const BRANCH_TABLE_ROLES = ['gm','admin','manager','production_manager'];
+function buildBranchRows(state, user, ctx){
+  const rows = [];
+  const today = ctx.today;
+  const sales = new Map(), prod = new Map(), tr = new Map(), low = new Map(), red = new Map(), amber = new Map();
+  const inc = (m, k, n) => m.set(k, (m.get(k) || 0) + (n == null ? 1 : n));
+  const showSales = hasSalesModule(ctx) && hasSalesData(ctx);   // review: production_manager ไม่มีโมดูลขาย → ไม่เห็นคอลัมน์ขาย
+  if(showSales){
+    for(const e of arr(state.salesLight)){ if(e && e.date === today) inc(sales, e.branch, num(e.totalRevenue)); }          // src/mod-sales-light.js:33-35
+    for(const i of arr(state.salesInvoices)){ if(i && !i.voided && i.invDate === today && i.branch) inc(sales, i.branch, num(i.netTotal)); }   // src/mod-sales-full.js:77-79
+  }
+  const showProd = ctx.prodLive && ctx.can('production') && arr(state.productionOrders).length > 0;
+  if(showProd){
+    for(const o of arr(state.productionOrders)){                                   // src/mod-production.js:679-696 (แผน/กำลัง/รอQC) · src/mod-checklist.js:2389 (ล่าช้า)
+      if(!o || !o.branchId) continue;
+      const p = prod.get(o.branchId) || { plan:0, run:0, qc:0, late:0 };
+      const pd = (o.plannedDate || '').slice(0, 10);
+      if(pd === today){ p.plan++; if(['materials_issued','producing'].includes(o.status)) p.run++; }
+      if(o.status === 'produced') p.qc++;
+      if(o.status === 'planned' && pd && pd < today){ p.late++; inc(red, o.branchId); }
+      prod.set(o.branchId, p);
+    }
+  }
+  for(const t of arr(state.transferRequests)){                                       // src/02-nav.js NAV_COUNTS['transfer.tr'] ต่อสาขา (pending · from|to)
+    if(!t || t.status !== 'pending') continue;
+    if(t.toBranch) inc(tr, t.toBranch); if(t.fromBranch && t.fromBranch !== t.toBranch) inc(tr, t.fromBranch);
+    if(t.fromBranch) inc(amber, t.fromBranch);                                          // รอจัดส่ง (wh_tr_to_ship)
+  }
+  try { for(const a of (typeof getLowStockAlerts === 'function' ? arr(getLowStockAlerts(state)) : [])) inc(low, a.branchId); } catch(_e){}   // src/00-core.js getLowStockAlerts (ทุกสาขาที่เกี่ยวข้อง)
+  for(const t of arr(state.transferOrders)){ if(t && (t.status === 'shipping' || t.status === 'partial') && t.toBranch) inc(amber, t.toBranch); }   // TO รอกดรับ (wh_to_incoming)
+  for(const p of arr(state.pos)){ if(p && p.destinationBranch && isPOOverdue(p, today)) inc(red, p.destinationBranch); }                      // PO เลยกำหนด (isPOOverdue)
+  for(const b of negativeBins(ctx)) inc(red, b.branch);                                                                                       // สต๊อกติดลบ (wh_neg_stock)
+  for(const x of lotsExpiring(ctx)) inc(amber, x.branch);                                                                                     // ล็อตใกล้หมดอายุ (wh_lot_expiring_7d)
+  for(const b of ctx.branches){
+    rows.push({ branch:b, sales: showSales ? (sales.get(b.id) || 0) : null, prod: showProd ? (prod.get(b.id) || { plan:0, run:0, qc:0, late:0 }) : null,
+      tr: tr.get(b.id) || 0, low: low.get(b.id) || 0, red: red.get(b.id) || 0, amber: amber.get(b.id) || 0, current: b.id === ctx.currentBranch });
+  }
+  return { rows, showSales, showProd };
+}
+
+// คอลัมน์ "ค้าง" ต่อสาขา = ผลรวมเฉพาะเรื่องที่ผูกสาขาได้ (ไม่ใช่ collectPendingWork ซึ่งคิดต่อผู้ใช้ทั้งขอบเขต — เรื่องตั้งค่า/BOM ไม่ผูกสาขาจึงไม่อยู่ในคอลัมน์นี้)
+const PENDING_COL_TIP = '🔴 เร่ง = สต๊อกติดลบ · ออเดอร์เลยวันแผน · PO เลยกำหนดส่ง (ปลายทางสาขานี้)\n🟠 รอ = TO รอกดรับ · TR รอจัดส่งจากสาขานี้ · ล็อตใกล้หมดอายุ\n(เฉพาะเรื่องที่ผูกสาขาได้ — งานตั้งค่า/BOM ดูที่ ✅ งานค้าง)';
+function BranchTable({ rows, showSales, showProd, showValue, onPick }){
+  const money = (v) => v == null ? '—' : (v > 0 ? fmtMoneyShort(v) : '—');
+  const prodTxt = (p) => p ? `${fmtNum(p.plan)} / ${fmtNum(p.run)} / ${fmtNum(p.qc)} / ${fmtNum(p.late)}` : '—';
+  const pendingCell = (r) => (r.red === 0 && r.amber === 0) ? h('span', { className:'text-green-700 text-xs' }, '✓')
+    : h('span', { className:'text-xs whitespace-nowrap' }, r.red > 0 && h('span', { className:'text-red-700 font-semibold mr-1.5' }, '🔴', fmtNum(r.red)), r.amber > 0 && h('span', { className:'text-amber-700 font-semibold' }, '🟠', fmtNum(r.amber)));
+  const num2 = (n, warn) => h('span', { className: cls('tabular-nums', n > 0 && warn ? 'text-amber-800 font-semibold' : n > 0 ? 'text-gray-800' : 'text-gray-400') }, n > 0 ? fmtNum(n) : '—');
+  const th = (label, cl, tip) => h('th', { className: cls('px-3 py-2 text-[13px] font-semibold text-gray-600 whitespace-nowrap', cl), title: tip }, label);
+  return h(R.Fragment, null,
+    // desktop/tablet: ตาราง
+    h('div', { className:'hidden md:block overflow-x-auto -mx-4 px-4' },
+      h('table', { className:'w-full text-sm' },
+        h('thead', { className:'bg-gray-50' }, h('tr', null,
+          th('สาขา', 'text-left'), showSales && showValue !== false && th('ขาย ฿', 'text-right'), showProd && th('ผลิต แผน/กำลัง/รอQC/ล่าช้า', 'text-right'),
+          th('TR ค้าง', 'text-right'), th('สต๊อกต่ำ', 'text-right'), th('ค้าง 🔴เร่ง/🟠รอ', 'text-right', PENDING_COL_TIP))),
+        h('tbody', { className:'divide-y divide-gray-100' },
+          rows.map(r => h('tr', { key:r.branch.id, 'data-home-branch-row':r.branch.id, onClick:()=>onPick(r.branch), tabIndex:0, role:'button',
+              onKeyDown:(e)=>{ if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); onPick(r.branch); } },
+              className: cls('cursor-pointer hover:bg-blue-50/40 focus-visible:bg-blue-50', r.current && 'bg-blue-50/60') },
+            h('td', { className:'px-3 py-2 font-medium text-gray-800 whitespace-nowrap' }, r.branch.branchType === 'hq' ? '🏢 ' : '🏪 ', r.branch.name, r.current && h('span', { className:'ml-1.5 text-[10px] text-blue-700 font-semibold' }, 'เปิดอยู่')),
+            showSales && showValue !== false && h('td', { className:'px-3 py-2 text-right tabular-nums' }, money(r.sales)),
+            showProd && h('td', { className: cls('px-3 py-2 text-right tabular-nums whitespace-nowrap', r.prod && r.prod.late > 0 && 'text-red-700 font-semibold') }, prodTxt(r.prod)),
+            h('td', { className:'px-3 py-2 text-right' }, num2(r.tr, true)),
+            h('td', { className:'px-3 py-2 text-right' }, num2(r.low, false)),
+            h('td', { className:'px-3 py-2 text-right' }, pendingCell(r))))))),
+    // มือถือ: การ์ดสั้น
+    h('div', { className:'md:hidden grid grid-cols-1 gap-2' },
+      rows.map(r => h('button', { key:r.branch.id, type:'button', 'data-home-branch-row':r.branch.id, onClick:()=>onPick(r.branch),
+          className: cls('w-full text-left rounded-lg border p-3 min-h-[44px] bg-white hover:border-blue-300', r.current ? 'border-blue-300 bg-blue-50/40' : 'border-gray-200') },
+        h('div', { className:'flex items-center gap-2' },
+          h('span', { className:'font-medium text-gray-800 truncate' }, r.branch.branchType === 'hq' ? '🏢 ' : '🏪 ', r.branch.name),
+          h('span', { className:'ml-auto', title: PENDING_COL_TIP }, pendingCell(r))),
+        h('div', { className:'text-xs text-gray-600 mt-1 flex flex-wrap gap-x-3 gap-y-0.5' },
+          showSales && showValue !== false && h('span', null, 'ขาย ', h('b', { className:'tabular-nums' }, money(r.sales))),
+          showProd && h('span', null, 'ผลิต ', h('b', { className: cls('tabular-nums', r.prod && r.prod.late > 0 && 'text-red-700') }, prodTxt(r.prod))),
+          h('span', null, 'TR ค้าง ', h('b', null, fmtNum(r.tr))),
+          h('span', null, 'สต๊อกต่ำ ', h('b', null, fmtNum(r.low))))))));
+}
+
+// ==================== งานค้าง (block+warn เท่านั้น) — ตัวเลขจาก usePendingWork ชุดเดียวกับกระดิ่ง ====================
+const SEV_RANK = { block:0, warn:1, info:2 };
+function PendingBlock({ pending, available }){
+  const goAll = () => navigateTo('checklist', { checklist_sev:'all', checklist_group:'all' });
+  if(!available){
+    return h(Section, { title:'งานค้าง', tone:'red', attr:'data-home-pending', right: h(Button, { size:'sm', variant:'secondary', onClick:goAll }, '✅ เปิดหน้างานค้าง →') },
+      h('div', { className:'text-sm text-gray-600' }, 'ดูรายการที่ยังค้าง/ข้อมูลที่ยังขาดของแต่ละฝ่ายได้ที่หน้า ✅ งานค้าง'));
+  }
+  if(!pending) return h(Section, { title:'งานค้าง', tone:'red', attr:'data-home-pending' }, h('div', { className:'text-sm text-gray-400' }, 'กำลังตรวจ…'));
+  const c = pending.counts || { block:0, warn:0, info:0, total:0 };
+  const urgent = num(c.block) + num(c.warn);
+  const top = arr(pending.items).filter(x => !x.done && !x.failed && (x.severity === 'block' || x.severity === 'warn'))
+    .sort((a, b) => (SEV_RANK[a.severity] - SEV_RANK[b.severity]) || (b.count - a.count)).slice(0, 4);
+  const box = (sev, label, n, cl) => h('button', { type:'button', key:sev, onClick:()=>navigateTo('checklist', { checklist_sev:sev, checklist_group:'all' }), 'data-home-pending-sev':sev,
+      className: cls('rounded-lg border px-3 py-2 text-left transition hover:brightness-95 min-h-[44px]', cl) },
+    h('div', { className:'text-[11px] font-medium' }, label),
+    h('div', { className:'text-xl font-bold leading-tight tabular-nums' }, fmtNum(n), h('span', { className:'text-[11px] font-normal ml-1' }, 'เรื่อง')));
+  return h(Section, { title:'งานค้าง', count: urgent, tone: c.block > 0 ? 'red' : 'amber', attr:'data-home-pending',
+      right: h(Button, { size:'sm', variant: urgent > 0 ? 'primary' : 'secondary', onClick:goAll }, urgent > 0 ? 'ดูทั้งหมด →' : 'ดูรายการที่ตรวจ →') },
+    h('div', { className:'grid grid-cols-2 gap-2 mb-2' },
+      box('block', '🔴 ต้องทำก่อน', c.block, c.block > 0 ? 'bg-red-50 border-red-200 text-red-800' : 'bg-white border-gray-200 text-gray-500'),
+      box('warn',  '🟠 ควรทำวันนี้', c.warn,  c.warn > 0 ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-white border-gray-200 text-gray-500')),
+    urgent === 0
+      ? h('div', { className:'text-sm text-green-800' }, `🎉 ไม่มีงานเร่ง — ตรวจแล้ว ${fmtNum(arr(pending.items).length)} ข้อ${c.info > 0 ? ` · ข้อมูลยังไม่ครบ ${fmtNum(c.info)} เรื่อง (ดูในหน้างานค้าง)` : ''}`)
+      : h('ul', { className:'text-sm text-gray-700 space-y-1' },
+          top.map(it => h('li', { key:it.key, className:'flex items-start gap-2' },
+            h('span', { className:'shrink-0' }, it.severity === 'block' ? '🔴' : '🟠'),
+            h('span', { className:'flex-1 min-w-0 leading-snug' }, it.label, h('span', { className:'ml-1.5 text-xs font-mono bg-white border rounded px-1.5 whitespace-nowrap' }, fmtNum(it.count), ' รายการ')),
+            it.nav && it.nav.tab && h('button', { type:'button', className:'shrink-0 text-xs px-2 py-1 rounded border bg-white text-blue-700 hover:bg-blue-50 min-h-[28px]', onClick:()=>navigateTo(it.nav.tab, it.nav.subs) }, 'ไปทำ →'))),
+          urgent > top.length && h('li', { className:'text-xs text-gray-500' }, `… และอีก ${fmtNum(urgent - top.length)} รายการ`)));
+}
+
+// ==================== เปิดล่าสุด (global.ERP.readRecents + resolveNavId) ====================
+function RecentBlock({ state, user }){
+  const read = E().readRecents, resolve = E().resolveNavId;
+  if(typeof read !== 'function') return null;
+  let list = [];
+  try { list = arr(read(user)).map(id => (typeof resolve === 'function' ? resolve(id, user, state) : null)).filter(Boolean).slice(0, 6); } catch(_e){ list = []; }
+  if(!list.length) return null;
+  return h(Section, { title:'เปิดล่าสุด', tone:'slate', attr:'data-home-recent' },
+    h('div', { className:'flex flex-wrap gap-2' },
+      list.map(e => h('button', { key:e.id, type:'button', onClick:()=>navigateTo(e.tab || e.id, e.subs || {}), title: arr(e.crumbs).join(' › ') || e.label,
+          className:'inline-flex items-center gap-1.5 px-3 min-h-[36px] rounded-full border border-gray-200 bg-white text-sm text-gray-700 hover:border-blue-300 hover:text-blue-700' },
+        h('span', null, e.icon || '▸'), h('span', { className:'truncate max-w-[12rem]' }, e.label)))));
+}
+
+// ==================== HomePage ====================
+function HomePage({ state, dispatch, pending: pendingProp }){
+  const user = state && state.currentUser;
+  const usePW = E().usePendingWork;
+  // hook ต้องเรียกทุกครั้ง (ลำดับคงที่) — ปิดการคำนวณเมื่อ orchestrator ส่ง pending มาให้แล้ว
+  const pendingOwn = (typeof usePW === 'function') ? usePW(state, user, pendingProp === undefined && !!user) : null;
+  const pending = pendingProp !== undefined ? pendingProp : pendingOwn;
+  const [waitAll, setWaitAll] = useState(false);   // คิวรอตัดสินใจ: 6 แถวแรก → กด "แสดงทั้งหมด"
+  const ctx = useMemo(() => (state && user) ? buildHomeCtx(state, user) : null, [state, user]);
+  const kpis = useMemo(() => (ctx ? computeHomeKpis(state, user, null, ctx) : []), [ctx, state, user]);
+  const quick = useMemo(() => (ctx ? buildQuickActions(state, user, pending) : []), [ctx, state, user, pending]);
+  const showBranches = !!(user && (BRANCH_TABLE_ROLES.includes(user.role) || ctx && ctx.isSuper) && ctx && ctx.branches.length > 1);
+  const branchData = useMemo(() => (showBranches ? buildBranchRows(state, user, ctx) : null), [showBranches, state, user, ctx]);   // review: ไม่ขึ้นกับ pending (buildBranchRows ไม่ใช้)
+  if(!user || !ctx) return null;
+
+  const branch = getBranch(state, state.currentBranch);
+  const N = NAV();
+  let roleText = '';
+  try { const k = N && N.navHomeKey ? N.navHomeKey(user) : null; const cfg = k && N.HOME_CONFIG ? N.HOME_CONFIG[k] : null; roleText = (cfg && cfg.label) || ''; } catch(_e){}
+  if(!roleText){ try { roleText = E().roleLabel ? E().roleLabel(user.role) : user.role; } catch(_e){ roleText = user.role || ''; } }
+  // สลับสาขาแล้วค่อยนำทาง — SET_BRANCH → visibleMenu อัปเดต (__visibleMenuKeys) → navigateTo (ลำดับเดียวกับ 03-shell switchHQThen)
+  const goBranch = (b) => {
+    const target = user.role === 'production_manager' ? { tab:'production', subs:{ production:'orders' } } : { tab:'stock', subs:{ stock:'dashboard' } };
+    if(b.id !== state.currentBranch && typeof dispatch === 'function') dispatch({ type:'SET_BRANCH', data:b.id });   // action เดียวที่สัญญาอนุญาต
+    const go = () => setTimeout(() => navigateTo(target.tab, target.subs), 60);
+    if(global.requestAnimationFrame) global.requestAnimationFrame(go); else go();
+  };
+  const canPickBranch = ctx.branches.length > 1 && typeof dispatch === 'function';
+
+  return h('div', { 'data-home':'1', className:'max-w-[1400px]' },
+    // ---------- หัว ----------
+    h('div', { className:'mb-4 flex items-start gap-3 flex-wrap' },
+      h('div', { className:'min-w-0' },
+        h('h1', { className:'text-xl font-bold text-gray-900 leading-tight' }, `สวัสดี, ${user.name || user.username || ''}`, roleText && h('span', { className:'ml-2 text-base font-normal text-gray-500' }, `(${roleText})`)),
+        h('p', { className:'text-sm text-gray-600 mt-1 flex items-center gap-1.5 flex-wrap' },
+          h('span', null, branch && branch.branchType === 'hq' ? '🏢' : '🏪', ' ', (branch && branch.name) || state.currentBranch || '-'),
+          h('span', { className:'text-gray-300' }, '·'),
+          h('span', null, dateTH(ctx.today)))),
+      canPickBranch && h('label', { className:'ml-auto flex items-center gap-1.5 text-sm text-gray-600' }, 'สลับสาขา',
+        h('select', { 'data-home-branch-select':'1', value: state.currentBranch || '', onChange:(e)=>{ const id = e.target.value; if(id && id !== state.currentBranch) dispatch({ type:'SET_BRANCH', data:id }); },
+            className:'h-9 px-2 border border-gray-300 rounded-md bg-white text-sm' },
+          ctx.branches.map(b => h('option', { key:b.id, value:b.id }, (b.branchType === 'hq' ? '🏢 ' : '🏪 ') + b.name))))),
+
+    // ---------- ทำเลย ----------
+    quick.length > 0 && h(Section, { title:'ทำเลย', tone:'blue', attr:'data-home-quick' },
+      h('div', { className:'grid grid-cols-2 lg:grid-cols-4 gap-3' }, quick.map(q => h(QuickBox, { key:q.id, q })))),
+
+    // ---------- ตัวเลขวันนี้ (มาก่อนคิวรอตัดสินใจ — ตัวเลขต้องเห็นโดยไม่ต้องเลื่อน) ----------
+    kpis.length > 0 && h(Section, { title:'ตัวเลขวันนี้', tone:'indigo', attr:'data-home-kpis', className:'overflow-hidden' },
+      h('div', { className:'flex overflow-x-auto snap-x snap-mandatory gap-3 pb-1 -mx-1 px-1 md:grid md:grid-cols-2 xl:grid-cols-4 md:overflow-visible md:pb-0', 'data-home-kpi-row':'1' },
+        kpis.map(k => h(KpiCard, { key:k.key, k })))),
+
+    // ---------- รอฉันตัดสินใจ (6 แถวแรก · กด "แสดงทั้งหมด" ขยาย) ----------
+    h(WaitingForMe, { state, user, ctx, limit: waitAll ? ROW_MAX : 6, onMore: () => setWaitAll(true) }),
+
+    // ---------- สาขา × วันนี้ ----------
+    showBranches && branchData && branchData.rows.length > 0 && h(Section, { title:'สาขา × วันนี้', count: branchData.rows.length, tone:'teal', attr:'data-home-branches',
+        right: h('span', { className:'text-xs text-gray-500' }, 'กดแถว = สลับไปสาขานั้น') },
+      h(BranchTable, { rows: branchData.rows, showSales: branchData.showSales, showProd: branchData.showProd, showValue: true, onPick: goBranch })),
+
+    // ---------- งานค้าง + เปิดล่าสุด ----------
+    h('div', { className:'grid grid-cols-1 lg:grid-cols-2 gap-x-4' },
+      h(PendingBlock, { pending, available: typeof usePW === 'function' || pendingProp !== undefined }),
+      h(RecentBlock, { state, user })));
+}
+
+global.ERP.registerModule('home', { HomePage, HOME_KPIS, computeHomeKpis, WaitingForMe, MODULE_TONE, collectWaiting, buildHomeCtx, TONE });
+
+})(window);
 
 </script>
 <script>window.addEventListener('DOMContentLoaded',()=>{if(window.ERP&&window.ERP.mount){window.ERP.mount(document.getElementById('root'));}else{document.getElementById('root').innerHTML='โหลดไม่สำเร็จ';}});</script></body></html>
