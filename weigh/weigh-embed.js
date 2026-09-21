@@ -12,9 +12,10 @@
  *   // ตอน logout:                     w.hide()  (หรือ w.destroy() แล้ว mount ใหม่ตอน login)
  *
  * options: container? (element หรือ selector) · src (default 'weigh/index.html' — ต้องตรงชื่อโฟลเดอร์จริง)
- *          operator, lockOperator, branchId, role ('staff'|'manager'|'admin'|'viewer'), permissions, recipes, settings
- *          onReady(info) · onFinished(log) · onScale({connected,device}) · autoHeight (แบบ A เท่านั้น, default true) · minHeight (default 640)
- * คืน: { iframe, send(msg), selectRecipe({code|recipeId}), setOperator(name, lock), setRole(role, permissions), show(slotEl), hide(), destroy() }
+ *          operator, lockOperator, branchId, role ('staff'|'manager'|'admin'|'viewer'), permissions, recipes, recipesMode ('replace' = รายการของแม่ทั้งชุด ไม่รวมกับสูตรในเครื่อง), settings
+ *          onReady(info{version,features}) · onFinished(log) · onScale({connected,device}) · autoHeight (แบบ A เท่านั้น, default true) · minHeight (default 640)
+ * คืน: { iframe, send(msg), selectRecipe({code|recipeId}), printLabel(log, copies), setOperator(name, lock), setRole(role, permissions), show(slotEl), hide(), destroy() }
+ *   printLabel(log) = พิมพ์ฉลากซ้ำจาก log ที่แอปแม่เก็บไว้ ({recipeName, lot, total, operator, ts, note?, offSpec?}) — ไม่แตะสูตร/ชุดที่ชั่งค้าง (ระบบชั่ง ≥ 2026.09.18.1 · เช็ค info.features มี 'print-label')
  *
  * ⚠️ iframe ต้องมี allow="usb; bluetooth; serial; screen-wake-lock" (ใส่ให้แล้ว) · หน้าแม่ต้องเป็น HTTPS/localhost
  * ⚠️ ถ้า onReady ไม่ถูกเรียกภายใน ~3 วิ = path src ผิด (iframe ได้หน้า 404/SPA fallback แทน)
@@ -54,10 +55,10 @@
       if(d.type === 'ready'){
         ready = true;
         var cfg = {};
-        ['operator','lockOperator','branchId','role','permissions','recipes','settings'].forEach(function(k){ if(opts[k] != null) cfg[k] = opts[k]; });
+        ['operator','lockOperator','branchId','role','permissions','recipes','recipesMode','settings'].forEach(function(k){ if(opts[k] != null) cfg[k] = opts[k]; });
         if(Object.keys(cfg).length) post(Object.assign({ type:'config' }, cfg));
         queue.splice(0).forEach(function(m){ try { iframe.contentWindow.postMessage(m, '*'); } catch(e){} });
-        opts.onReady && opts.onReady({ version: d.version });
+        opts.onReady && opts.onReady({ version: d.version, features: Array.isArray(d.features) ? d.features : [] });
       } else if(d.type === 'finished'){ opts.onFinished && opts.onFinished(d.log); }
       else if(d.type === 'scale'){ opts.onScale && opts.onScale({ connected: d.connected, device: d.device }); }
       else if(d.type === 'height'){ if(!detached && opts.autoHeight !== false && d.px > 0) iframe.style.height = Math.max(opts.minHeight || 640, d.px + 8) + 'px'; }
@@ -89,6 +90,7 @@
       iframe: iframe,
       send: post,
       selectRecipe: function(sel){ post(Object.assign({ type:'select-recipe' }, sel || {})); },
+      printLabel: function(log, copies){ if(log && typeof log === 'object') post({ type:'print-label', log:log, copies: copies || 1 }); },
       setOperator: function(name, lock){ post({ type:'config', operator:name, lockOperator: lock !== false }); },
       setRole: function(role, permissions){ post({ type:'config', role:role, permissions:permissions }); },
       show: show, hide: hide, isDetached: detached,

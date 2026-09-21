@@ -510,6 +510,7 @@ const PERM_TREE = {
     plan:      { label:'แผนผลิตรายวัน',    actions:['view','create','edit','delete'] },
     orders:    { label:'ออเดอร์ผลิต',      actions:['view','create','edit','delete','complete','qc'] },
     issue:     { label:'เบิกวัตถุดิบ (ใบเบิก)', actions:['view','create','edit','delete'] },   // 🆕 GO-LIVE: delete = ขอยกเลิกใบเบิก
+    weigh:     { label:'สถานีชั่ง (ตามสูตร BOM)', actions:['view','create'] },   // 🆕 WEIGH: view = ดูประวัติชั่ง · create = ชั่ง/ออก LOT (ฝัง /weigh/)
     flow:      { label:'ติดตามการผลิต',    actions:['view'] },
     bom:       { label:'สูตร BOM',         actions:['view','create','edit','delete','import'] },
     variance:  { label:'Variance Report',  actions:['view','export'] },
@@ -668,7 +669,14 @@ const QUICK_PROFILES = {
     label:'🧺 หน้างาน — เบิกวัตถุดิบ (ผลิตยังไม่เปิด)',
     desc:'เบิกวัตถุดิบตัดคลังกลาง + ขอของ TR · ไม่เห็นต้นทุน/ออเดอร์ผลิต',
     role: 'branch',
-    permissions: ['production.issue.view','production.issue.create','stock.list.view','transfer.tr.view','transfer.tr.create','reports.stock.view'],
+    permissions: ['production.issue.view','production.issue.create','production.weigh.view','production.weigh.create','stock.list.view','transfer.tr.view','transfer.tr.create','reports.stock.view'],
+  },
+  // 🆕 WEIGH: พนักงานสถานีชั่ง — เห็นแค่ ⚖️ ชั่ง (สูตรจาก BOM ของไลน์/สถานีตัวเอง) · ไม่เห็นต้นทุน/ออเดอร์
+  'weigh_only': {
+    label:'⚖️ พนักงานชั่ง (เฉพาะสถานีชั่ง)',
+    desc:'ชั่งตามสูตร BOM ของไลน์ตัวเอง + พิมพ์ฉลาก LOT · ไม่เห็นออเดอร์/ต้นทุน',
+    role: 'branch',
+    permissions: ['production.weigh.view','production.weigh.create'],
   },
   'qc_only': {
     label:'🔬 QC Inspector',
@@ -1018,7 +1026,8 @@ function deductFromLayers(layers, itemId, qty, branch){
 // ==================== O1: POS Sales → back-flush BOM (recursive explode) ====================
 // 🆕 หา BOM ที่ผลิต item นี้เป็น output สำหรับสาขานั้น (legacy BOM ที่ไม่มี availableIn = ทุกสาขา)
 function findBomForOutput(state, itemId, branchId){
-  return (state.boms || []).find(b =>
+  // 🆕 WEIGH UAT: BOM ที่ปิดใช้ (soft-delete active:false) ไม่ถูกหยิบไปคำนวณ (POS back-flush / ออเดอร์ใหม่)
+  return (state.boms || []).find(b => b && b.active !== false &&
     (!b.availableIn || b.availableIn.length === 0 || b.availableIn.includes(branchId)) &&
     getBomOutputs(b).some(o => o.productId === itemId)) || null;
 }
@@ -1390,7 +1399,7 @@ function optimizeBatchCombination(target, profiles){
 // คืน Map: wipItemId → [{fgItemId, qtyPerFg, finishingBom}]
 function detectSharedBase(state, branchId){
   const items = state.items || [];
-  const boms = (state.boms || []).filter(b => (b.availableIn||[]).includes(branchId));
+  const boms = (state.boms || []).filter(b => b && b.active !== false && (b.availableIn||[]).includes(branchId));
   const wipUsage = new Map();  // wipId → [{fgId, qty, bom}]
 
   for(const bom of boms){
@@ -1417,7 +1426,7 @@ function detectSharedBase(state, branchId){
 
 // คืน BOM ที่ผลิต WIP item นี้ (สำหรับ build Master order)
 function findBomForWip(state, branchId, wipItemId){
-  const boms = (state.boms || []).filter(b => (b.availableIn||[]).includes(branchId));
+  const boms = (state.boms || []).filter(b => b && b.active !== false && (b.availableIn||[]).includes(branchId));
   for(const bom of boms){
     const outputs = getBomOutputs(bom);
     if(outputs.some(o => o.productId === wipItemId)) return bom;
@@ -2521,6 +2530,73 @@ function payEffectiveDate(p){
   return p.date || '';
 }
 
+// ==================== ⚖️ WEIGH STATION (สูตรชั่ง = BOM ที่มีขั้น stationType 'weigh') ====================
+// ปริมาณวัตถุดิบใน BOM → กรัม (ระบบชั่งรับ g เท่านั้น) : แปลงเป็นหน่วยฐานของสินค้าก่อน แล้วดูว่าหน่วยฐานเป็นน้ำหนัก/ปริมาตรไหม
+//   คืน null = ชั่งไม่ได้ (นับชิ้น/ฟอง/ใบ) → ข้าม + แจ้งใน skipped
+const _WEIGH_G_PER_UNIT = { 'กรัม':1, 'g':1, 'gram':1, 'กก.':1000, 'กก':1000, 'กิโลกรัม':1000, 'kg':1000, 'ml':1, 'มล.':1, 'มล':1, 'มิลลิลิตร':1, 'ลิตร':1000, 'l':1000, 'L':1000, 'ซีซี':1, 'cc':1 };
+const _VOLUME_UNITS = new Set(['ml','มล.','มล','มิลลิลิตร','ลิตร','l','L','ซีซี','cc']);
+function _isVolumeUnit(name){ const k = String(name||'').trim(); return _VOLUME_UNITS.has(k) || _VOLUME_UNITS.has(k.toLowerCase()); }
+function gramsPerUnitName(name){
+  const k = String(name||'').trim();
+  if(_WEIGH_G_PER_UNIT[k] != null) return _WEIGH_G_PER_UNIT[k];
+  const low = k.toLowerCase();
+  return _WEIGH_G_PER_UNIT[low] != null ? _WEIGH_G_PER_UNIT[low] : null;
+}
+function gramsOfMaterial(item, qty, unit){
+  const q = Number(qty)||0;
+  if(q <= 0) return null;
+  // 1) หน่วยที่ระบุแปลงเป็นกรัมได้ตรง ๆ
+  const direct = gramsPerUnitName(unit);
+  if(direct != null) return q * direct;
+  if(!item) return null;
+  // 2) แปลงเป็นหน่วยฐานของสินค้า (units[].isBase) แล้วดูว่าฐานเป็นน้ำหนัก/ปริมาตร
+  const base = getBaseUnit(item);
+  const gBase = gramsPerUnitName(base);
+  if(gBase == null) return null;
+  const factor = resolveToBase(item.units, unit);
+  if(!factor || !isFinite(factor)) return null;
+  return q * factor * gBase;
+}
+// เกณฑ์ ± มาตรฐานของระบบชั่ง (กรัม) — ตารางเดียวกับใน weigh-system
+function weighDefaultTolG(targetG){
+  const t = Number(targetG)||0;
+  if(t < 10) return 0.5; if(t < 100) return 2; if(t < 300) return 5; if(t < 500) return 7; if(t < 1000) return 12; return 13;
+}
+function bomHasWeighStep(bom){ return !!(bom && (bom.operations||[]).some(o => o && o.stationType === 'weigh')); }
+// BOM → สูตรสำหรับระบบชั่ง { id:'bom:<id>', bomId, code, name, items:[{ name, itemId, target(g), unit:'g', tol }], skipped:[ชื่อที่ชั่งไม่ได้] }
+function weighRecipeFromBom(state, bom){
+  if(!bom) return null;
+  const items = state.items || [];
+  const out = [], skipped = [];
+  for(const m of (bom.materials||[])){
+    if(!m || m.weighRequired === false) continue;
+    const it = items.find(x => x.id === m.itemId);
+    const name = (it && it.name) || m.note || m.name || m.itemId || '-';
+    const g = gramsOfMaterial(it, m.qty, m.unit);
+    if(g == null){ skipped.push(name); continue; }
+    const target = Number(g.toFixed(2));
+    const tol = (m.weighTolerance != null && Number(m.weighTolerance) > 0) ? Number(m.weighTolerance) : weighDefaultTolG(target);
+    // 🆕 WEIGH UAT: ปริมาตร (ml/ลิตร) → ส่ง unit 'ml' (สถานีชั่งคิด 1 มล. = 1 ก. และโชว์ป้ายให้คนชั่งรู้) · scaleType 'fixed' → ไม่คูณตามตัวคูณที่สถานี
+    const isVolume = _isVolumeUnit(m.unit) || (it && _isVolumeUnit(getBaseUnit(it)) && gramsPerUnitName(m.unit) == null);
+    out.push({ name, itemId: m.itemId || null, target, unit: isVolume ? 'ml' : 'g', tol, srcQty: Number(m.qty)||0, srcUnit: m.unit || '', isVolume, fixed: m.scaleType === 'fixed' });
+  }
+  const rawCode = String(bom.weighCode || bom.code || (bom.productName||bom.name||'').replace(/[^A-Za-z0-9]/g,'') || ('B' + String(bom.id||'').replace(/[^A-Za-z0-9]/g,'').slice(-5))).toUpperCase().slice(0,8) || 'BOM';
+  return { id:'bom:' + bom.id, bomId: bom.id, code: rawCode, name: bom.name || bom.productName || bom.id, lineId: bom.lineId || null, items: out, skipped };
+}
+// BOM ที่สถานีชั่งของผู้ใช้เห็น: มีขั้นชั่ง · active · ใช้ในสาขานี้ · ไลน์ตรงกับที่ user ถูกมอบหมาย (superuser/manager/production_manager เห็นทุกไลน์ของสาขา)
+//   จำกัดรายคนได้ด้วย user.weighBomIds[] (ไม่ว่าง = เห็นเฉพาะรายการนี้)
+function bomsForWeigh(state, user, branchId){
+  const all = (state.boms||[]).filter(b => b && b.active !== false && bomHasWeighStep(b)
+    && (!branchId || b.createdBranch === branchId || (b.availableIn||[]).includes(branchId)));
+  if(!user) return all;
+  const own = Array.isArray(user.weighBomIds) ? user.weighBomIds.filter(Boolean) : [];
+  if(own.length) return all.filter(b => own.includes(b.id));
+  if(isSuperUser(user) || ['manager','production_manager'].includes(user.role)) return all;
+  const lines = getUserAssignedLines(user) || [];
+  if(!lines.length) return all.filter(b => !b.lineId);   // ไม่ได้มอบหมายไลน์ → เห็นเฉพาะ BOM ที่ไม่ผูกไลน์
+  return all.filter(b => !b.lineId || lines.includes(b.lineId));
+}
+
 // ==================== IMAGE HELPERS (Phase 2A — QC photos) ====================
 // Resize image file → base64 string (auto compress)
 // maxDim: longest side (default 1200px), quality: JPEG quality (default 0.7)
@@ -3537,6 +3613,7 @@ Object.assign(global.ERP, {
   genId, nextPartyCode, getPendingAssetLines, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, getBaseUnit, findItemUnit, toBaseQty, unitsForPurpose, unitsForIssue, hasUnitForPurpose, isReversalPair,
+  gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,
   getStockUnitsRanked, getAllUnitsRanked, formatQtyMulti, multiUnitsToBase,
   resolveDisplayUnit,
   qcTemplateAppliesTo,
@@ -3809,15 +3886,99 @@ Object.assign(global.ERP, {
     } catch(e){ return null; }
   }
 
+  // 🆕 PER-USER AUTH (ตัวเลือก A 2026-09-21 — _backend/AUTH_PER_USER.md): ERP user 1 คน = auth user 1 คน อีเมลภายใน <username>@yume-erp.local
+  //   พนักงานกรอก username + รหัสของตัวเองครั้งเดียวที่ CloudGate → เข้า cloud → เข้า ERP เป็นคนนั้นอัตโนมัติ · รหัสอยู่ฝั่ง Supabase Auth เท่านั้น
+  //   บัญชี cloud ถูกสร้าง/แก้ผ่าน Edge Function `erp-users` (service_role อยู่ฝั่งเซิร์ฟเวอร์ — client ส่งแค่ JWT ของแอดมิน)
+  var INTERNAL_DOMAIN = 'yume-erp.local';
+  var USERS_FN = 'erp-users';
+  function isInternalEmail(email){ return String(email||'').toLowerCase().slice(-(INTERNAL_DOMAIN.length + 1)) === '@' + INTERNAL_DOMAIN; }
+  // username → อีเมลภายใน · มี @ อยู่แล้ว (อีเมลเจ้าของ/ผู้ดูแล) → ใช้ตรง ๆ
+  function usernameToEmail(username){
+    var u = String(username||'').trim();
+    if(!u) return '';
+    if(u.indexOf('@') >= 0) return u.toLowerCase();
+    return u.toLowerCase() + '@' + INTERNAL_DOMAIN;
+  }
+  async function signInUsername(username, password){
+    var email = usernameToEmail(username);
+    if(!email) return { ok:false, error:'กรอกชื่อผู้ใช้' };
+    var r = await signIn(email, password);
+    if(!r.ok && /invalid login credentials/i.test(r.error||'')) r.error = 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' + (email.indexOf('@' + INTERNAL_DOMAIN) >= 0 ? ' (ถ้ายังไม่เคยเข้าเลย ให้ผู้ดูแลกด "ซิงก์บัญชี cloud" ก่อน)' : '');
+    return r;
+  }
+  // ตัวตนของ session นี้: { email, id, internal, username, role, name } — internal = บัญชีภายใน (map เป็น ERP user ตาม username)
+  async function getIdentity(){
+    var sb = _sb(); if(!sb) return null;
+    try {
+      var res = await sb.auth.getSession();
+      var u = res && res.data && res.data.session && res.data.session.user;
+      if(!u) return null;
+      var meta = u.app_metadata || {};
+      var internal = isInternalEmail(u.email);
+      return { email: u.email, id: u.id, internal: internal,
+        username: meta.erp_username || (internal ? String(u.email).split('@')[0] : null),
+        role: meta.erp_role || null, name: (u.user_metadata && u.user_metadata.name) || meta.erp_name || null };
+    } catch(e){ return null; }
+  }
+  // ยืนยันตัวตนซ้ำด้วยรหัสเดิม (ก่อนเปลี่ยนรหัสของฉัน — เครื่องที่จำ session ไว้ ใครเดินผ่านก็เปลี่ยนไม่ได้)
+  async function reauth(password){
+    var sb = _sb(); if(!sb) return { ok:false, error:'ยังไม่ได้ตั้งค่า Supabase' };
+    try {
+      var id = await getIdentity();
+      if(!id || !id.email) return { ok:false, error:'ไม่มี session' };
+      var res = await sb.auth.signInWithPassword({ email: id.email, password: password });
+      if(res.error) return { ok:false, error: /invalid login credentials/i.test(res.error.message||'') ? 'รหัสเดิมไม่ถูกต้อง' : res.error.message };
+      return { ok:true };
+    } catch(e){ return { ok:false, error: String(e && e.message || e) }; }
+  }
+  // 🧹 ลบสำเนาสำรองย้อนหลังทั้งหมดบน cloud (daily/manual/pre_restore ของทุกเครื่อง) เหลือ company:latest — ใช้หลังซิงก์บัญชีครั้งแรก
+  //   (สำเนาเก่ายังมี users[].password plaintext ซึ่งตอนนี้ = รหัส cloud จริง · RLS authenticated ลบได้จากแอป) · คืน { ok, deleted }
+  async function purgeLegacySnapshots(){
+    var sb = _sb(); if(!sb) return { ok:false, error:'ยังไม่ได้ตั้งค่า Supabase' };
+    try {
+      var res = await sb.from('erp_state_snapshots').delete().neq('id', CLOUD_ID).select('id');
+      if(res.error) return { ok:false, error: res.error.message };
+      // สำเนา local ยุคก่อน cloud-only บนเครื่องนี้ด้วย
+      try { var ks = []; for(var i = 0; i < global.localStorage.length; i++){ var k = global.localStorage.key(i); if(k && k.indexOf('erp_v5__pre_cloud_') === 0) ks.push(k); } ks.forEach(function(k){ global.localStorage.removeItem(k); }); } catch(_l){}
+      return { ok:true, deleted: (res.data||[]).length };
+    } catch(e){ return { ok:false, error: String(e && e.message || e) }; }
+  }
+  // เรียก Edge Function erp-users (ต้องล็อกอินเป็นแอดมิน: อีเมลใน ERP_ADMIN_EMAILS หรือ app_metadata.erp_role gm/admin/manager)
+  async function callUsersFn(action, payload){
+    var sb = _sb(); if(!sb) return { ok:false, error:'ยังไม่ได้ตั้งค่า Supabase' };
+    if(!sb.functions || !sb.functions.invoke) return { ok:false, error:'supabase-js รุ่นนี้ไม่มี functions.invoke' };
+    try {
+      var res = await sb.functions.invoke(USERS_FN, { body: Object.assign({ action: action }, payload || {}) });
+      if(res.error){
+        var msg = String(res.error.message || res.error);
+        var st = res.error.context && res.error.context.status;
+        // ฟังก์ชันยังไม่ถูก deploy (404) / ไม่ใช่แอดมิน (403) — ข้อความไทยให้แอดมินรู้ว่าต้องทำอะไร
+        var body = null;
+        try { body = res.error.context && res.error.context.json ? await res.error.context.json() : null; } catch(_j){}
+        if(body && body.error) msg = body.error;
+        if(st === 404 || /not found/i.test(msg)) msg = 'ยังไม่ได้ติดตั้งฟังก์ชัน erp-users ใน Supabase (ดู _backend/AUTH_PER_USER.md)';
+        return { ok:false, error: msg, status: st };
+      }
+      var data = res.data || {};
+      if(data.ok === false) return { ok:false, error: data.error || 'ไม่สำเร็จ' };
+      return Object.assign({ ok:true }, data);
+    } catch(e){ return { ok:false, error: String(e && e.message || e) }; }
+  }
+
   // 🆕 SESSION-PER-DEVICE: ตัด "ใครล็อกอิน/อยู่สาขาไหน" ออกก่อนขึ้น cloud ทุกเส้นทาง
   //   identity เป็นของเครื่อง ไม่ใช่ข้อมูลบริษัท — ถ้าติดไปด้วย เครื่องอื่นโหลดมาแล้วกลายเป็น user คนนั้น (ข้ามหน้า login)
   function _stripSession(state){
     try {
+      var o = state;
       if(state && (state.currentUser || state.currentBranch !== undefined || state.__fromCloudPull)){
-        var o = Object.assign({}, state, { currentUser: null, currentBranch: null });
+        o = Object.assign({}, state, { currentUser: null, currentBranch: null });
         delete o.__fromCloudPull;   // 🆕 marker ภายในของการดึงข้อมูล — ไม่ต้องขึ้น cloud
-        return o;
       }
+      // 🆕 PER-USER AUTH ชั้นสอง: เมื่อเปิดล็อกอินชั้นเดียวแล้ว รหัสผ่านของบัญชีที่ซิงก์ (หรือที่หลุดมาจาก restore) ห้ามขึ้น cloud
+      if(o && o.settings && o.settings.cloudAuth && Array.isArray(o.users) && o.users.some(function(u){ return u && u.password != null && u.cloudAuth; })){
+        o = Object.assign({}, o, { users: o.users.map(function(u){ if(!u || u.password == null || !u.cloudAuth) return u; var n = Object.assign({}, u); delete n.password; return n; }) });
+      }
+      return o;
     } catch(e){}
     return state;
   }
@@ -4241,6 +4402,9 @@ Object.assign(global.ERP, {
     persistQueue: persistQueue, loadQueue: loadQueue,
     // ☁️ auth + snapshot backup
     signUp: signUp, signIn: signIn, signOut: signOut, getUser: getUser,
+    // 🆕 per-user auth (username → อีเมลภายใน · Edge Function erp-users)
+    INTERNAL_DOMAIN: INTERNAL_DOMAIN, isInternalEmail: isInternalEmail, usernameToEmail: usernameToEmail,
+    signInUsername: signInUsername, getIdentity: getIdentity, callUsersFn: callUsersFn, reauth: reauth, purgeLegacySnapshots: purgeLegacySnapshots,
     // 🆕 ลืมรหัสผ่าน (self-service)
     resetPasswordForEmail: resetPasswordForEmail, updatePassword: updatePassword,
     onRecovery: onRecovery, isRecoveryMode: isRecoveryMode,
@@ -4299,7 +4463,7 @@ function _expenseItemsFromCats(cats){
 
 // ==================== INITIAL STATE ====================
 const INIT_STATE = {
-  version: 35,
+  version: 36,
   currentUser: null,
   currentBranch: 'b1',
 
@@ -4580,6 +4744,7 @@ const INIT_STATE = {
     warehouseSeeValue: false, // 🆕 warehouse role เห็นมูลค่าเงิน (default ไม่เห็น)
     pettyPayMax: 0,           // 🆕 ACCT-V2: เพดานจ่ายจากเงินสดย่อยต่อ PI (0 = ไม่จำกัด — user ตัดสิน 2026-09-17; ผู้อนุมัติตรวจย้อนหลังแทน)
     pettyRecordOnly: true,    // 🆕 ACCT-V2 (user 2026-09-18): เงินสดย่อย = บันทึกอย่างเดียว — จ่ายได้โดยไม่ต้องเติมเงินเข้าระบบก่อน (ยอดคงเหลือติดลบได้) · ปิด = บังคับ ≤ คงเหลือ
+    weighUrl: 'weigh/index.html',   // 🆕 WEIGH: ที่อยู่ระบบชั่ง (origin เดียวกับ ERP) — เทสต์/ดีบักตั้งเป็น file:// ได้
   },
 
   // ---------- Stock / FIFO ----------
@@ -4604,6 +4769,8 @@ const INIT_STATE = {
   // 🆕 GO-LIVE: รายการโปรด (วัตถุดิบที่ใช้ประจำ) — ต่อคน/ต่อไลน์/ต่อสาขา ซิงก์ทุกเครื่อง · ใช้ในหน้า เบิกวัตถุดิบ / TR / TO
   //   { id, scope:'user'|'line'|'branch', scopeId, itemIds:[…], defaultUnit:{ [itemId]: unitName }, updatedBy, updatedAt }
   itemFavorites: [],
+  // 🆕 WEIGH: ผลชั่งจากสถานีชั่ง (ฝัง /weigh/) — { id, deviceId, lot, bomId, recipeName, recipeCode, lineId, branchId, userId, operator, ts, total, multiplier, offSpec, items:[{ name, itemId, value, unit, target, tol, pass, offSpec, reason }], scaleMode, note }
+  weighLogs: [],
 
   // ---------- Production ----------
   // BOMs สร้างที่ HQ (createdBranch='b1') + เลือกสาขาที่ใช้ได้ใน availableIn[]
@@ -4750,6 +4917,9 @@ const INIT_STATE = {
       defaultParams:[
         { paramId:'mp_count', requirePhoto:false, required:true },
       ], defaultMustHandoff:false, defaultExpectedTimeMin:15, builtin:true },
+    // 🆕 WEIGH (2026-09-18): ขั้น "ชั่งตามสูตร" — BOM ที่มีขั้นนี้จะโผล่ในแท็บ ⚖️ ชั่ง (ฝัง /weigh/) ของไลน์นั้น · ขั้นอื่นยังไม่ต้องใส่
+    { id:'opt_weigh', label:'⚖️ ชั่งตามสูตร (สถานีชั่ง)', stationType:'weigh', paramSource:'from_bom_materials',
+      defaultParams:[], defaultMustHandoff:false, defaultExpectedTimeMin:15, builtin:true },
   ],
 
   // ---------- QC Spot Check Templates (master) ----------
@@ -5649,6 +5819,38 @@ function reducer(s, a){
     case 'DELETE_APPROVAL_REQUEST':
       return { ...s, approvalRequests:(s.approvalRequests||[]).filter(r => r.id!==a.data) };
     case 'DELETE_USER':  return { ...s, users:(s.users||[]).filter(u => u.id!==a.data) };
+    // 🆕 PER-USER AUTH (2026-09-21 ตัวเลือก A): บัญชี cloud ของผู้ใช้ถูกสร้าง/อัปเดตแล้ว → ลบรหัสผ่านออกจากข้อมูลบริษัท (รหัสอยู่ฝั่ง Supabase Auth เท่านั้น)
+    //   data: { usernames:[], seedUsernames:[] (คนที่ยังใช้ 1234 — checklist sec_seed_password ยังเตือน), by }
+    //   settings.cloudAuth = true ตั้งแต่ซิงก์คนแรก → CloudGate เข้าโหมด username+รหัส · หน้า LoginPage เดิมเหลือให้เฉพาะบัญชีที่ยังไม่ซิงก์
+    case 'MARK_USERS_CLOUD_SYNCED': {
+      const d = a.data || {};
+      const names = new Set((d.usernames||[]).map(x => String(x).toLowerCase()));
+      const seeds = new Set((d.seedUsernames||[]).map(x => String(x).toLowerCase()));
+      const migrated = new Set((d.migratedUsernames||[]).map(x => String(x).toLowerCase()));   // รหัสที่ย้ายมาจาก state (เคยอยู่ในข้อมูลบริษัท) → บังคับเปลี่ยนครั้งแรก
+      if(!names.size) return s;
+      const now = Date.now();
+      const ownerEmail = d.ownerEmail ? String(d.ownerEmail).toLowerCase() : null;
+      const users = (s.users||[]).map(u => {
+        if(!u) return u;
+        const key = String(u.username||'').toLowerCase();
+        let n = u;
+        if(names.has(key)){
+          n = { ...u, cloudAuth:true, cloudSyncedAt: now, cloudPending:false, cloudError: undefined, seedPassword: seeds.has(key), ...(migrated.has(key) ? { mustChangePassword:true } : {}) };
+          delete n.password;
+        }
+        // เจ้าของที่กดซิงก์จาก session อีเมล → ผูกอีเมลนั้นกับ ERP user ของตัวเอง (ทางเข้ากู้ระบบยังใช้ได้หลังซิงก์ครบ)
+        if(ownerEmail && s.currentUser && u.id === s.currentUser.id && !u.cloudEmail) n = { ...n, cloudEmail: ownerEmail };
+        return n;
+      });
+      const al = { id:'al_'+now.toString(36)+Math.random().toString(36).slice(2,5), ts: now, type:'users_cloud_synced', by: d.by || (s.currentUser && s.currentUser.username) || 'system',
+        entityId:'users', entityRef:'cloud-auth', note:`ซิงก์บัญชี cloud ${names.size} คน (ลบรหัสผ่านออกจากข้อมูลบริษัท): ${[...names].slice(0,12).join(', ')}${names.size > 12 ? ' …' : ''}` };
+      return { ...s, users, settings:{ ...(s.settings||{}), cloudAuth:true }, auditLog:[...(s.auditLog||[]), al] };
+    }
+    // ธง "ยังซิงก์บัญชี cloud ไม่สำเร็จ" ต่อคน (เรียก Edge Function ไม่ผ่านตอนเพิ่ม/แก้ผู้ใช้) — ปุ่มซิงก์ทั้งหมดจะเก็บตกให้
+    case 'SET_USER_CLOUD_PENDING': {
+      const { id, pending, error } = a.data || {};
+      return { ...s, users:(s.users||[]).map(u => u.id === id ? { ...u, cloudPending: !!pending, cloudError: pending ? (error || '') : undefined } : u) };
+    }
 
     // ---------- Purchase ----------
     case 'ADD_PO':       return { ...s, pos:[...s.pos, a.data], seq:{ ...s.seq, po:s.seq.po+1 } };
@@ -8656,6 +8858,66 @@ function reducer(s, a){
         materialIssues: (s.materialIssues||[]).map(m => m.id === issueId ? { ...m, status:'voided', voidedAt: now, voidedBy: by, voidReason: reason||'' } : m),
         auditLog: [...(s.auditLog||[]), al] };
     }
+    // 🆕 WEIGH: บันทึกผลชั่ง 1 ชุดจากระบบชั่ง (ฝัง) — dedupe ด้วย deviceId+id (แท็บเล็ตอาจส่งซ้ำหลัง reload) · ไม่ตัดสต๊อก ไม่ลง JE (Step 1)
+    case 'ADD_WEIGH_LOG': {
+      const d = (a.data && a.data.log) || a.data || {};
+      if(!d || !d.id) return s;
+      const key = String(d.deviceId||'') + '|' + String(d.id);
+      if((s.weighLogs||[]).some(w => (String(w.deviceId||'') + '|' + String(w.id)) === key)) return s;
+      const rec = {
+        id: d.id, deviceId: d.deviceId || null, lot: d.lot || '', ts: Number(d.ts) || Date.now(),
+        bomId: d.bomId || (String(d.recipeId||'').startsWith('bom:') ? String(d.recipeId).slice(4) : null),
+        recipeId: d.recipeId || null, recipeCode: d.recipeCode || '', recipeName: d.recipeName || '',
+        lineId: d.lineId || null, branchId: d.branchId || s.currentBranch || null,
+        userId: d.userId || (a.data && a.data.by) || null, operator: d.operator || '',
+        total: Number(d.total) || 0, multiplier: Number(d.multiplier) || 1, offSpec: !!d.offSpec,
+        scaleMode: d.scaleMode || null, scaleDevice: d.scaleDevice || null, note: d.note || '',
+        // 🆕 WEIGH UAT (QC): เก็บ by/lockedAt/fixed ที่แท็บเล็ตส่งมาด้วย — สอบย้อนรายตัว (ใครล็อกตัวไหนเมื่อไหร่ · ตัวไหนไม่คูณ)
+        items: (d.items||[]).map(it => ({ name: it.name, itemId: it.itemId || null, value: Number(it.value)||0, unit: it.unit || 'g',
+          target: Number(it.target)||0, tol: Number(it.tol)||0, pass: it.pass !== false, ...(it.offSpec ? { offSpec:true, reason: it.reason || '' } : {}),
+          ...(it.by ? { by: String(it.by) } : {}), ...(it.lockedAt ? { lockedAt: Number(it.lockedAt) } : {}), ...(it.fixed ? { fixed:true } : {}) })),
+        createdAt: Date.now(),
+      };
+      const _bom = rec.bomId ? (s.boms||[]).find(b => b.id === rec.bomId) : null;
+      if(_bom) rec.bomRev = Number(_bom.rev)||0;   // 🆕 WEIGH UAT (audit): ชั่งด้วย BOM รอบไหน
+      return { ...s, weighLogs: [...(s.weighLogs||[]), rec] };
+    }
+    // 🆕 WEIGH UAT (QC): ผจก.ตัดสินชุดที่นอกเกณฑ์ — ใช้ต่อ / ชั่งใหม่ / คัดทิ้ง (บันทึกอย่างเดียว ไม่ตัดสต๊อก)
+    case 'REVIEW_WEIGH_LOG': {
+      const { deviceId, id, disposition, note, by, bySuper } = a.data || {};
+      if(!id || !['use','reweigh','scrap'].includes(disposition)) return s;
+      const key = String(deviceId||'') + '|' + String(id);
+      const now = Date.now();
+      const me = s.currentUser || null;
+      const reviewer = (me && me.username) || by || null;
+      let found = false, blocked = false;
+      const weighLogs = (s.weighLogs||[]).map(w => {
+        if((String(w.deviceId||'') + '|' + String(w.id)) !== key) return w;
+        found = true;
+        // 🆕 WEIGH UAT (แบ่งแยกหน้าที่): ผู้ชั่งตัดสินชุดของตัวเองไม่ได้ (superuser ส่ง bySuper ได้เหมือน petty review)
+        if(me && w.userId && w.userId === me.id && !bySuper){ blocked = true; return w; }
+        return { ...w, reviewedBy: reviewer, reviewedAt: now, disposition, reviewNote: note || '' };
+      });
+      if(!found || blocked) return s;
+      const al = { id:'al_'+now.toString(36)+Math.random().toString(36).slice(2,5), ts: now, type:'weigh_review', by: by || (s.currentUser && s.currentUser.username) || 'system', entityId: id, entityRef: (weighLogs.find(w => w.id === id)||{}).lot || id,
+        note: `ตัดสินชุดนอกเกณฑ์: ${disposition === 'use' ? 'ใช้ต่อ' : disposition === 'reweigh' ? 'ชั่งใหม่' : 'คัดทิ้ง'}${note ? ' · ' + note : ''}` };
+      return { ...s, weighLogs, auditLog:[...(s.auditLog||[]), al] };
+    }
+    // 🆕 WEIGH UAT (audit): พิมพ์ฉลาก LOT ซ้ำ → บันทึกร่องรอยบน log + auditLog (ฉลากซ้ำมีคำว่า "พิมพ์ซ้ำ" ที่หมายเหตุ)
+    case 'MARK_WEIGH_REPRINT': {
+      const { deviceId, id, by } = a.data || {};
+      if(!id) return s;
+      const key = String(deviceId||'') + '|' + String(id);
+      const now = Date.now(); const who = (s.currentUser && s.currentUser.username) || by || 'system';
+      let found = null;
+      const weighLogs = (s.weighLogs||[]).map(w => {
+        if((String(w.deviceId||'') + '|' + String(w.id)) !== key) return w;
+        found = w; return { ...w, reprints: [...(w.reprints||[]), { by: who, ts: now }].slice(-20) };
+      });
+      if(!found) return s;
+      const al = { id:'al_'+now.toString(36)+Math.random().toString(36).slice(2,5), ts: now, type:'weigh_reprint', by: who, entityId: id, entityRef: found.lot || id, note: `พิมพ์ฉลากซ้ำ LOT ${found.lot || id} (ครั้งที่ ${(found.reprints||[]).length + 1})` };
+      return { ...s, weighLogs, auditLog:[...(s.auditLog||[]), al] };
+    }
     case 'ADD_TR_PRESET':    return { ...s, transferPresets:[...(s.transferPresets||[]), a.data] };
     case 'UPDATE_TR_PRESET': return { ...s, transferPresets:(s.transferPresets||[]).map(p => p.id===a.data.id ? a.data : p) };
     case 'DELETE_TR_PRESET': return { ...s, transferPresets:(s.transferPresets||[]).filter(p => p.id!==a.data) };
@@ -8750,9 +9012,53 @@ function reducer(s, a){
     }
 
     // ---------- BOM (per branch) ----------
-    case 'ADD_BOM':      return { ...s, boms:[...s.boms, a.data] };
-    case 'UPDATE_BOM':   return { ...s, boms:s.boms.map(b => b.id===a.data.id ? a.data : b) };
-    case 'DELETE_BOM':   return { ...s, boms:s.boms.filter(b => b.id!==a.data) };
+    // 🆕 WEIGH UAT (audit): BOM = สูตรชั่งที่ใช้จริง → เก็บผู้สร้าง/ผู้แก้/รอบแก้ (rev) + audit log · ลบ BOM ที่มีประวัติชั่ง/ออเดอร์อ้าง = ปิดใช้แทนลบจริง
+    case 'ADD_BOM': {
+      // 🆕 WEIGH UAT (audit): ผู้สร้าง = คนที่ล็อกอินอยู่ (ไม่เชื่อ payload — สำเนา BOM เคยติดชื่อผู้สร้างเดิม) · ล้างร่องรอย soft-delete ที่อาจติดมากับสำเนา
+      const by = (s.currentUser && s.currentUser.username) || (a.data && a.data.createdBy) || 'system';
+      const now = Date.now();
+      const bom = { ...a.data, createdBy: by, createdAt: now, rev: 1, active: a.data.active === false ? false : true };
+      delete bom.deletedBy; delete bom.deletedAt; delete bom.updatedBy; delete bom.updatedAt;
+      const al = { id:'al_'+now.toString(36)+Math.random().toString(36).slice(2,5), ts: now, type:'bom_add', by, entityId: bom.id, entityRef: bom.name || bom.productName || bom.id,
+        note: `สร้าง BOM · วัตถุดิบ ${(bom.materials||[]).length} · ขั้นตอน ${(bom.operations||[]).length}${bomHasWeighStepS(bom) ? ' · ⚖️ มีขั้นชั่ง' : ''}` };
+      return { ...s, boms:[...s.boms, bom], auditLog:[...(s.auditLog||[]), al] };
+    }
+    case 'UPDATE_BOM': {
+      const prev = s.boms.find(b => b.id === a.data.id);
+      if(!prev) return { ...s, boms:s.boms.map(b => b.id===a.data.id ? a.data : b) };
+      const by = (s.currentUser && s.currentUser.username) || a.data.updatedBy || 'system';
+      const now = Date.now();
+      const next = { ...a.data, createdBy: a.data.createdBy || prev.createdBy, createdAt: a.data.createdAt || prev.createdAt, updatedBy: by, updatedAt: now, rev: (Number(prev.rev)||0) + 1 };
+      // สรุปสิ่งที่เปลี่ยน (เฉพาะที่กระทบสูตรชั่ง)
+      const diffs = [];
+      const pm = prev.materials||[], nm = next.materials||[];
+      if(pm.length !== nm.length) diffs.push(`วัตถุดิบ ${pm.length}→${nm.length}`);
+      for(const m of nm){
+        const o = pm.find(x => x && x.itemId === m.itemId);
+        if(!o) continue;
+        if(Number(o.qty) !== Number(m.qty) || (o.unit||'') !== (m.unit||'')) diffs.push(`${m.note||m.itemId}: ${o.qty} ${o.unit||''}→${m.qty} ${m.unit||''}`);
+        if((o.weighRequired !== false) !== (m.weighRequired !== false)) diffs.push(`${m.note||m.itemId}: ชั่ง ${m.weighRequired !== false ? 'เปิด' : 'ปิด'}`);
+        if(Number(o.weighTolerance||0) !== Number(m.weighTolerance||0)) diffs.push(`${m.note||m.itemId}: ± ${o.weighTolerance||'ค่ามาตรฐาน'}→${m.weighTolerance||'ค่ามาตรฐาน'}`);
+      }
+      if((prev.operations||[]).length !== (next.operations||[]).length) diffs.push(`ขั้นตอน ${(prev.operations||[]).length}→${(next.operations||[]).length}`);
+      if((prev.weighCode||'') !== (next.weighCode||'')) diffs.push(`รหัสชั่ง ${prev.weighCode||'-'}→${next.weighCode||'-'}`);
+      const al = { id:'al_'+now.toString(36)+Math.random().toString(36).slice(2,5), ts: now, type:'bom_update', by, entityId: next.id, entityRef: next.name || next.productName || next.id,
+        note: `แก้ BOM rev ${next.rev}${diffs.length ? ' · ' + diffs.slice(0,8).join(' · ') + (diffs.length > 8 ? ' …' : '') : ''}` };
+      return { ...s, boms:s.boms.map(b => b.id===next.id ? next : b), auditLog:[...(s.auditLog||[]), al] };
+    }
+    case 'DELETE_BOM': {
+      const id = (a.data && a.data.id) || a.data;
+      const bom = s.boms.find(b => b.id === id);
+      if(!bom) return s;
+      if(bom.active === false) return s;   // ปิดใช้ไปแล้ว — ไม่ซ้ำ audit (UI มีปุ่ม "เปิดใช้อีกครั้ง" แทน)
+      const by = (s.currentUser && s.currentUser.username) || 'system';
+      const now = Date.now();
+      const referenced = (s.weighLogs||[]).some(w => w.bomId === id) || (s.productionOrders||[]).some(o => o.bomId === id);
+      const al = { id:'al_'+now.toString(36)+Math.random().toString(36).slice(2,5), ts: now, type:'bom_delete', by, entityId: id, entityRef: bom.name || bom.productName || id,
+        note: referenced ? 'ปิดใช้ BOM (มีประวัติชั่ง/ออเดอร์อ้างอิง — ไม่ลบจริง)' : 'ลบ BOM' };
+      if(referenced) return { ...s, boms:s.boms.map(b => b.id===id ? { ...b, active:false, deletedBy: by, deletedAt: now } : b), auditLog:[...(s.auditLog||[]), al] };
+      return { ...s, boms:s.boms.filter(b => b.id!==id), auditLog:[...(s.auditLog||[]), al] };
+    }
 
     // ---------- Production ----------
     case 'ADD_PROD_ORDER':    return { ...s, productionOrders:[...(s.productionOrders||[]), a.data], seq:{ ...s.seq, prod:(s.seq.prod||1)+1 } };
@@ -9918,7 +10224,18 @@ function reducer(s, a){
 
     // ---------- Misc ----------
     case 'RESET_STATE':   return INIT_STATE;
-    case 'IMPORT_STATE':  return { ...INIT_STATE, ...a.data };
+    // 🆕 PER-USER AUTH: กู้คืน/นำเข้าทั้งก้อน — คง session ของเครื่องนี้ (ไม่งั้น currentUser=null ถูกตีความว่า "ออกจากระบบ" → signOut) · ถ้าก้อนที่นำเข้ามีรหัสของบัญชีที่ซิงก์แล้ว ให้ตัดทิ้ง (รหัสอยู่ฝั่ง cloud)
+    case 'IMPORT_STATE': {
+      const d = a.data || {};
+      const me = s.currentUser ? ((d.users||[]).find(u => u && u.id === s.currentUser.id) || s.currentUser) : null;
+      let users = d.users;
+      if(s.settings && s.settings.cloudAuth && Array.isArray(users)){
+        const synced = new Set((s.users||[]).filter(u => u && u.cloudAuth).map(u => String(u.username||'').toLowerCase()));
+        users = users.map(u => { if(!u) return u; const n = { ...u }; if(synced.has(String(u.username||'').toLowerCase())){ delete n.password; n.cloudAuth = true; } return n; });
+      }
+      const settings = (s.settings && s.settings.cloudAuth) ? { ...(d.settings||{}), cloudAuth:true } : d.settings;
+      return { ...INIT_STATE, ...d, ...(users ? { users } : {}), ...(settings ? { settings } : {}), currentUser: me, currentBranch: s.currentBranch != null ? s.currentBranch : (d.currentBranch != null ? d.currentBranch : INIT_STATE.currentBranch) };
+    }
     // 🆕 MERGE_IMPORT — นำเข้าเฉพาะส่วน (migration ทีละ stage): แทนที่เฉพาะ collection ที่ส่งมา
     //   เก็บ session (currentUser/currentBranch) + version เดิม → ไม่ทับ config ที่ตั้งไว้
     case 'MERGE_IMPORT': {
@@ -10076,6 +10393,7 @@ let _saveTimer = null;
 // 🆕 B5(ก): safety-valve — ถ้า auditLog ยาวเกิน 15000 (≈หลายเดือน) เก็บแค่ล่าสุด 15000 + marker (tamper-evident)
 //   กัน state blob บวมไม่จำกัด · ใช้ทั้ง cloud-only path และ localStorage path (เดิม cap อยู่ใน localStorage path เท่านั้น
 //   → cloud-only return ก่อนถึง → cap ไม่เคยทำงานเลย = blob โตเรื่อยๆ)
+function bomHasWeighStepS(bom){ return !!(bom && (bom.operations||[]).some(o => o && o.stationType === 'weigh')); }
 function _capAuditLogForSave(state){
   try {
     if(!(state && state.auditLog && state.auditLog.length > 15000)) return state;
@@ -10087,6 +10405,19 @@ function _capAuditLogForSave(state){
     return { ...state, auditLog: [_marker, ..._kept] };
   } catch(_cap){ return state; }
 }
+// 🆕 WEIGH UAT: weighLogs โตไม่จำกัด (≈1 KB/ชุด) → persist แค่ล่าสุด 10,000 ชุด + marker (export CSV จากประวัติชั่งก่อน) · ระยะยาวย้ายเป็นตาราง append-only
+function _capWeighLogsForSave(state){
+  try {
+    const cap = 10000;
+    if(!(state && state.weighLogs && state.weighLogs.length > cap)) return state;
+    const drop = state.weighLogs.length - cap;
+    try { console.warn('⚠️ weighLogs ' + state.weighLogs.length + ' ชุด — persist แค่ล่าสุด ' + cap + ' (ตัดเก่าสุด ' + drop + ')'); } catch(_w){}
+    const kept = state.weighLogs.slice(-cap);
+    const marker = { id:'wl_trunc_'+(((kept[0]&&kept[0].ts)||0)).toString(36), deviceId:'system', ts:((kept[0]&&kept[0].ts)||0), type:'weigh_truncated', lot:'', recipeName:'✂️ ตัดประวัติชั่งเก่าสุด ' + drop + ' ชุด (กัน blob เต็ม) — export CSV เป็นระยะ', items:[], total:0 };
+    return { ...state, weighLogs: [marker, ...kept] };
+  } catch(_cap){ return state; }
+}
+function _capLogsForSave(state){ return _capWeighLogsForSave(_capAuditLogForSave(state)); }
 
 function saveState(state){
   // ☁️☁️ CLOUD-ONLY (2026-07-03): Supabase = source of truth — ไม่เขียน state ลง localStorage เลย
@@ -10095,7 +10426,7 @@ function saveState(state){
     if(global.ERP && global.ERP.SBSync && global.ERP.SBSync.isCloudOnly && global.ERP.SBSync.isCloudOnly()){
       if(typeof window !== 'undefined' && window.__erpRestoring) return;   // 🔒 P1-4: กำลังกู้คืน — ห้าม schedule push
       // 🆕 B5(ก): cap auditLog ก่อน push (เดิมข้ามเพราะ return ก่อนถึง cap ใน localStorage path)
-      global.ERP.SBSync.scheduleCloudPush(_capAuditLogForSave(state), (state.currentUser && state.currentUser.username) || undefined);
+      global.ERP.SBSync.scheduleCloudPush(_capLogsForSave(state), (state.currentUser && state.currentUser.username) || undefined);
       return;
     }
   } catch(_co){}
@@ -10105,7 +10436,7 @@ function saveState(state){
     // 🔒 cloud-restore กำลังเขียน localStorage → ห้าม save ทับจนกว่า reload (กัน race ทับ snapshot ที่เพิ่งกู้)
     try { if(typeof window !== 'undefined' && window.__erpRestoring) return; } catch(_rg){}
     // 🆕 B5(ก): auditLog safety-valve (ย้ายไป helper _capAuditLogForSave ใช้ร่วม cloud path)
-    const _stateToSave = _capAuditLogForSave(state);
+    const _stateToSave = _capLogsForSave(state);
     const json = JSON.stringify(_stateToSave);
     try {
       // บีบอัดก่อนเก็บ → ใส่ได้เกิน 5MB (prefix  = ถูกบีบ)
@@ -10377,6 +10708,14 @@ function _migrateStateOnce(s){
     });
     return { ...s, version: 35, chartOfAccounts: coa, expenseItems, settings, users };
   }
+  // 🆕 v35 → v36 (WEIGH Step 1): operation template opt_weigh + weighLogs + settings.weighUrl — สูตรชั่ง = BOM ที่มีขั้น stationType 'weigh'
+  if(s.version === 35){
+    const tpl = [...(s.operationTemplates||[])];
+    const seedW = (INIT_STATE.operationTemplates||[]).find(t => t.id === 'opt_weigh');
+    if(seedW && !tpl.find(t => t.id === 'opt_weigh')) tpl.push({ ...seedW });
+    const settings = { ...(s.settings||{}), weighUrl: (s.settings && s.settings.weighUrl) || 'weigh/index.html' };
+    return { ...s, version: 36, operationTemplates: tpl, weighLogs: s.weighLogs || [], settings };
+  }
   if(s.version === 27){
     const coa = [...(s.chartOfAccounts||[])];
     const need = [
@@ -10561,6 +10900,7 @@ function _migrateStateOnce(s){
     transferPresets: s.transferPresets || [],
     materialIssues: s.materialIssues || [],
     itemFavorites: s.itemFavorites || [],
+    weighLogs: s.weighLogs || [],   // 🆕 WEIGH
     expenseItems: (s.expenseItems && s.expenseItems.length) ? s.expenseItems : _expenseItemsFromCats((s.expenseCategories && s.expenseCategories.length) ? s.expenseCategories : INIT_STATE.expenseCategories),   // 🆕 ACCT-V2
     productionPlans: s.productionPlans || [],
     posImports: s.posImports || [],
@@ -10611,7 +10951,9 @@ function _migrateStateOnce(s){
       const existingIds = new Set(existing.map(u => u.id));
       const existingUsernames = new Set(existing.map(u => (u.username||'').toUpperCase()));
       const missing = INIT_STATE.users.filter(u =>
-        !existingIds.has(u.id) && !existingUsernames.has((u.username||'').toUpperCase()));
+        !existingIds.has(u.id) && !existingUsernames.has((u.username||'').toUpperCase()))
+        // 🆕 PER-USER AUTH: เมื่อเปิดล็อกอินชั้นเดียวแล้ว บัญชีตัวอย่างที่ระบบเติมกลับต้อง "ระงับ + ไม่มีรหัส" (ไม่งั้นรหัส 1234 กลับเข้า state และซิงก์รอบถัดไปสร้างบัญชี cloud ให้)
+        .map(u => (s.settings && s.settings.cloudAuth) ? (() => { const n = { ...u, active:false }; delete n.password; return n; })() : u);
       return existing.length === 0 ? INIT_STATE.users : [...existing, ...missing];
     })(),
     seq: { ...(INIT_STATE.seq), ...(s.seq||{}), mi: (s.seq?.mi||1), pos: (s.seq?.pos||1) },
@@ -10653,12 +10995,15 @@ const ROLE_LABEL = {
 function roleLabel(role){ return ROLE_LABEL[role] || role; }
 
 // ==================== LOGIN PAGE ====================
-function LoginPage({ users, onLogin }){
+function LoginPage({ users, onLogin, cloudAuth, onCloudLogout }){
   const [un, setUn] = useState('');
   const [pw, setPw] = useState('');
   const [err, setErr] = useState('');
 
   const handleLogin = () => {
+    // 🆕 PER-USER AUTH: ผู้ใช้ที่ซิงก์บัญชี cloud แล้วไม่มี password ใน state → ต้องเข้าจากหน้าแรก (username+รหัส) ไม่ใช่หน้านี้
+    const synced = (users||[]).find(x => x.username===un.trim() && x.cloudAuth && !x.password);
+    if(synced){ setErr(`บัญชี ${synced.username} ใช้ล็อกอินชั้นเดียวแล้ว — กด "ออกจากระบบ" ที่มุมขวาบนของหน้าเข้าสู่ระบบ แล้วใส่ชื่อผู้ใช้+รหัสของคุณที่หน้าแรก`); return; }
     const u = (users||[]).find(x => x.username===un.trim() && x.password===pw && x.active!==false);
     if(!u) { setErr('รหัสผ่านไม่ถูกต้อง'); return; }
     setErr('');
@@ -10681,6 +11026,8 @@ function LoginPage({ users, onLogin }){
       // Card
       h('div', { className:'bg-white rounded-2xl shadow-2xl p-6' },
         h('h2', { className:'text-lg font-bold mb-4 text-gray-800' }, 'เข้าสู่ระบบ'),
+        cloudAuth && h('div', { className:'text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3' },
+          'ระบบเปิดล็อกอินชั้นเดียวแล้ว — หน้านี้ใช้เฉพาะบัญชีที่ยังไม่ได้ซิงก์ cloud · พนักงานทั่วไปให้ออกจากบัญชีอีเมลนี้แล้วเข้าด้วยชื่อผู้ใช้ของตัวเองที่หน้าแรก'),
 
         h('div', { className:'space-y-3' },
           h('div', null,
@@ -10713,7 +11060,10 @@ function LoginPage({ users, onLogin }){
 
         // 🔒 (ถอด quick-login + hint รหัสทดสอบออกแล้ว — ระบบใช้จริง ห้ามโชว์บัญชี/รหัสบนหน้าจอ)
         h('p', { className:'text-center text-xs text-gray-400 mt-4' },
-          'ลืมรหัสผ่าน? ติดต่อผู้ดูแลระบบ')
+          'ลืมรหัสผ่าน? ติดต่อผู้ดูแลระบบ'),
+        // 🆕 PER-USER AUTH: เครื่องนี้ค้าง session อีเมลผู้ดูแลอยู่ → ปิดแล้วกลับหน้าแรกให้พนักงานใส่ชื่อผู้ใช้ของตัวเอง
+        onCloudLogout && h('button', { type:'button', onClick:onCloudLogout, className:'w-full mt-2 py-1.5 text-xs text-indigo-600 hover:text-indigo-800' },
+          '☁️ ออกจากบัญชี cloud นี้ → กลับหน้าเข้าสู่ระบบด้วยชื่อผู้ใช้')
       )
     )
   );
@@ -10941,6 +11291,7 @@ mod('settings',    'ตั้งค่า',    { icon:'⚙️', group:'admin', h
 {
   const pg = pager('production', 'production', 'ผลิต', { hq:false });
   pg('issue',     'เบิกวัตถุดิบ',           null, { old:'📦 เบิกวัตถุดิบ', perm:{ mod:'production', tab:'issue', action:'view' }, aliases:['เบิก','เบิกของ','ใบเบิก','เบิกวัตถุดิบ','issue','material issue','ขอเบิก','เบิกวัตถุดิบจากคลังกลาง'] });   // 🆕 GO-LIVE
+  pg('weigh',     'สถานีชั่ง',              null, { old:'⚖️ ชั่ง', perm:{ mod:'production', tab:'weigh', action:'view' }, aliases:['ชั่ง','ชั่งวัตถุดิบ','สถานีชั่ง','เครื่องชั่ง','weigh','weighing','ตวง','LOT','ฉลาก','สูตรชั่ง'] });   // 🆕 WEIGH: ฝัง /weigh/ สูตรจาก BOM ที่มีขั้นชั่ง
   pg('mystation', 'หน้างาน',             null, { old:'🧑‍🍳 หน้างาน', showIf:(u)=>hasStations(u), aliases:['station','สถานี','งานของฉัน','operator'] });
   pg('qc',        'ตรวจคุณภาพ (QC)',      null, { old:'🔬 QC Live', showIf:(u)=>canQC(u), aliases:['QC','QC Live','ตรวจ QC','ตรวจคุณภาพ','รอตรวจ'] });
   pg('linestock', 'คลังไลน์',             null, { old:'📦 คลังไลน์', perm:{ mod:'stock', tab:'list', action:'adjust' }, aliases:['line stock','สต๊อกไลน์','ของในไลน์','ขอเติม'] });   // 🆕 GO-LIVE UAT: ปรับสต๊อกไลน์ = สิทธิ์เดียวกับนับสต๊อก (mod-production go-live filter เช็คเหมือนกัน)
@@ -11218,8 +11569,8 @@ const HOME_CONFIG = {
     kpis:['salesToday','toIncoming','trMine','lotsExpiring7'], waiting:['toIncoming','trMineWaiting','ordersToday'],
     homeOf:{ 'sales-light':'sales-light.today', transfer:'transfer.tr', stock:'stock.incoming', production:'production.orders' } },
   operator: { label:'พนักงานหน้างาน',
-    shortcuts:['production.issue','production.mystation','production.linestock','production.flow','checklist'],
-    bottomNav:['production.issue','production.mystation','production.linestock','checklist'],
+    shortcuts:['production.issue','production.weigh','production.mystation','production.linestock','production.flow','checklist'],
+    bottomNav:['production.issue','production.weigh','production.mystation','checklist'],
     kpis:['myOrdersToday','myInProgress'], waiting:['myOrders'],
     homeOf:{ production:'production.mystation' } },
   qc: { label:'ตรวจคุณภาพ (QC)',
@@ -11356,7 +11707,7 @@ function navVisible(entry, user, state){
   if(state && state.settings && state.settings.productionLive === false && main === 'production' && entry.kind !== 'module'
      && !isSuper(user) && user.role !== 'production_manager'){
     const v = entry.subs && entry.subs.production;
-    if(v && !['issue','linestock','posimport','posmatcheck'].includes(v)) return false;
+    if(v && !['issue','weigh','linestock','posimport','posmatcheck'].includes(v)) return false;   // 🆕 WEIGH: สถานีชั่งเปิดในโหมดเตรียมระบบผลิตด้วย
   }
   // 🆕 GO-LIVE UAT: นำเข้า POS / ตรวจวัตถุดิบ POS เป็นงานหัวหน้า/แอดมิน — คนหน้างาน (isLineOperator) ไม่เห็นในเมนู/ค้นหา (mod-production ซ่อนแท็บคู่กัน)
   if(main === 'production' && entry.subs && ['posimport','posmatcheck'].includes(entry.subs.production) && !isSuper(user) && isShopFloor(user)) return false;
@@ -12006,8 +12357,10 @@ function MainShell(){
       // 🆕 จำ session ของ "เครื่องนี้" (localStorage ไม่ขึ้น cloud) → refresh/โหลดหน้าใหม่ ไม่ต้องล็อกอินซ้ำ
       //    หมดอายุ 12 ชม. นับจากโหลดหน้าล่าสุด (เครื่องสาขาใช้ร่วมกัน — ไม่ค้าง session ข้ามวัน)
       let devUser = null;
+      // 🆕 PER-USER AUTH: session cloud เป็นบัญชีภายใน → ตัวตนมาจาก cloud (MainShell ล็อกอินให้) ไม่ใช้ session เก่าของเครื่อง (อาจเป็นคนอื่น)
+      const _idn = global.__ERP_CLOUD_IDENTITY;
       try {
-        const _raw = global.localStorage.getItem('erp_v5__deviceSession');
+        const _raw = (_idn && _idn.internal) ? null : global.localStorage.getItem('erp_v5__deviceSession');
         if(_raw){
           const _s = JSON.parse(_raw);
           if(_s && _s.userId && _s.ts && (Date.now() - _s.ts) < 12*60*60*1000){
@@ -12164,10 +12517,70 @@ function MainShell(){
     }
   }, [state.currentUser?.id]);
 
+  // 🆕 PER-USER AUTH: session cloud เป็นบัญชีภายใน (<username>@yume-erp.local) → ล็อกอิน ERP เป็นคนนั้นอัตโนมัติ (ครั้งเดียวต่อการโหลดหน้า)
+  //   · หา user ตาม username (ไม่สนตัวพิมพ์) · ไม่พบ/ปิดใช้งาน → หน้าแจ้ง + ปุ่มออก (signOut แล้วกลับหน้าเข้าสู่ระบบ) ไม่ตกไป LoginPage เดิม (ไม่มีรหัสให้เทียบแล้ว)
+  //   · บัญชีอีเมล (ผู้ดูแล): ถ้ามี user ที่ตั้ง cloudEmail ตรง → ล็อกอินให้ · ไม่งั้น LoginPage เดิม (บัญชีที่ยังไม่ซิงก์)
+  //   · LOGOUT จากบัญชีภายใน → SB.signOut() + โหลดใหม่ → หน้าเข้าสู่ระบบ (เครื่องใช้ร่วมกัน: คนถัดไปใส่ของตัวเอง)
+  const _ident = global.__ERP_CLOUD_IDENTITY || null;
+  const _autoRef = R.useRef({ tried:false, hadUser:false });
+  const [identErr, setIdentErr] = useState(null);
+  const _cloudOut = async () => {
+    // ก่อนปิด session: รอ push ที่ค้าง (งานสุดท้ายก่อนกดออก) ไม่เกิน ~6 วิ
+    const SB = global.ERP.SBSync;
+    try {
+      if(SB && SB.cloudSaveStatus){
+        for(let i = 0; i < 30; i++){ const cs = SB.cloudSaveStatus(); if(!(cs.dirty || cs.pushing)) break; await new Promise(r => setTimeout(r, 200)); }
+      }
+      if(SB && SB.signOut) await SB.signOut();
+    } catch(_e){}
+    try { global.localStorage.removeItem('erp_v5__deviceSession'); } catch(_l){}
+    try { global.location.reload(); } catch(_r){}
+  };
+  useEffect(() => {
+    if(state.currentUser){ _autoRef.current.hadUser = true; return; }
+    if(_autoRef.current.tried || !_ident) return;
+    _autoRef.current.tried = true;
+    // 🆕 UAT (แท็บเล็ตใช้ร่วมกัน): บัญชีภายในก็หมดอายุ 12 ชม. นับจากล็อกอิน/โหลดหน้าล่าสุด — เกินแล้วต้องกรอกใหม่ (กันชื่อคนกะก่อนค้างข้ามวัน)
+    if(_ident.internal){
+      let stale = false;
+      try { const raw = global.localStorage.getItem('erp_v5__deviceSession'); const d = raw ? JSON.parse(raw) : null; if(d && d.ts && (Date.now() - d.ts) > 12*60*60*1000) stale = true; } catch(_e){}
+      if(stale){ _cloudOut(); return; }
+    }
+    const users = state.users || [];
+    let u = null;
+    if(_ident.internal && _ident.username) u = users.find(x => x && String(x.username||'').toLowerCase() === String(_ident.username).toLowerCase()) || null;
+    else if(_ident.email) u = users.find(x => x && x.cloudEmail && String(x.cloudEmail).toLowerCase() === String(_ident.email).toLowerCase()) || null;
+    if(u && u.active !== false){ dispatch({ type:'LOGIN', data:u }); return; }
+    if(_ident.internal) setIdentErr(u ? `บัญชี ${u.username} ถูกปิดใช้งาน — ติดต่อผู้ดูแลระบบ` : `ไม่พบผู้ใช้ ERP "${_ident.username || _ident.email}" ในข้อมูลบริษัท — ติดต่อผู้ดูแลระบบ`);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.currentUser?.id]);
+  // กด "ออกจากระบบ" (LOGOUT intent — ไม่ใช่ restore/นำเข้าที่ currentUser หายชั่วคราว) ด้วยบัญชีภายใน → ปิด session cloud ด้วย แล้วกลับหน้าเข้าสู่ระบบ
+  useEffect(() => {
+    if(state.currentUser || !_autoRef.current.hadUser || !_ident || !_ident.internal) return;
+    if(!global.__ERP_LOGOUT_INTENT) return;
+    global.__ERP_LOGOUT_INTENT = false;
+    _cloudOut();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.currentUser?.id]);
+
   if(!state.currentUser){
+    if(_ident && _ident.internal){
+      const SB = global.ERP.SBSync;
+      const out = async () => { try { if(SB && SB.signOut) await SB.signOut(); } catch(_e){} try { global.location.reload(); } catch(_r){} };
+      return h('div', { className:'min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-600 via-purple-600 to-purple-800 p-4' },
+        h('div', { className:'bg-white rounded-2xl shadow-2xl p-8 text-center w-full max-w-sm' },
+          identErr
+            ? [h('div', { key:'i', className:'text-4xl mb-3' }, '🚫'), h('div', { key:'t', className:'font-bold text-lg mb-2' }, 'เข้าใช้งานไม่ได้'), h('div', { key:'m', className:'text-sm text-gray-600 mb-4' }, identErr),
+               h('button', { key:'b', onClick:out, className:'px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold' }, '🚪 ออก แล้วเข้าด้วยบัญชีอื่น')]
+            : [h('div', { key:'i', className:'text-4xl mb-3' }, '🔐'), h('div', { key:'t', className:'font-bold text-lg' }, `กำลังเข้าระบบเป็น ${_ident.username || _ident.email}…`)]));
+    }
+    const _SB = global.ERP.SBSync;
+    const _cloudOnly = !!(_SB && _SB.isCloudOnly && _SB.isCloudOnly());
     return h(LoginPage, {
       users: state.users,
+      cloudAuth: !!(state.settings && state.settings.cloudAuth),
       onLogin: (u) => dispatch({ type:'LOGIN', data:u }),
+      onCloudLogout: _cloudOnly ? (async () => { if(!confirm('ออกจากบัญชี cloud บนเครื่องนี้ แล้วกลับหน้าเข้าสู่ระบบ?')) return; try { await _SB.signOut(); } catch(_e){} try { global.location.reload(); } catch(_r){} }) : null,
     });
   }
 
@@ -12175,6 +12588,12 @@ function MainShell(){
     return h('div', { className:'min-h-screen flex items-center justify-center bg-slate-50' },
       h(Spinner, { label:`กำลังโหลดโมดูลสำหรับ ${state.currentUser.name}...` })
     );
+  }
+
+  // 🆕 PER-USER AUTH: รหัสที่ย้ายมาจากข้อมูลบริษัท (เคยอยู่ใน state ที่ทุกเครื่องอ่านได้) → บังคับตั้งใหม่ก่อนเข้าใช้ครั้งแรก
+  if(_ident && _ident.internal && state.currentUser.mustChangePassword){
+    return h('div', { className:'min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-600 via-purple-600 to-purple-800 p-4' },
+      h(ChangeMyPasswordModal, { user: state.currentUser, dispatch, forced:true, onClose: () => {} }));
   }
 
   return h(AppShell, { state, dispatch: dispatchLogged });
@@ -13546,6 +13965,7 @@ function BranchButton({ state, dispatch, user, currentBranch }){
 
 function UserMenu({ user, dispatch, openPalette }){
   const [open, setOpen] = useState(false);
+  const [showPw, setShowPw] = useState(false);   // 🆕 PER-USER AUTH: ฟอร์มเปลี่ยนรหัสของฉัน
   const isMac = /Mac|iPhone|iPad/.test((global.navigator && (global.navigator.platform || global.navigator.userAgent)) || '');
   const ref = R.useRef(null);
   useOutsideClose(ref, open, () => setOpen(false));
@@ -13557,7 +13977,7 @@ function UserMenu({ user, dispatch, openPalette }){
   const logout = () => {
     setOpen(false);
     const _n = (window.__MINIMIZED_MODALS||[]).length;
-    if(confirm(_n ? `มีหน้าต่างย่อค้าง ${_n} รายการ — ร่างที่ยังไม่บันทึกจะหายทั้งหมด\n\nออกจากระบบ?` : 'ออกจากระบบ?')) dispatch({ type:'LOGOUT' });
+    if(confirm(_n ? `มีหน้าต่างย่อค้าง ${_n} รายการ — ร่างที่ยังไม่บันทึกจะหายทั้งหมด\n\nออกจากระบบ?` : 'ออกจากระบบ?')){ global.__ERP_LOGOUT_INTENT = true; dispatch({ type:'LOGOUT' }); }
   };
   const seg = (val, label, title) => h('button', { type:'button', title, onClick: () => setDensityPref(val),
     className: cls('flex-1 px-2 py-1 rounded text-xs', pref === val ? 'bg-white shadow text-blue-700 font-semibold' : 'text-gray-600 hover:text-gray-800') }, label);
@@ -13587,9 +14007,51 @@ function UserMenu({ user, dispatch, openPalette }){
         className:'w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-50 text-gray-700' },
         h('span', null, '⌨️'), h('span', { className:'flex-1' }, 'ค้นหา'), h('kbd', { className:'text-[10px] px-1 rounded border border-gray-300 text-gray-500' }, isMac ? '⌘ K' : 'Ctrl K')),
       h('div', { className:'border-t my-1' }),
+      // 🆕 PER-USER AUTH: เปลี่ยนรหัสผ่านของตัวเอง (บัญชีภายใน → auth.updateUser ตรง ไม่ผ่านแอดมิน)
+      (global.__ERP_CLOUD_IDENTITY && global.__ERP_CLOUD_IDENTITY.internal) && h('button', { type:'button', role:'menuitem', onClick: () => { setOpen(false); setShowPw(true); },
+        className:'w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-50 text-gray-700' },
+        h('span', null, '🔑'), 'เปลี่ยนรหัสผ่านของฉัน'),
       h('button', { type:'button', role:'menuitem', onClick: logout,
         className:'w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-red-50 hover:text-red-700 text-gray-700', title:'ออกจากระบบ' },
-        h('span', null, '🚪'), 'ออกจากระบบ')));
+        h('span', null, '🚪'), 'ออกจากระบบ')),
+    showPw && h(ChangeMyPasswordModal, { user, dispatch, onClose: () => setShowPw(false) }));
+}
+
+// 🆕 PER-USER AUTH: ฟอร์มเปลี่ยนรหัสผ่านของตัวเอง (SB.updatePassword) — สำเร็จแล้วล้างธง seedPassword ของผู้ใช้ (checklist sec_seed_password)
+function ChangeMyPasswordModal({ user, dispatch, onClose, forced }){
+  const [old, setOld] = useState(''); const [pw, setPw] = useState(''); const [pw2, setPw2] = useState(''); const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+  const SB = global.ERP.SBSync;
+  const save = async () => {
+    if(busy) return;
+    if(!old){ setMsg({ ok:false, text:'ใส่รหัสเดิมก่อน' }); return; }
+    if(!pw || pw.length < 6){ setMsg({ ok:false, text:'รหัสใหม่อย่างน้อย 6 ตัว' }); return; }
+    if(pw === old){ setMsg({ ok:false, text:'รหัสใหม่ต้องไม่ซ้ำรหัสเดิม' }); return; }
+    if(pw !== pw2){ setMsg({ ok:false, text:'รหัสใหม่ 2 ช่องไม่ตรงกัน' }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      // 🆕 UAT: ยืนยันรหัสเดิมก่อน (เครื่องที่จำ session ไว้ — ใครเดินผ่านก็เปลี่ยนรหัสล็อกเจ้าของไม่ได้)
+      const ra = SB && SB.reauth ? await SB.reauth(old) : { ok:true };
+      if(!ra.ok){ setMsg({ ok:false, text:'❌ ' + (ra.error || 'รหัสเดิมไม่ถูกต้อง') }); return; }
+      const r = SB && SB.updatePassword ? await SB.updatePassword(pw) : { ok:false, error:'ไม่พร้อม' };
+      if(!r.ok){ setMsg({ ok:false, text:'❌ ' + (r.error || 'ไม่สำเร็จ') }); return; }
+      if(user && (user.seedPassword || user.mustChangePassword)) dispatch({ type:'UPDATE_USER', data:{ ...user, seedPassword:false, mustChangePassword:false, passwordChangedAt: Date.now() } });
+      setMsg({ ok:true, text:'✅ เปลี่ยนรหัสผ่านแล้ว — ใช้รหัสใหม่ครั้งถัดไปที่เข้าระบบ' });
+      setOld(''); setPw(''); setPw2('');
+      setTimeout(onClose, 1200);
+    } finally { setBusy(false); }
+  };
+  return h('div', { className: forced ? 'w-full max-w-sm' : 'fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4', onClick: forced ? undefined : onClose },
+    h('div', { className:'bg-white rounded-xl shadow-2xl p-5 w-full max-w-sm', onClick: e => e.stopPropagation(), role:'dialog', 'aria-label':'เปลี่ยนรหัสผ่านของฉัน', 'data-change-pw': forced ? 'forced' : '1' },
+      h('div', { className:'font-bold text-gray-800 mb-1' }, forced ? '🔑 ตั้งรหัสผ่านใหม่ก่อนเริ่มใช้งาน' : '🔑 เปลี่ยนรหัสผ่านของฉัน'),
+      h('div', { className:'text-xs text-gray-500 mb-3' }, `บัญชี ${user && user.username ? user.username : ''} — ` + (forced ? 'รหัสเดิมเคยเก็บในข้อมูลบริษัท ต้องตั้งใหม่ครั้งเดียว (รหัสใหม่อยู่ฝั่ง cloud เท่านั้น)' : 'รหัสนี้ใช้เข้าระบบทุกเครื่อง')),
+      h('input', { type:'password', value:old, placeholder:'รหัสเดิม', autoComplete:'current-password', onChange:e=>setOld(e.target.value), className:'w-full px-3 py-2 border-2 rounded-lg mb-2 text-sm' }),
+      h('input', { type:'password', value:pw, placeholder:'รหัสผ่านใหม่ (อย่างน้อย 6 ตัว)', autoComplete:'new-password', onChange:e=>setPw(e.target.value), className:'w-full px-3 py-2 border-2 rounded-lg mb-2 text-sm' }),
+      h('input', { type:'password', value:pw2, placeholder:'ยืนยันรหัสผ่านใหม่', autoComplete:'new-password', onChange:e=>setPw2(e.target.value), onKeyDown:e=>{ if(e.key === 'Enter') save(); }, className:'w-full px-3 py-2 border-2 rounded-lg mb-2 text-sm' }),
+      msg && h('div', { className:'text-xs mb-2 ' + (msg.ok ? 'text-green-600' : 'text-red-500') }, msg.text),
+      h('div', { className:'flex gap-2 justify-end' },
+        !forced && h('button', { type:'button', onClick:onClose, className:'px-3 py-1.5 text-sm text-gray-600' }, 'ยกเลิก'),
+        forced && h('button', { type:'button', onClick: async () => { const SB = global.ERP.SBSync; try { if(SB && SB.signOut) await SB.signOut(); } catch(_e){} try { global.location.reload(); } catch(_r){} }, className:'px-3 py-1.5 text-sm text-gray-600' }, 'ออก'),
+        h('button', { type:'button', disabled:busy, onClick:save, className:'px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-sm font-semibold disabled:opacity-50' }, busy ? 'กำลังบันทึก…' : '💾 บันทึก'))));
 }
 
 function TopBar({ state, dispatch, user, currentBranch, setActiveTab, openPalette }){
@@ -14026,6 +14488,10 @@ function CloudGate(){
         setPhase('error'); return;
       }
       const mig = global.ERP.migrateState;
+      // 🆕 PER-USER AUTH: ตัวตนของ session นี้ (บัญชีภายใน <username>@yume-erp.local → MainShell ล็อกอิน ERP ให้อัตโนมัติ)
+      let ident = null;
+      try { if(SB.getIdentity) ident = await SB.getIdentity(); } catch(_i){}
+      global.__ERP_CLOUD_IDENTITY = ident;
       global.__ERP_CLOUD_BOOT = {
         state: (cloud && cloud.state) ? (mig ? mig(cloud.state) : cloud.state) : null,   // null = บริษัทยังไม่มีข้อมูล → เริ่ม INIT สด
         savedAt: cloud ? cloud.savedAt : null,
@@ -14060,10 +14526,11 @@ function CloudGate(){
   // 🔒 login เท่านั้น — ไม่มีสมัครในแอป (ออกไอดีผ่านส่วนกลาง Supabase Dashboard · server ปิดรับสมัครด้วย)
   const doAuth = async () => {
     if(busy) return;
-    if(!email.trim() || !pw){ setMsg({ ok:false, text:'กรอกอีเมลและรหัสผ่าน' }); return; }
+    if(!email.trim() || !pw){ setMsg({ ok:false, text:'กรอกชื่อผู้ใช้และรหัสผ่าน' }); return; }
     setBusy(true); setMsg(null);
     try {
-      const r = await SB.signIn(email.trim(), pw);
+      // 🆕 PER-USER AUTH: ช่องเดียวรับทั้ง username พนักงาน (→ อีเมลภายใน) และอีเมลผู้ดูแล (มี @)
+      const r = await (SB.signInUsername ? SB.signInUsername(email.trim(), pw) : SB.signIn(email.trim(), pw));
       if(!r.ok){ setMsg({ ok:false, text:'❌ ' + (r.error || 'ไม่สำเร็จ') }); return; }
       setPw('');
       bootLoad();
@@ -14184,11 +14651,13 @@ function CloudGate(){
   return h('div', { className: shellBg },
     h('div', { className:'bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm' },
       h('div', { className:'text-center mb-5' },
-        h('div', { className:'text-4xl mb-2' }, '☁️'),
-        h('div', { className:'font-bold text-xl' }, 'เชื่อมต่อ Cloud บริษัท'),
-        h('div', { className:'text-xs text-gray-500 mt-1' }, 'บัญชีอีเมลกลางของบริษัท (ไม่ใช่รหัสพนักงาน ERP)')),
-      h('input', { type:'email', value:email, placeholder:'อีเมลบริษัท', autoComplete:'username',
+        h('div', { className:'text-4xl mb-2' }, '🍰'),
+        h('div', { className:'font-bold text-xl' }, 'YUME ERP — เข้าสู่ระบบ'),
+        h('div', { className:'text-xs text-gray-500 mt-1' }, 'ชื่อผู้ใช้ + รหัสผ่านของคุณ (เครื่องนี้จะจำไว้ จนกว่าจะกดออกจากระบบ)')),
+      // 🆕 PER-USER AUTH: ช่องเดียว — พนักงานใส่ username (เช่น WH001) · ผู้ดูแลใส่อีเมลได้ (ตั้งค่าครั้งแรก/กู้ระบบ)
+      h('input', { type:'text', value:email, placeholder:'ชื่อผู้ใช้ (เช่น WH001) หรืออีเมลผู้ดูแล', autoComplete:'username', autoCapitalize:'none', spellCheck:false,
         onChange:e=>setEmail(e.target.value),
+        onKeyDown:e=>{ if(e.key === 'Enter' && !busy) doAuth(); },
         className:'w-full px-4 py-3 border-2 rounded-lg mb-3 text-sm' }),
       h('input', { type:'password', value:pw, placeholder:'รหัสผ่าน', autoComplete:'current-password',
         onChange:e=>setPw(e.target.value),
@@ -14197,9 +14666,9 @@ function CloudGate(){
       msg && h('div', { className:'text-xs mb-3 ' + (msg.ok ? 'text-green-600' : 'text-red-500') }, msg.text),
       h('button', { disabled:busy, onClick:()=>doAuth(),
         className:'w-full py-3 bg-indigo-600 text-white rounded-lg font-bold mb-2 disabled:opacity-50' },
-        busy ? 'กำลังเชื่อมต่อ...' : 'เข้าสู่ระบบ Cloud'),
-      // 🆕 ลืมรหัสผ่าน — self-service reset ผ่านอีเมล
-      h('button', { onClick:()=>{ setMsg(null); setPhase('reset_request'); },
+        busy ? 'กำลังเข้าสู่ระบบ...' : 'เข้าสู่ระบบ'),
+      // 🆕 ลืมรหัสผ่าน — บัญชีอีเมล (ผู้ดูแล) รีเซ็ตผ่านอีเมลได้ · บัญชีพนักงาน (อีเมลภายในไม่มีจริง) → ให้ผู้ดูแลตั้งรหัสใหม่ให้ที่ ตั้งค่า → ผู้ใช้
+      h('button', { onClick:()=>{ setMsg(null); setPhase(email.indexOf('@') >= 0 ? 'reset_request' : 'login'); if(email.indexOf('@') < 0) setMsg({ ok:false, text:'พนักงานลืมรหัส → แจ้งผู้ดูแลระบบให้ตั้งรหัสใหม่ให้ (ตั้งค่า → 👥 ผู้ใช้) · ผู้ดูแลที่ใช้อีเมล → พิมพ์อีเมลแล้วกดอีกครั้งเพื่อรับลิงก์รีเซ็ต' }); },
         className:'w-full py-1.5 text-indigo-600 hover:text-indigo-800 text-xs font-medium mb-1' },
         'ลืมรหัสผ่าน?'),
       setupMode
@@ -14207,7 +14676,7 @@ function CloudGate(){
             className:'w-full py-2 border-2 border-dashed border-indigo-300 text-indigo-600 rounded-lg text-sm font-semibold disabled:opacity-50' },
             '🔑 โหมดติดตั้ง: ตั้งบัญชีบริษัท (อีเมล+รหัสด้านบน)')
         : h('div', { className:'text-center text-xs text-gray-400 mt-1' },
-            'ยังไม่มีบัญชี? ติดต่อผู้ดูแลระบบ (ออกไอดีจากส่วนกลางเท่านั้น)')));
+            'ยังไม่มีบัญชี / เข้าไม่ได้? ติดต่อผู้ดูแลระบบ (ผู้ดูแลเพิ่มผู้ใช้ที่ ตั้งค่า → 👥 ผู้ใช้ แล้วระบบสร้างบัญชีให้)')));
 }
 
 // ==================== MOUNT ====================
@@ -14222,7 +14691,7 @@ function mount(rootEl){
 // ==================== EXPORT ====================
 global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
-  MainShell, AppShell, DashboardTab, mount, MENU_ITEMS,
+  MainShell, AppShell, DashboardTab, mount, MENU_ITEMS, ChangeMyPasswordModal,
   // 🆕 UI-v2 (เฟส 1): palette/โปรด/ล่าสุด/density — ให้โมดูล/ทดสอบเรียกได้ (openCommandPalette ตั้งตอน AppShell mount)
   CommandPalette, searchDocuments, buildDocIndex, searchDocIndex, statusTh, docKindOf, menuLabel, tabGroupOf, entryIcon, navCountOf,
   readFavs, toggleFav, readRecents, pushRecent, applyDensity, setDensityPref, readDensityPref,
@@ -24098,7 +24567,7 @@ global.ERP.registerModule('transfer', { main: TransferModule });
 </script>
 <!--src/mod-production.js--><script>
 // ==================== mod-production.js (Phase 1: ครัวกลาง 4 ไลน์ + สาขาขนมปัง) ====================
-// Tabs: issue (🆕 GO-LIVE เบิกวัตถุดิบ — บันทึกอย่างเดียว) | dashboard | plan | orders | bom | posimport
+// Tabs: issue (🆕 GO-LIVE เบิกวัตถุดิบ — บันทึกอย่างเดียว) | weigh (🆕 WEIGH สถานีชั่ง ฝัง /weigh/ · สูตร = BOM ที่มีขั้นชั่ง) | dashboard | plan | orders | bom | posimport
 //
 // Workflow ออเดอร์ผลิต:
 //   planned → materials_issued → producing → produced → qc_passed → completed
@@ -24143,6 +24612,8 @@ const {
   toast, useOpenDoc,
   // 🆕 GO-LIVE: เบิกวัตถุดิบแบบบันทึกอย่างเดียว — ซ่อนต้นทุน · แถวมือถือ · รายการโปรด
   canSeeStockValue, getFavoriteList, resolveItemFavorites, LineRow, FavoriteLinesSection, FavoritesEditorModal,
+  // 🆕 WEIGH: สถานีชั่ง — สูตรชั่ง = BOM ที่มีขั้น stationType 'weigh' (helpers ใน 00-core) + Combobox สำหรับ map วัตถุดิบตอนนำเข้าสูตรเดิม
+  bomsForWeigh, weighRecipeFromBom, bomHasWeighStep, weighDefaultTolG, gramsOfMaterial, gramsPerUnitName, Combobox,
 } = global.ERP;
 // กันโค้ดเก่า/build ที่ core ยังไม่มี useOpenDoc → hook no-op (ลำดับ hook คงที่)
 const _useOpenDoc = typeof useOpenDoc === 'function' ? useOpenDoc : function(){};
@@ -24151,6 +24622,7 @@ const _notify = (msg, type) => { try { if(toast && typeof toast === 'function'){
 // ==================== HELPERS ====================
 function isBomAvailable(bom, branchId){
   if(!bom) return false;
+  if(bom.active === false) return false;   // 🆕 WEIGH UAT: ปิดใช้ (soft-delete) = ไม่ใช้กับออเดอร์/back-flush
   if(bom.availableIn && bom.availableIn.length) return bom.availableIn.includes(branchId);
   return bom.branch === branchId;
 }
@@ -24623,50 +25095,62 @@ function ProductionModule({ state, dispatch }){
   const isShopFloor = hasLineOrStation || (user?.role === 'branch' && user?.canQC === true);
   // UAT: หลังติ๊ก "ระบบผลิตเต็มรูปแบบ" คนมีไลน์/สถานี ต้องเบิกผ่านออเดอร์ผลิต (BOM ตัดคลังไลน์) — ซ่อนเบิกด่วนกันตัดวัตถุดิบซ้ำ 2 ทาง
   const quickIssueAllowed = canIssue && canQuickIssue(state, user);
-  const GO_LIVE_TABS = ['issue','linestock','posimport','posmatcheck'];
+  // 🆕 WEIGH: แท็บ ⚖️ ชั่ง — สิทธิ์ production.weigh.view · เปิดในโหมด go-live ด้วย (เหมือน issue)
+  //   คนที่ชั่งอย่างเดียว (weigh_only: ไม่มีสิทธิ์เบิก) → ⚖️ ชั่ง เป็นแท็บแรก · คนอื่นอยู่ถัดจากเบิกวัตถุดิบ
+  //   🆕 WEIGH UAT: สิทธิ์อย่างเดียวไม่พอ — role branch ได้ production.* ตาม default → พนักงานสาขาที่ไม่มีไลน์/ไม่มี BOM ชั่ง เห็นแท็บ ⚖️ + iframe เปล่า (สแกน BLE/USB) โดยไม่จำเป็น
+  //   → แสดงเมื่อ "มีของให้ชั่ง" (ผจก./มีไลน์-สถานี/ระบุ weighBomIds/มีสูตรชั่งในสาขานี้) · ยกเว้นคนที่ไม่มีสิทธิ์เบิก (โปรไฟล์ weigh_only ถูกให้สิทธิ์ชั่งโดยเจตนา) ยังเห็นแท็บ + คำแนะนำ "ยังไม่มีสูตรชั่ง"
+  const weighHasWork = weighSeesAll(user) || hasLineOrStation || (user?.weighBomIds||[]).length > 0 || weighRecipesFor(state, user, currentBranch).length > 0;
+  const canWeigh = (hasPerm(user,'production','weigh','view') || isSuperUser(user)) && (weighHasWork || !canIssue);
+  const weighFirst = canWeigh && !quickIssueAllowed;
+  const weighTabDef = { id:'weigh', label:'⚖️ ชั่ง', highlight: weighFirst || hasLineOrStation };
+  const GO_LIVE_TABS = ['issue','weigh','linestock','posimport','posmatcheck'];
+  // 🆕 WEIGH UAT (สิทธิ์): แท็บผลิตแต่ละแท็บผูกกับ production.<tab>.view — เดิมไม่เช็คเลย (ซ่อนด้วย goLiveRestricted อย่างเดียว) → เมื่อเปิด productionLive
+  //   พนักงานที่มีสิทธิ์เฉพาะ weigh/issue (โปรไฟล์ weigh_only / line_issue_only) จะเห็นออเดอร์ทั้งโรงงาน + BOM ทุกสูตรพร้อมต้นทุนทันที
+  //   (ROLE_DEFAULT_PERMS.branch/manager/production_manager มี production.* อยู่แล้ว → ผู้ใช้ปกติไม่กระทบ)
+  const pv = (t) => hasPerm(user,'production',t,'view') || isSuperUser(user);
 
   const tabs = [
+    weighFirst && weighTabDef,
     quickIssueAllowed && { id:'issue', label:'📦 เบิกวัตถุดิบ', highlight:true },
+    canWeigh && !weighFirst && weighTabDef,
     // 📱 Operator/QC views first (mobile-first for them)
     isOperator && { id:'mystation', label:'🧑‍🍳 หน้างาน',  highlight:true },
     isQC       && { id:'qc',        label:'🔬 QC Live',    highlight:true,
                     count: orders.filter(o => o.status === 'produced').length, countHint:'รอตรวจ' },
-    // 🆕 คลังของไลน์ผลิต — operator เช็คสต๊อกเอง · ขอเติมเอง (ไม่ต้องรอฝ่ายคลัง)
-    { id:'linestock', label:'📦 คลังไลน์', highlight:isOperator },
-    { id:'dashboard', label:'📊 แดชบอร์ด' },
+    // 🆕 คลังของไลน์ผลิต — operator เช็คสต๊อกเอง · ขอเติมเอง (ไม่ต้องรอฝ่ายคลัง) · ต้องมีไลน์/สถานี (หรือเป็นผู้จัดการ) + สิทธิ์ดูสต๊อก
+    (hasLineOrStation || isManager) && hasPerm(user,'stock','list','view') && { id:'linestock', label:'📦 คลังไลน์', highlight:isOperator },
+    pv('dashboard') && { id:'dashboard', label:'📊 แดชบอร์ด' },
     // 🆕 รวม "แผน + ออเดอร์" เป็นแท็บเดียว (v16) — แต่เก็บ plan เป็นแท็บลัดยังเข้าถึงได้
-    { id:'orders',    label:'📅 แผน + ออเดอร์ผลิต', count:counts.planned + counts.inProgress, countHint:'รอดำเนินการ' },
-    { id:'flow',      label:'🚦 ติดตามการผลิต',
+    pv('orders') && { id:'orders',    label:'📅 แผน + ออเดอร์ผลิต', count:counts.planned + counts.inProgress, countHint:'รอดำเนินการ' },
+    pv('flow') && { id:'flow',      label:'🚦 ติดตามการผลิต',
       count: orders.filter(o => ['planned','materials_issued','producing','produced'].includes(o.status)).length,
       countHint:'order ของวัน' },
-    { id:'bom',       label:'🧪 สูตร BOM', count:counts.boms },
-    { id:'reports',   label:'📊 รายงานผลิต' },
-    { id:'variance',  label:'📊 Variance Report' },
+    pv('bom') && { id:'bom',       label:'🧪 สูตร BOM', count:counts.boms },
+    pv('dashboard') && { id:'reports',   label:'📊 รายงานผลิต' },
+    pv('variance') && { id:'variance',  label:'📊 Variance Report' },
     // 🆕 B2: PM ภาพรวมทุกสาขา
     isManager && { id:'allbranch', label:'🌐 ทุกสาขา' },
     // 🆕 QC รวมหลายสาขา — คน QC/ผู้จัดการ ตรวจข้ามสาขาที่ดูแลได้จากหน้าเดียว
     (isQC || isManager) && { id:'qcall', label:'🔬 QC ทุกสาขา', count:pendingQcAll, countHint:'รอตรวจ' },
-    isHq && { id:'posimport', label:'📥 นำเข้าจาก POS' },
+    // UAT: POS import (ลง JE/ตัดสต๊อกสาขา) ไม่ใช่งานครัว — ซ่อนจากคนหน้างานเสมอ (ทุกโหมด) แม้ role branch จะได้ production.* · นำเข้า = create · ตรวจ (report-only) = view
+    isHq && !isShopFloor && hasPerm(user,'production','posimport','create') && { id:'posimport', label:'📥 นำเข้าจาก POS' },
     // 🆕 O1: REPORT-ONLY ตรวจวัตถุดิบที่ควรใช้ตาม BOM × ยอดขาย POS (ไม่ตัดสต๊อก)
-    isHq && { id:'posmatcheck', label:'📊 ตรวจวัตถุดิบจากยอดขาย POS' },
+    isHq && !isShopFloor && hasPerm(user,'production','posimport','view') && { id:'posmatcheck', label:'📊 ตรวจวัตถุดิบจากยอดขาย POS' },
   ].filter(Boolean).filter(t => {
     if(!goLiveRestricted) return true;
     if(!GO_LIVE_TABS.includes(t.id)) return false;
     // UAT: คลังไลน์ในโหมด go-live — commitCounts ปรับสต๊อกตรง (ไม่ผ่านอนุมัติ adjust_stock) → ต้องมีสิทธิ์ปรับสต๊อก (stock.list.adjust)
     //   หมายเหตุ: ใช้ 'adjust' ไม่ใช่ 'edit' เพราะ ROLE_DEFAULT_PERMS.branch มี stock.list.edit อยู่แล้ว → 'edit' ไม่ซ่อนจากพนักงานไลน์ (กรณีที่ UAT รายงาน)
     if(t.id === 'linestock') return hasLineOrStation && hasPerm(user,'stock','list','adjust');
-    // UAT: POS import (ลง JE/ตัดสต๊อกสาขา) ไม่ใช่งานครัว — ซ่อนจากคนหน้างานเสมอ แม้ role branch จะได้ production.* · นำเข้า = create · ตรวจ (report-only) = view
-    if(t.id === 'posimport') return !isShopFloor && hasPerm(user,'production','posimport','create');
-    if(t.id === 'posmatcheck') return !isShopFloor && hasPerm(user,'production','posimport','view');
     return true;
   });
   const tabIds = tabs.map(t => t.id).join(',');
   // แท็บที่ไม่มีให้เห็น (ซ่อนตามสิทธิ์/โหมด/หลังเปิดระบบผลิต · มาจากทางลัด/ลิงก์เก่า/ค่าที่จำไว้) → แสดงแท็บแรกที่เห็นได้แทนทันที (ไม่ render หน้าที่ซ่อนแม้แต่เฟรมเดียว)
   //   ทำทุกโหมด (ไม่ใช่แค่ go-live) — เช่น persisted 'issue' ของ operator หลัง cut-over ต้องตกไป 'mystation' โดยไม่ต้องล้าง localStorage
-  //   ยกเว้นแท็บลัดที่ไม่มีปุ่มแต่เปิดได้ (plan) ในโหมดปกติ
+  //   ยกเว้นแท็บลัดที่ไม่มีปุ่มแต่เปิดได้ (plan) ในโหมดปกติ (ต้องมีสิทธิ์ production.plan.view)
   const HIDDEN_OK_TABS = ['plan'];
-  const tabVisible = tabs.some(t => t.id === tab) || (!goLiveRestricted && HIDDEN_OK_TABS.includes(tab));
-  const shownTab = !tabVisible ? (tabs[0]?.id || (goLiveRestricted ? 'issue' : 'dashboard')) : tab;   // ไม่มีแท็บเลย (go-live + ไม่มีสิทธิ์) → 'issue' ซึ่ง render ว่าง ไม่ใช่แดชบอร์ด
+  const tabVisible = tabs.some(t => t.id === tab) || (!goLiveRestricted && HIDDEN_OK_TABS.includes(tab) && pv(tab));
+  const shownTab = !tabVisible ? (tabs[0]?.id || 'issue') : tab;   // ไม่มีแท็บเลย (ไม่มีสิทธิ์) → 'issue' ซึ่ง render ว่าง ไม่ใช่แดชบอร์ด (ทุกโหมด)
 
   // Auto-select default tab — แท็บที่ซ่อน → เด้งไปแท็บที่แสดงจริงทุกโหมด · ปกติ: operator/QC เดิม (ครั้งแรกเท่านั้น)
   const _autoOnce = useRef(false);
@@ -24684,7 +25168,8 @@ function ProductionModule({ state, dispatch }){
     h('div', { className:'mb-4 flex flex-wrap items-center justify-between gap-2' },
       // 🆕 GO-LIVE UAT (มือถือ): พนักงานในโหมดเตรียมระบบผลิต เห็นแค่หน้าเบิก → หัวเรื่องสั้น ไม่กินที่เหนือรายการโปรด
       goLiveRestricted ? h('div', null,
-        h('h1', { className:'text-xl font-bold text-gray-800' }, '📦 เบิกวัตถุดิบ'),
+        // 🆕 WEIGH: หัวเรื่องตามแท็บที่แสดงจริง — คนชั่งอย่างเดียวไม่ควรเห็นหัวว่า "เบิกวัตถุดิบ"
+        h('h1', { className:'text-xl font-bold text-gray-800' }, shownTab === 'weigh' ? '⚖️ สถานีชั่ง' : '📦 เบิกวัตถุดิบ'),
         h('p', { className:'text-xs text-gray-500' }, `${branch?.branchType==='hq'?'🏢 ':'🏪 '}${branch?.name}`))
       : h('div', null,
         h('h1', { className:'text-2xl font-bold text-gray-800' }, '🏭 ผลิต / BOM'),
@@ -24701,7 +25186,7 @@ function ProductionModule({ state, dispatch }){
 
     // 🆕 GO-LIVE: ผู้ดูแลเห็นครบทุกแท็บ + แบนเนอร์บอกว่าพนักงานเห็นเฉพาะเบิกวัตถุดิบ
     goLiveMode && goLivePrivileged && h('div', { className:'mb-3 px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-sm' },
-      '⚠️ โหมดเตรียมระบบผลิต — พนักงานเห็นเฉพาะ เบิกวัตถุดิบ (เปิดใช้เต็มที่ ตั้งค่า → บริษัท)'),
+      '⚠️ โหมดเตรียมระบบผลิต — พนักงานเห็นเฉพาะ เบิกวัตถุดิบ + ⚖️ ชั่ง (เปิดใช้เต็มที่ ตั้งค่า → บริษัท)'),
     // ผู้จัดการทั่วไป (ไม่ใช่ GM/Admin/ผู้จัดการผลิต) ถูกจำกัดแท็บเหมือนพนักงานตามนโยบายใน ตั้งค่า → บริษัท — บอกเหตุผลที่แท็บหายไป ไม่ให้เข้าใจว่าระบบพัง
     goLiveRestricted && user?.role === 'manager' && h('div', { className:'mb-3 px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-sm' },
       '⚠️ โหมดเตรียมระบบผลิต — แสดงเฉพาะ เบิกวัตถุดิบ (แท็บออเดอร์/แผน/BOM/รายงานผลิต ซ่อนไว้ชั่วคราว · GM/Admin เปิดใช้เต็มที่ได้ที่ ตั้งค่า → บริษัท)'),
@@ -24712,6 +25197,8 @@ function ProductionModule({ state, dispatch }){
     ),
 
     shownTab==='issue'     && quickIssueAllowed && h(QuickIssueTab, { state, dispatch, user, branchId:currentBranch }),
+    // 🆕 WEIGH: สถานีชั่ง (ฝัง /weigh/ + ประวัติชั่ง) — สูตรจาก BOM ที่มีขั้นชั่งของไลน์ที่ user ถูกมอบหมาย
+    shownTab==='weigh'     && canWeigh && h(WeighStationTab, { state, dispatch, user, branchId:currentBranch }),
     shownTab==='mystation' && h(MyStationTab, { state, dispatch, user, branchId:currentBranch }),
     shownTab==='linestock' && h(LineStockTab,  { state, dispatch, user, branchId:currentBranch }),
     shownTab==='qc'        && h(QCDashboardTab, { state, dispatch, user, branchId:currentBranch }),
@@ -24720,7 +25207,8 @@ function ProductionModule({ state, dispatch }){
     // 🆕 รวมหน้า "แผน + ออเดอร์" เป็นหน้าเดียว — Plan อยู่ด้านบนเป็น collapsible · Orders ด้านล่าง
     shownTab==='orders'    && h(PlanAndOrdersTab, { state, dispatch, user, branchId:currentBranch, boms, orders }),
     // (tab='issue' = QuickIssueTab ด้านบน — GO-LIVE เบิกวัตถุดิบแบบบันทึกอย่างเดียว)
-    shownTab==='bom'       && h(BOMTab,       { state, dispatch, user, branchId:currentBranch, boms }),
+    // แท็บ BOM รับรวม BOM ที่ปิดใช้ (soft-delete) ด้วย — BOMTab ซ่อนเอง + สวิตช์ "แสดงที่ปิดใช้" · ที่อื่น (ออเดอร์/back-flush) ใช้ boms ที่กรอง active แล้ว
+    shownTab==='bom'       && h(BOMTab,       { state, dispatch, user, branchId:currentBranch, boms: (state.boms||[]).filter(b => b && (isBomAvailable(b, currentBranch) || (b.active === false && (b.availableIn && b.availableIn.length ? b.availableIn.includes(currentBranch) : b.branch === currentBranch)))) }),
     shownTab==='flow'      && h(FlowTrackerTab, { state, dispatch, user, branchId:currentBranch, boms, orders }),
     shownTab==='reports'   && h(ProductionReportsTab, { state, dispatch, user, branchId:currentBranch }),
     shownTab==='variance'  && h(VarianceReportTab, { state, dispatch, user, branchId:currentBranch }),
@@ -24789,7 +25277,8 @@ function DashboardTab({ state, dispatch, user, branchId }){
     h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3' },
       h(StatCard, { color:'blue',  label:'ออเดอร์วันนี้', value:todayOrders.length, hint:`เสร็จ ${todayProduced.length}/${todayOrders.length}` }),
       h(StatCard, { color:'green', label:'ผลิตได้ (หน่วย)', value:fmtNum(todayUnits), hint:'รวมทุกไลน์' }),
-      h(StatCard, { color:'purple', label:'ต้นทุนวันนี้', value:fmtCur(todayCost), hint:'รวม FIFO+labor+OH' }),
+      // 🆕 WEIGH UAT (สิทธิ์): ต้นทุนเฉพาะคนที่เห็นมูลค่า (canSeeStockValue) — เหมือนทุกจอหน้างาน
+      canSeeStockValue(user, state) && h(StatCard, { color:'purple', label:'ต้นทุนวันนี้', value:fmtCur(todayCost), hint:'รวม FIFO+labor+OH' }),
       h(StatCard, { color:'amber', label:'รอ QC', value:perLine.reduce((s,l)=>s+l.pendingQc,0), hint:'ทุกไลน์' }),
     ),
 
@@ -30003,9 +30492,12 @@ function BomWeighModal({ op, opState, order, state, user, bom, onClose, onPass, 
     const it = (state.items||[]).find(x => x.id === resolved.itemId);
     const expected = Number(resolved.qty)||0;
     // 🎯 Tolerance: ถ้า BOM ตั้ง weighTolerance → scale ตาม batch ด้วย (ยกเว้น fixed)
+    //   🆕 WEIGH UAT: weighTolerance เก็บเป็น "กรัมสัมบูรณ์" เสมอ (หน่วยเดียวกับสถานีชั่ง/00-core weighRecipeFromBom/ตาราง weighDefaultTolG)
+    //   → หน้าจอนี้ทำงานในหน่วยของวัตถุดิบ (กก./ลิตร) จึงต้องแปลงกรัม → หน่วยวัตถุดิบก่อน (เดิมอ่านตรง ๆ = ±12 กก. บนแป้ง 2 กก.)
     let tolerance;
     if(m.weighTolerance != null && m.weighTolerance !== ''){
-      const baseTolerance = Number(m.weighTolerance);
+      const gPer = it ? gramsOfMaterial(it, 1, resolved.unit || m.unit) : null;
+      const baseTolerance = gPer ? Number(m.weighTolerance) / gPer : Number(m.weighTolerance);
       tolerance = m.scaleType === 'fixed' ? baseTolerance : baseTolerance * scale;
     } else {
       tolerance = Math.max(0.5, expected * 0.02);
@@ -32147,11 +32639,777 @@ function IssueDetailModal({ issue, state, dispatch, user, onClose }){
 // ================================================================
 // BOM TAB (multi-output, lineId, labor/overhead)
 // ================================================================
+
+// ================================================================
+// ⚖️ WEIGH STATION — สถานีชั่ง (ฝังระบบชั่ง /weigh/ ใน ERP · สูตรชั่ง = BOM ที่มีขั้น stationType 'weigh')
+// ================================================================
+// 🆕 WEIGH: หลักการ
+//   · ERP = แอปแม่ (ล็อกอิน · เก็บสูตรใน BOM · กำหนดใครเห็นสูตรไหน · เก็บผลชั่งใน state.weighLogs)
+//   · ระบบชั่ง (Weight/weigh-system) ยังเป็นแพ็กเกจแยก → ฝังเป็น iframe (src = settings.weighUrl + ?embed=1)
+//   · โปรโตคอล postMessage (ดู weigh-system/README.md):
+//       แม่ → ชั่ง : { target:'weigh-system', type:'config', operator, lockOperator, branchId, role, permissions, recipes, recipesMode:'replace' }
+//                    { target:'weigh-system', type:'select-recipe', recipeId | code }
+//       ชั่ง → แม่ : { source:'weigh-system', type:'ready'|'finished'|'scale'|'height', ... }
+//   · Step 1 จบที่ LOT + ฉลาก + log — ไม่ตัดสต๊อก ไม่ลง JE
+const WEIGH_IFRAME_MIN_H = 720;
+const WEIGH_READY_TIMEOUT_MS = 8000;
+// 🆕 WEIGH UAT: สูตรชั่งเดิมไม่ฝังในโค้ดอีก (ข้อมูลจริงในไฟล์สาธารณะ + แก้ไม่ได้) → ผจก.อัปโหลดไฟล์ JSON เอง (erp-v2/weigh-seeds.json หรือ
+//   "สำรองข้อมูล" จากระบบชั่ง weighing-backup-*.json) ใน WeighSeedImportModal · รับได้ทั้ง [ {code,name,items} ] และ { recipes:[…] }
+function weighParseSeedFile(text){
+  let d; try { d = JSON.parse(text); } catch(_e){ throw new Error('ไฟล์ไม่ใช่ JSON'); }
+  const list = Array.isArray(d) ? d : (d && Array.isArray(d.recipes) ? d.recipes : null);
+  if(!list) throw new Error('ไม่พบรายการสูตร (ต้องเป็น array หรือ { recipes:[…] })');
+  const out = [];
+  list.forEach((r, i) => {
+    if(!r || typeof r !== 'object') return;
+    // 🆕 UAT: normalize เป็นกรัมครั้งเดียว (target/tol) — ไฟล์สำรองจากแท็บเล็ตอาจเป็น kg/L · tol ของสูตร kg/L ในแท็บเล็ตปนสองแบบ
+    //   (คีย์เอง = หน่วยสูตร · auto-fill = กรัม) → ถ้าคูณแล้วเกิน 25% ของเป้า ถือว่าเป็นกรัมอยู่แล้ว
+    const items = (r.items||[]).map(it => {
+      const unit = (it && it.unit) || 'g';
+      const gPer = gramsPerUnitName(unit) != null ? gramsPerUnitName(unit) : 1;
+      const target = (Number(it && it.target)||0) * gPer;
+      const rawTol = Number(it && it.tol)||0;
+      let tol = rawTol > 0 ? rawTol * gPer : 0;
+      if(tol > target * 0.25) tol = rawTol;
+      return { name: String((it && it.name) || '').trim(), target, unit:'g', tol, fixed: !!(it && it.fixed), srcTarget: Number(it && it.target)||0, srcUnit: unit };
+    }).filter(it => it.name && it.target > 0);
+    if(!items.length) return;
+    const name = String(r.name || '').trim() || `สูตร ${i+1}`;
+    const code = String(r.code || name.replace(/[^A-Za-z0-9]/g,'') || ('R' + (i+1))).toUpperCase().slice(0, 8);
+    out.push({ id: r.id || ('file_' + (i+1)), code, name, items });
+  });
+  if(!out.length) throw new Error('ไม่มีสูตรที่มีวัตถุดิบในไฟล์');
+  return out;
+}
+// หน่วยของสินค้าที่เป็นน้ำหนัก (กรัม/กก.) สำหรับบรรทัด BOM ที่นำเข้าจากสูตรชั่ง — สถานีชั่งแปลงกลับเป็นกรัมด้วย gramsOfMaterial
+//   ไม่มีหน่วยน้ำหนักในทะเบียน → ใส่ 'กรัม' ตรง ๆ (ชั่งได้ แต่หน่วยไม่อยู่ใน units ของสินค้า → ok:false ให้เตือนก่อนนำเข้า)
+function weighMatQtyUnit(it, grams){
+  const units = ((it && Array.isArray(it.units)) ? it.units : []).filter(u => u && gramsPerUnitName(u.name) != null);
+  // 🆕 UAT: หน่วยกรัม/มล. ของสินค้าก่อน (เป้าตรงไฟล์เป๊ะ) → หน่วยฐาน → หน่วยน้ำหนักอื่น
+  const pick = units.find(u => gramsPerUnitName(u.name) === 1) || units.find(u => u.isBase) || units[0];
+  if(!pick) return { qty: grams, unit:'กรัม', ok:false };
+  const g = gramsPerUnitName(pick.name);
+  // ความละเอียด: เก็บถึง 0.001 กรัม ไม่ว่าหน่วยสินค้าเป็นอะไร (กก. → 6 ตำแหน่ง) — เดิมปัด 3 ตำแหน่งของ กก. = ทีละ 1 กรัม (สาร 1.3 g → 1 g)
+  const dec = Math.min(9, 3 + Math.max(0, Math.round(Math.log10(g))));
+  const f = Math.pow(10, dec);
+  return { qty: Math.round((grams / g) * f) / f, unit: pick.name, ok:true };
+}
+
+// URL ของระบบชั่ง (ตั้งค่า → weighUrl · ค่าเริ่มต้น weigh/index.html origin เดียวกับ ERP) → ต่อ ?embed=1 ให้ระบบชั่งรู้ว่าถูกฝัง
+function weighBaseUrl(state){ return (state && state.settings && state.settings.weighUrl) || 'weigh/index.html'; }
+function weighEmbedSrc(state, bust){
+  const base = weighBaseUrl(state);
+  let u = base + (base.includes('?') ? '&' : '?') + 'embed=1';
+  if(bust) u += '&r=' + bust;
+  return u;
+}
+// สูตรที่ user คนนี้เห็นในสถานีชั่ง (BOM ที่มีขั้นชั่ง · ไลน์ตรง · แปลงเป็นกรัมแล้ว · ตัดสูตรที่ไม่เหลือวัตถุดิบชั่งได้)
+function weighRecipesFor(state, user, branchId){
+  const boms = bomsForWeigh(state, user, branchId);
+  const created = {}; boms.forEach(b => { created[b.id] = Number(b.createdAt)||0; });
+  const list = boms
+    .map(b => weighRecipeFromBom(state, b))
+    .filter(r => r && r.items && r.items.length);
+  // 🆕 WEIGH UAT: รหัสชั่ง (คำนำหน้าเลข LOT) ต้องไม่ซ้ำในชุดที่ส่งให้สถานีชั่ง — weighRecipeFromBom ตัดชื่ออังกฤษเหลือ 8 ตัว (CROISSAN ×2) /
+  //   สำเนาเก่าที่ยังติด weighCode → LOT สตริงเดียวกันในวันเดียว/เครื่องเดียว · แก้แบบ deterministic: กลุ่มรหัสซ้ำ → BOM เก่าสุด (createdAt แล้ว bomId) คงรหัสเดิม
+  //   ตัวอื่นได้ code.slice(0,6) + 2 ตัวท้ายของ bomId (คงที่ต่อ BOM ไม่ขึ้นกับลำดับ · ≤8 ตัวสำหรับ Code128) · weighRecipesSig มี r.code → iframe ได้รหัสใหม่อัตโนมัติ
+  const byCode = {};
+  list.forEach(r => { (byCode[r.code] = byCode[r.code] || []).push(r); });
+  Object.values(byCode).forEach(grp => {
+    if(grp.length < 2) return;
+    grp.sort((a, b) => (created[a.bomId] - created[b.bomId]) || String(a.bomId).localeCompare(String(b.bomId)));
+    grp.slice(1).forEach(r => {
+      const tail = String(r.bomId||'').replace(/[^A-Za-z0-9]/g,'').slice(-2).toUpperCase() || 'X';
+      r.code = (String(r.code||'').slice(0, 6) + tail).toUpperCase();
+      r.codeDedup = true;
+    });
+  });
+  return list;
+}
+// ลายเซ็นสูตร — ส่ง config ใหม่เฉพาะตอนสูตรเปลี่ยนจริง (ไม่ใช่ทุก render)
+function weighRecipesSig(recipes){
+  return JSON.stringify((recipes||[]).map(r => [r.id, r.code, r.name, r.lineId, (r.items||[]).map(i => [i.name, i.itemId, i.target, i.tol])]));
+}
+function weighTs(ts){
+  const d = new Date(Number(ts)||0);
+  if(!ts || isNaN(d.getTime())) return '-';
+  const iso = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  return fmtDate(iso) + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+function weighIsoDate(ts){
+  const d = new Date(Number(ts)||0);
+  if(!ts || isNaN(d.getTime())) return '';
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+// ผู้จัดการ (เห็นประวัติทุกไลน์/ทุกคน) vs พนักงาน (เห็นเฉพาะที่ตัวเองชั่ง)
+function weighSeesAll(user){
+  return isSuperUser(user) || ['manager','production_manager','gm','admin','owner'].includes(user?.role);
+}
+// 🆕 WEIGH UAT (ความเสี่ยงอันดับ 1 — เหมือนใบเบิก): ผลชั่งที่ push ขึ้น cloud แพ้ conflict → คิว replay ใน localStorage (ไม่ใช่ sessionStorage —
+//   แท็บเล็ตอาจปิด Chrome ก่อนโหลดใหม่) · array · cap 50 · แต่ละรายการ { key:deviceId|id, act, branchId, user, lot, ts } · replay ตอน mount ของ WeighStationTab
+const _WEIGH_REPLAY_KEY = 'erp_v5__weigh_replay';
+function _weighLogKey(log){ return String((log && log.deviceId) || '') + '|' + String((log && log.id) || ''); }
+function _weighHasLog(st, key){ return ((st && st.weighLogs) || []).some(w => _weighLogKey(w) === key); }
+function _weighLoadReplay(){ try { const raw = global.localStorage.getItem(_WEIGH_REPLAY_KEY); const a = raw ? JSON.parse(raw) : []; return Array.isArray(a) ? a : []; } catch(_e){ return []; } }
+function _weighSaveReplay(list){ try { if(!list || !list.length) global.localStorage.removeItem(_WEIGH_REPLAY_KEY); else global.localStorage.setItem(_WEIGH_REPLAY_KEY, JSON.stringify(list.slice(-50))); } catch(_e){} }
+function _weighPushReplay(p){ const list = _weighLoadReplay(); const old = list.find(x => x && x.key === p.key); _weighSaveReplay([...list.filter(x => !(x && x.key === p.key)), { ...p, tries: old ? (Number(old.tries)||0) : 0 }]); }
+// เกณฑ์เครื่องชั่งที่ ERP บังคับทุกครั้งที่ส่ง config (weigh-system merge d.settings → ทับค่าที่ถูกแก้จากโหมดเปิดเดี่ยว ซึ่ง origin/localStorage เดียวกับที่ฝัง)
+const WEIGH_FORCED_SETTINGS = { minTolG:1, requireZero:true, lockDwellSec:2.5, zeroTol:2 };
+// ผลชั่ง → cloud ก่อน แล้วค่อยเก็บในเครื่อง (ลำดับเดียวกับใบเบิก QuickIssue.submit — ความเสี่ยงอันดับ 1 ของ go-live):
+//   (1) __refreshFromCloud → (2) dry-run reducer ADD_WEIGH_LOG บน state ล่าสุด → (3) SB.pushNow → (4) dispatch + toast "บันทึกแล้ว"
+//   · conflict ที่ (3) → เก็บ act ในคิว localStorage (erp_v5__weigh_replay) → reload → WeighStationTab mount แล้ว replay (dedupe deviceId|id)
+//   · เน็ตล่ม → dispatch ในเครื่อง + shell/scheduleCloudPush ลองส่งใหม่เอง · ไม่ใช่ cloud-only (harness/local) → dispatch ตรง
+async function _weighCommit(act, ctx){
+  const { key, lot, branchId, user, dispatch, fallbackState } = ctx;
+  const SB = global.ERP.SBSync;
+  const cloud = !!(SB && SB.isCloudOnly && SB.isCloudOnly() && SB.pushNow);
+  const getSt = global.ERP.__getState;
+  const red = global.ERP.reducer;
+  const queue = () => _weighPushReplay({ key, act, branchId, user: user.username, lot: lot || '', ts: Date.now() });
+  let cur = (typeof getSt === 'function' && getSt()) || fallbackState;
+  if(cur && _weighHasLog(cur, key)) return true;
+  if(!cloud || typeof red !== 'function' || !cur){ dispatch(act); _notify(`✅ บันทึกผลชั่ง ${lot || ''} แล้ว`, 'success'); return true; }
+  _notify(`⏳ กำลังส่งผลชั่ง ${lot || ''} ขึ้นระบบ…`, 'info');
+  try {
+    // (1) เครื่องอื่นบันทึกไปก่อนไหม → ดึงมาก่อน (ลดโอกาสชนที่ (3))
+    const fn = global.ERP.__refreshFromCloud;
+    let pulled = false;
+    try { if(typeof fn === 'function') pulled = await fn(); } catch(_e){}
+    if(pulled){
+      const fresh = await _qiSettle(cur, 2500);
+      if(!fresh){
+        // ดึงมาแล้วแต่ยังไม่เห็น state ใหม่ → ห้าม push ของเก่าทับ · เก็บคิวแล้วลองใหม่เอง
+        queue();
+        _notify(`⚠️ กำลังโหลดข้อมูลใหม่จากเครื่องอื่น — ผลชั่ง ${lot || ''} จะถูกบันทึกให้อัตโนมัติ`, 'warning');
+        setTimeout(() => _weighReplayPending({ branchId, user, dispatch, fallbackState: cur }), 2000);
+        return false;
+      }
+      cur = fresh;
+      if(_weighHasLog(cur, key)) return true;
+    }
+    // (2) dry-run บน state ล่าสุด
+    const next = red(cur, act);
+    if(next === cur){ _notify(`⛔ ระบบไม่รับผลชั่ง ${lot || ''} (ซ้ำ/ข้อมูลไม่ครบ)`, 'error'); return false; }
+    // (3) ขึ้น cloud ก่อน แล้วรอผลจริง
+    const r = await SB.pushNow(next, user.username);
+    if(!(r && r.ok)){
+      if(r && r.conflict){
+        queue();
+        _notify(`⚠️ ข้อมูลชนกับเครื่องอื่น — กำลังโหลดใหม่และบันทึกผลชั่ง ${lot || ''} ซ้ำให้อัตโนมัติ`, 'warning');
+        const cs = SB.cloudSaveStatus ? SB.cloudSaveStatus() : {};
+        if(cs.dirty && SB.scheduleCloudPush) SB.scheduleCloudPush(cur, user.username);
+        else setTimeout(() => { try { global.location.reload(); } catch(_e){} }, 800);
+        return false;
+      }
+      // เน็ต/อื่น ๆ → บันทึกในเครื่อง ให้ระบบลองส่งใหม่อัตโนมัติ · 🆕 UAT: เข้าคิว replay ด้วย — ถ้าแท็บเล็ตดับ/ปิด Chrome ก่อนเน็ตกลับ (cloud-only ไม่มี state ในเครื่อง) รอบหน้าจะส่งซ้ำให้
+      //   (คิวถูกล้างตอน mount ถ้าพบว่า log ขึ้น cloud แล้ว — dedupe deviceId|id)
+      queue();
+      dispatch(act);
+      _notify(`⚠️ บันทึกผลชั่ง ${lot || ''} ในเครื่องแล้ว แต่ยังส่งขึ้นระบบไม่ได้ (เน็ต) — จะลองใหม่อัตโนมัติ ห้ามปิดหน้าจนกว่าไอคอน ☁️ จะขึ้นบันทึกแล้ว`, 'warning');
+      return true;
+    }
+    // (4) บันทึกในเครื่อง (shell push ตามด้วย token ใหม่ = สำเร็จ)
+    dispatch(act);
+    _notify(`✅ บันทึกผลชั่ง ${lot || ''} แล้ว`, 'success');
+    return true;
+  } catch(e){
+    queue();
+    _notify(`⚠️ ส่งผลชั่ง ${lot || ''} ไม่สำเร็จ (${(e && e.message) || e}) — เก็บไว้บันทึกซ้ำอัตโนมัติ`, 'error');
+    return false;
+  }
+}
+// replay ผลชั่งที่ค้างในคิว (เฉพาะสาขา/ผู้ใช้เดิม · ข้ามที่มีใน state แล้ว · ที่ reducer ปฏิเสธคงไว้ในคิวให้ผจก.ตรวจ) — เรียกตอน mount และหลัง refresh
+// 🆕 UAT (audit): คิวใน localStorage แก้ได้จากเครื่อง → รับเฉพาะ ADD_WEIGH_LOG ที่ key ตรงกับ log และ by = ผู้ใช้ที่ล็อกอินอยู่ (ไม่เชื่อค่าในคิว)
+function _weighReplayValid(p, user){
+  if(!p || !p.act || p.act.type !== 'ADD_WEIGH_LOG') return false;
+  const log = p.act.data && p.act.data.log;
+  if(!log || !log.id) return false;
+  if(_weighLogKey(log) !== p.key) return false;
+  return true;
+}
+const _WEIGH_REPLAY_MAX_TRIES = 3;
+// 🆕 UAT (architect): replay ต้องเดินลำดับเดียวกับของสด (refresh → dry-run → pushNow → dispatch) ไม่ใช่ dispatch-first — ทำทีละรายการ ·
+//   รายการที่ลองครบ 3 รอบแล้วยังไม่ผ่านคงไว้ในคิว (ไม่วน reload) และแจ้งให้ผจก.ทราบ · async — ผู้เรียกไม่ต้อง await
+async function _weighReplayPending({ branchId, user, dispatch, fallbackState }){
+  const list = _weighLoadReplay();
+  if(!list.length || !user) return;
+  const mine = list.filter(p => p && p.branchId === branchId && p.user === user.username);
+  if(!mine.length) return;
+  const cur = (typeof global.ERP.__getState === 'function' && global.ERP.__getState()) || fallbackState || null;
+  if(!cur) return;
+  let done = 0, dup = 0; const stuck = [], bad = [];
+  for(const p of mine){
+    if(!_weighReplayValid(p, user)){ bad.push(p); continue; }
+    if(_weighHasLog(cur, p.key)){ dup++; _weighSaveReplay(_weighLoadReplay().filter(x => !(x && x.key === p.key))); continue; }   // ขึ้น cloud แล้ว (เครื่องนี้ก่อน reload / เครื่องอื่น)
+    const tries = Number(p.tries)||0;
+    if(tries >= _WEIGH_REPLAY_MAX_TRIES){ stuck.push(p); continue; }
+    // นับรอบก่อนลอง (ถ้า commit ทำให้ reload คิวต้องจำว่าลองไปแล้ว)
+    _weighSaveReplay(_weighLoadReplay().map(x => (x && x.key === p.key) ? { ...x, tries: tries + 1 } : x));
+    const act = { type:'ADD_WEIGH_LOG', data:{ ...p.act.data, log:{ ...p.act.data.log, userId: user.id, branchId }, by: user.username } };
+    let ok = false;
+    try { ok = await _weighCommit(act, { key: p.key, lot: p.lot, branchId, user, dispatch, fallbackState: cur }); } catch(_e){ ok = false; }
+    if(ok){ done++; _weighSaveReplay(_weighLoadReplay().filter(x => !(x && x.key === p.key))); }
+    else return;   // conflict → _weighCommit เก็บคิว + reload/ลองใหม่เอง · หยุดรอบนี้ (รายการถัดไปจะได้ลองหลัง reload)
+  }
+  if(bad.length) _weighSaveReplay(_weighLoadReplay().filter(x => !bad.includes(x)));
+  if(done) _notify(`✅ บันทึกผลชั่งที่ค้างจากรอบก่อนแล้ว ${done} ชุด`, 'success');
+  if(stuck.length) _notify(`⚠️ ผลชั่งที่ค้าง ${stuck.length} ชุด ส่งไม่ผ่านหลายรอบ (${stuck.map(p => p.lot).filter(Boolean).join(', ') || 'ไม่มีเลข LOT'}) — แจ้งผจก.ผลิต (ฉลากพิมพ์ไปแล้ว แต่ยังไม่มีในระบบ)`, 'error');
+}
+
+function WeighStationTab({ state, dispatch, user, branchId }){
+  const canCreate = hasPerm(user,'production','weigh','create') || isSuperUser(user);
+  const lines = getBranchLines(state, branchId);
+  const myLineIds = getUserAssignedLines(user) || [];
+  const seesAll = weighSeesAll(user);
+
+  // สูตรที่คนนี้เห็น — คำนวณใหม่เมื่อ BOM/สินค้า/คน/สาขา เปลี่ยน
+  const recipes = useMemo(() => weighRecipesFor(state, user, branchId), [state.boms, state.items, user, branchId]);
+  const recipesSig = useMemo(() => weighRecipesSig(recipes), [recipes]);
+  const skippedHints = recipes.filter(r => (r.skipped||[]).length);
+
+  // ---- iframe (mount ครั้งเดียวต่อ src · ไม่ remount ทุก render) ----
+  const [reloadKey, setReloadKey] = useState(0);
+  const baseUrl = weighBaseUrl(state);
+  const src = useMemo(() => weighEmbedSrc(state, reloadKey), [baseUrl, reloadKey]);
+  const iframeRef = useRef(null);
+  const readyRef = useRef(false);
+  const [ready, setReady] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const [frameH, setFrameH] = useState(WEIGH_IFRAME_MIN_H);
+  const [scaleInfo, setScaleInfo] = useState(null);
+  const [weighVersion, setWeighVersion] = useState('');
+  const [lastLot, setLastLot] = useState('');
+  const [busyLot, setBusyLot] = useState('');   // ผลชั่งที่กำลังส่งขึ้นระบบ (แสดงสถานะบนหัว)
+  const [lastMsg, setLastMsg] = useState(null);  // 🆕 UAT: ผลล่าสุด {ok,text} — แสดงในแถบสถานะเหนือ iframe (มองเห็นแม้เต็มจอ ที่ toast ของ ERP ถูกบัง)
+  const wrapRef = useRef(null);                  // กล่องที่ขยายเต็มจอ = แถบสถานะ + iframe (ไม่ใช่ iframe เดี่ยว)
+  const featuresRef = useRef([]);               // ความสามารถของระบบชั่งรุ่นที่โหลด (จาก ready.features) เช่น 'print-label'
+  // ค่าล่าสุดสำหรับ handler ที่ผูกครั้งเดียว (listener 'message')
+  const latest = useRef({});
+  latest.current = { user, branchId, recipes, dispatch, state, weighLogs: state.weighLogs || [] };
+
+  const postToWeigh = (msg) => {
+    const fr = iframeRef.current;
+    if(!fr || !fr.contentWindow) return false;
+    try { fr.contentWindow.postMessage({ target:'weigh-system', ...msg }, '*'); return true; } catch(_e){ return false; }
+  };
+  const sendConfig = () => {
+    const { user:u, branchId:b, recipes:rs } = latest.current;
+    if(!u) return;
+    postToWeigh({ type:'config',
+      operator: u.name || u.username || '',
+      lockOperator: true,
+      branchId: b,
+      role: 'staff',
+      permissions: { recipes:'view', logs:'view', settings:'none', offSpec:true },
+      // 🆕 WEIGH UAT: unit 'ml' สำหรับปริมาตร (สถานีโชว์ "ตวงเป็นกรัม 1 มล.=1 ก.") · fixed = ไม่คูณตามตัวคูณ (scaleType 'fixed') · itemId ติดไปกับ log
+      recipes: rs.map(r => ({ id:r.id, code:r.code, name:r.name, items: r.items.map(i => ({ name:i.name, target:i.target, unit: i.unit === 'ml' ? 'ml' : 'g', tol:i.tol, ...(i.itemId ? { itemId:i.itemId } : {}), ...(i.fixed ? { fixed:true } : {}) })) })),
+      recipesMode: 'replace',   // ระบบชั่งรุ่นใหม่: ใช้รายการนี้แทนสูตรในเครื่อง (รุ่นเก่า ignore = รวมตาม id เหมือนเดิม)
+      // 🆕 WEIGH UAT: เกณฑ์เครื่องชั่งที่ ERP บังคับ (ทับค่าที่ถูกแก้จากโหมดเปิดเดี่ยวบนเครื่องเดียวกัน) — ไม่แตะ autoPrint (แท็บเล็ตตัดสินเองตามเครื่องพิมพ์ที่มี)
+      settings: WEIGH_FORCED_SETTINGS,
+    });
+  };
+  const handleFinished = async (log) => {
+    const { user:u, branchId:b, recipes:rs, dispatch:dp, weighLogs, state:st } = latest.current;
+    if(!log || !log.id || !u) return;
+    // แท็บเล็ตอาจส่งซ้ำ (reload/กลับมาที่หน้าเดิม) → reducer dedupe อยู่แล้ว แต่ไม่ต้องเด้ง toast ซ้ำ
+    const key = _weighLogKey(log);
+    if((weighLogs||[]).some(w => _weighLogKey(w) === key)) return;
+    const r = rs.find(x => x.id === log.recipeId) || null;
+    const bomId = r ? r.bomId : (String(log.recipeId||'').startsWith('bom:') ? String(log.recipeId).slice(4) : null);
+    // เติม itemId ให้แต่ละรายการจากสูตร (ระบบชั่งส่งมาแค่ชื่อ) → Step 3 ตัดสต๊อกตามน้ำหนักจริงได้
+    const items = (log.items||[]).map(it => {
+      const ri = r ? (r.items.find(x => x.name === it.name) || null) : null;
+      return { ...it, itemId: it.itemId || (ri && ri.itemId) || null };
+    });
+    const act = { type:'ADD_WEIGH_LOG', data:{ log:{ ...log, items, userId:u.id, lineId: r ? r.lineId : null, branchId:b, bomId }, by:u.username } };
+    // 🆕 WEIGH UAT (blocker): cloud ก่อน → ค่อยบันทึกในเครื่อง — ฉลากพิมพ์ไปแล้วแต่ log หายเพราะแพ้ conflict = สอบย้อน LOT ไม่ได้
+    setBusyLot(log.lot || ''); setLastMsg(null);
+    let okc = false;
+    try { okc = await _weighCommit(act, { key, lot: log.lot, branchId: b, user: u, dispatch: dp, fallbackState: st }); }
+    finally {
+      setBusyLot(''); setLastLot(log.lot || '');
+      const inQueue = _weighLoadReplay().some(x => x && x.key === key);
+      setLastMsg(okc && !inQueue ? { ok:true, text:`✅ ${log.lot || ''} บันทึกเข้าระบบแล้ว` } : inQueue ? { ok:false, text:`⚠️ ${log.lot || ''} ยังไม่ขึ้นระบบ — เก็บไว้ส่งซ้ำอัตโนมัติ (อย่าเพิ่งปิดเครื่อง)` } : { ok:false, text:`⛔ ${log.lot || ''} ระบบไม่รับ — แจ้งผจก.` });
+    }
+  };
+
+  useEffect(() => {
+    const onMsg = (ev) => {
+      const fr = iframeRef.current;
+      if(!fr || !ev.source || ev.source !== fr.contentWindow) return;   // รับเฉพาะจาก iframe ของเรา
+      const d = ev.data;
+      if(!d || typeof d !== 'object' || d.source !== 'weigh-system') return;
+      if(d.type === 'ready'){ readyRef.current = true; featuresRef.current = Array.isArray(d.features) ? d.features : []; setReady(true); setTimedOut(false); setWeighVersion(d.version || ''); sendConfig(); }
+      else if(d.type === 'finished'){ handleFinished(d.log); }
+      else if(d.type === 'reprinted' && d.log && d.log.id){ const { user:u, dispatch:dp } = latest.current; if(u) dp({ type:'MARK_WEIGH_REPRINT', data:{ deviceId: d.log.deviceId || '', id: d.log.id, by: u.username } }); }   // 🆕 พิมพ์ซ้ำจากประวัติในแท็บเล็ต → ร่องรอยใน ERP ด้วย
+      else if(d.type === 'height'){ const px = Number(d.px)||0; if(px > 0) setFrameH(Math.min(4000, Math.max(WEIGH_IFRAME_MIN_H, px + 8))); }
+      else if(d.type === 'scale'){ setScaleInfo({ connected: !!d.connected, device: d.device || null }); }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // src เปลี่ยน (โหลดใหม่) → รอ ready ใหม่ · ถ้าไม่มาใน 8 วิ = path ผิด/ไม่ใช่ Chrome
+  useEffect(() => {
+    readyRef.current = false; setReady(false); setTimedOut(false); setScaleInfo(null);
+    const t = setTimeout(() => { if(!readyRef.current) setTimedOut(true); }, WEIGH_READY_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, [src]);
+
+  // คน/สาขา/สูตรเปลี่ยน → ส่ง config ใหม่ (ระบบชั่งเก็บค่าล่าสุดที่ได้)
+  useEffect(() => { if(readyRef.current) sendConfig(); }, [user?.id, user?.name, branchId, recipesSig]);
+
+  // 🆕 WEIGH UAT: ผลชั่งที่ค้างจากรอบก่อน (conflict → reload / เน็ตหลุดกลางทาง) → บันทึกซ้ำให้ครั้งเดียวตอน mount (หน่วงให้ shell/toast พร้อม)
+  useEffect(() => {
+    const t = setTimeout(() => _weighReplayPending({ branchId, user, dispatch, fallbackState: latest.current.state }), 400);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const reprint = (log) => {
+    if(!log) return;
+    if(!readyRef.current){ _notify('ระบบชั่งยังไม่พร้อม — พิมพ์ซ้ำไม่ได้', 'warning'); return; }
+    // 🆕 WEIGH UAT: ระบบชั่ง ≥ 2026.09.18.1 รับ print-label → พิมพ์ฉลากจากข้อมูลใน ERP ทันที (เครื่องพิมพ์ที่ต่อกับเครื่องนี้ / หน้าจอพิมพ์) ไม่ต้องหาในประวัติของแท็บเล็ต
+    if((featuresRef.current||[]).includes('print-label')){
+      // 🆕 UAT (audit): ฉลากซ้ำระบุ "พิมพ์ซ้ำ" ที่หมายเหตุ + บันทึกร่องรอยบน log/auditLog (MARK_WEIGH_REPRINT)
+      const n = (log.reprints||[]).length + 1;
+      const ok = postToWeigh({ type:'print-label', copies:1, log:{ recipeName: log.recipeName || '', recipeCode: log.recipeCode || '', lot: log.lot || '', total: Number(log.total)||0,
+        operator: log.operator || '', ts: log.ts || Date.now(), note: (log.note ? log.note + ' · ' : '') + `พิมพ์ซ้ำ #${n}`, offSpec: !!log.offSpec, multiplier: log.multiplier || 1, items: log.items || [] } });
+      if(ok){ dispatch({ type:'MARK_WEIGH_REPRINT', data:{ deviceId: log.deviceId || '', id: log.id, by: user.username } }); _notify(`🖨️ ส่งพิมพ์ฉลาก ${log.lot || ''} แล้ว (สำเนา #${n})`, 'success'); return; }
+    }
+    const okSel = postToWeigh({ type:'select-recipe', recipeId: log.recipeId, code: log.recipeCode });
+    if(okSel){
+      _notify(`เปิดสูตร ${log.recipeName || log.recipeCode || ''} ในระบบชั่งแล้ว — พิมพ์ซ้ำจาก 📜 ประวัติ ของเครื่องได้เลย`, 'info');
+      try { iframeRef.current && iframeRef.current.scrollIntoView({ behavior:'smooth', block:'start' }); } catch(_e){}
+    }
+  };
+
+  const myLineNames = myLineIds.map(id => { const l = lines.find(x => x.id === id); return l ? `${l.icon||''} ${l.name}`.trim() : id; });
+
+  return h('div', { className:'space-y-3', 'data-weigh-tab':'1' },
+    // หัว: ไลน์ที่มอบหมาย · จำนวนสูตร · วัตถุดิบที่ชั่งไม่ได้
+    h('div', { className:'bg-white rounded-lg shadow p-3 text-sm' },
+      h('div', { className:'flex flex-wrap items-center justify-between gap-2' },
+        h('div', { className:'flex flex-wrap items-center gap-x-3 gap-y-1' },
+          h('span', { className:'font-bold text-gray-800' }, '⚖️ สถานีชั่ง'),
+          h('span', { className:'text-gray-600' },
+            seesAll ? 'ทุกไลน์ของสาขา' : (myLineNames.length ? 'ไลน์ที่มอบหมาย: ' + myLineNames.join(', ') : 'ยังไม่ได้มอบหมายไลน์ (เห็นเฉพาะสูตรที่ไม่ผูกไลน์)')),
+          h('span', { className:'px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 text-xs font-medium' }, `${recipes.length} สูตร`),
+          ready && h('span', { className:'text-xs text-green-700' }, `● พร้อม${weighVersion ? ' v' + weighVersion : ''}`),
+          busyLot && h('span', { className:'text-xs text-amber-700 animate-pulse' }, `⏳ กำลังส่ง ${busyLot}…`),
+          scaleInfo && h('span', { className: cls('text-xs', scaleInfo.connected ? 'text-green-700' : 'text-gray-500') },
+            scaleInfo.connected ? `🔗 เครื่องชั่ง: ${scaleInfo.device || 'ต่อแล้ว'}` : '⚪ ยังไม่ต่อเครื่องชั่ง'),
+        ),
+        canCreate && h('div', { className:'flex items-center gap-2' },
+          // 🆕 WEIGH UAT: "เปิดเต็มจอ" เดิมเป็นลิงก์ไป /weigh/ แบบเดี่ยว (ไม่มีสูตร ไม่มีชื่อผู้ชั่ง ผลไม่เข้า ERP) → พนักงานหลงไปชั่งนอกระบบ
+          //   ตอนนี้: ⛶ เต็มจอ = iframe นี้เอง (requestFullscreen · ผลยังเข้า ERP) · ลิงก์เปิดแยกเหลือให้ผจก.ทดสอบเครื่องเท่านั้น
+          h(Button, { variant:'secondary', size:'sm', title:'ขยายสถานีชั่งเต็มจอ (กด Esc เพื่อออก) — ผลชั่งยังบันทึกเข้า ERP ตามปกติ',
+            onClick:()=>{ const el = wrapRef.current || iframeRef.current; try { if(el && el.requestFullscreen) el.requestFullscreen(); else if(el && el.webkitRequestFullscreen) el.webkitRequestFullscreen(); else _notify('เบราว์เซอร์นี้ไม่รองรับเต็มจอ', 'warning'); } catch(_e){ _notify('เปิดเต็มจอไม่ได้: ' + (_e && _e.message), 'warning'); } } }, '⛶ เต็มจอ'),
+          seesAll && h('a', { href: baseUrl, target:'_blank', rel:'noopener', className:'text-xs text-gray-500 hover:underline', title:'เปิดระบบชั่งแบบเดี่ยว (ทดสอบเครื่องชั่ง/เครื่องพิมพ์) — ไม่มีสูตรจาก ERP และผลชั่งไม่เข้า ERP' }, '↗ ทดสอบเครื่อง (แยกหน้าต่าง)'),
+          h(Button, { variant:'secondary', size:'sm', onClick:()=>setReloadKey(k => k + 1), title:'โหลดระบบชั่งใหม่ (สูตร/ชื่อผู้ชั่งจะถูกส่งให้ใหม่)' }, '🔄 โหลดใหม่'),
+        )
+      ),
+      recipes.length === 0 && h('div', { className:'mt-2 px-3 py-2 rounded border border-amber-200 bg-amber-50 text-amber-900 text-xs' },
+        'ยังไม่มีสูตรชั่งสำหรับคุณ — ผจก.ผลิต/GM สร้าง BOM แล้วกด "⚖️ เพิ่มขั้นชั่ง" ในสูตรของไลน์นี้ (แท็บ 🧪 สูตร BOM) หรือกำหนดไลน์ให้ผู้ใช้ที่ ตั้งค่า → ผู้ใช้'),
+      skippedHints.length > 0 && h('details', { className:'mt-2 text-xs' },
+        h('summary', { className:'cursor-pointer text-amber-800' }, `⚠️ วัตถุดิบที่ชั่งไม่ได้ (นับชิ้น/หน่วยแปลงเป็นกรัมไม่ได้) ${skippedHints.reduce((n,r)=>n+r.skipped.length,0)} รายการ — ข้ามในสถานีชั่ง`),
+        h('ul', { className:'mt-1 ml-4 list-disc text-gray-600 space-y-0.5' },
+          skippedHints.map(r => h('li', { key:r.id }, h('b', null, r.name), ': ', r.skipped.join(', '),
+            ' · ', h('span', { className:'text-gray-400' }, 'ตั้งหน่วยฐานเป็นกรัม/กก. ที่ทะเบียนสินค้า หรือติ๊ก "ชั่ง" ออกใน BOM'))))
+      ),
+    ),
+
+    // iframe ระบบชั่ง (เฉพาะคนมีสิทธิ์ชั่ง)
+    canCreate
+      ? h('div', { ref: wrapRef, className:'bg-white rounded-lg shadow overflow-hidden', style:{ display:'flex', flexDirection:'column' } },
+          // 🆕 UAT: แถบสถานะของ ERP อยู่ในกล่องเดียวกับ iframe → เห็นแม้เต็มจอ (toast ของ ERP อยู่นอกกล่อง จะถูกบัง)
+          (busyLot || lastMsg) && h('div', { className: cls('px-3 py-1.5 text-sm border-b font-medium', busyLot ? 'bg-amber-50 text-amber-900' : lastMsg.ok ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'), 'data-weigh-status':'1', role:'status' },
+            busyLot ? `⏳ กำลังส่งผลชั่ง ${busyLot} ขึ้นระบบ… (อย่าเพิ่งปิดหน้า)` : lastMsg.text,
+            !busyLot && h('button', { type:'button', onClick:()=>setLastMsg(null), className:'ml-2 text-xs text-gray-500' }, '✕')),
+          !ready && !timedOut && h('div', { className:'px-3 py-2 text-xs text-gray-500 border-b bg-gray-50' }, '⏳ กำลังเปิดระบบชั่ง…'),
+          timedOut && !ready && h('div', { className:'px-3 py-2 text-sm text-red-800 bg-red-50 border-b border-red-200' },
+            h('div', { className:'font-medium' }, '⚠️ เปิดระบบชั่งไม่ได้ — ตรวจ URL ตั้งค่า → weighUrl / ต้องใช้ Chrome Android'),
+            h('div', { className:'text-xs mt-0.5' },
+              'ค่าปัจจุบัน: ', h('code', { className:'bg-white px-1 rounded' }, baseUrl), ' · ',
+              h('a', { href: baseUrl, target:'_blank', rel:'noopener', className:'text-blue-700 underline' }, 'ลองเปิด URL นี้ในแท็บใหม่'),
+              ' · ', h('button', { type:'button', onClick:()=>setReloadKey(k => k + 1), className:'text-blue-700 underline' }, 'โหลดใหม่'))),
+          h('iframe', { key:src, ref:iframeRef, src, title:'ระบบชั่งวัดตวง',
+            allow:'usb; bluetooth; serial; screen-wake-lock',
+            style:{ width:'100%', height: frameH + 'px', minHeight: WEIGH_IFRAME_MIN_H + 'px', border:0, display:'block', background:'#f1f5f9', flex:'1 1 auto' } })
+        )
+      : h('div', { className:'bg-gray-50 border rounded-lg p-3 text-sm text-gray-600' },
+          '🔒 คุณดูประวัติชั่งได้อย่างเดียว (ต้องมีสิทธิ์ "สถานีชั่ง → create" จึงจะชั่ง/ออก LOT ได้)'),
+
+    h(WeighHistory, { state, dispatch, user, branchId, seesAll, lines, onReprint: canCreate ? reprint : null, lastLot })
+  );
+}
+
+// ---------- 📜 ประวัติชั่ง (state.weighLogs — เก็บกลาง ดูได้จากทุกเครื่อง) ----------
+function WeighHistory({ state, dispatch, user, branchId, seesAll, lines, onReprint, lastLot }){
+  const { startDate, setStartDate, endDate, setEndDate } = useDateRange(30);
+  const [lineFilter, setLineFilter] = useState('all');
+  const [q, setQ] = useState('');
+  const [onlyOff, setOnlyOff] = useState(false);
+  // 🆕 WEIGH UAT: ผจก. (weighSeesAll) ตัดสินชุดนอกเกณฑ์ในหน้านี้เลย — ใช้ต่อ / ชั่งใหม่ / คัดทิ้ง (REVIEW_WEIGH_LOG → reviewedBy/At + disposition + audit weigh_review)
+  //   checklist prod_weigh_offspec_unreviewed นับเฉพาะที่ยังไม่ตัดสิน → กดแล้วรายการหายจากงานค้าง
+  const canReview = !!dispatch && seesAll && !!user;
+  const canReviewLog = (w) => canReview && (isSuperUser(user) || !w.userId || w.userId !== user.id);   // 🆕 แบ่งแยกหน้าที่: ผู้ชั่งไม่ตัดสินชุดของตัวเอง (reducer กันด้วย)
+  const DISPO = { use:'✔ ใช้ต่อ', reweigh:'↩ ชั่งใหม่', scrap:'🗑 คัดทิ้ง' };
+  const review = (w, disposition) => {
+    const label = DISPO[disposition];
+    const note = prompt(`${label} — LOT ${w.lot || w.id}\nหมายเหตุ (${disposition === 'use' ? 'ไม่บังคับ' : 'บอกหัวหน้าไลน์ว่าต้องทำอะไรต่อ'}):`, '');
+    if(note === null) return;
+    if(disposition !== 'use' && !String(note).trim()){ _notify('ต้องใส่หมายเหตุสำหรับ ชั่งใหม่/คัดทิ้ง', 'warning'); return; }
+    dispatch({ type:'REVIEW_WEIGH_LOG', data:{ deviceId: w.deviceId || '', id: w.id, disposition, note: String(note).trim(), by: user.username, bySuper: isSuperUser(user) && w.userId === user.id } });
+    _notify(`${label} · LOT ${w.lot || w.id} บันทึกแล้ว`, 'success');
+  };
+  const users = state.users || [];
+  const userName = (id, fallback) => { const u = users.find(x => x.id === id) || (fallback && users.find(x => x.username === fallback)); return (u && (u.name || u.username)) || fallback || '-'; };
+  const lineName = (id) => { const l = (lines||[]).find(x => x.id === id); return l ? `${l.icon||''} ${l.name}`.trim() : (id || '-'); };
+
+  const logs = useMemo(() => {
+    const ql = q.trim().toLowerCase();
+    return (state.weighLogs || [])
+      .filter(w => !branchId || !w.branchId || w.branchId === branchId)
+      .filter(w => seesAll || w.userId === user?.id)
+      .filter(w => inDateRange(weighIsoDate(w.ts), startDate, endDate))
+      .filter(w => lineFilter === 'all' || (w.lineId || '') === lineFilter)
+      .filter(w => !onlyOff || w.offSpec)
+      .filter(w => !ql || [w.lot, w.recipeName, w.recipeCode, w.operator, userName(w.userId, '')].some(v => String(v||'').toLowerCase().includes(ql)))
+      .sort((a,b) => (Number(b.ts)||0) - (Number(a.ts)||0));
+  }, [state.weighLogs, branchId, seesAll, user?.id, startDate, endDate, lineFilter, onlyOff, q]);
+  const pg = usePaged(logs, 50);
+  const offCount = logs.filter(w => w.offSpec).length;
+  const unreviewed = logs.filter(w => w.offSpec && !w.reviewedAt).length;
+  const reprintTag = (w) => (w.reprints||[]).length ? h('span', { className:'ml-1 text-[10px] text-gray-500', title:(w.reprints||[]).map(r => `${r.by} ${weighTs(r.ts)}`).join('\n') }, `🖨️×${w.reprints.length}`) : null;
+
+  const doExport = () => {
+    const rows = [['วันที่/เวลา','LOT','รหัสสูตร','สูตร','ไลน์','ผู้ชั่ง','ผู้ใช้ ERP','รวม (g)','ตัวคูณ','นอกเกณฑ์','รายการนอกเกณฑ์/เหตุผล','เครื่องชั่ง','อุปกรณ์','หมายเหตุ','การตัดสิน (ผจก.)','ผู้ตัดสิน','หมายเหตุผจก.']];
+    logs.forEach(w => rows.push([
+      weighTs(w.ts), w.lot, w.recipeCode, w.recipeName, lineName(w.lineId), w.operator || userName(w.userId), userName(w.userId, ''),
+      Number(w.total)||0, w.multiplier || 1, w.offSpec ? 'ใช่' : '',
+      (w.items||[]).filter(i => i.offSpec || i.pass === false).map(i => `${i.name} ${i.value}/${i.target}g${i.reason ? ' (' + i.reason + ')' : ''}`).join(' | '),
+      w.scaleMode || '', w.scaleDevice || '', w.note || '',
+      w.reviewedAt ? (DISPO[w.disposition] || w.disposition || '') : (w.offSpec ? 'ยังไม่ตัดสิน' : ''), w.reviewedBy || '', w.reviewNote || '',
+    ]));
+    exportCSV(`weigh-logs_${startDate}_${endDate}.csv`, rows);
+  };
+
+  return h('div', { className:'bg-white rounded-lg shadow p-3', 'data-weigh-history':'1' },
+    h('div', { className:'flex flex-wrap items-center justify-between gap-2 mb-2' },
+      h('div', { className:'font-bold text-gray-800' }, '📜 ประวัติชั่ง ',
+        h('span', { className:'text-xs font-normal text-gray-500' }, seesAll ? '(ทุกไลน์ของสาขา)' : '(เฉพาะที่คุณชั่ง)'),
+        ' ', h('span', { className:'text-xs font-normal text-gray-500' }, `${logs.length} ชุด`),
+        offCount > 0 && h('span', { className:'ml-1 text-xs font-medium text-amber-700' }, `· ⚠️ นอกเกณฑ์ ${offCount}`),
+        unreviewed > 0 && canReview && h('span', { className:'ml-1 text-xs font-medium text-red-700' }, `· ยังไม่ตัดสิน ${unreviewed}`),
+        lastLot && h('span', { className:'ml-2 text-xs font-normal text-green-700' }, `ล่าสุด: ${lastLot}`)),
+      h('div', { className:'flex gap-2' },
+        h(Button, { variant:'secondary', size:'sm', onClick:doExport, disabled:logs.length === 0 }, '📥 CSV'))
+    ),
+    h('div', { className:'flex flex-wrap gap-2 items-center mb-2' },
+      h(DateRangeBar, { startDate, setStartDate, endDate, setEndDate, showAll:true }),
+      (lines||[]).length > 1 && h('select', { value:lineFilter, onChange:e=>setLineFilter(e.target.value), className:'px-2 py-1 border rounded text-xs' },
+        h('option', { value:'all' }, 'ทุกไลน์'),
+        h('option', { value:'' }, '— ไม่ระบุไลน์ —'),
+        (lines||[]).map(l => h('option', { key:l.id, value:l.id }, `${l.icon||'⚙️'} ${l.name}`))),
+      h('input', { type:'search', value:q, onChange:e=>setQ(e.target.value), placeholder:'🔍 LOT / สูตร / ผู้ชั่ง', className:'px-2 py-1 border rounded text-xs' }),
+      h('label', { className:'text-xs flex items-center gap-1 cursor-pointer' },
+        h('input', { type:'checkbox', checked:onlyOff, onChange:e=>setOnlyOff(e.target.checked) }), '⚠️ เฉพาะนอกเกณฑ์'),
+    ),
+    logs.length === 0
+      ? h('div', { className:'text-center text-gray-400 text-sm py-6' }, 'ยังไม่มีผลชั่งในช่วงนี้')
+      : h('div', { className:'overflow-x-auto' },
+          h('table', { className:'w-full text-xs min-w-[720px]' },
+            h('thead', { className:'bg-gray-50 border-b' },
+              h('tr', null,
+                h('th', { className:'px-2 py-1 text-left' }, 'วันที่/เวลา'),
+                h('th', { className:'px-2 py-1 text-left' }, 'LOT'),
+                h('th', { className:'px-2 py-1 text-left' }, 'สูตร'),
+                h('th', { className:'px-2 py-1 text-left' }, 'ไลน์'),
+                h('th', { className:'px-2 py-1 text-left' }, 'ผู้ชั่ง'),
+                h('th', { className:'px-2 py-1 text-right' }, 'รวม (g)'),
+                h('th', { className:'px-2 py-1 text-left' }, 'ผล'),
+                h('th', { className:'px-2 py-1' }))),
+            h('tbody', { className:'divide-y' },
+              pg.shown.map(w => {
+                const offItems = (w.items||[]).filter(i => i.offSpec || i.pass === false);
+                return h('tr', { key:(w.deviceId||'') + '|' + w.id, className: w.offSpec ? 'bg-amber-50/40' : '' },
+                  h('td', { className:'px-2 py-1 whitespace-nowrap' }, weighTs(w.ts)),
+                  h('td', { className:'px-2 py-1 font-mono whitespace-nowrap' }, w.lot || '-', reprintTag(w)),
+                  h('td', { className:'px-2 py-1' }, w.recipeName || '-', w.recipeCode && h('span', { className:'ml-1 text-gray-400 font-mono' }, w.recipeCode),
+                    (w.multiplier||1) !== 1 && h('span', { className:'ml-1 text-indigo-700' }, `×${w.multiplier}`)),
+                  h('td', { className:'px-2 py-1 whitespace-nowrap' }, lineName(w.lineId)),
+                  h('td', { className:'px-2 py-1' }, w.operator || userName(w.userId)),
+                  h('td', { className:'px-2 py-1 text-right font-mono' }, fmtNum(w.total)),
+                  h('td', { className:'px-2 py-1' },
+                    w.offSpec
+                      ? h('div', null,
+                          h('span', { className:'inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-medium' }, '⚠️ นอกเกณฑ์'),
+                          offItems.length > 0 && h('div', { className:'text-[11px] text-amber-800 mt-0.5' },
+                            offItems.map((i, k) => h('div', { key:k }, `${i.name}: ${fmtNum(i.value)}/${fmtNum(i.target)} g`, i.reason ? ` — ${i.reason}` : ''))),
+                          // การตัดสินของผจก. / ปุ่มตัดสิน
+                          w.reviewedAt
+                            ? h('div', { className: cls('text-[11px] mt-0.5 font-medium', w.disposition === 'use' ? 'text-green-700' : w.disposition === 'scrap' ? 'text-red-700' : 'text-indigo-700'), title: w.reviewNote || '' },
+                                DISPO[w.disposition] || w.disposition, ' · ', userName(null, w.reviewedBy), w.reviewNote ? ` — ${w.reviewNote}` : '')
+                            : canReview && !canReviewLog(w) ? h('div', { className:'text-[11px] text-gray-500 mt-0.5' }, 'ชุดของคุณเอง — ให้ผจก.คนอื่นตัดสิน')
+                            : canReview && h('div', { className:'flex gap-1 mt-1 flex-wrap', 'data-weigh-review':'1' },
+                                Object.keys(DISPO).map(k => h('button', { key:k, type:'button', onClick:()=>review(w, k),
+                                  className: cls('px-1.5 py-0.5 rounded border text-[11px]', k === 'use' ? 'border-green-300 bg-green-50 text-green-800' : k === 'scrap' ? 'border-red-300 bg-red-50 text-red-800' : 'border-indigo-300 bg-indigo-50 text-indigo-800') }, DISPO[k]))))
+                      : h('span', { className:'text-green-700' }, '✓ ผ่าน'),
+                    w.scaleMode === 'mock' && h('span', { className:'ml-1 inline-block px-1.5 py-0.5 rounded bg-gray-200 text-gray-700 text-[10px]', title:'ชั่งด้วยเครื่องจำลอง (ทดสอบ) ไม่ใช่ของจริง' }, 'mock')),
+                  h('td', { className:'px-2 py-1 text-right whitespace-nowrap' },
+                    onReprint && h('button', { type:'button', onClick:()=>onReprint(w), title:'เปิดสูตรนี้ในระบบชั่ง (พิมพ์ฉลากซ้ำจากประวัติในเครื่อง)',
+                      className:'text-blue-600 hover:underline' }, '🖨️ พิมพ์ซ้ำ'))
+                );
+              }))
+          ),
+          h(Pager, { pg, label:'ผลชั่ง' })
+        )
+  );
+}
+
+// ---------- 👁️ ดูสูตรชั่ง (จาก BOM) — รายการเป็นกรัม + ที่ข้าม ----------
+function WeighRecipePreviewModal({ bom, state, onClose }){
+  const r = weighRecipeFromBom(state, bom);
+  const total = (r?.items||[]).reduce((s,i) => s + (Number(i.target)||0), 0);
+  return h(Modal, { isOpen:true, title:`⚖️ สูตรชั่ง: ${bom.name || bom.productName || ''}`, onClose, size:'md' },
+    !r ? h('div', { className:'text-sm text-gray-500' }, 'ไม่มีข้อมูล') :
+    h('div', { className:'space-y-2 text-sm' },
+      h('div', { className:'text-xs text-gray-500' }, 'รหัส LOT: ', h('b', { className:'font-mono text-gray-800' }, r.code), ' · id ', h('code', null, r.id)),
+      r.items.length === 0
+        ? h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 text-amber-900 text-xs' }, 'ไม่มีวัตถุดิบที่ชั่งได้ — สูตรนี้จะไม่แสดงในสถานีชั่ง')
+        : h('table', { className:'w-full text-xs' },
+            h('thead', { className:'bg-gray-50' }, h('tr', null,
+              h('th', { className:'px-2 py-1 text-left' }, 'วัตถุดิบ'),
+              h('th', { className:'px-2 py-1 text-right' }, 'เป้า (g)'),
+              h('th', { className:'px-2 py-1 text-right' }, '± (g)'))),
+            h('tbody', { className:'divide-y' },
+              r.items.map((i, k) => h('tr', { key:k },
+                h('td', { className:'px-2 py-1' }, i.name),
+                h('td', { className:'px-2 py-1 text-right font-mono' }, fmtNum(i.target)),
+                h('td', { className:'px-2 py-1 text-right font-mono text-gray-600' }, i.tol,
+                  // 🆕 WEIGH UAT: เกณฑ์แคบผิดปกติ (< 0.1% ของเป้า) = น่าจะกรอกเป็น กก. แทนกรัม → เตือนก่อนไปโผล่ที่สถานีชั่ง
+                  Number(i.tol) > 0 && Number(i.tol) < Number(i.target) * 0.001 && h('span', { className:'ml-1 text-amber-700', title:'เกณฑ์แคบผิดปกติ — ใส่ผิดหน่วย? (weighTolerance เป็นกรัม)' }, '⚠️')))),
+              h('tr', { className:'bg-gray-50 font-medium' },
+                h('td', { className:'px-2 py-1' }, 'รวม'),
+                h('td', { className:'px-2 py-1 text-right font-mono' }, fmtNum(total)),
+                h('td', null)))),
+      r.skipped.length > 0 && h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 text-xs text-amber-900' },
+        '⚠️ ข้าม (ชั่งไม่ได้): ', r.skipped.join(', '),
+        h('div', { className:'text-amber-700 mt-0.5' }, 'ตั้งหน่วยฐานของสินค้าเป็นกรัม/กก./มล. หรือเอาติ๊ก "ชั่ง" ออกใน BOM')),
+      h('div', { className:'flex justify-end pt-2 border-t' }, h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'))
+    ));
+}
+
+// ---------- 📥 นำเข้าสูตรชั่งจากไฟล์ (weigh-seeds.json / weighing-backup-*.json) → BOM + สินค้า ----------
+// สูตรเดิมมีแต่ "ชื่อวัตถุดิบ" → ต้อง map เข้าทะเบียนสินค้า (เลือกที่มี หรือสร้างใหม่เป็นวัตถุดิบหน่วยกรัม)
+// ผลผลิต = สินค้า WIP ใหม่ชื่อเดียวกับสูตร (หรือเลือกสินค้าที่มี) · BOM ไลน์ชั่ง (pl_weigh) + ขั้น ⚖️ ชั่ง · weighCode = code เดิม (กันนำเข้าซ้ำ)
+const WEIGH_NEW = '__new__';
+function weighNormName(s){ return String(s||'').toLowerCase().replace(/\s+/g,'').replace(/[()\-_.·]/g,''); }
+function weighOpFromTemplate(state, existingCount){
+  const tpl = (state.operationTemplates||[]).find(t => t.id === 'opt_weigh') || {};
+  return {
+    id: 'op_' + Date.now().toString(36) + Math.random().toString(36).slice(2,4),
+    seq: 1, name: 'ชั่งตามสูตร', stationType: tpl.stationType || 'weigh',
+    paramSource: tpl.paramSource || 'from_bom_materials',
+    mustHandoff: tpl.defaultMustHandoff === true,
+    expectedTimeMin: tpl.defaultExpectedTimeMin || 15,
+    isQcEndPoint: !(existingCount > 0),   // เป็นขั้นเดียว → เป็นปลายไลน์ไปก่อน (มีขั้นอื่นแล้ว → ขั้นสุดท้ายเดิมยังเป็น QC end)
+    templateId: 'opt_weigh',
+    verification: { params: [] },
+  };
+}
+function WeighSeedImportModal({ state, dispatch, user, branchId, onClose }){
+  const items = (state.items||[]).filter(i => i.active !== false);
+  const lines = getBranchLines(state, branchId);
+  // รหัสที่ถือว่า "นำเข้าแล้ว" = BOM ที่ยังเปิดใช้เท่านั้น (ปิดใช้แล้วนำเข้าใหม่ได้ — สำเนาใหม่ไม่ชนรหัสเพราะ weighRecipesFor กรอง active)
+  const importedCodes = new Set((state.boms||[]).filter(b => b && b.active !== false).map(b => String(b.weighCode||'').toUpperCase()).filter(Boolean));
+  // 🆕 WEIGH UAT: สูตรมาจากไฟล์ที่ผจก.เลือก (ไม่ฝังในโค้ด) — [ {code,name,items} ] หรือ { recipes:[…] } (สำรองข้อมูลของระบบชั่ง)
+  const [seeds, setSeeds] = useState([]);
+  const [fileName, setFileName] = useState('');
+  const [fileErr, setFileErr] = useState('');
+  const defaultLine = (lines.find(l => l.id === 'pl_weigh') || lines.find(l => l.dept === 'weigh') || lines[0] || {}).id || '';
+  const [lineId, setLineId] = useState(defaultLine);
+
+  // ผลผลิตของแต่ละสูตร: WEIGH_NEW = สร้าง WIP ใหม่ · หรือเลือกสินค้าที่มี (WIP/กึ่งสำเร็จ/FG)
+  const outCandidates = items.filter(i => ['wip','semi_fg','finished'].includes(i.type));
+  // จับคู่ชื่อวัตถุดิบ → สินค้า: ชื่อตรง → ใช้เลย · คล้ายกันตัวเดียว → ใช้ · คล้ายหลายตัว (กำกวม) → ให้เลือกเอง (แสดงรายชื่อที่คล้าย) · ไม่พบ → สร้างใหม่
+  const similar = (nm) => items.filter(i => i.type === 'material' && (weighNormName(i.name).includes(weighNormName(nm)) || weighNormName(nm).includes(weighNormName(i.name))));
+  const prefill = (nm) => {
+    const exact = items.find(i => i.name === nm) || items.find(i => weighNormName(i.name) === weighNormName(nm));
+    if(exact) return exact.id;
+    const contains = similar(nm);
+    return contains.length === 1 ? contains[0].id : WEIGH_NEW;
+  };
+  // เลือกสูตรที่จะนำเข้า (ตัดที่นำเข้าแล้วออก) · map ชื่อวัตถุดิบ → itemId (ค่าเดียวกันใช้ร่วมทุกสูตร: เกลือ = ตัวเดียว) · ผลผลิตต่อสูตร
+  const [picked, setPicked] = useState({});
+  const [ingMap, setIngMap] = useState({});
+  const [outMap, setOutMap] = useState({});
+  const [fuzzy, setFuzzy] = useState({});   // 🆕 UAT: ชื่อที่จับคู่จาก "ชื่อคล้ายตัวเดียว" (เดา) → ป้ายให้ตรวจก่อนนำเข้า
+  const ingNames = useMemo(() => { const set = []; seeds.forEach(s => (s.items||[]).forEach(i => { if(!set.includes(i.name)) set.push(i.name); })); return set; }, [seeds]);
+  const loadSeeds = (list) => {
+    setSeeds(list);
+    setPicked(Object.fromEntries(list.map(s => [s.code, !importedCodes.has(String(s.code).toUpperCase())])));
+    const names = []; list.forEach(s => (s.items||[]).forEach(i => { if(!names.includes(i.name)) names.push(i.name); }));
+    const fz = {};
+    names.forEach(n => { const exact = items.find(i => i.name === n) || items.find(i => weighNormName(i.name) === weighNormName(n)); if(!exact && similar(n).length === 1) fz[n] = similar(n)[0].name; });
+    setFuzzy(fz);
+    setIngMap(Object.fromEntries(names.map(n => [n, prefill(n)])));
+    setOutMap(Object.fromEntries(list.map(s => { const ex = outCandidates.find(i => i.name === s.name); return [s.code, ex ? ex.id : WEIGH_NEW]; })));
+  };
+  const onFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if(!f) return;
+    setFileErr('');
+    const rd = new FileReader();
+    rd.onerror = () => setFileErr('อ่านไฟล์ไม่ได้');
+    rd.onload = () => { try { loadSeeds(weighParseSeedFile(String(rd.result||''))); setFileName(f.name); } catch(err){ setSeeds([]); setFileName(f.name); setFileErr(err.message || String(err)); } };
+    rd.readAsText(f);
+  };
+  // สินค้าที่เลือกไว้ไม่มีหน่วยน้ำหนัก → บรรทัด BOM จะใช้ 'กรัม' ที่ไม่อยู่ใน units ของสินค้า (ชั่งได้ แต่ควรแก้ทะเบียนสินค้า)
+  const unitWarn = (itemId) => { if(!itemId || itemId === WEIGH_NEW) return false; const it = items.find(i => i.id === itemId); return !!it && !weighMatQtyUnit(it, 100).ok; };
+
+  const itemOpts = useMemo(() => [{ id:WEIGH_NEW, name:'➕ สร้างสินค้าใหม่ (วัตถุดิบ · หน่วยกรัม)', code:'' }, ...items.filter(i => i.type !== 'finished')], [items]);
+  const outOpts = useMemo(() => [{ id:WEIGH_NEW, name:'➕ สร้างสินค้า WIP ใหม่ (ชื่อเดียวกับสูตร)', code:'' }, ...outCandidates], [items]);
+  const optLabel = (o) => o.id === WEIGH_NEW ? o.name : `${o.code ? o.code + ' · ' : ''}${o.name}${o.type ? ' (' + o.type + ')' : ''}`;
+  const optSearch = (o) => `${o.code||''} ${o.name||''}`;
+
+  const toImport = seeds.filter(s => picked[s.code] && !importedCodes.has(String(s.code).toUpperCase()));
+  const newIngNames = ingNames.filter(n => ingMap[n] === WEIGH_NEW && toImport.some(s => (s.items||[]).some(i => i.name === n)));
+  const newOutCount = toImport.filter(s => outMap[s.code] === WEIGH_NEW).length;
+
+  const nextCode = (prefix, used) => {
+    let n = ((state.items||[]).filter(i => String(i.code||'').startsWith(prefix + '-')).length) + 1;
+    let c = `${prefix}-${String(n).padStart(3,'0')}`;
+    while(used.has(c) || (state.items||[]).some(i => i.code === c)){ n++; c = `${prefix}-${String(n).padStart(3,'0')}`; }
+    used.add(c); return c;
+  };
+  const mkItem = (name, type, code) => {
+    const stockByBranch = {}; (state.branches||[]).forEach(b => { stockByBranch[b.id] = 0; });
+    return { id: genId('i'), code, name, barcode:'', type, groupId:'', issueUnit:'กรัม',
+      units:[{ name:'กรัม', isBase:true, toBase:1, purposes:['stock','bom','transfer'] }],
+      minStock:0, maxStock:0, costPrice:0, salePrice:0, shelfLife:0, shelf:'', defaultSupplierId:'', tags:[], active:true, stockByBranch,
+      trayConfig:null, weighMode:'either', zeroTolerance:0, stableSeconds:1, displayUnit:'', displayUnitByDept:{}, displayUnitByLocType:{}, suppliers:[],
+      createdAt: Date.now(), createdBy: user?.username || '' };
+  };
+
+  const doImport = () => {
+    if(!toImport.length) return alert('ไม่มีสูตรที่จะนำเข้า (เลือกอย่างน้อย 1 สูตร)');
+    if(!lineId) return alert('เลือกไลน์สำหรับ BOM');
+    const fuzzyUsed = Object.keys(fuzzy).filter(n => ingMap[n] !== WEIGH_NEW && toImport.some(s => (s.items||[]).some(i => i.name === n)));
+    const ambiguousNew = newIngNames.filter(n => similar(n).length > 1);
+    if(!confirm(`นำเข้า ${toImport.length} สูตร → สร้าง BOM ${toImport.length} สูตร` + (newIngNames.length ? ` · วัตถุดิบใหม่ ${newIngNames.length} ตัว (${newIngNames.join(', ')})` : '') + (newOutCount ? ` · สินค้า WIP ใหม่ ${newOutCount} ตัว` : '')
+      + (fuzzyUsed.length ? `\n🔎 จับคู่จากชื่อคล้าย ${fuzzyUsed.length} ชื่อ: ${fuzzyUsed.map(n => `${n}→${fuzzy[n]}`).join(', ')}` : '')
+      + (ambiguousNew.length ? `\n⚠️ ชื่อกำกวมที่จะสร้างใหม่ทั้งที่มีของคล้ายในทะเบียน ${ambiguousNew.length} ชื่อ: ${ambiguousNew.join(', ')} (เสี่ยงทะเบียนซ้ำ)` : '')
+      + '\n\nดำเนินการ?')) return;
+    const used = new Set();
+    const now = Date.now();
+    const createdIng = {};   // name → itemId (สร้างครั้งเดียวต่อชื่อ)
+    newIngNames.forEach(n => { const it = mkItem(n, 'material', nextCode('RM', used)); createdIng[n] = it.id; dispatch({ type:'ADD_ITEM', data: it }); });
+    let made = 0;
+    toImport.forEach(seed => {
+      let productId = outMap[seed.code], productName;
+      if(productId === WEIGH_NEW){
+        const wip = mkItem(seed.name, 'wip', nextCode('WIP', used));
+        dispatch({ type:'ADD_ITEM', data: wip });
+        productId = wip.id; productName = wip.name;
+      } else {
+        const ex = items.find(i => i.id === productId); productName = ex ? ex.name : seed.name;
+      }
+      const materials = (seed.items||[]).map(i => {
+        const itemId = ingMap[i.name] === WEIGH_NEW ? createdIng[i.name] : ingMap[i.name];
+        const grams = Number(i.target)||0;   // weighParseSeedFile normalize เป็นกรัมแล้ว
+        const tolG = Number(i.tol)||0;
+        // 🆕 WEIGH UAT: ใช้หน่วยน้ำหนักของสินค้าเอง (กก. → qty/1000) ให้บรรทัด BOM ตัดสต๊อก/แปลงได้ใน Step 3 · สินค้าใหม่ = กรัม
+        const it = items.find(x => x.id === itemId);
+        const qu = it ? weighMatQtyUnit(it, grams) : { qty: grams, unit:'กรัม', ok:true };
+        return { itemId, qty: qu.qty, unit: qu.unit, note: i.name, weighRequired:true,
+          weighTolerance: tolG > 0 ? tolG : weighDefaultTolG(grams), scaleType: i.fixed ? 'fixed' : 'proportional', _g: grams };
+      }).filter(m => m.itemId && m.qty > 0);
+      const yieldQty = materials.reduce((s,m) => s + (m._g || 0), 0);
+      materials.forEach(m => { delete m._g; });
+      const bom = {
+        id: genId('bom'), name: seed.name, createdBranch: branchId, availableIn:[branchId], lineId,
+        outputs:[{ productId, productName, qty: yieldQty, unit:'กรัม' }],
+        productId, productName, yieldQty, yieldUnit:'กรัม',
+        materials, laborCost:0, overheadCost:0, prepTimeMin:15,
+        operations:[weighOpFromTemplate(state, 0)],
+        notes:`นำเข้าจากสูตรชั่งเดิม (${seed.id})`, weighCode: String(seed.code).toUpperCase(),
+        active:true, createdBy: user?.username || '', createdAt: now,
+      };
+      dispatch({ type:'ADD_BOM', data: bom }); made++;
+    });
+    _notify(`นำเข้าสูตรชั่งเดิม ${made} สูตรแล้ว — เห็นในสถานีชั่งของไลน์ ${(lines.find(l => l.id === lineId)||{}).name || lineId}`, 'success');
+    onClose();
+  };
+
+  return h(Modal, { isOpen:true, title:`📥 นำเข้าสูตรชั่งจากไฟล์${seeds.length ? ` (${seeds.length} สูตร)` : ''}`, onClose, size:'xl' },
+    h('div', { className:'space-y-3 text-sm' },
+      h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-900' },
+        'เลือกไฟล์สูตรชั่ง (JSON): weigh-seeds.json ของระบบชั่งเดิม หรือไฟล์ "สำรองข้อมูล" จากแท็บเล็ต (ตั้งค่า → สำรองข้อมูล ในระบบชั่ง) · สูตรมีแต่ "ชื่อวัตถุดิบ" — จับคู่กับทะเบียนสินค้าให้ครบ (หรือสร้างใหม่เป็นวัตถุดิบหน่วยกรัม) แล้วระบบจะสร้าง BOM ที่มีขั้น ⚖️ ชั่ง ให้ · ผลผลิต = สินค้า WIP ชื่อเดียวกับสูตร · สูตรที่นำเข้าแล้ว (รหัสชั่งซ้ำ) จะถูกข้าม'),
+      h('div', { className:'flex flex-wrap items-center gap-2', 'data-weigh-seed-file':'1' },
+        h('label', { className:'text-xs font-medium' }, 'ไฟล์สูตร:'),
+        h('input', { type:'file', accept:'.json,application/json', onChange:onFile, className:'text-xs' }),
+        fileName && !fileErr && h('span', { className:'text-xs text-green-700' }, `✓ ${fileName} · ${seeds.length} สูตร`),
+        fileErr && h('span', { className:'text-xs text-red-700' }, `⛔ ${fileName}: ${fileErr}`)),
+      seeds.length > 0 && h('div', { className:'flex flex-wrap items-center gap-2' },
+        h('label', { className:'text-xs font-medium' }, 'ไลน์ของ BOM:'),
+        h('select', { value:lineId, onChange:e=>setLineId(e.target.value), className:'px-2 py-1 border rounded text-xs' },
+          lines.map(l => h('option', { key:l.id, value:l.id }, `${l.icon||'⚙️'} ${l.name}`))),
+        h('span', { className:'text-xs text-gray-500' }, 'ใช้ในสาขา: ', (getBranch(state, branchId)||{}).name || branchId)),
+
+      // 1) เลือกสูตร + ผลผลิต
+      seeds.length > 0 && h('div', null,
+        h('div', { className:'font-bold text-gray-800 mb-1' }, '1) สูตรที่จะนำเข้า + สินค้าผลผลิต'),
+        h('div', { className:'border rounded divide-y' },
+          seeds.map(s => {
+            const done = importedCodes.has(String(s.code).toUpperCase());
+            const total = (s.items||[]).reduce((a,i) => a + (Number(i.target)||0), 0);
+            return h('div', { key:s.code, className: cls('p-2 grid grid-cols-1 md:grid-cols-[auto_1fr_1fr] gap-2 items-center', done && 'bg-gray-50 text-gray-400') },
+              h('label', { className:'flex items-center gap-2 cursor-pointer' },
+                h('input', { type:'checkbox', disabled:done, checked: !!picked[s.code] && !done, onChange:e=>setPicked({ ...picked, [s.code]: e.target.checked }) }),
+                h('span', { className:'font-mono text-xs w-12' }, s.code)),
+              h('div', null, h('b', null, s.name), h('span', { className:'text-xs text-gray-500 ml-2' }, `${(s.items||[]).length} วัตถุดิบ · รวม ${fmtNum(total)} g`),
+                done && h('span', { className:'ml-2 text-xs text-green-700' }, '✓ นำเข้าแล้ว')),
+              !done && h(Combobox, { value: outMap[s.code], onChange: v => setOutMap({ ...outMap, [s.code]: v }), options: outOpts,
+                getLabel: optLabel, getSearchText: optSearch, className:'py-1 text-xs', placeholder:'ผลผลิต (สินค้า WIP)' })
+            );
+          }))),
+
+      // 2) จับคู่วัตถุดิบ
+      seeds.length > 0 && h('div', null,
+        h('div', { className:'font-bold text-gray-800 mb-1' }, `2) จับคู่วัตถุดิบ (${ingNames.length} ชื่อ · ใช้ร่วมทุกสูตร)`),
+        h('div', { className:'border rounded divide-y' },
+          ingNames.map(n => {
+            const usedIn = seeds.filter(s => picked[s.code] && (s.items||[]).some(i => i.name === n)).map(s => s.code);
+            const isNew = ingMap[n] === WEIGH_NEW;
+            const sim = isNew ? similar(n) : [];
+            return h('div', { key:n, className:'p-2 grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-2 items-center' },
+              h('div', null, h('b', null, n), h('div', { className:'text-[11px] text-gray-500' }, usedIn.length ? 'ใช้ใน: ' + usedIn.join(', ') : 'ไม่ได้ใช้ในสูตรที่เลือก'),
+                isNew && sim.length > 1 && h('div', { className:'text-[11px] text-red-700' }, `⚠️ ชื่อกำกวม — พบ ${sim.length} รายการที่คล้าย: ${sim.slice(0,4).map(i => i.name).join(', ')}${sim.length > 4 ? ' …' : ''} → เลือกให้ตรง หรือปล่อยเป็นสร้างใหม่`),
+                fuzzy[n] && ingMap[n] !== WEIGH_NEW && h('div', { className:'text-[11px] text-amber-700' }, `🔎 จับคู่จากชื่อคล้าย: ${fuzzy[n]} — ตรวจก่อนนำเข้า`),
+                isNew && h('div', { className:'text-[11px] text-amber-700' }, '➕ จะสร้างใหม่: วัตถุดิบ หน่วยฐาน กรัม'),
+                unitWarn(ingMap[n]) && h('div', { className:'text-[11px] text-amber-700' }, '⚠️ สินค้านี้ไม่มีหน่วยน้ำหนัก (กรัม/กก.) ในทะเบียน — BOM จะใส่หน่วย "กรัม" ให้ (ชั่งได้ แต่ควรเพิ่มหน่วยที่ทะเบียนสินค้า)')),
+              h(Combobox, { value: ingMap[n], onChange: v => setIngMap({ ...ingMap, [n]: v }), options: itemOpts,
+                getLabel: optLabel, getSearchText: optSearch, className:'py-1 text-xs', placeholder:'เลือกสินค้าในทะเบียน' })
+            );
+          }))),
+
+      seeds.length > 0 && h('div', { className:'bg-gray-50 border rounded p-2 text-xs text-gray-700' },
+        `จะสร้าง: BOM ${toImport.length} สูตร`, newIngNames.length ? ` · วัตถุดิบใหม่ ${newIngNames.length} (${newIngNames.join(', ')})` : ' · ไม่มีวัตถุดิบใหม่', newOutCount ? ` · WIP ใหม่ ${newOutCount}` : ''),
+      h('div', { className:'flex gap-2 pt-2 border-t' },
+        h(Button, { variant:'primary', onClick:doImport, disabled: toImport.length === 0 }, `📥 นำเข้า ${toImport.length} สูตร`),
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'))
+    ));
+}
+
 function BOMTab({ state, dispatch, user, branchId, boms }){
   const [showModal, setShowModal] = useState(false);
   const [edit, setEdit] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showWeighImport, setShowWeighImport] = useState(false);   // 🆕 WEIGH: นำเข้าสูตรชั่งเดิม 6 สูตร → BOM
   const currentIsHQ = isHQ(state, branchId);
   // 🔒 Operator (มี assignedStations) ห้ามแก้ BOM · ห้ามสร้าง · ห้ามลบ
   const isOperator = (getUserAssignedStations(user) || []).length > 0;
@@ -32161,11 +33419,13 @@ function BOMTab({ state, dispatch, user, branchId, boms }){
 
   const [search, setSearch] = useState('');
   const [lineFilter, setLineFilter] = useState('all');
+  const [showInactive, setShowInactive] = useState(false);   // 🆕 WEIGH UAT: BOM ที่ "ลบ" แล้วถูกอ้าง (ประวัติชั่ง/ออเดอร์) = ปิดใช้ (active:false) → ซ่อนไว้ก่อน
   const lines = getBranchLines(state, branchId);
+  const inactiveCount = boms.filter(b => b && b.active === false).length;
 
   // 🔒 Operator เห็นเฉพาะ BOM ของไลน์ที่ตัวเองสังกัด
   const myLines = getUserAssignedLines(user);
-  let filtered = boms;
+  let filtered = showInactive ? boms : boms.filter(b => !b || b.active !== false);
   if(isOperator && myLines.length > 0 && !isSuperUser(user)){
     filtered = filtered.filter(b => !b.lineId || myLines.includes(b.lineId));
   }
@@ -32234,6 +33494,10 @@ function BOMTab({ state, dispatch, user, branchId, boms }){
           title:'ดาวน์โหลด CSV template เพื่อแก้ใน Excel' }, '📥 Template'),
         canCreate && h(Button, { variant:'secondary', onClick:()=>setShowImport(true),
           title:'อัพโหลด CSV ที่กรอกแล้ว' }, '📤 Import CSV'),
+        // 🆕 WEIGH: สูตรชั่งจากไฟล์ (weigh-seeds.json / สำรองข้อมูลของระบบชั่ง) → BOM ไลน์ชั่ง + ขั้น ⚖️ ชั่ง (ข้ามที่นำเข้าแล้ว)
+        canCreate && h(Button, { variant:'secondary', onClick:()=>setShowWeighImport(true),
+          title:'สร้าง BOM จากไฟล์สูตรชั่ง (JSON จาก weigh-seeds.json หรือ "สำรองข้อมูล" ของระบบชั่ง) — จับคู่วัตถุดิบกับทะเบียนสินค้าก่อน' },
+          '📥 นำเข้าสูตรชั่ง (ไฟล์)'),
         // 📐 Pattern Wizard
         canCreate && h(Button, { variant:'success', onClick:()=>setShowWizard(true) },
           '📐 สร้างจากรูปแบบ'),
@@ -32241,6 +33505,8 @@ function BOMTab({ state, dispatch, user, branchId, boms }){
       )
     ),
 
+    inactiveCount > 0 && h('label', { className:'inline-flex items-center gap-1 text-xs text-gray-600 mb-2 cursor-pointer', 'data-bom-inactive-toggle':'1' },
+      h('input', { type:'checkbox', checked:showInactive, onChange:e=>setShowInactive(e.target.checked) }), `แสดงที่ปิดใช้ (${inactiveCount})`),
     filtered.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' }, 'ยังไม่มี BOM ในเงื่อนไขนี้')
       : h('div', null,
@@ -32248,7 +33514,15 @@ function BOMTab({ state, dispatch, user, branchId, boms }){
             pg.shown.map(b => h(BOMCard, { key:b.id, bom:b, state, branchId, canEdit, canDelete,
               onEdit:()=>{ setEdit(b); setShowModal(true); },
               onDuplicate: canCreate ? () => duplicateBom(b, state, dispatch) : null,
-              onDelete:()=>{ if(confirm(`ลบ BOM "${b.name||getPrimaryOutput(b)?.productName}"?`)) dispatch({ type:'DELETE_BOM', data:b.id }); }
+              // 🆕 WEIGH UAT: BOM ที่ถูกอ้างโดยประวัติชั่ง/ออเดอร์ → reducer ปิดใช้แทนลบ — บอกผู้ใช้ก่อนกด + หลังกด (ไม่ใช่หายเงียบ/ไม่หาย)
+              onDelete:()=>{
+                const refd = (state.weighLogs||[]).some(w => w.bomId === b.id) || (state.productionOrders||[]).some(o => o.bomId === b.id);
+                const nm = b.name||getPrimaryOutput(b)?.productName;
+                if(b.active === false){ if(confirm(`เปิดใช้ BOM "${nm}" อีกครั้ง?`)) dispatch({ type:'UPDATE_BOM', data:{ ...b, active:true, deletedBy:undefined, deletedAt:undefined } }); return; }
+                if(!confirm(refd ? `BOM "${nm}" มีประวัติชั่ง/ออเดอร์อ้างถึง — จะถูก "ปิดใช้" (ซ่อนจากสถานีชั่งและรายการนี้ · ประวัติยังสอบย้อนได้) ไม่ลบทิ้ง\n\nดำเนินการ?` : `ลบ BOM "${nm}"?`)) return;
+                dispatch({ type:'DELETE_BOM', data:b.id });
+                _notify(refd ? `ปิดใช้ BOM "${nm}" แล้ว (ดูได้ที่ "แสดงที่ปิดใช้")` : `ลบ BOM "${nm}" แล้ว`, refd ? 'info' : 'success');
+              }
             }))),
           h('div', { className:'bg-white rounded-lg shadow overflow-hidden mt-3' },
             h(Pager, { pg, label:'สูตร BOM' }))
@@ -32256,7 +33530,8 @@ function BOMTab({ state, dispatch, user, branchId, boms }){
 
     showModal && h(BOMEditModal, { bom:edit, state, dispatch, branchId, onClose:()=>setShowModal(false) }),
     showWizard && h(PatternWizardModal, { state, dispatch, user, branchId, onClose:()=>setShowWizard(false) }),
-    showImport && h(BomImportModal, { state, dispatch, user, branchId, onClose:()=>setShowImport(false) })
+    showImport && h(BomImportModal, { state, dispatch, user, branchId, onClose:()=>setShowImport(false) }),
+    showWeighImport && h(WeighSeedImportModal, { state, dispatch, user, branchId, onClose:()=>setShowWeighImport(false) })
   );
 }
 
@@ -32292,7 +33567,7 @@ function downloadBomTemplate(state){
     '## MATERIALS',
     `# itemCode = code ของวัตถุดิบ (จากตาราง Items) · ตัวอย่าง: ${sampleMatCodes||'RM-FLOUR'}`,
     '# weighRequired = true/false · scaleType = proportional/fixed',
-    '# weighTolerance = ค่าตัวเลข (เว้น = 2% ของ qty)',
+    '# weighTolerance = เกณฑ์ ± เป็นกรัมเสมอ (เว้น = ตารางมาตรฐานของสถานีชั่ง: เป้า <10→±0.5 · <100→±2 · <300→±5 · <500→±7 · <1000→±12 · ≥1000→±13 g)',
     'itemCode,qty,unit,note,weighRequired,scaleType,weighTolerance',
     'RM-FLOUR,5000,กรัม,แป้ง,true,proportional,100',
     'RM-SUGAR,500,กรัม,น้ำตาล,true,proportional,10',
@@ -32703,6 +33978,12 @@ function duplicateBom(bom, state, dispatch){
   const cloned = JSON.parse(JSON.stringify(bom));
   cloned.id = newId;
   cloned.name = newName.trim();
+  // 🆕 WEIGH UAT (audit): สำเนาเป็น BOM ใหม่ของคนที่กด — ไม่สืบทอดผู้สร้าง/rev/สถานะปิดใช้ของต้นฉบับ
+  ['createdBy','createdAt','updatedBy','updatedAt','rev','deletedBy','deletedAt'].forEach(k => { delete cloned[k]; });
+  cloned.active = true;
+  // 🆕 WEIGH UAT: รหัสชั่ง (คำนำหน้าเลข LOT) ห้ามติดไปกับสำเนา — 2 สูตรรหัสเดียวกันบนแท็บเล็ตเดียวกันวันเดียวกันจะออก LOT สตริงเดียวกัน
+  //   สำเนาจะ fallback เป็นรหัสอัตโนมัติ (ผจก.ตั้งใหม่ได้ในฟอร์ม BOM → "รหัสชั่ง")
+  delete cloned.weighCode;
   // Re-id operations เพื่อกัน conflict
   if(Array.isArray(cloned.operations)){
     cloned.operations = cloned.operations.map((op, i) => ({
@@ -32723,20 +34004,29 @@ function BOMCard({ bom, state, branchId, canEdit, canDelete, onEdit, onDelete, o
     const it = state.items.find(x => x.id === m.itemId);
     return it?.type === 'finished';
   });
+  // 🆕 WEIGH: BOM ที่มีขั้นชั่ง → ป้าย ⚖️ + ดูสูตรชั่ง (รายการเป็นกรัม/ที่ข้าม) ตามที่สถานีชั่งจะเห็นจริง
+  const hasWeigh = bomHasWeighStep(bom);
+  const [showWeighPreview, setShowWeighPreview] = useState(false);
 
-  return h('div', { className:'bg-white rounded-lg shadow p-3 hover:shadow-md transition' },
+  const inactive = bom.active === false;
+  return h('div', { className: cls('bg-white rounded-lg shadow p-3 hover:shadow-md transition', inactive && 'opacity-70 border-2 border-dashed border-gray-300'), 'data-bom-inactive': inactive ? '1' : undefined },
     h('div', { className:'flex items-start justify-between mb-2' },
       h('div', { className:'flex-1' },
-        h('div', { className:'font-bold text-gray-800' }, bom.name || outputs[0]?.productName),
+        h('div', { className:'font-bold text-gray-800' }, bom.name || outputs[0]?.productName,
+          inactive && h('span', { className:'ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-700 font-medium', title: `ปิดใช้โดย ${bom.deletedBy||'-'}` }, '⛔ ปิดใช้')),
         h('div', { className:'text-xs text-gray-500' },
           line ? `${line.icon||'⚙️'} ${line.name} · ` : '',
           `${(bom.materials||[]).length} วัตถุดิบ`,
           hasNested && h('span', { className:'ml-1 text-purple-600 font-medium' }, '🔗 nested')
         )
       ),
-      outputs.length > 1 && h('span', { className:'bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded font-medium' },
-        `joint ×${outputs.length}`)
+      h('div', { className:'flex items-center gap-1' },
+        hasWeigh && h('button', { type:'button', onClick:()=>setShowWeighPreview(true), title:'สูตรนี้มีขั้นชั่ง — คลิกดูสูตรชั่ง (กรัม) ตามที่สถานีชั่งเห็น',
+          className:'bg-indigo-100 hover:bg-indigo-200 text-indigo-800 text-[10px] px-1.5 py-0.5 rounded font-medium' }, '⚖️ ชั่ง'),
+        outputs.length > 1 && h('span', { className:'bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded font-medium' },
+          `joint ×${outputs.length}`))
     ),
+    showWeighPreview && h(WeighRecipePreviewModal, { bom, state, onClose:()=>setShowWeighPreview(false) }),
 
     h('div', { className:'bg-purple-50 border border-purple-100 rounded p-2 text-xs mb-2' },
       h('div', { className:'text-purple-700 font-medium mb-0.5' }, '🎂 Output 1 batch:'),
@@ -32758,7 +34048,8 @@ function BOMCard({ bom, state, branchId, canEdit, canDelete, onEdit, onDelete, o
       (bom.materials||[]).length > 5 && h('div', { className:'text-gray-400 italic' }, `+${bom.materials.length-5} อื่น`)
     ),
 
-    h('div', { className:'bg-green-50 rounded p-2 text-xs mb-2' },
+    // 🆕 WEIGH UAT (สิทธิ์): ต้นทุนวัตถุดิบ/ค่าแรง/รวม ต่อ batch เฉพาะคนที่เห็นมูลค่า (canSeeStockValue) — พนักงานชั่ง/ไลน์ที่เห็นแท็บ BOM ไม่เห็น ฿
+    canSeeStockValue(state.currentUser, state) && h('div', { className:'bg-green-50 rounded p-2 text-xs mb-2' },
       h('div', { className:'flex justify-between text-green-700' },
         h('span', null, 'วัตถุดิบ:'), h('span', null, fmtCur(cost.material))),
       (cost.labor > 0 || cost.overhead > 0) && h('div', { className:'flex justify-between text-green-700' },
@@ -32771,7 +34062,8 @@ function BOMCard({ bom, state, branchId, canEdit, canDelete, onEdit, onDelete, o
       h('div', { className:'text-blue-700 font-medium' }, `📍 ใช้ได้ ${availBranches.length} สาขา`)
     ),
 
-    (canEdit || canDelete || onDuplicate) && h('div', { className:'flex gap-2 flex-wrap' },
+    (canEdit || canDelete || onDuplicate || hasWeigh) && h('div', { className:'flex gap-2 flex-wrap' },
+      hasWeigh && h(Button, { variant:'secondary', size:'sm', onClick:()=>setShowWeighPreview(true) }, '⚖️ ดูสูตรชั่ง'),
       canEdit   && h(Button, { variant:'warning', size:'sm', onClick:onEdit }, '✏️ แก้'),
       onDuplicate && h(Button, { variant:'secondary', size:'sm', onClick:onDuplicate, title:'ทำสำเนา BOM' }, '📋 สำเนา'),
       canDelete && h(Button, { variant:'danger',  size:'sm', onClick:onDelete }, '🗑️ ลบ'),
@@ -32900,6 +34192,9 @@ function MaterialRow({ m, i, it, bomUnits, baseQty, profiles, state, updateMater
   const items = state.items || [];
   const hasOverride = m.byProfile && Object.keys(m.byProfile).length > 0;
   const isFixed = m.scaleType === 'fixed';
+  // 🆕 WEIGH: เป้าเป็นกรัม (ถ้าแปลงได้) → placeholder เกณฑ์มาตรฐาน · แปลงไม่ได้ = สถานีชั่งจะข้ามวัตถุดิบนี้
+  //   weighTolerance = "± กรัมสัมบูรณ์" หน่วยเดียวทั้งระบบ (สถานีชั่ง/00-core:weighRecipeFromBom/BomWeighModal แปลงเอง) — ใช้ร่วมทั้งแถวหลักและแผงขยาย
+  const g = it ? gramsOfMaterial(it, m.qty, m.unit) : null;
 
   const updateOverride = (profileId, key, value) => {
     const cur = m.byProfile || {};
@@ -32953,11 +34248,20 @@ function MaterialRow({ m, i, it, bomUnits, baseQty, profiles, state, updateMater
       h('td', { className:'px-2 py-1 text-right text-xs text-blue-700' },
         `${fmtNum(baseQty)} ${it?.issueUnit||''}`),
       h('td', { className:'px-2 py-1 text-center' },
-        h('input', { type:'checkbox',
-          checked: m.weighRequired !== false,
-          onChange:e=>updateMaterial(i,'weighRequired',e.target.checked),
-          title:'ต้องชั่งจริงตอนเริ่ม (ถ้าไม่ติ๊ก = ข้ามไป)',
-          className:'cursor-pointer' })
+        (() => {
+          const weighOn = m.weighRequired !== false;
+          return h('div', { className:'flex items-center justify-center gap-1' },
+            h('label', { className:'flex items-center gap-0.5 cursor-pointer', title:'ต้องชั่งจริงตอนเริ่ม (ถ้าไม่ติ๊ก = ข้ามไป)' },
+              h('input', { type:'checkbox', checked: weighOn,
+                onChange:e=>updateMaterial(i,'weighRequired',e.target.checked), className:'cursor-pointer' }),
+              h('span', { className:'text-[10px] text-gray-600' }, 'ชั่ง')),
+            weighOn && h('input', { type:'number', step:'any', min:0, value: m.weighTolerance ?? '',
+              onChange:e=>updateMaterial(i,'weighTolerance', e.target.value === '' ? undefined : (Number(e.target.value)||0)),
+              placeholder: g != null ? '±' + weighDefaultTolG(g) : '±',
+              title: g != null ? `เกณฑ์ ± กรัม (ว่าง = มาตรฐาน ±${weighDefaultTolG(g)} g สำหรับ ${fmtNum(g)} g)` : 'เกณฑ์ ± กรัม — หน่วยนี้แปลงเป็นกรัมไม่ได้ สถานีชั่งจะข้าม',
+              className: cls('w-14 px-1 py-0.5 border rounded text-right text-[11px]', g == null && 'border-amber-300 bg-amber-50') }),
+            weighOn && g == null && h('span', { className:'text-[10px] text-amber-700', title:'หน่วยแปลงเป็นกรัมไม่ได้ (นับชิ้น) — สถานีชั่งข้าม' }, '⚠️'));
+        })()
       ),
       h('td', { className:'px-2 py-1' },
         h('input', { type:'text', value:m.note||'', onChange:e=>updateMaterial(i,'note',e.target.value),
@@ -32985,18 +34289,20 @@ function MaterialRow({ m, i, it, bomUnits, baseQty, profiles, state, updateMater
                 onChange:()=>updateMaterial(i,'scaleType','fixed') }),
               h('span', null, '🔒 ไม่สเกล (qty คงที่ทุก batch — เช่น เกลือ/ผงฟู)')),
           ),
-          // 🎯 Tolerance per material
+          // 🎯 Tolerance ตอนชั่ง — อ่านอย่างเดียว (แก้ที่ช่อง ± ในคอลัมน์ ⚖️ ชั่ง ของแถวหลัก)
+          //   🆕 WEIGH UAT: เดิมเป็นช่องกรอกที่ 2 ของ field เดียวกัน (m.weighTolerance) แต่บอกหน่วยเป็นหน่วยวัตถุดิบ + "auto 2%" (และคำนวณผิดลำดับ operator)
+          //   ทั้งที่สถานีชั่งอ่านเป็นกรัม → ผจก.ใส่ 0.013 (คิดเป็น กก.) ได้เกณฑ์ ±0.013 g ล็อกไม่ได้ทุกชุด · ตอนนี้แสดงเป็นกรัมเสมอ
           h('div', { className:'flex items-center gap-2 text-xs flex-wrap bg-white border border-amber-300 rounded p-2' },
-            h('span', { className:'font-bold' }, '🎯 Tolerance ตอนชั่ง (±):'),
-            h('input', { type:'number', step:'any', value: m.weighTolerance ?? '',
-              placeholder:'auto 2%',
-              onChange:e=>updateMaterial(i,'weighTolerance', e.target.value === '' ? null : Number(e.target.value)),
-              className:'w-24 px-1 py-0.5 border rounded text-right' }),
-            h('span', null, m.unit || ''),
-            h('span', { className:'text-gray-500 italic' },
-              m.weighTolerance != null
-                ? `(±${m.weighTolerance} ${m.unit||''} จาก ${m.qty} ${m.unit||''})`
-                : `(default = 2% ของ qty = ±${(Number(m.qty)||0 * 0.02).toFixed(2)} ${m.unit||''})`),
+            h('span', { className:'font-bold' }, '🎯 เกณฑ์ตอนชั่ง (± กรัม):'),
+            g == null
+              ? h('span', { className:'text-amber-700' }, 'หน่วยนี้แปลงเป็นกรัมไม่ได้ — สถานีชั่งจะข้ามวัตถุดิบนี้')
+              : h('span', { className:'font-mono' },
+                  `±${(m.weighTolerance != null && Number(m.weighTolerance) > 0) ? m.weighTolerance : weighDefaultTolG(g)} g`,
+                  h('span', { className:'text-gray-500 italic font-sans ml-1' },
+                    (m.weighTolerance != null && Number(m.weighTolerance) > 0)
+                      ? `(จากเป้า ${fmtNum(g)} g = ${(Number(m.weighTolerance) / g * 100).toFixed(2)}%)`
+                      : `(ว่าง = มาตรฐาน ±${weighDefaultTolG(g)} g สำหรับ ${fmtNum(g)} g)`)),
+            h('span', { className:'text-gray-400' }, '· แก้ที่ช่อง ± ในคอลัมน์ ⚖️ ชั่ง'),
           ),
           // Per-profile override
           (profiles||[]).length > 0 && h('div', { className:'bg-white border border-cyan-300 rounded p-2' },
@@ -33895,6 +35201,9 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
   };
   const [prepTimeMin, setPrepTimeMin] = useState(bom?.prepTimeMin || 0);
   const [notes, setNotes] = useState(bom?.notes || '');
+  // 🆕 WEIGH UAT: รหัสชั่ง = คำนำหน้าเลข LOT/บาร์โค้ด (A-Z 0-9 ≤ 8 ตัว) — เดิมตั้งได้เฉพาะตอนนำเข้าไฟล์ · ว่าง = ระบบเดา (ชื่ออังกฤษ 8 ตัวแรก → ซ้ำกันได้)
+  const [weighCode, setWeighCode] = useState(bom?.weighCode || '');
+  const weighCodeDup = weighCode && (state.boms||[]).some(b => b && b.id !== bom?.id && b.active !== false && String(b.weighCode||'').toUpperCase() === weighCode.toUpperCase());
   const [itemSearch, setItemSearch] = useState('');
   const [availableIn, setAvailableIn] = useState(
     bom?.availableIn || (bom?.branch ? [bom.branch] : [branchId])
@@ -33935,6 +35244,14 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
   };
   const setQcEnd = (idx) => {
     setOperations(operations.map((o,i) => ({ ...o, isQcEndPoint: i === idx })));
+  };
+  // 🆕 WEIGH: ปุ่มเดียวเพิ่มขั้น "ชั่งตามสูตร" (template opt_weigh) — ใส่เป็นขั้นแรก (ชั่งก่อนผสมเสมอ) · มีอยู่แล้วไม่เพิ่มซ้ำ
+  const hasWeighOp = operations.some(o => o && o.stationType === 'weigh');
+  const addWeighOperation = () => {
+    if(hasWeighOp) return;
+    if(operations.length >= 5) return alert('สูงสุด 5 ขั้นต่อ BOM — ลบขั้นอื่นก่อนแล้วค่อยเพิ่มขั้นชั่ง');
+    const op = weighOpFromTemplate(state, operations.length);
+    setOperations([op, ...operations].map((o,i) => ({ ...o, seq: i+1 })));
   };
 
   // 📥 Apply Operation Template — pull params + paramSource + mustHandoff from template
@@ -34087,7 +35404,11 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
         expectedTimeMin: Number(o.expectedTimeMin)||0,
       })) : undefined,
       notes,
+      // 🆕 WEIGH: คงค่าที่ฟอร์มนี้ไม่ได้แก้ — weighCode (รหัส LOT/กันนำเข้าซ้ำ) · active · ผู้สร้าง (เดิมหายทุกครั้งที่กดบันทึก)
+      ...(isEdit ? { active: bom.active, createdBy: bom.createdBy, createdAt: bom.createdAt } : { createdAt: Date.now() }),
+      weighCode: weighCode ? weighCode.toUpperCase() : undefined,
     };
+    if(weighCodeDup) return alert(`รหัสชั่ง "${weighCode.toUpperCase()}" ซ้ำกับ BOM อื่น — เลข LOT จะชนกัน ตั้งรหัสอื่น`);
     dispatch({ type: isEdit ? 'UPDATE_BOM' : 'ADD_BOM', data });
     onClose();
   };
@@ -34203,10 +35524,25 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
             h('div', { className:'text-xs text-amber-700' },
               'สูงสุด 5 ขั้น · ⭐ = QC end-of-line (default ตรวจขั้นสุดท้าย) · เว้นว่างได้ถ้าไม่ใช้ workflow แบบ step-by-step')
           ),
-          h('button', { type:'button', onClick:addOperation, disabled:operations.length >= 5,
-            className:'px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs rounded disabled:opacity-50' },
-            `+ เพิ่มขั้น (${operations.length}/5)`)
+          h('div', { className:'flex gap-1 flex-wrap justify-end' },
+            // 🆕 WEIGH: เพิ่มขั้นชั่งคลิกเดียว → BOM นี้โผล่ในแท็บ ⚖️ ชั่ง ของไลน์
+            h('button', { type:'button', onClick:addWeighOperation, disabled: hasWeighOp || operations.length >= 5,
+              title: hasWeighOp ? 'มีขั้นชั่งแล้ว' : 'เพิ่มขั้น "ชั่งตามสูตร" (สถานีชั่ง) — สูตรนี้จะเห็นในแท็บ ⚖️ ชั่ง ของไลน์ · ขั้นอื่นยังไม่ต้องใส่ก็ได้',
+              className:'px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs rounded disabled:opacity-50' },
+              hasWeighOp ? '⚖️ มีขั้นชั่งแล้ว' : '⚖️ เพิ่มขั้นชั่ง (สถานีชั่ง)'),
+            h('button', { type:'button', onClick:addOperation, disabled:operations.length >= 5,
+              className:'px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs rounded disabled:opacity-50' },
+              `+ เพิ่มขั้น (${operations.length}/5)`))
         ),
+        // 🆕 WEIGH UAT: รหัสชั่ง (คำนำหน้า LOT) — แสดงเมื่อมีขั้นชั่ง
+        hasWeighOp && h('div', { className:'flex flex-wrap items-center gap-2 mb-2 text-xs bg-white border border-indigo-200 rounded p-2', 'data-weigh-code':'1' },
+          h('span', { className:'font-bold text-indigo-900' }, '⚖️ รหัสชั่ง (ขึ้นต้นเลข LOT):'),
+          h('input', { type:'text', value:weighCode, maxLength:8, placeholder:'เช่น PGK, BRD1',
+            onChange:e=>setWeighCode(e.target.value.replace(/[^A-Za-z0-9]/g,'').toUpperCase()),
+            className: cls('w-28 px-2 py-1 border rounded font-mono uppercase', weighCodeDup && 'border-red-500 bg-red-50') }),
+          weighCodeDup
+            ? h('span', { className:'text-red-700' }, '⛔ ซ้ำกับ BOM อื่น — เลข LOT จะชนกัน')
+            : h('span', { className:'text-gray-500' }, weighCode ? `LOT จะเป็น ${weighCode}-ปปดดวว-ลำดับ` : 'ว่าง = ระบบเดาจากชื่ออังกฤษ 8 ตัวแรก (อาจซ้ำกับสูตรอื่น) · A-Z 0-9 ไม่เกิน 8 ตัว')),
         operations.length === 0
           ? h('div', { className:'bg-white border rounded p-3 text-center text-xs text-gray-500' },
               'ยังไม่มี operations · ถ้าไม่เพิ่ม → ออเดอร์จะใช้ workflow เดิม (เบิก → ผลิต → QC ขั้นเดียว)')
@@ -34251,9 +35587,10 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
                     h('th', { className:'px-2 py-1 text-right text-xs w-20' }, 'จำนวน'),
                     h('th', { className:'px-2 py-1 text-left text-xs w-24' }, 'หน่วย'),
                     h('th', { className:'px-2 py-1 text-right text-xs' }, '= base'),
-                    h('th', { className:'px-2 py-1 text-center text-xs w-16',
-                      title:'ติ๊กถ้าต้องชั่ง/วัด ตอนเริ่มขั้น (ใช้กับ paramSource = from_bom_materials)' },
-                      '🌾 ชั่ง'),
+                    // 🆕 WEIGH: ติ๊ก "ชั่ง" + เกณฑ์ ± (กรัม) ต่อวัตถุดิบ — ใช้ในสถานีชั่ง (ว่าง = ตารางมาตรฐาน)
+                    h('th', { className:'px-2 py-1 text-center text-xs w-28',
+                      title:'ติ๊กถ้าต้องชั่งตอนเริ่มขั้น (สถานีชั่ง / paramSource = from_bom_materials) · ช่องตัวเลข = เกณฑ์ ± กรัม (ว่าง = มาตรฐาน <10→0.5 · <100→2 · <300→5 · <500→7 · <1000→12 · ≥1000→13)' },
+                      '⚖️ ชั่ง / ± g'),
                     h('th', { className:'px-2 py-1 text-left text-xs' }, 'หมายเหตุ'),
                     h('th', { className:'px-2 py-1 w-8' }),
                   )
@@ -35648,9 +36985,12 @@ function LineStockTab({ state, dispatch, user, branchId }){
       h('div', { className:'flex-1' }),
       h('button', { onClick:()=>{ if(confirm('ล้างผลนับทั้งหมด?')) setCounts({}); },
         className:'text-xs px-2 py-1 bg-gray-200 rounded' }, '🗑 ล้าง'),
-      h('button', { onClick:commitCounts,
-        className:'px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs rounded font-bold' },
-        '✅ บันทึกผลนับทั้งหมด')),
+      // 🆕 WEIGH UAT (คลัง): บันทึกผลนับปรับสต๊อกตรง (ไม่ผ่านอนุมัติ) → ต้องมีสิทธิ์ stock.list.adjust ทุกโหมด · คนอื่นดู/ขอเติมได้อย่างเดียว
+      (hasPerm(user,'stock','list','adjust') || isSuperUser(user))
+        ? h('button', { onClick:commitCounts,
+            className:'px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs rounded font-bold' },
+            '✅ บันทึกผลนับทั้งหมด')
+        : h('span', { className:'text-xs text-amber-800', title:'ต้องมีสิทธิ์ คลัง → ปรับสต๊อก (stock.list.adjust)' }, '🔒 บันทึกผลนับได้เฉพาะผู้มีสิทธิ์ปรับสต๊อก — แจ้งหัวหน้า/คลัง')),
 
     // ===== Items table =====
     stockReady && h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
@@ -38829,7 +40169,7 @@ function VarianceReportTab({ state, dispatch, user, branchId }){
 }
 
 // ==================== REGISTER ====================
-global.ERP.registerModule('production', { main: ProductionModule, QuickIssueTab, IssueDetailModal });   // 🆕 GO-LIVE: stock module ฝัง QuickIssueTab ได้
+global.ERP.registerModule('production', { main: ProductionModule, QuickIssueTab, IssueDetailModal, WeighStationTab });   // 🆕 GO-LIVE: stock module ฝัง QuickIssueTab ได้ · 🆕 WEIGH: WeighStationTab ฝังที่อื่นได้
 global.ERP.canQuickIssue = canQuickIssue;   // 🆕 UAT (cut-over): predicate เดียวกันให้โมดูลคลัง (คลัง → ส่งออก → เบิกวัตถุดิบ) ซ่อนปุ่ม/แท็บหลังเปิดระบบผลิต
 
 })(window);
@@ -67157,20 +68497,133 @@ function suggestBranchCode(state, branch){
 // ================================================================
 // USERS + PERMISSION TREE
 // ================================================================
+// 🆕 PER-USER AUTH (ตัวเลือก A 2026-09-21 — _backend/AUTH_PER_USER.md): ERP user ↔ บัญชี cloud <username>@yume-erp.local ผ่าน Edge Function erp-users
+//   ใช้ได้เมื่อแอปอยู่ในโหมด cloud-only และ session ปัจจุบันเป็นแอดมิน (อีเมลใน ERP_ADMIN_EMAILS หรือ app_metadata.erp_role gm/admin)
+function cloudAuthAvailable(){
+  const SB = global.ERP.SBSync;
+  return !!(SB && SB.isConfigured && SB.isConfigured() && SB.callUsersFn);
+}
+// setPassword:true = แอดมินตั้งรหัสใหม่ในฟอร์มโดยเจตนา (บัญชีเดิมถึงจะถูกเปลี่ยนรหัส) · ซิงก์รวมส่ง false → รหัสเก่าใน state ไม่ทับรหัส cloud ที่พนักงานเปลี่ยนเองแล้ว
+function cloudUserPayload(u, password, setPassword){
+  return { username: u.username, name: u.name || '', role: u.role || '', active: u.active !== false, ...(password ? { password, setPassword: !!setPassword } : {}) };
+}
+const USERNAME_RE = /^[A-Za-z0-9._-]{2,40}$/;   // กติกาเดียวกับ Edge Function (อีเมลภายในต้องสร้างได้)
+const MIN_PW = 6;                                // ตรง Supabase Auth ค่าเริ่มต้น + ฟอร์มเปลี่ยนรหัส/รีเซ็ต
+// รหัสอ่อน = ไม่ให้ขึ้น cloud ตอนซิงก์รวม (1234 ที่เปิดเผยในซอร์ส · สั้นกว่า 6 · เท่ากับ username)
+const weakPw = (u) => !u.password || u.password === '1234' || String(u.password).length < MIN_PW || String(u.password).toLowerCase() === String(u.username||'').toLowerCase();
+// ซิงก์ผู้ใช้ 1 คนขึ้น cloud (หลังเพิ่ม/แก้) — สำเร็จ → MARK (ลบรหัสออกจาก state) · ล้มเหลว → ธง cloudPending ให้ปุ่ม "ซิงก์ทั้งหมด" เก็บตก
+async function syncUserToCloud(u, password, dispatch, by){
+  const SB = global.ERP.SBSync;
+  const r = await SB.callUsersFn('upsert', { users: [cloudUserPayload(u, password, !!password)] });
+  const res = r.ok && Array.isArray(r.results) ? r.results[0] : null;
+  if(r.ok && res && (res.status === 'created' || res.status === 'updated')){
+    dispatch({ type:'MARK_USERS_CLOUD_SYNCED', data:{ usernames:[u.username], seedUsernames: password === '1234' || (u.seedPassword && !password) ? [u.username] : [], by } });
+    return { ok:true, status: res.status };
+  }
+  const err = (res && res.error) || r.error || 'ไม่สำเร็จ';
+  dispatch({ type:'SET_USER_CLOUD_PENDING', data:{ id:u.id, pending:true, error: err } });
+  return { ok:false, error: err };
+}
 function UsersSettings({ state, dispatch }){
   const [showModal, setShowModal] = useState(false);
   const [edit, setEdit] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncReport, setSyncReport] = useState(null);
   const users = state.users || [];
+  const cloudOn = cloudAuthAvailable();
+  const cloudAuth = !!(state.settings && state.settings.cloudAuth);
+  // ต้องซิงก์: ยังไม่ซิงก์ (active) · หรือค้าง pending ไม่ว่าจะ active หรือถูกระงับ (ระงับที่ ban ไม่ผ่านต้องตามไปปิดให้ได้)
+  const needSync = users.filter(u => u.cloudPending || (u.active !== false && !u.cloudAuth));
+  const [fnPing, setFnPing] = useState(null);   // { ok, isAdmin, rank, error } — session นี้สั่งฟังก์ชันได้ไหม (แสดงก่อนกด)
+  useEffect(() => {
+    if(!cloudOn){ setFnPing(null); return; }
+    let alive = true;
+    global.ERP.SBSync.callUsersFn('ping', {}).then(r => { if(alive) setFnPing(r); }).catch(e => { if(alive) setFnPing({ ok:false, error: String(e && e.message || e) }); });
+    return () => { alive = false; };
+  }, [cloudOn]);
+  const fnReady = !!(fnPing && fnPing.ok && fnPing.isAdmin);
+  // ☁️ ซิงก์บัญชี cloud ทั้งหมด: ผู้ใช้ที่ต้องซิงก์ → Edge Function upsert เป็นชุด → MARK ตามผลรายคน
+  //   🆕 UAT: ไม่ส่งรหัสอ่อน (1234/สั้น/เท่ากับ username) ขึ้น cloud — บัญชีตัวอย่างในซอร์สสาธารณะจะกลายเป็นบัญชีที่ใครก็ล็อกอินได้ · แอดมินต้องตั้งรหัส ≥6 หรือระงับก่อน
+  //   · บัญชีที่ซิงก์แล้ว (pending) ส่งโดยไม่มีรหัส (setPassword false) → แค่ปรับชื่อ/บทบาท/ระงับ
+  const syncAll = async () => {
+    if(syncing) return;
+    const SB = global.ERP.SBSync;
+    const list = needSync.filter(u => (u.password && !weakPw(u)) || u.cloudAuth);
+    const weak = needSync.filter(u => !u.cloudAuth && weakPw(u));
+    const badName = list.filter(u => !USERNAME_RE.test(String(u.username||'')));
+    const lower = {}; users.forEach(u => { const k = String(u.username||'').toLowerCase(); lower[k] = (lower[k]||0) + 1; });
+    const caseDup = list.filter(u => lower[String(u.username||'').toLowerCase()] > 1);
+    if(!list.length){ alert(weak.length ? `ยังซิงก์ไม่ได้: ${weak.map(u => u.username).join(', ')} ใช้รหัสอ่อน (1234 / สั้นกว่า ${MIN_PW} / เท่ากับชื่อผู้ใช้) — กด "แก้" ตั้งรหัสใหม่ ≥${MIN_PW} ตัว หรือเอาติ๊ก "เปิดใช้งาน" ออกก่อน` : 'ทุกบัญชีซิงก์แล้ว'); return; }
+    if(badName.length || caseDup.length){ alert(`แก้ก่อนซิงก์:` + (badName.length ? `\n• ชื่อผู้ใช้ผิดรูปแบบ (A-Z 0-9 . _ - 2–40 ตัว): ${badName.map(u => u.username).join(', ')}` : '') + (caseDup.length ? `\n• ชื่อผู้ใช้ซ้ำกันต่างแค่ตัวพิมพ์ใหญ่-เล็ก (จะกลายเป็นบัญชี cloud เดียวกัน): ${caseDup.map(u => u.username).join(', ')}` : '')); return; }
+    const first = !cloudAuth;
+    if(!confirm(`สร้าง/อัปเดตบัญชี cloud ให้ผู้ใช้ ${list.length} คน แล้วลบรหัสผ่านออกจากข้อมูลบริษัท (รหัสจะอยู่ฝั่ง cloud เท่านั้น)` + (weak.length ? `\n⚠️ ข้าม ${weak.length} คนที่ใช้รหัสอ่อน (ตั้งใหม่ ≥${MIN_PW} ก่อน): ${weak.map(u => u.username).join(', ')}` : '') + `\n\nหลังจากนี้ทุกคนเข้าระบบด้วย ชื่อผู้ใช้ + รหัส ที่หน้าแรกเลย · ครั้งแรกที่เข้าจะถูกบังคับตั้งรหัสใหม่ (รหัสเดิมเคยอยู่ในข้อมูลบริษัท)` + (first ? `\n\n⚠️ สำเนาสำรองย้อนหลังบน cloud (daily/manual) ที่ยังมีรหัสผ่านจะถูกลบทิ้ง เหลือข้อมูลปัจจุบันชุดเดียว` : '') + `\n\nดำเนินการ?`)) return;
+    setSyncing(true); setSyncReport(null);
+    try {
+      const r = await SB.callUsersFn('upsert', { users: list.map(u => cloudUserPayload(u, u.cloudAuth ? '' : (u.password || ''), false)) });
+      if(!r.ok){ setSyncReport({ ok:false, text:'❌ ' + (r.error || 'ไม่สำเร็จ') }); return; }
+      const okNames = (r.results||[]).filter(x => x.status === 'created' || x.status === 'updated').map(x => x.username);
+      const bad = (r.results||[]).filter(x => x.status === 'error');
+      const ident = global.__ERP_CLOUD_IDENTITY || null;
+      if(okNames.length){
+        const seeds = list.filter(u => okNames.includes(u.username) && (u.password === '1234' || (u.seedPassword && !u.password))).map(u => u.username);
+        const migrated = list.filter(u => okNames.includes(u.username) && !u.cloudAuth && u.password).map(u => u.username);
+        dispatch({ type:'MARK_USERS_CLOUD_SYNCED', data:{ usernames: okNames, seedUsernames: seeds, migratedUsernames: migrated, ownerEmail: ident && !ident.internal ? ident.email : null, by: state.currentUser && state.currentUser.username } });
+      }
+      bad.forEach(x => { const u = list.find(y => y.username === x.username); if(u) dispatch({ type:'SET_USER_CLOUD_PENDING', data:{ id:u.id, pending:true, error:x.error } }); });
+      let purgeTxt = '';
+      if(first && okNames.length && SB.purgeLegacySnapshots){
+        const pr = await SB.purgeLegacySnapshots();
+        purgeTxt = pr.ok ? ` · 🧹 ลบสำเนาสำรองเก่า ${pr.deleted} ชุด` : ` · ⚠️ ลบสำเนาสำรองเก่าไม่สำเร็จ (${pr.error}) — ให้ Claude/ผู้ดูแลลบใน Dashboard`;
+      }
+      setSyncReport({ ok: bad.length === 0, text: `✅ ซิงก์แล้ว ${okNames.length} คน` + (bad.length ? ` · ❌ ไม่สำเร็จ ${bad.length}: ${bad.map(x => `${x.username} (${x.error})`).join(', ')}` : '') + (weak.length ? ` · ⚠️ ข้าม ${weak.length} คนรหัสอ่อน (${weak.map(u => u.username).join(', ')}) — ตั้งรหัสใหม่ ≥${MIN_PW} หรือระงับ` : '') + purgeTxt });
+    } catch(e){ setSyncReport({ ok:false, text:'❌ ' + (e && e.message || e) }); }
+    finally { setSyncing(false); }
+  };
+  const deleteUser = async (u) => {
+    if(u.id === state.currentUser.id) return alert('ลบตัวเองไม่ได้');
+    // บัญชีตัวอย่างของระบบ (INIT) ลบไม่ได้ — migrate เติมกลับ (พร้อมรหัส 1234 ถ้ายังไม่เปิดล็อกอินชั้นเดียว) → ให้ระงับแทน
+    if(((global.ERP.INIT_STATE||{}).users||[]).some(x => x.username === u.username)){
+      if(u.active === false) return alert(`บัญชีตัวอย่าง ${u.username} ลบไม่ได้ (ระบบเติมกลับเมื่อเปิดแอปใหม่) — ระงับอยู่แล้ว`);
+      if(!confirm(`บัญชีตัวอย่าง ${u.username} ลบไม่ได้ (ระบบเติมกลับเมื่อเปิดแอปใหม่)\n\nระงับการใช้งานแทน?`)) return;
+      const off = { ...u, active:false };
+      dispatch({ type:'UPDATE_USER', data: off });
+      if(u.cloudAuth && cloudOn) syncUserToCloud(off, '', dispatch, state.currentUser && state.currentUser.username).then(r => { if(!r.ok) _toastWarn(`⚠️ ระงับบัญชี cloud ของ ${u.username} ไม่สำเร็จ: ${r.error} — กดซิงก์ซ้ำ`); });
+      return;
+    }
+    if(!confirm(`ลบผู้ใช้ ${u.username}?` + (u.cloudAuth ? '\n(บัญชี cloud จะถูกลบด้วย — เข้าระบบไม่ได้ทันที)' : ''))) return;
+    if(u.cloudAuth && cloudOn){
+      const r = await global.ERP.SBSync.callUsersFn('delete', { username: u.username });
+      if(!r.ok){
+        // 🆕 UAT: ลบ cloud ไม่ผ่าน → ห้ามทิ้งบัญชี cloud กำพร้า (ยังล็อกอินได้) — ระงับไว้ก่อน + ธง pending ให้ซิงก์ (ban) ตามทีหลัง
+        dispatch({ type:'UPDATE_USER', data:{ ...u, active:false } });
+        dispatch({ type:'SET_USER_CLOUD_PENDING', data:{ id:u.id, pending:true, error:'ลบบัญชี cloud ไม่สำเร็จ: ' + r.error } });
+        alert(`ลบบัญชี cloud ไม่สำเร็จ: ${r.error}\n\nระงับผู้ใช้ไว้ก่อนแล้ว — GM/Admin กด "☁️ ซิงก์บัญชี cloud" เพื่อปิดบัญชี cloud แล้วค่อยลบอีกครั้ง`);
+        return;
+      }
+    }
+    dispatch({ type:'DELETE_USER', data:u.id });
+  };
   // 📄 แบ่งหน้าละ 50 — ยอดนับด้านบนยังคิดจาก users ทั้งชุด (ไม่ใช่เฉพาะหน้านี้)
   const pg = usePaged(users, 50);
   // 🔒 guard ชั้นสอง: เฉพาะสิทธิ์ Settings เต็ม (hooks ทั้งหมดอยู่ก่อนบรรทัดนี้แล้ว — กฎ React)
   if(!isFullSettings(state.currentUser)) return h(AdminOnlyNotice);
 
   return h('div', null,
-    h('div', { className:'flex justify-between items-center mb-3' },
-      h('div', { className:'text-sm text-gray-600' }, `${users.length} ผู้ใช้`),
-      h(Button, { variant:'primary', size:'sm', onClick:()=>{ setEdit(null); setShowModal(true); } }, '+ เพิ่มผู้ใช้')
+    h('div', { className:'flex justify-between items-center mb-3 flex-wrap gap-2' },
+      h('div', { className:'text-sm text-gray-600' }, `${users.length} ผู้ใช้`,
+        cloudAuth && h('span', { className:'ml-2 text-xs px-2 py-0.5 rounded bg-indigo-100 text-indigo-800' }, '☁️ ล็อกอินชั้นเดียว: เปิดใช้'),
+        cloudAuth && needSync.length > 0 && h('span', { className:'ml-1 text-xs text-amber-700' }, `· ยังไม่ซิงก์ ${needSync.length}`)),
+      h('div', { className:'flex gap-2' },
+        cloudOn && h(Button, { variant: cloudAuth ? 'secondary' : 'success', size:'sm', disabled: syncing || (fnPing && !fnReady), onClick: syncAll,
+          title: fnPing && !fnReady ? ('session นี้สั่งฟังก์ชันไม่ได้: ' + (fnPing.error || 'ไม่ใช่ผู้ดูแล (GM/Admin/ผู้จัดการ หรืออีเมลเจ้าของ)')) : 'สร้างบัญชี cloud ให้ผู้ใช้ทุกคนด้วยรหัสปัจจุบัน → ทุกคนเข้าระบบด้วยชื่อผู้ใช้+รหัสที่หน้าแรก (ต้องติดตั้ง Edge Function erp-users ก่อน — ดู _backend/AUTH_PER_USER.md)' },
+          syncing ? '⏳ กำลังซิงก์…' : (cloudAuth ? `☁️ ซิงก์บัญชี cloud (${needSync.length})` : '☁️ เปิดล็อกอินชั้นเดียว: ซิงก์บัญชี cloud ทั้งหมด')),
+        h(Button, { variant:'primary', size:'sm', onClick:()=>{ setEdit(null); setShowModal(true); } }, '+ เพิ่มผู้ใช้'))
     ),
+    syncReport && h('div', { className: cls('text-xs rounded px-3 py-2 mb-3 border', syncReport.ok ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'), 'data-cloud-sync-report':'1' }, syncReport.text),
+    cloudOn && fnPing && !fnReady && h('div', { className:'text-xs bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 text-amber-900', 'data-cloud-fn-status':'1' },
+      `⚠️ เครื่องนี้สั่งสร้าง/แก้บัญชี cloud ไม่ได้: ${fnPing.error || 'บัญชีที่ล็อกอินอยู่ไม่ใช่ผู้ดูแล (GM/Admin/ผู้จัดการ หรืออีเมลเจ้าของ)'} — แก้ผู้ใช้ได้ แต่บัญชี cloud จะค้าง ⏳ จนกว่าผู้ดูแลจะกดซิงก์`),
+    cloudOn && !cloudAuth && h('div', { className:'text-xs bg-blue-50 border border-blue-200 rounded px-3 py-2 mb-3 text-blue-900' },
+      '☁️ ล็อกอินชั้นเดียว (ยังไม่เปิด): ตอนนี้ทุกเครื่องต้องเข้าด้วยอีเมลผู้ดูแลก่อน · เมื่อพร้อม (ติดตั้ง Edge Function erp-users แล้ว) กดปุ่มด้านบน — พนักงานจะเข้าด้วยชื่อผู้ใช้+รหัสของตัวเองที่หน้าแรก และรหัสจะย้ายไปเก็บฝั่ง cloud'),
 
     h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
       h('table', { className:'w-full text-sm' },
@@ -67202,17 +68655,17 @@ function UsersSettings({ state, dispatch }){
               ),
               h('td', { className:'px-3 py-2 text-center' },
                 u.active!==false ? h('span', { className:'text-xs text-green-700 font-medium' }, '✓ ใช้งาน')
-                                  : h('span', { className:'text-xs text-gray-400' }, 'ระงับ')
+                                  : h('span', { className:'text-xs text-gray-400' }, 'ระงับ'),
+                // 🆕 สถานะบัญชี cloud: ☁️ ซิงก์แล้ว · ⏳ ค้าง (เรียกไม่ผ่าน) · — ยังไม่ซิงก์ (แสดงเมื่อเปิดล็อกอินชั้นเดียวแล้ว)
+                cloudAuth && h('div', { className:'text-[10px] mt-0.5', 'data-cloud-status': u.cloudPending ? 'pending' : (u.cloudAuth ? 'synced' : 'none') },
+                  u.cloudPending ? h('span', { className:'text-amber-700', title: u.cloudError || '' }, '⏳ ค้างซิงก์')
+                    : u.cloudAuth ? h('span', { className:'text-indigo-700' }, '☁️ cloud', u.seedPassword ? h('span', { className:'text-red-600 ml-1', title:'ยังใช้รหัสเริ่มต้น 1234' }, '⚠️1234') : null)
+                    : h('span', { className:'text-gray-400' }, '— ยังไม่ซิงก์'))
               ),
               h('td', { className:'px-3 py-2 text-center' },
                 h('div', { className:'flex gap-1 justify-center' },
                   h(Button, { variant:'warning', size:'sm', onClick:()=>{ setEdit(u); setShowModal(true); } }, 'แก้'),
-                  h(Button, { variant:'danger', size:'sm',
-                    onClick: () => {
-                      if(u.id === state.currentUser.id) return alert('ลบตัวเองไม่ได้');
-                      if(confirm(`ลบผู้ใช้ ${u.username}?`)) dispatch({ type:'DELETE_USER', data:u.id });
-                    }
-                  }, 'ลบ')
+                  h(Button, { variant:'danger', size:'sm', onClick: () => deleteUser(u) }, 'ลบ')
                 )
               )
             );
@@ -67302,12 +68755,16 @@ function UserEditModal({ user, state, dispatch, onClose }){
   };
   const [tab, setTab] = useState('info');
   const [showFav, setShowFav] = useState(false);   // ⭐ GO-LIVE: รายการโปรดของผู้ใช้คนนี้ (scope 'user' — บันทึกแยกจากฟอร์มนี้ทันที)
+  // 🆕 PER-USER AUTH: อีเมล cloud ของผู้ดูแล (ทางเข้ากู้ระบบ) — session อีเมลนี้จะเข้า ERP เป็นผู้ใช้คนนี้อัตโนมัติ
+  const [cloudEmail, setCloudEmail] = useState(user?.cloudEmail || '');
 
   const save = () => {
     if(!username.trim()) return alert('ใส่ username');
+    if(!USERNAME_RE.test(username.trim())) return alert('ชื่อผู้ใช้ต้องเป็นอังกฤษ/ตัวเลข/. _ - ยาว 2–40 ตัว (ใช้สร้างบัญชี cloud)');
     if(!name.trim()) return alert('ใส่ชื่อ');
     if(!isEdit && !password) return alert('ใส่รหัสผ่าน');
-    if(!isEdit && state.users.find(u => u.username === username.trim())) return alert('username ซ้ำ');
+    if(password && password.length < MIN_PW) return alert(`รหัสผ่านอย่างน้อย ${MIN_PW} ตัว`);
+    if(!isEdit && state.users.find(u => String(u.username||'').toLowerCase() === username.trim().toLowerCase())) return alert('username ซ้ำ (ไม่แยกตัวพิมพ์ใหญ่-เล็ก)');
 
     // 🛡 merge ของเดิมก่อน — ฟอร์มนี้ไม่มีทุก field ที่ user มี (favoriteItemIds, superAdmin ฯลฯ)
     //    เดิมสร้าง object ใหม่ทั้งก้อน → กดบันทึกทีเดียว ของที่ไม่มีในฟอร์มหายถาวร
@@ -67338,8 +68795,27 @@ function UserEditModal({ user, state, dispatch, onClose }){
         '⚠️ กำลังแก้สิทธิ์ของตัวเอง (' + _diff.join(', ') + ')\n\n' +
         'ถ้าลดสิทธิ์ตัวเอง เมนูจะหายทันทีและกลับมาแก้เองไม่ได้ — ต้องให้ผู้ดูแลอีกคนแก้ให้\n\nยืนยันบันทึก?')) return;
     }
+    // 🆕 PER-USER AUTH: เมื่อเปิดล็อกอินชั้นเดียวแล้ว รหัสผ่านไม่ลง state เลย (ส่งขึ้น cloud อย่างเดียว — กันค้างใน company blob/daily snapshot)
+    //   · ผู้ใช้ที่ซิงก์แล้ว → ไม่เขียน password กลับ · ผู้ใช้ใหม่ → ADD_USER โดยไม่มีรหัส + cloudPending จนกว่า Edge Function จะสร้างสำเร็จ
+    const cloudAuthOn = !!(state.settings && state.settings.cloudAuth) || (user && user.cloudAuth);
+    if(cloudEmail !== undefined) data.cloudEmail = cloudEmail.trim() ? cloudEmail.trim().toLowerCase() : undefined;
+    if(cloudAuthOn){
+      delete data.password;
+      if(password) data.seedPassword = password === '1234';
+      if(!isEdit) data.cloudPending = true;
+    }
     dispatch({ type: isEdit ? 'UPDATE_USER' : 'ADD_USER', data });
     onClose();
+    // ซิงก์ขึ้น cloud ต่อเมื่อเปิดล็อกอินชั้นเดียวแล้ว (หรือผู้ใช้คนนี้ซิงก์อยู่แล้ว) — ไม่บล็อกการบันทึกในเครื่อง
+    if(cloudAuthOn && cloudAuthAvailable()){
+      const by = state.currentUser && state.currentUser.username;
+      syncUserToCloud(data, password || '', dispatch, by).then(r => {
+        if(r.ok) _toastInfo(`☁️ บัญชี cloud ของ ${data.username} ${r.status === 'created' ? 'สร้างแล้ว' : 'อัปเดตแล้ว'}`);
+        else _toastWarn(`⚠️ ซิงก์บัญชี cloud ของ ${data.username} ไม่สำเร็จ: ${r.error}` + (!isEdit ? ' — ผู้ใช้ถูกบันทึกโดยยังไม่มีรหัส: กด "แก้" ตั้งรหัสใหม่เมื่อฟังก์ชันพร้อม' : ' — กด "☁️ ซิงก์บัญชี cloud" ซ้ำภายหลัง'));
+      });
+    } else if(cloudAuthOn && !isEdit){
+      _toastWarn(`⚠️ ยังสร้างบัญชี cloud ให้ ${data.username} ไม่ได้ (ฟังก์ชันไม่พร้อม) — กด "แก้" ตั้งรหัสอีกครั้งภายหลัง`);
+    }
   };
 
   const onRoleChange = (newRole) => {
@@ -67365,11 +68841,15 @@ function UserEditModal({ user, state, dispatch, onClose }){
           h('input', { type:'text', value:username, onChange:e=>setUsername(e.target.value), disabled:isEdit,
             className: cls('w-full px-3 py-2 border-2 rounded text-sm font-mono', isEdit && 'bg-gray-100 text-gray-500') })
         ),
-        h(Field, { label:isEdit?'รหัสผ่านใหม่ (ว่าง=ไม่เปลี่ยน)':'รหัสผ่าน *' },
-          h('input', { type:'password', value:password, onChange:e=>setPassword(e.target.value),
+        h(Field, { label:isEdit?`รหัสผ่านใหม่ (ว่าง=ไม่เปลี่ยน · ≥${MIN_PW} ตัว)`:`รหัสผ่าน * (≥${MIN_PW} ตัว)`, hint: (isEdit && user && user.cloudAuth) ? '☁️ รหัสอยู่ฝั่ง cloud — ตั้งใหม่ที่นี่จะส่งขึ้น cloud ทันที' : null },
+          h('input', { type:'password', value:password, onChange:e=>setPassword(e.target.value), autoComplete:'new-password',
             className:'w-full px-3 py-2 border-2 rounded text-sm' })
         ),
       ),
+      // 🆕 PER-USER AUTH: เฉพาะ GM/Admin — ผูกอีเมล cloud (บัญชีเจ้าของ) กับผู้ใช้นี้ = ทางเข้ากู้ระบบหลังเปิดล็อกอินชั้นเดียว
+      ['gm','admin'].includes(role) && h(Field, { label:'📧 อีเมล cloud ผู้ดูแล (ไม่บังคับ)', hint:'ล็อกอินด้วยอีเมลนี้ที่หน้าแรก → เข้าเป็นผู้ใช้คนนี้อัตโนมัติ (ทางเข้ากู้ระบบ)' },
+        h('input', { type:'email', value:cloudEmail, onChange:e=>setCloudEmail(e.target.value), placeholder:'owner@example.com', autoComplete:'off',
+          className:'w-full px-3 py-2 border-2 rounded text-sm' })),
       h(Field, { label:'ชื่อ-นามสกุล *' },
         h('input', { type:'text', value:name, onChange:e=>setName(e.target.value),
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
@@ -74402,7 +75882,7 @@ global.ERP.registerModule('executive', { main: ExecutiveModule });
 //     hint:     'ทำอย่างไร' | (ctx, res)=>string,   // 1–2 ประโยค บอกทางแก้จริงในระบบ
 //     nav:      { tab:'purchase', subs:{ purchase:'po' } } | (ctx)=>nav | null,
 //     show:     (ctx)=>boolean,                      // optional — gate สิทธิ์/โมดูล/สาขา (ค่าเริ่มต้น = แสดง)
-//     alias:    '<group>.<key>',                     // optional — ข้อเท็จจริงเดียวกับ check นั้น: ซ่อนตัวเองเมื่อผู้ใช้เห็นกลุ่มนั้นอยู่แล้ว (กัน gm นับซ้ำ)
+//     alias:    '<group>.<key>' | (ctx)=>'<group>.<key>'|null,   // optional — ข้อเท็จจริงเดียวกับ check นั้น: ซ่อนตัวเองเมื่อผู้ใช้เห็นกลุ่มนั้นอยู่แล้ว (กัน gm นับซ้ำ) · ฟังก์ชันคืน null = ไม่ alias ในบริบทนั้น
 //     run:      (ctx)=> number | array | { count, detail:[string…] }   // detail ≤ 6 รายการ (เลขที่เอกสาร/ชื่อ)
 //   }
 //   ctx: { state, user, today, now (ms), role, isSuper, branches, branchIds, inScope(bid), branchName(bid),
@@ -74503,8 +75983,9 @@ function collectPendingWork(state, user, opts){
       let entry;
       try {
         if(typeof c.show === 'function' && !c.show(ctx)) continue;
-        // alias = ข้อเท็จจริงเดียวกับ check ในกลุ่มอื่น → ถ้าผู้ใช้เห็นกลุ่มนั้นอยู่แล้ว ไม่นับซ้ำที่นี่
-        if(c.alias && visibleKeys.has(String(c.alias).split('.')[0]) && String(c.alias).split('.')[0] !== g.key) continue;
+        // alias = ข้อเท็จจริงเดียวกับ check ในกลุ่มอื่น → ถ้าผู้ใช้เห็นกลุ่มนั้นอยู่แล้ว ไม่นับซ้ำที่นี่ (alias เป็นฟังก์ชันได้ — คืน null = ไม่ alias ในบริบทนี้)
+        const alias = typeof c.alias === 'function' ? c.alias(ctx) : c.alias;
+        if(alias && visibleKeys.has(String(alias).split('.')[0]) && String(alias).split('.')[0] !== g.key) continue;
         const res = _normResult(typeof c.run === 'function' ? c.run(ctx) : 0);
         if(res.count <= 0 && !opts.includeZero) continue;
         const severity = typeof c.severity === 'function' ? c.severity(ctx, res) : (c.severity || 'info');
@@ -76489,6 +77970,7 @@ const {
   getLineStockLocation, getFGDestinationLocation, getBranchLines,
   hasUnitForPurpose, productRequiresQC, qcTemplateAppliesTo,
   getUserAssignedLines, getUserAssignedStations, getStationsForLine, canSeeOrder, userCanQC, canSeeBranch, isHQ,
+  hasPerm, isSuperUser, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,   // 🆕 WEIGH: helpers สถานีชั่ง (00-core.js ⚖️ WEIGH STATION)
 } = global.ERP;
 
 // ---------- shared helpers (pure) ----------
@@ -76747,12 +78229,26 @@ function branchShortage(ctx){
   });
 }
 
+// ---------- ⚖️ สถานีชั่ง (WEIGH) ----------
+// ref: src/00-core.js ⚖️ WEIGH STATION — bomHasWeighStep (operations[].stationType 'weigh') · weighRecipeFromBom(state,bom) → { items, skipped[] } (skipped = วัตถุดิบที่ gramsOfMaterial แปลงเป็นกรัมไม่ได้)
+//      · bomsForWeigh(state,user,branchId) (BOM ที่สถานีชั่งของคนนั้นเห็น: ไลน์ตรง assignedLineIds · weighBomIds ทับ · superuser/manager/PM เห็นทุกไลน์)
+//      src/01-state.js ADD_WEIGH_LOG → state.weighLogs[{ id, lot, ts, bomId, recipeName, recipeCode, lineId, branchId, userId, operator, offSpec, items:[{ name, value, unit, target, tol, pass, offSpec?, reason? }] }]
+//      src/mod-production.js:531-534 แท็บ ⚖️ ชั่ง = สิทธิ์ production.weigh.view · GO_LIVE_TABS มี 'weigh' (02-nav.js:629) → สถานีชั่งใช้จริงตั้งแต่โหมด go-live (productionLive=false)
+const WEIGH_NAV = { tab:'production', subs:{ production:'weigh' } };
+const weighVisible = (ctx) => ctx.can('production') && ctx.perm('production','weigh','view');
+// BOM ที่มีขั้นชั่ง ในขอบเขตผู้ใช้ (active · scopedBoms) — ใช้ร่วมกันทั้ง 3 check
+const weighBoms = (ctx) => ctx.memo('prod_weighBoms', () => scopedBoms(ctx).filter(b => b.active !== false && bomHasWeighStep(b)));
+const weighOnly = (b) => { const ops = (b.operations||[]).filter(Boolean); return ops.length > 0 && ops.every(op => op.stationType === 'weigh'); };
+const MGR_TIER = (u) => isSuperUser(u) || ['manager','production_manager'].includes(u.role);   // bomsForWeigh คืนทุก BOM → ไม่ใช่ "คนประจำสถานีชั่ง"
+const userLabel = (u) => u.name || u.username || u.id;
 // GO-LIVE: settings.productionLive=false (01-state.js v34 migrate · เปิดคืนที่ ตั้งค่า → บริษัท) = ยังไม่ใช้ใบสั่งผลิต/BOM/QC/แผน กับพนักงาน
-//   → ซ่อนทั้งกลุ่ม (ทุก check ในกลุ่มนี้อิง productionOrders/BOM/สถานี/QC template ซึ่งยังไม่ได้ใช้จริง → ถ้าแสดงจะเป็น noise ทั้งกระดาน)
+//   → check ทั้งกลุ่มซ่อนตาม prodLive (ทุก check อิง productionOrders/BOM/สถานี/QC template ซึ่งยังไม่ได้ใช้จริง → ถ้าแสดงจะเป็น noise ทั้งกระดาน)
+//   ยกเว้น 🆕 WEIGH: check ที่ติดธง goLive:true (สถานีชั่งเปิดใช้ในโหมดนี้ — 02-nav.js:629 / mod-production.js:534) → กลุ่มโผล่ให้ผู้ที่เห็นแท็บ ⚖️ ชั่ง แม้ !prodLive
 //   งานที่ยังต้องตามในโหมด go-live (ใบเบิกวัตถุดิบบันทึกอย่างเดียว ISS-) อยู่ที่กลุ่มคลัง: wh_issue_void_pending / wh_issue_neg_layers / wh_quick_issue_today_zero
+const gateProdLive = (c) => c.goLive ? c : { ...c, show: (ctx) => ctx.prodLive && (typeof c.show !== 'function' || c.show(ctx)) };
 C.registerGroup({
   key:'production', label:'ผลิต / BOM', icon:'🏭', roles:['production_manager','branch'], primary:['production_manager'],
-  show: (ctx) => ctx.prodLive,
+  show: (ctx) => ctx.prodLive || weighVisible(ctx),
   checks:[
 
     // ==================== งานประจำวัน (ออเดอร์ผลิต) ====================
@@ -77237,11 +78733,12 @@ C.registerGroup({
 
     // ref: src/mod-production.js:13009 `if(isPendingQC && op?.isQcEndPoint)` → ไม่มี ⭐ = QC Live บันทึกแค่ spot_check (:12994) ออเดอร์ค้าง 'produced' แต่ยัง alert สำเร็จ (:13030) · :12864 initOpId ตก fallback ขั้นล่าสุด · :8206 CSV import ไม่ติ๊ก ⭐ ให้ (editor :9584,9590,9604 ติ๊กให้)
     //     · :2213 ออเดอร์คัดลอก operations ตอนสร้าง → ออเดอร์เก่าไม่หายเองหลังแก้ BOM · ทางปิดสำรอง: หน้าออเดอร์ → 🔬 QC + ส่งเข้าคลัง FG (QCForm :7201 ไม่เช็ค endpoint) → 'warn'
+    //     · 🆕 WEIGH: BOM ที่มีแต่ขั้น ⚖️ ชั่ง (สูตรชั่ง Step 1 — memory/WEIGH_STATION_PLAN.md "ขั้นตอนอื่นยังไม่ต้องใส่") ไม่ได้ผลิตผ่าน QC Live → ไม่นับ
     { key:'bom_no_qc_endpoint', label:'BOM มีขั้นตอน แต่ไม่ได้ติ๊ก ⭐ QC ปลายไลน์', severity: mdSev('warn'),
       show: bomShow, nav: BOM_NAV,
       hint: bomHint('QC Live จะปิดออเดอร์จากสูตรนี้ไม่ได้ (บันทึกได้แค่ตรวจระหว่างไลน์) · เปิด 🧪 สูตร BOM → ⚙️ ขั้นตอนการผลิต → กด ☆ ให้เป็น ⭐ ที่ขั้นสุดท้าย · ออเดอร์ที่สร้างไว้แล้ว ปิดผ่านหน้าออเดอร์ → 🔬 QC + ส่งเข้าคลัง FG แทน'),
       run: (ctx) => {
-        const l = scopedBoms(ctx).filter(b => { const ops = (b.operations||[]).filter(Boolean); return ops.length > 0 && !ops.some(op => op.isQcEndPoint); });
+        const l = scopedBoms(ctx).filter(b => { const ops = (b.operations||[]).filter(Boolean); return ops.length > 0 && !weighOnly(b) && !ops.some(op => op.isQcEndPoint); });
         return { count:l.length, detail:l.map(b => bomLabel(ctx, b)) };
       } },
 
@@ -77399,6 +78896,7 @@ C.registerGroup({
 
     // ref: src/00-core.js:1078-1084 getUserAssignedLines/Stations · :1109-1117 getStationsForLine (stationsByLine[lineId] override → assignedStations) · :1122-1134 canActOnOperation (QC ทำไม่ได้ · ไลน์ต้องตรง (ถ้า assign) · station ต้องตรง) · :774-783 canSeeBranch · src/mod-production.js:12242-12249 reason 'station' · src/01-state.js:98-113 users.assignedStations/stationsByLine
     //   lineId ของออเดอร์ = bom.lineId || lines[0] ของสาขา (mod-production.js:98, 2027, 2641 · 00-core.js:1382-1387 getBomLineId) → ประเมินตาม "ไลน์ที่ออเดอร์จะได้จริง" ต่อสาขาที่ BOM ใช้ได้ (bomAvailableAt)
+    //   🆕 WEIGH: ขั้น ⚖️ ชั่ง ไม่ได้จับคู่ด้วย assignedStations แต่ด้วย bomsForWeigh (ไลน์ที่สังกัด / weighBomIds) → ถือว่ามีคนประจำเมื่อมีผู้ใช้ (ไม่ใช่ผจก.) ที่มีสิทธิ์ชั่งและเห็น BOM นี้ในสถานีชั่งของตัวเอง
     { key:'station_no_operator', label:'สถานีในสูตรยังไม่มีคนประจำสถานี', severity: settingsSev('users', 'warn'),
       show: settingsShow,
       ...settingsHint('users', 'งานของสถานีนั้นจะไม่ขึ้นหน้างานของใคร · ตั้งค่า → 🏢 องค์กร → 👥 ผู้ใช้ + สิทธิ์ → แก้ผู้ใช้ของสาขานั้น → "ไลน์ที่สังกัด" ให้มีไลน์นี้ (หรือเว้นว่าง = ทุกไลน์) และ "🛠 Station ที่ทำงานได้" ให้มีสถานีนี้'),
@@ -77422,7 +78920,10 @@ C.registerGroup({
               const k = `${br.id}|${lineId}|${st}`;
               if(seen.has(k)) continue;
               seen.add(k);
-              const has = users.some(u => {
+              const has = st === 'weigh'
+                ? users.some(u => !MGR_TIER(u) && canSeeBranch(u, ctx.state, br.id) && hasPerm(u,'production','weigh','create')
+                    && bomsForWeigh(ctx.state, u, br.id).some(x => x.id === b.id))
+                : users.some(u => {
                 if(!canSeeBranch(u, ctx.state, br.id)) return false;
                 const ul = getUserAssignedLines(u);
                 if(ul.length && !ul.includes(lineId)) return false;
@@ -77430,7 +78931,7 @@ C.registerGroup({
               });
               if(!has){
                 const L = idx.get(lineId);
-                out.push(`${(L && L.line.name) || lineId}: ${stationLabel(ctx, st)} (${br.name})`);
+                out.push(`${(L && L.line.name) || lineId}: ${stationLabel(ctx, st)} (${br.name})${st === 'weigh' ? ' — สถานีชั่ง: ให้สิทธิ์ ⚖️ สถานีชั่ง + "ไลน์ที่สังกัด" ไลน์นี้ (ไม่ใช้ช่อง Station)' : ''}`);
               }
             }
           }
@@ -77565,7 +79066,100 @@ C.registerGroup({
         }
         return { count:out.length, detail:out };
       } },
-  ],
+
+    // ==================== ⚖️ สถานีชั่ง (WEIGH — goLive:true ใช้ได้ตั้งแต่โหมด go-live) ====================
+
+    // 🆕 WEIGH: ผลชั่งที่ผู้ชั่งยืนยัน "นอกเกณฑ์" (ติดธง ⚠️ + ใส่เหตุผลในระบบชั่ง) และผจก.ยังไม่ตัดสิน (reviewedAt ว่าง) — ต้องตัดสินใจว่าใช้ต่อ/ชั่งใหม่/ทิ้ง ก่อนของถูกส่งต่อเข้าไลน์
+    //   UAT: เดิมนับ "วันนี้" อย่างเดียว → ชุดเมื่อวานที่ยังไม่ได้ดูหลุดจากงานค้าง · ตอนนี้นับย้อน 30 วันเฉพาะที่ยังไม่ตัดสิน (ปุ่ม ✔/↩/🗑 ใน 📜 ประวัติชั่ง → REVIEW_WEIGH_LOG)
+    //   ref: src/01-state.js ADD_WEIGH_LOG (offSpec:!!d.offSpec · items[].offSpec/reason เฉพาะรายการนอกเกณฑ์ · ts = เวลาชั่ง ms · branchId = จาก log หรือ currentBranch) · src/mod-production.js:8544-8597 WeighHistory (กรองสาขาที่เปิดอยู่ · ติ๊ก "⚠️ เฉพาะนอกเกณฑ์")
+    //   show: ผจก./ผจก.ผลิต/superuser ที่มีสิทธิ์ดูสถานีชั่ง (isManagerRole ไม่รวม role branch → คนประจำสถานีไม่เห็น) · "วันนี้" = วันที่ท้องถิ่นของ ts ตรง ctx.today (ไม่ขึ้นกับเวลาปัจจุบัน)
+    { key:'prod_weigh_offspec_unreviewed', label:'ชั่งนอกเกณฑ์ที่ยังไม่ตัดสิน (ผจก.ตรวจ)', severity:'warn', goLive:true,
+      show: (ctx) => weighVisible(ctx) && isManagerRole(ctx),
+      nav: WEIGH_NAV,
+      hint: (ctx, res) => 'เปิด ⚖️ สถานีชั่ง → 📜 ประวัติชั่ง → ติ๊ก "⚠️ เฉพาะนอกเกณฑ์" → อ่านเหตุผลของผู้ชั่ง แล้วกดตัดสิน: ✔ ใช้ต่อ / ↩ ชั่งใหม่ / 🗑 คัดทิ้ง (ใส่หมายเหตุให้หัวหน้าไลน์ที่รับ LOT นั้นไป)'
+        + ' · ถ้าวัตถุดิบเดิมหลุดเกณฑ์ซ้ำ ๆ → ปรับเกณฑ์ ± ของแถวนั้นใน 🧪 สูตร BOM หรือทบทวนวิธีตัก/ภาชนะ'
+        + ((res && res.otherBranch) ? ' · รายการของสาขาอื่น: สลับสาขาที่หัวจอก่อน (ประวัติชั่งกรองตามสาขาที่เปิดอยู่)' : ''),
+      run: (ctx) => {
+        const eod = startOfToday(ctx) + DAY, since = eod - 31*DAY;
+        const users = ctx.state.users || [];
+        const userName = (id) => { const u = users.find(x => x && x.id === id); return u ? userLabel(u) : ''; };
+        const bomName = (id) => { const b = id && (ctx.state.boms||[]).find(x => x && x.id === id); return b ? bomLabel(ctx, b) : ''; };
+        const l = (ctx.state.weighLogs||[]).filter(w => {
+          if(!w || !w.offSpec || w.reviewedAt) return false;
+          const ts = Number(w.ts)||0;
+          if(!(ts >= since && ts < eod)) return false;
+          return !w.branchId || ctx.inScope(w.branchId);
+        }).sort((a,b) => (Number(b.ts)||0) - (Number(a.ts)||0));
+        const cur = ctx.state.currentBranch || ctx.user.branch;
+        return { count:l.length, otherBranch: l.some(w => w.branchId && w.branchId !== cur),
+          detail: l.map(w => {
+            const off = (w.items||[]).filter(it => it && (it.offSpec || it.pass === false));
+            const offTxt = off.map(it => `${it.name || '-'} ${fmtNum(it.value)}/${fmtNum(it.target)} ${it.unit || 'g'}${it.reason ? ` (${it.reason})` : ' (ไม่ระบุเหตุผล)'}`).join(', ');
+            return `${w.lot || w.id} · ${w.recipeName || w.recipeCode || bomName(w.bomId) || '-'} · ${w.operator || userName(w.userId) || '-'} · ${offTxt || 'ไม่ระบุรายการ'}${w.branchId && w.branchId !== cur ? ` (${ctx.branchName(w.branchId)})` : ''}`;
+          }) };
+      } },
+
+    // 🆕 WEIGH: สูตรชั่ง (BOM ที่มีขั้น ⚖️ ชั่ง) ที่สถานีชั่งจะ "ข้ามเงียบ ๆ" บางแถว — weighRecipeFromBom ข้ามวัตถุดิบที่แปลงเป็นกรัมไม่ได้ (นับชิ้น/ฟอง/ใบ · หน่วยฐานไม่ใช่น้ำหนัก/ปริมาตร) ใส่ไว้ใน skipped[]
+    //   + แถวที่ยังไม่ผูกทะเบียนสินค้า (itemId ว่าง — เช่น สูตรเดิมที่นำเข้าแล้วยังไม่ map): ชั่งได้ถ้าหน่วยเป็น g/กก. แต่ log จะไม่มี itemId → Step 3 (ตัดสต๊อกตามน้ำหนักจริง) ใช้ไม่ได้
+    //   ref: src/00-core.js gramsOfMaterial/weighRecipeFromBom (m.weighRequired === false = ตั้งใจไม่ชั่ง → ไม่นับ) · src/mod-production.js:10160-10162 คอลัมน์ "🌾 ชั่ง" (checkbox weighRequired) ในตารางวัตถุดิบของ BOM
+    //   show: คนที่แก้ BOM ได้ (production.bom.edit — PM/GM ตามแผน) · โหมด go-live แท็บ 🧪 สูตร BOM เปิดเฉพาะ superuser/PM (02-nav.js:626-630) → role อื่นซ่อนจนกว่า prodLive
+    { key:'prod_bom_weigh_unlinked', label:'สูตรชั่ง (BOM) มีวัตถุดิบที่สถานีชั่งข้าม / ยังไม่ผูกสินค้า', severity:'info', goLive:true,
+      show: (ctx) => bomShow(ctx) && ctx.perm('production','bom','edit') && (ctx.prodLive || ctx.isSuper || ctx.role === 'production_manager'),
+      nav: BOM_NAV,
+      hint: bomHint('สถานีชั่งจะไม่แสดงแถวเหล่านี้ให้ชั่ง (ผู้ชั่งไม่รู้ว่าขาด) · เปิด 🧪 สูตร BOM → ตารางวัตถุดิบ: ของที่นับชิ้น (ไข่/ใบ/แผ่น) เอาติ๊กช่อง "🌾 ชั่ง" ออก = ไม่ชั่ง · ของที่ต้องชั่งจริง แก้หน่วยเป็น กรัม/กก./ml/ลิตร (หรือเพิ่มหน่วยฐานน้ำหนักให้สินค้าที่ ตั้งค่า → 📦 สินค้า) · แถวที่ยังไม่ผูกสินค้า ให้เลือกสินค้าจากทะเบียน'),
+      run: (ctx) => {
+        const out = [];
+        for(const b of weighBoms(ctx)){
+          const r = weighRecipeFromBom(ctx.state, b) || { skipped:[] };
+          const skipped = r.skipped || [];
+          const unlinked = (b.materials||[]).filter(m => m && m.weighRequired !== false && !m.itemId).map(m => m.note || m.name || '(ไม่ระบุชื่อ)');
+          if(!skipped.length && !unlinked.length) continue;
+          const parts = [];
+          if(skipped.length) parts.push(`ชั่งไม่ได้ (ข้าม): ${skipped.join(', ')}`);
+          if(unlinked.length) parts.push(`ยังไม่ผูกสินค้า: ${unlinked.join(', ')}`);
+          out.push(`${bomLabel(ctx, b)} — ${parts.join(' · ')}`);
+        }
+        return { count:out.length, detail:out };
+      } },
+
+    // 🆕 WEIGH: คนที่มีสิทธิ์ชั่ง (production.weigh.create) และสังกัดไลน์ แต่สถานีชั่งของเขาไม่มีสูตรเลย (bomsForWeigh ว่าง) → เปิดแท็บ ⚖️ ชั่ง แล้วเจอหน้าว่าง
+    //   นับเฉพาะเมื่อมีสูตรชั่งในระบบแล้วอย่างน้อย 1 สูตร (ก่อนหน้านั้นทั้งโรงงานยังไม่เริ่มใช้ → ไม่ใช่ช่องว่างรายไลน์) · ข้าม superuser/manager/PM (เห็นทุกสูตร) และคนไม่มีไลน์ (เห็นสูตรที่ไม่ผูกไลน์อยู่แล้ว)
+    //   ทางแก้หลัก = สร้าง BOM ที่มีขั้น ⚖️ ชั่ง ให้ไลน์นั้น (PM ทำได้เอง) · ทางแก้รอง = admin/gm ย้ายไลน์ที่สังกัด หรือถอดสิทธิ์สถานีชั่ง (ตั้งค่า → ผู้ใช้) · show: PM + superuser
+    { key:'prod_weigh_no_bom_for_line', label:'คนใช้สถานีชั่ง แต่ไลน์ที่สังกัดยังไม่มีสูตรชั่ง', severity:'info', goLive:true,
+      show: (ctx) => weighVisible(ctx) && (ctx.role === 'production_manager' || ctx.isSuper),
+      nav: BOM_NAV,
+      hint: bomHint('คนเหล่านี้เปิด ⚖️ สถานีชั่ง แล้วจะไม่มีสูตรให้เลือก · สร้างสูตรชั่งให้ไลน์นั้น: 🧪 สูตร BOM → ➕ สูตรใหม่ (ระบุ "ไลน์ที่ผลิต" = ไลน์นั้น) → ⚙️ ขั้นตอนการผลิต → เพิ่มขั้น "⚖️ ชั่งตามสูตร" · หรือถ้าคนนั้นไม่ได้ชั่งจริง → แจ้ง admin/gm ปรับ "ไลน์ที่สังกัด" / ถอดสิทธิ์ สถานีชั่ง ที่ ตั้งค่า → 👥 ผู้ใช้ + สิทธิ์'),
+      run: (ctx) => {
+        if(!(ctx.state.boms||[]).some(b => b && b.active !== false && bomHasWeighStep(b))) return 0;   // ยังไม่มีสูตรชั่งเลย → ยังไม่เริ่มใช้
+        const idx = lineIndex(ctx);
+        const out = [];
+        for(const u of (ctx.state.users||[])){
+          if(!u || u.active === false || MGR_TIER(u)) continue;
+          if(u.branch && !ctx.inScope(u.branch)) continue;
+          if(!hasPerm(u,'production','weigh','create')) continue;
+          const lines = getUserAssignedLines(u) || [];
+          if(!lines.length) continue;
+          if(bomsForWeigh(ctx.state, u, u.branch || null).length > 0) continue;
+          const lineNames = lines.map(id => { const e = idx.get(id); return (e && e.line.name) || id; });
+          out.push(`${userLabel(u)} — ${lineNames.join('/')} (${ctx.branchName(u.branch)})`);
+        }
+        return { count:out.length, detail:out };
+      } },
+
+    // 🆕 WEIGH UAT (audit): state เก็บประวัติชั่งได้ 10,000 ชุดล่าสุด (_capWeighLogsForSave ใน 01-state) — เกินแล้วชุดเก่าสุดหลุดจาก cloud ถาวร
+    //   เตือนตั้งแต่ 8,000 ให้ผจก. export CSV (📜 ประวัติชั่ง → 📥 CSV ช่วงเก่า) ก่อน · ถ้ามี marker weigh_truncated = เคยตัดไปแล้ว
+    { key:'prod_weigh_logs_near_cap', label:'ประวัติชั่งใกล้เต็มที่เก็บในระบบ — export CSV เก็บนอกระบบก่อน', severity:'warn', goLive:true,
+      show: (ctx) => weighVisible(ctx) && isManagerRole(ctx),
+      nav: WEIGH_NAV,
+      hint: () => 'เปิด ⚖️ สถานีชั่ง → 📜 ประวัติชั่ง → เลือกช่วงวันที่เก่า → 📥 CSV เก็บไว้นอกระบบ · ระบบเก็บ 10,000 ชุดล่าสุด (เกินนั้นชุดเก่าสุดถูกตัดออกอัตโนมัติ)',
+      run: (ctx) => {
+        const logs = ctx.state.weighLogs || [];
+        const n = logs.filter(w => w && w.type !== 'weigh_truncated').length;
+        const truncated = logs.some(w => w && w.type === 'weigh_truncated');
+        if(n < 8000 && !truncated) return { count:0 };
+        return { count:1, detail:[`ประวัติชั่งในระบบ ${n.toLocaleString()} ชุด (เพดาน 10,000)${truncated ? ' · เคยตัดชุดเก่าออกแล้ว' : ''}`] };
+      } },
+  ].map(gateProdLive),
 });
 })(window);
 
@@ -78160,7 +79754,8 @@ C.registerGroup({
       hint: (ctx) => ctx.isSuper
         ? hqPrefix(ctx) + 'ตั้งค่า → 🏢 องค์กร → 👥 ผู้ใช้ + สิทธิ์ → แก้ไข → ตั้งรหัสผ่านใหม่ให้ทุกบัญชีที่ใช้จริง และเอาติ๊ก "เปิดใช้งาน" ออกจากบัญชีตัวอย่างที่ไม่ใช้ (อย่าลบ — ระบบเติมบัญชีตัวอย่างกลับมาเมื่อเปิดแอปใหม่)'
         : 'บัญชีนี้ไม่ควรตั้งรหัสให้ผู้อื่น → แจ้ง GM/admin ให้เปลี่ยนรหัสผ่านหรือปิดการใช้งานบัญชีตัวอย่าง',
-      run: (ctx) => { const l = M.users(ctx).filter(u => String(u.password) === '1234');
+      // 🆕 PER-USER AUTH: หลังซิงก์บัญชี cloud รหัสไม่อยู่ใน state แล้ว → ใช้ธง seedPassword (ตั้งตอนซิงก์ถ้ารหัส = 1234 · ล้างเมื่อผู้ใช้/แอดมินตั้งรหัสใหม่)
+      run: (ctx) => { const l = M.users(ctx).filter(u => String(u.password) === '1234' || u.seedPassword === true);
         return { count:l.length, detail: ctx.isSuper ? l.map(uname) : [], total:M.users(ctx).length }; } },
 
     // ref: src/00-supabase.js:601-604 cloudSaveStatus {cloudOnly, dirty, pushing, conflict, error} · :356-358, :428, :445-446, :503 (_conflict/_lastCloudErr)
@@ -78535,7 +80130,8 @@ C.registerGroup({
     //      → ทุก store ที่สร้างจาก UI ยิงทันที (store ส่วนใหญ่ไม่ผลิต) = noisy → นับเฉพาะ HQ หรือสาขาที่มีสูตร BOM ใช้ได้ (availableIn) · alias: production.branch_no_active_line
     { key:'branch_no_production_line', label:'สาขาเปิดฟีเจอร์ผลิตแต่ยังไม่มีไลน์ผลิต',
       severity: (ctx, res) => (res && res.hasHq) ? sSev('warn','lines')(ctx) : 'info',
-      alias: 'production.branch_no_active_line',
+      // 🆕 WEIGH: โหมด go-live กลุ่มผลิตโผล่เฉพาะ check สถานีชั่ง (production.branch_no_active_line ยังซ่อนตาม prodLive) → alias เฉพาะเมื่อ prodLive ไม่งั้นนับที่นี่ตามเดิม
+      alias: (ctx) => ctx.prodLive ? 'production.branch_no_active_line' : null,
       show: (ctx) => ctx.can('settings'),
       nav: sNav('lines'),
       hint: sHint('lines', 'ตั้งค่า → 🏭 การผลิต → 🏭 ไลน์ผลิต → เพิ่มไลน์ให้สาขา — สาขาที่ไม่ผลิตเอง: ตั้งค่า → 🏢 สาขา → แก้ไข → ส่วน "⚙️ Feature ที่เปิดใช้งานในสาขานี้" → เอาติ๊ก "🏭 ผลิต / BOM" ออก (ค่าเริ่มต้นเปิดไว้)'),
