@@ -12,9 +12,9 @@
 <script>
 (function(){
 'use strict';
-const WEIGH_VERSION = '2026.09.18.2';
+const WEIGH_VERSION = '2026.09.21';
 // ความสามารถของรุ่นนี้ — ส่งไปกับ ready ให้แอปแม่เช็คได้ตรง ๆ ไม่ต้องเทียบเลขเวอร์ชัน
-const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard'];
+const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode'];
 const h = React.createElement;
 const { useState, useEffect, useRef, useMemo } = React;
 const cls = (...a)=>a.filter(Boolean).join(' ');
@@ -113,6 +113,8 @@ const resolvePerms = (settings) => {
 //                  { source:'weigh-system', type:'scale', connected, device }
 //                  { source:'weigh-system', type:'height', px }           ← ให้แอปแม่ปรับความสูง iframe
 const EMBED = (()=>{ try { return window.parent && window.parent !== window && /[?&]embed=1/.test(location.search); } catch(e){ return false; } })();
+// 🆕 โหมดเครื่องพิมพ์อย่างเดียว (ERP ฝังไว้ที่หน้ารับของ/ประวัติ GR): แสดงแค่แถบต่อเครื่องพิมพ์ + รับคำสั่ง print-lot-labels (ฉลากล็อตทั่วไป) — ไม่มีสูตร/ชั่ง
+const PRINTER_MODE = EMBED && /[?&]mode=printer/.test(location.search);
 const embedPost = (msg) => { if(!EMBED) return; try { window.parent.postMessage({ source:'weigh-system', version:WEIGH_VERSION, ...msg }, '*'); } catch(e){} };
 const embedListeners = new Set();
 if(EMBED){
@@ -476,6 +478,7 @@ const LABEL_PRESETS = [
   { id:'100x150', label:'100×150 มม. (ใบปะหน้า)', w:100, h:150 },
   { id:'80x50',  label:'80×50 มม.',  w:80,  h:50 },
   { id:'100x50', label:'100×50 มม.', w:100, h:50 },
+  { id:'60x40',  label:'60×40 มม. (ฉลากรับของ)', w:60, h:40 },
   { id:'50x30',  label:'50×30 มม.',  w:50,  h:30 },
 ];
 const printerOpts = (settings) => {
@@ -594,6 +597,67 @@ function renderLabelCanvas(data, opt){
   const foot = (data.offSpec ? '⚠ นอกเกณฑ์ ' : '') + (data.note || '');
   if(foot.trim()){ const fl = wrap(foot, innerW, 1)[0]||''; ctx.fillText(fl, pad, Math.min(y, H - footFs*1.2 - pad)); }
   return cv;
+}
+
+// 🆕 ฉลากล็อตทั่วไป (รับของ/โอน — จากแอปแม่): { name, code?, lot, dateText?, expText?, unitText?, fromText?, grNumber?, idx?, count? }
+//   ใช้ตัววัด/ตัดคำ/บาร์โค้ดชุดเดียวกับฉลากชั่ง · ดวงเล็ก (<300 จุดสูง = 50×30) ย่อทุกอย่าง · บาร์โค้ด = LOT (เฉพาะ ASCII)
+function renderLotLabelCanvas(lb, opt){
+  const dpmm = (opt.dpi||203)/25.4;
+  let W = Math.round(opt.wmm*dpmm); W -= W % 8;
+  const H = Math.round(opt.hmm*dpmm);
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#000'; ctx.textBaseline = 'top';
+  const FONT = '"Sarabun","Noto Sans Thai","Leelawadee UI","Tahoma",sans-serif';
+  const pad = Math.round(1.5*dpmm), innerW = W - pad*2;
+  const setFont = (px, bold, mono) => { ctx.font = (bold?'bold ':'') + Math.max(8,Math.round(px)) + 'px ' + (mono ? '"Courier New",monospace' : FONT); };
+  const fit = (txt, maxW) => { let t = String(txt||''); if(ctx.measureText(t).width <= maxW) return t; const ch = Array.from(t); while(ch.length > 1 && ctx.measureText(ch.join('') + '…').width > maxW) ch.pop(); return ch.join('') + '…'; };
+  const wrap2 = (txt, maxW, maxLines) => { const out=[]; let cur=''; for(const c of Array.from(String(txt||''))){ if(ctx.measureText(cur+c).width > maxW && cur){ out.push(cur); cur=c; if(out.length>=maxLines) break; } else cur+=c; } if(cur && out.length<maxLines) out.push(cur); if(out.length>=maxLines && ctx.measureText(out[maxLines-1]).width > maxW-1) out[maxLines-1] = fit(out[maxLines-1], maxW); return out; };
+  const small = H < 300;
+  // 1) ชื่อสินค้า (หนา ≤2 บรรทัด)
+  const nameFs = Math.round(H * (small ? 0.15 : 0.12));
+  let y = pad + Math.round(nameFs*0.22);
+  setFont(nameFs, true);
+  for(const ln of wrap2(lb.name||'-', innerW, small ? 2 : 2)){ ctx.fillText(ln, pad, y); y += nameFs*1.2; }
+  // 2) บาร์โค้ด LOT (ถ้าเข้ารหัสได้และมีที่)
+  const lotTxt = String(lb.lot == null ? '' : lb.lot);
+  const widths = code128Widths(lotTxt);
+  const bcH = Math.round(H * (small ? 0.17 : 0.16));
+  if(widths){
+    const modules = widths.split('').reduce((a,b)=>a+Number(b),0);
+    let mod = Math.floor((innerW - 20) / modules); mod = Math.max(2, Math.min(4, mod));
+    if(mod*modules + 20 <= innerW){
+      let x = Math.round((W - mod*modules)/2); let bar = true;
+      for(const wch of widths){ const ww = Number(wch)*mod; if(bar) ctx.fillRect(x, Math.round(y), ww, bcH); x += ww; bar = !bar; }
+      y += bcH + dpmm*0.4;
+    }
+  }
+  // 3) LOT (โมโน หนา)
+  const lotFs = Math.round(H * (small ? 0.105 : 0.085));
+  setFont(lotFs, true, true); ctx.fillText(fit(lotTxt || '-', innerW), pad, y); y += lotFs*1.3;
+  // 4) รับวันที่ · EXP
+  const infoFs = Math.round(H * (small ? 0.085 : 0.07));
+  setFont(infoFs, false);
+  const l1 = `รับ ${lb.dateText || '-'}` + (lb.expText ? `  EXP ${lb.expText}` : '  ไม่ระบุวันหมดอายุ');
+  ctx.fillText(fit(l1, innerW), pad, y); y += infoFs*1.3;
+  // 5) หน่วย + รหัสสินค้า
+  if(lb.unitText || lb.code){ setFont(infoFs, false); const u = fit(lb.unitText || '', innerW*0.62); ctx.fillText(u, pad, y); const c = fit(lb.code || '', innerW*0.36); ctx.fillText(c, W - pad - ctx.measureText(c).width, y); y += infoFs*1.3; }
+  // 6) ท้าย: ผู้ส่ง · เลขใบรับ · ดวงที่
+  const footFs = Math.round(H * (small ? 0.075 : 0.06));
+  setFont(footFs, false);
+  const right = (lb.grNumber || '') + (lb.count > 1 ? ` · ${lb.idx || 1}/${lb.count}` : '');
+  const rw = ctx.measureText(right).width;
+  const fy = Math.min(Math.max(y, H - footFs*1.3 - pad), H - footFs*1.3 - pad);
+  if(lb.fromText) ctx.fillText(fit(lb.fromText, innerW - rw - dpmm), pad, fy);
+  if(right) ctx.fillText(right, W - pad - rw, fy);
+  return cv;
+}
+// HTML สำรอง (ไม่มีเครื่องพิมพ์ต่อ → หน้าจอพิมพ์ของระบบ) สำหรับฉลากล็อตทั่วไป — ใช้ภาพจาก canvas เดียวกัน (ให้หน้าตาเหมือนที่ยิงเข้าเครื่อง)
+function buildLotLabelsHTML(labels, opt){
+  const imgs = [];
+  labels.forEach(lb => { const n = Math.max(1, Math.min(99, Number(lb.count)||1)); for(let k = 1; k <= n; k++){ const cv = renderLotLabelCanvas({ ...lb, idx:k, count:n }, opt); imgs.push(cv.toDataURL('image/png')); } });
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ฉลากล็อต ${imgs.length} ดวง</title><style>@page{size:${opt.wmm}mm ${opt.hmm}mm;margin:0}body{margin:0}img{display:block;width:${opt.wmm}mm;height:${opt.hmm}mm;page-break-after:always}img:last-child{page-break-after:auto}</style></head><body>${imgs.map(u => `<img src="${u}">`).join('')}<script>window.onload=()=>{setTimeout(()=>{window.print();},300);};<\/script></body></html>`;
 }
 
 // canvas → บิตแมป 1 บิต (MSB = ซ้ายสุด) · ห้าม dither (ตัวไทย/บาร์โค้ดจะแตก) · blackIsOne: ESC/POS=true, TSPL=false
@@ -859,10 +923,21 @@ function useUSBPrinter(opts){
     const job = opt.lang==='escpos' ? buildESCPOS(cv, opt, copies||1) : buildTSPL(cv, opt, copies||1);
     await send(job);
   });
+  // 🆕 ฉลากล็อตทั่วไปหลายดวง (จากแอปแม่) · size {wmm,hmm} ทับขนาดที่ตั้งไว้ได้ (รับของใช้ 50×30 · สถานีชั่ง 100×75 เครื่องเดียวกันสลับม้วน)
+  const printLotLabels = (labels, settings, size) => run(`กำลังพิมพ์ฉลาก ${labels.length} แบบ…`, async () => {
+    const opt = { ...printerOpts(settings), ...(size && size.wmm ? { wmm: Number(size.wmm), hmm: Number(size.hmm) || Number(size.wmm) } : {}) };
+    for(const lb of labels){
+      const n = Math.max(1, Math.min(99, Number(lb.count)||1));
+      for(let k = 1; k <= n; k++){
+        const cv = renderLotLabelCanvas({ ...lb, idx:k, count:n }, opt);
+        await send(opt.lang==='escpos' ? buildESCPOS(cv, opt, 1) : buildTSPL(cv, opt, 1));
+      }
+    }
+  });
   const testText = (settings) => run('พิมพ์ทดสอบ…', async () => { await send(buildTestText({ ...printerOpts(settings), via: viaLabel() })); });
   const testLabel = (settings) => printLabel({ recipeName:'ทดสอบพิมพ์ฉลาก ภาษาไทย', lot:'TEST-690912-01', total:2410.5, operator:(settings && settings.lastOperator) || 'ทดสอบ', note:'พิมพ์ทดสอบ ' + viaLabel(), ts:Date.now() }, settings, 1);   // 🆕 ชื่อผู้ชั่งจริงบนฉลากทดสอบ
   return { supported, supportedUSB, supportedBT, supportedBLE, connected, name, busy, lastErr, transport, transportLabel: viaLabel(),
-    connect, connectBT, connectBLE, disconnect, printLabel, testText, testLabel };
+    connect, connectBT, connectBLE, disconnect, printLabel, printLotLabels, testText, testLabel };
 }
 
 // ==================== MAIN APP ====================
@@ -912,6 +987,20 @@ function App(){
         });
       } else if(d.type === 'select-recipe'){
         setEmbedSelect({ code: d.code, recipeId: d.recipeId, at: Date.now() });
+      } else if(d.type === 'print-lot-labels' && Array.isArray(d.labels)){
+        // 🆕 ฉลากล็อตจากหน้ารับของ/โอน ของแอปแม่ · ตอบ printed {ok, count, via}
+        const st = stateRef.current, pr = printerRef.current;
+        const labels = d.labels.filter(x => x && typeof x === 'object').slice(0, 200);
+        const total = labels.reduce((a, x) => a + Math.max(1, Math.min(99, Number(x.count)||1)), 0);
+        const size = d.size && d.size.wmm ? d.size : null;
+        const reply = (ok, extra) => embedPost({ type:'printed', reqId: d.reqId || null, ok, count: total, ...(extra||{}) });
+        if(pr && pr.connected){
+          pr.printLotLabels(labels, st.settings, size).then(() => reply(true, { via: pr.transportLabel })).catch(e => reply(false, { error: e && e.message || String(e) }));
+        } else if(d.allowScreen !== false){
+          const opt = { ...printerOpts(st.settings), ...(size ? { wmm:Number(size.wmm), hmm:Number(size.hmm)||Number(size.wmm) } : {}) };
+          const ok = printHTML(buildLotLabelsHTML(labels, opt));
+          reply(!!ok, { via:'screen' });
+        } else reply(false, { error:'ยังไม่ได้ต่อเครื่องพิมพ์' });
       } else if(d.type === 'print-label' && d.log && typeof d.log === 'object'){
         // 🆕 พิมพ์ซ้ำจากข้อมูลของแอปแม่ (ERP มี lot/ชื่อสูตร/total/operator/ts ครบ) — logic เดียวกับ LogsTab.reprint
         //    ไม่ผ่าน select-recipe → ไม่มี confirm "เปลี่ยนสูตรจะล้างทิ้ง" · LOT ที่ชั่งจากเครื่องอื่น/ล้างข้อมูลแล้วก็พิมพ์ได้
@@ -930,6 +1019,7 @@ function App(){
     return ()=>{ embedListeners.delete(fn); try { ro && ro.disconnect(); } catch(e){} };
   }, []);
   useEffect(()=>{ if(EMBED) embedPost({ type:'scale', connected: !!scale.connected, device: scale.device ? scale.device.name : null }); }, [scale.connected]);
+  useEffect(()=>{ if(EMBED) embedPost({ type:'printer', connected: !!printer.connected, name: printer.name || null, transport: printer.transport || null, busy: printer.busy || '', error: printer.lastErr || '' }); }, [printer.connected, printer.name, printer.busy, printer.lastErr]);
 
   // 🆕 สูตรที่ฝังในไฟล์ (SEED_RECIPES) เปลี่ยน (มี deploy ชุดใหม่) → รวมเข้าเครื่องแบบ "ตาม id"
   //    - id ใหม่ในไฟล์ → เพิ่ม · id เดิมแต่เนื้อหาต่าง → ใช้ของไฟล์ · สูตรที่เครื่องนี้สร้างเอง → คงไว้
@@ -967,6 +1057,8 @@ function App(){
   const replaceMode = inReplaceMode(state);   // 🆕 สูตรมาจากแอปแม่ทั้งชุด (ERP) — แท็บสูตรอ่านอย่างเดียว
   const TABS = [['weigh','⚖️ ชั่ง'], perms.recipesView && ['recipes','📋 สูตร'], perms.logsView && ['logs','📜 ประวัติ'], perms.settingsEdit && ['settings','⚙️ ตั้งค่า']].filter(Boolean);
   useEffect(()=>{ if(!TABS.some(t=>t[0]===tab)) setTab('weigh'); }, [perms.recipesView, perms.logsView, perms.settingsEdit]);
+  // 🆕 โหมดเครื่องพิมพ์อย่างเดียว (ฝังในหน้ารับของของ ERP): แถบเดียว — สถานะ + ปุ่มต่อ + ทดสอบ · ตั้งค่ากระดาษ/ความเข้มยังใช้ของเครื่องนี้ (แก้ได้ในโหมดปกติ)
+  if(PRINTER_MODE) return h(PrinterBar, { printer, settings: state.settings || {} });
   // ใน iframe ห้ามใช้ min-h-screen (100vh = ความสูง iframe → รายงานความสูงวนเพิ่มไม่รู้จบ)
   return h('div', { className: EMBED ? '' : 'min-h-screen' },
     // Header
@@ -1756,6 +1848,25 @@ function LogsTab({ state, printer }){
 }
 
 // ==================== SETTINGS TAB ====================
+// 🆕 แถบเครื่องพิมพ์ (PRINTER_MODE) — ปุ่มใหญ่กดง่าย · ข้อความสั้น · ไม่มีอย่างอื่น
+function PrinterBar({ printer, settings }){
+  const opt = printerOpts(settings);
+  const btn = 'px-3 py-2 rounded-lg text-sm font-bold disabled:opacity-50';
+  return h('div', { className:'p-2 bg-white', 'data-printer-bar':'1' },
+    !printer.supported
+      ? h('div', { className:'text-sm text-red-700' }, '❌ เบราว์เซอร์นี้ต่อเครื่องพิมพ์ตรงไม่ได้ (ต้องเป็น Chrome บน Android/คอม) — จะใช้หน้าจอพิมพ์ของระบบแทน')
+      : h('div', { className:'flex items-center gap-2 flex-wrap' },
+          printer.connected
+            ? [ h('span', { key:'n', className:'text-sm bg-green-100 text-green-900 px-2 py-1.5 rounded-lg font-medium' }, '✓ ', printer.name || 'เครื่องพิมพ์', ' · ', printer.transportLabel),
+                h('button', { key:'t', onClick:()=>printer.printLotLabels([{ name:'ทดสอบพิมพ์ฉลากล็อต ภาษาไทย', code:'RM-TEST', lot:'GR-TEST-01', dateText:new Date().toLocaleDateString('th-TH'), expText:'', unitText:'1 ลัง = 24 ชิ้น', fromText:'ทดสอบ', grNumber:'GR-TEST', count:1 }], settings, null), disabled:!!printer.busy, className: btn + ' bg-white border-2 border-sky-300 text-sky-800' }, printer.busy || '🖨️ ทดสอบ'),
+                h('button', { key:'d', onClick:printer.disconnect, className:'px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg text-sm' }, '✗ ตัด') ]
+            : [ printer.supportedBT && h('button', { key:'b', onClick:()=>printer.connectBT(), disabled:!!printer.busy, className: btn + ' bg-blue-600 hover:bg-blue-700 text-white' }, printer.busy || '🔵 ต่อเครื่องพิมพ์ Bluetooth'),
+                printer.supportedUSB && h('button', { key:'c', onClick:()=>printer.connect(false), disabled:!!printer.busy, className: btn + ' bg-sky-600 hover:bg-sky-700 text-white' }, '🔌 USB'),
+                !printer.supportedBT && printer.supportedBLE && h('button', { key:'l', onClick:()=>printer.connectBLE(), disabled:!!printer.busy, className: btn + ' bg-blue-600 text-white' }, '🔵 Bluetooth LE'),
+                !printer.supportedBT && printer.supportedBLE && h('span', { key:'nb', className:'text-xs text-amber-800' }, 'Xprinter/TSC แบบ Bluetooth ต้อง Chrome 138+ (อัปเดต Chrome)') ],
+          h('span', { className:'text-xs text-gray-500 basis-full' }, `กระดาษที่ตั้งไว้ในเครื่องนี้: ${opt.wmm}×${opt.hmm} มม. · ${opt.lang.toUpperCase()} · ความเข้ม ${opt.density}` + (printer.connected ? '' : ' · ' + PAIR_HINT)),
+          printer.lastErr && h('span', { className:'text-xs text-red-700 basis-full' }, '⚠️ ', printer.lastErr)));
+}
 function PrinterSettings({ s, set, printer }){
   const p = s.printer || {};
   const setP = (patch) => set({ printer:{ ...p, ...patch } });
@@ -1972,7 +2083,7 @@ function SettingsTab({ state, update, printer }){
 
 ReactDOM.createRoot(document.getElementById('root')).render(h(App));
 // เปิดเผยตัวช่วยสำหรับทดสอบอัตโนมัติ (เฉพาะ ?debug=1)
-if(DEBUG) window.__weighTest = { renderLabelCanvas, buildTSPL, buildESCPOS, canvasToBits, code128Widths, printerOpts, buildTestText, WEIGH_VERSION };
+if(DEBUG) window.__weighTest = { renderLabelCanvas, renderLotLabelCanvas, buildLotLabelsHTML, buildTSPL, buildESCPOS, canvasToBits, code128Widths, printerOpts, buildTestText, WEIGH_VERSION };
 })();
 </script>
 </body></html>

@@ -2021,6 +2021,88 @@ const TOKENS = {
 };
 function toneOf(name){ return TOKENS.moduleTone[name] || TOKENS.moduleTone.blue; }
 
+// ==================== 🖨️ LABEL PRINTER DOCK — เครื่องพิมพ์ฉลาก Bluetooth/USB สำหรับหน้ารับของ/โอน (2026-09-21) ====================
+// ปัญหา: หน้ารับของพิมพ์สติ๊กเกอร์ผ่าน window.print() → บนแท็บเล็ต Android ไปไม่ถึงเครื่องพิมพ์ฉลาก Bluetooth (XP-420B)
+// ทางแก้: ใช้ตัวขับเครื่องพิมพ์ชุดเดียวกับสถานีชั่ง (Weight/weigh-system) ผ่าน iframe โหมด `?embed=1&mode=printer` ที่ฝังไว้ "ตัวเดียวทั้งแอป"
+//   · iframe สร้างครั้งเดียวใน <body> (แผงลอยมุมขวาล่าง แสดง/ซ่อนด้วย display — ห้ามย้าย DOM ไม่งั้น iframe โหลดใหม่ = หลุด Bluetooth)
+//   · การจับคู่/ต่อเครื่องต้องกดในกรอบ (user gesture) → ปุ่ม "ต่อเครื่องพิมพ์" อยู่ในแผงนั้น · สถานะส่งกลับด้วย postMessage {type:'printer'}
+//   · สั่งพิมพ์: LabelDock.printLotLabels(labels, { size:{wmm,hmm}, allowScreen }) → {ok, via, count} · ขนาดฉลาก = settings.lotLabelSize (ค่าเริ่มต้น 60×40 ตามม้วนของ user)
+//   · ไม่มีเครื่องพิมพ์ต่ออยู่ → ผู้เรียก (printLotLabels ใน mod-stock) ใช้หน้าพิมพ์ HTML เดิม
+const LOT_LABEL_SIZES = { '60x40':{ wmm:60, hmm:40, label:'60×40 มม.' }, '50x30':{ wmm:50, hmm:30, label:'50×30 มม.' }, '100x75':{ wmm:100, hmm:75, label:'100×75 มม.' }, '80x50':{ wmm:80, hmm:50, label:'80×50 มม.' }, '100x50':{ wmm:100, hmm:50, label:'100×50 มม.' } };
+function lotLabelSizeOf(state){ const k = state && state.settings && state.settings.lotLabelSize; return LOT_LABEL_SIZES[k] || LOT_LABEL_SIZES['60x40']; }
+const LabelDock = (() => {
+  let frame = null, panel = null, ready = false, seq = 0;
+  let status = { connected:false, name:null, transport:null, busy:'', error:'' };
+  const pending = {}; const listeners = new Set();
+  const emit = () => listeners.forEach(fn => { try { fn(status); } catch(_e){} });
+  const stateOf = () => { try { return (global.ERP && typeof global.ERP.__getState === 'function') ? global.ERP.__getState() : null; } catch(_e){ return null; } };
+  const url = (state) => { const st = state || stateOf(); const base = (st && st.settings && st.settings.weighUrl) || 'weigh/index.html'; return base + (base.includes('?') ? '&' : '?') + 'embed=1&mode=printer'; };
+  function onMsg(ev){
+    if(!frame || !ev.source || ev.source !== frame.contentWindow) return;
+    const d = ev.data; if(!d || typeof d !== 'object' || d.source !== 'weigh-system') return;
+    if(d.type === 'ready'){ ready = true; emit(); }
+    else if(d.type === 'printer'){ status = { connected: !!d.connected, name: d.name || null, transport: d.transport || null, busy: d.busy || '', error: d.error || '' }; emit(); }
+    else if(d.type === 'printed'){ const cb = d.reqId && pending[d.reqId]; if(cb){ delete pending[d.reqId]; cb(d); } }
+    else if(d.type === 'height'){ const px = Number(d.px)||0; if(frame && px > 0) frame.style.height = Math.min(320, Math.max(96, px + 8)) + 'px'; }
+  }
+  function ensure(state){
+    if(frame || typeof document === 'undefined') return frame;
+    panel = document.createElement('div');
+    panel.id = 'erp-label-dock';
+    panel.setAttribute('data-label-dock', '1');
+    panel.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:60;width:min(520px,calc(100vw - 24px));background:#fff;border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.18);display:none;overflow:hidden;font-family:inherit';
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:#0F2A4A;color:#fff;font-size:14px;font-weight:600';
+    head.innerHTML = '<span>🖨️ เครื่องพิมพ์ฉลาก <span style="font-weight:400;opacity:.8;font-size:12px">(Bluetooth/USB · ใช้ร่วมกับสถานีชั่ง)</span></span>';
+    const closeBtn = document.createElement('button'); closeBtn.type = 'button'; closeBtn.textContent = '✕'; closeBtn.title = 'ซ่อนแผง (เครื่องพิมพ์ยังต่ออยู่)';
+    closeBtn.style.cssText = 'background:transparent;border:0;color:#fff;font-size:16px;padding:4px 8px;cursor:pointer';
+    closeBtn.onclick = () => close();
+    head.appendChild(closeBtn);
+    frame = document.createElement('iframe');
+    frame.src = url(state);
+    frame.title = 'เครื่องพิมพ์ฉลาก';
+    frame.setAttribute('allow', 'usb; bluetooth; serial');
+    frame.style.cssText = 'width:100%;height:120px;border:0;display:block;background:#fff';
+    panel.appendChild(head); panel.appendChild(frame);
+    document.body.appendChild(panel);
+    global.addEventListener('message', onMsg);
+    return frame;
+  }
+  function open(state){ ensure(state); if(panel){ panel.style.display = 'block'; } try { global.dispatchEvent(new CustomEvent('erp:labeldock', { detail:{ open:true } })); } catch(_e){} }
+  function close(){ if(panel) panel.style.display = 'none'; try { global.dispatchEvent(new CustomEvent('erp:labeldock', { detail:{ open:false } })); } catch(_e){} }
+  function isOpen(){ return !!(panel && panel.style.display !== 'none'); }
+  // labels: [{ name, code, lot, dateText, expText, unitText, fromText, grNumber, count }] · opts: { size:{wmm,hmm}, allowScreen }
+  function printLotLabels(labels, opts){
+    opts = opts || {};
+    return new Promise(resolve => {
+      ensure(opts.state);
+      if(!frame || !frame.contentWindow) return resolve({ ok:false, error:'ไม่มีกรอบเครื่องพิมพ์' });
+      const reqId = 'lp' + (++seq) + '_' + Date.now().toString(36);
+      pending[reqId] = resolve;
+      try { frame.contentWindow.postMessage({ target:'weigh-system', type:'print-lot-labels', reqId, labels, size: opts.size || null, allowScreen: opts.allowScreen !== false }, '*'); }
+      catch(e){ delete pending[reqId]; return resolve({ ok:false, error: String(e && e.message || e) }); }
+      setTimeout(() => { if(pending[reqId]){ delete pending[reqId]; resolve({ ok:false, error:'เครื่องพิมพ์ไม่ตอบใน 60 วิ' }); } }, 60000);
+    });
+  }
+  return { ensure, open, close, isOpen, isReady: () => ready, isConnected: () => !!status.connected, getStatus: () => status,
+    subscribe(fn){ listeners.add(fn); return () => listeners.delete(fn); }, printLotLabels };
+})();
+// แถวสถานะเครื่องพิมพ์สำหรับใส่ในฟอร์มรับของ/พิมพ์ซ้ำ: "🖨️ เครื่องพิมพ์: ✓ XP-420B · Bluetooth" หรือ "ยังไม่ต่อ [ต่อเครื่องพิมพ์]"
+function PrinterStatusRow({ state, compact }){
+  const [st, setSt] = useState(LabelDock.getStatus());
+  useEffect(() => LabelDock.subscribe(s => setSt({ ...s })), []);
+  const size = lotLabelSizeOf(state);
+  return h('div', { className: cls('flex items-center gap-2 flex-wrap text-xs rounded-lg border px-2.5 py-1.5', st.connected ? 'bg-green-50 border-green-200 text-green-900' : 'bg-gray-50 border-gray-200 text-gray-700'), 'data-printer-row': st.connected ? 'on' : 'off' },
+    h('span', { className:'font-medium' }, '🖨️ เครื่องพิมพ์ฉลาก:'),
+    st.connected
+      ? h('span', null, `✓ ${st.name || 'ต่อแล้ว'}${st.transport ? ' · ' + ({ usb:'USB', bt:'Bluetooth', ble:'Bluetooth LE', serial:'Serial' }[st.transport] || st.transport) : ''}`)
+      : h('span', { className:'text-gray-600' }, 'ยังไม่ต่อ — จะพิมพ์ผ่านหน้าจอพิมพ์ของระบบแทน'),
+    h('span', { className:'text-gray-500' }, `· ฉลาก ${size.label}`),
+    st.error && h('span', { className:'text-red-700 basis-full' }, '⚠️ ', st.error),
+    h('button', { type:'button', onClick: () => LabelDock.open(state), className: cls('ml-auto px-2 py-1 rounded border font-medium', st.connected ? 'bg-white text-green-800 border-green-300' : 'bg-blue-600 text-white border-blue-600') },
+      st.connected ? (compact ? 'จัดการ' : 'เปิดแผงเครื่องพิมพ์') : '🔵 ต่อเครื่องพิมพ์ Bluetooth/USB'));
+}
+
 // ==================== 🆕 UI-v2 DESIGN ATOMS (หน้าแรก + ตารางทุกโมดูลใช้ชุดเดียวกัน) ====================
 // ToneTile — กล่องไอคอนสีทึบ (การ์ด KPI / หัวส่วน / แถวเอกสาร)
 function ToneTile({ icon, tone, size }){
@@ -3753,6 +3835,7 @@ Object.assign(global.ERP, {
   // Date range helpers
   useDateRange, DateRangeBar, usePaged, Pager, usePersistedTab, navigateTo, TAB_EVENT, TAB_CHANGED_EVENT, readPersistedTabs,
   OPEN_DOC_EVENT, requestOpenDoc, useOpenDoc, TOKENS, toneOf, ToneTile, SectionHead, KpiCard, QuickTile, StatusPill, DocChip, STATUS_TONE,
+  LabelDock, PrinterStatusRow, LOT_LABEL_SIZES, lotLabelSizeOf,
   code128Widths, code128SVG, inDateRange, exportCSV,
   // Business helpers
   getPOReceiveStatus, genDocNumber,
@@ -14953,6 +15036,7 @@ const {
   getBranch, isHQ, isSuperUser, getAllowedBranches, hasPerm,
   Modal, Button, deductFIFO,
   code128SVG, code128Widths,
+  LabelDock, PrinterStatusRow, lotLabelSizeOf,   // 🖨️ เครื่องพิมพ์ฉลาก Bluetooth/USB (ตัวขับชุดเดียวกับสถานีชั่ง)
   unitsForPurpose, findItemUnit, toBaseQty, resolveToBase, getBaseUnit,
   formatQtyMulti, getStockUnitsRanked, getAllUnitsRanked, multiUnitsToBase,
   resolveDisplayUnit,
@@ -16441,10 +16525,11 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     const labelCount = labelJobs.reduce((s2, j) => s2 + j.count, 0);
     // 🆕 บอกตามจริง — printLotLabels คืน false ถ้าเปิดหน้าต่างไม่ได้ (popup ถูกบล็อก)
     //    หรือผู้ใช้กดยกเลิกตอนถามยืนยันจำนวนมาก · เดิมขึ้นว่า "เปิดหน้าพิมพ์แล้ว" ทุกกรณี
-    const _printed = labelJobs.length > 0 ? (printLotLabels(labelJobs) !== false) : null;
+    const _printed = labelJobs.length > 0 ? (printLotLabels(labelJobs, state) !== false) : null;
+    const _viaDock = LabelDock && LabelDock.isConnected && LabelDock.isConnected();
     const labelMsg = labelCount <= 0 ? ''
       : (_printed
-          ? `\n\n🏷️ เปิดหน้าพิมพ์สติ๊กเกอร์ ${labelCount} ดวงแล้ว`
+          ? (_viaDock ? `\n\n🖨️ ส่งพิมพ์สติ๊กเกอร์ ${labelCount} ดวงเข้าเครื่องพิมพ์แล้ว` : `\n\n🏷️ เปิดหน้าพิมพ์สติ๊กเกอร์ ${labelCount} ดวงแล้ว`)
           : `\n\n⚠️ เปิดหน้าพิมพ์สติ๊กเกอร์ไม่ได้ (เบราว์เซอร์บล็อก popup)\n   ของรับเข้าคลังเรียบร้อยแล้ว — พิมพ์ได้ที่ ประวัติรับของ → 🏷️ สติ๊กเกอร์`);
 
     // 🆕 แจ้งว่าผูกกับ INV ล่วงหน้าแล้ว — ไม่ต้องตั้งหนี้อีก
@@ -16461,6 +16546,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
 
   return h(Modal, { isOpen:true, title:`📥 รับของจาก PO: ${po.poNumber}`, onClose, size:'xl', docKey:'gr:po:'+po.id },
     h('div', { className:'space-y-4' },
+      // 🖨️ สถานะเครื่องพิมพ์ฉลาก — ต่อ Bluetooth/USB ก่อนกดรับ → สติ๊กเกอร์ยิงเข้าเครื่องตรง (ไม่ผ่านหน้าจอพิมพ์)
+      h(PrinterStatusRow, { state }),
       h('div', { className:'bg-green-50 border border-green-200 rounded p-3 text-sm text-green-800' },
         '✨ รับได้บางส่วน · ระบบจะเพิ่ม stock ที่ ',
         h('b', null, `${destBranchObj?.branchType==='hq'?'🏢':'🏪'} ${destBranchObj?.name}`),
@@ -18962,13 +19049,14 @@ function LotLabelReprintModal({ gr, state, onClose }){
       };
     }).filter(Boolean);
     if(jobs.length === 0) return alert('ยังไม่ได้เลือกจำนวนสติ๊กเกอร์');
-    if(printLotLabels(jobs) === false){
+    if(printLotLabels(jobs, state) === false){
       alert('🖨️ เปิดหน้าต่างพิมพ์ไม่ได้ — เบราว์เซอร์บล็อก popup\n\nอนุญาต popup ของเว็บนี้ก่อน แล้วกดใหม่');
     }
   };
 
   return h(Modal, { isOpen:true, title:`🏷️ พิมพ์สติ๊กเกอร์ LOT — ${gr.grNumber}`, onClose, size:'lg' },
     h('div', { className:'space-y-3' },
+      h(PrinterStatusRow, { state }),
       h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-2.5 text-xs text-indigo-900' },
         'พิมพ์ซ้ำได้เมื่อสติ๊กเกอร์หลุด/พิมพ์ไม่ติด — ใช้ ', h('b', null, 'LOT เดิม'),
         ' ของใบรับของนี้ ไม่สร้างล็อตใหม่ ไม่กระทบสต๊อก',
@@ -19926,7 +20014,7 @@ function grFromText(gr, state){
   return (sup && sup.name) ? `ผู้ส่ง: ${sup.name}` : '';
 }
 
-function printLotLabels(labels){
+function printLotLabels(labels, stateArg){
   const jobs = (labels||[])
     .map(x => ({ ...x, count: Math.max(0, Math.min(99, Math.floor(Number(x.count)||0))) }))
     .filter(x => x.count > 0);
@@ -19935,6 +20023,19 @@ function printLotLabels(labels){
   const total = jobs.reduce((sum, x) => sum + x.count, 0);
   // 🛑 กันเผลอสั่งพิมพ์เป็นร้อยดวง (เช่นกดปุ่มลัดกับของที่ชั่งเป็นกรัม)
   if(total > 30 && !confirm(`จะพิมพ์สติ๊กเกอร์ ${total} ดวง — แน่ใจไหม?`)) return false;
+  // 🖨️ เครื่องพิมพ์ฉลาก Bluetooth/USB ต่ออยู่ (LabelDock = iframe โหมดเครื่องพิมพ์ของระบบชั่ง) → ยิง TSPL ตรง ไม่เปิดหน้าจอพิมพ์
+  //   ขนาดฉลาก = settings.lotLabelSize (ค่าเริ่มต้น 60×40) · ผลแจ้งด้วย toast · ล้มเหลว → บอกและให้กดพิมพ์ซ้ำได้ที่ประวัติรับของ (ไม่ตกไปหน้าจอพิมพ์เอง เพราะเครื่องต่ออยู่)
+  if(LabelDock && LabelDock.isConnected && LabelDock.isConnected()){
+    const st = stateArg || (typeof global.ERP.__getState === 'function' && global.ERP.__getState()) || null;
+    const size = lotLabelSizeOf(st);
+    const say = (m, k) => { try { if(global.ERP.toast) global.ERP.toast(m, k || 'info'); else alert(m); } catch(_e){ alert(m); } };
+    say(`🖨️ กำลังพิมพ์สติ๊กเกอร์ ${total} ดวง (${size.label})…`, 'info');
+    LabelDock.printLotLabels(jobs, { size:{ wmm:size.wmm, hmm:size.hmm }, allowScreen:false, state: st }).then(r => {
+      if(r && r.ok) say(`✅ พิมพ์สติ๊กเกอร์ ${r.count || total} ดวงแล้ว (${r.via || 'เครื่องพิมพ์'})`, 'success');
+      else say(`⚠️ พิมพ์สติ๊กเกอร์ไม่สำเร็จ: ${(r && r.error) || 'ไม่ทราบสาเหตุ'} — ตรวจเครื่องพิมพ์ (แผง 🖨️ มุมขวาล่าง) แล้วกดพิมพ์ซ้ำที่ ประวัติรับของ → 🏷️ สติ๊กเกอร์`, 'error');
+    });
+    return true;
+  }
 
   // 📊 บาร์โค้ดต้องกว้างไม่เกินดวง — Code128 ที่ความหนาแท่งอ่านได้จริง (ขั้นต่ำ 0.19 มม./module)
   //    LOT ยาว ๆ จะกินเกิน 46 มม. → ไม่วาดดีกว่าวาดแล้วโดนตัดขอบ
@@ -68193,6 +68294,13 @@ function SystemPolicyToggles({ state, dispatch }){
           onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ warehouseSeeValue: e.target.checked } }) }),
         h('span', { className:'text-sm font-medium' },
           'อนุญาตให้ พนักงานคลังสินค้า เห็นมูลค่าเงิน (฿) ของสต๊อก'))),
+
+    // 🖨️ ขนาดสติ๊กเกอร์ล็อต (รับของ/โอน) เมื่อพิมพ์ผ่านเครื่องพิมพ์ Bluetooth/USB — settings.lotLabelSize (user ใช้ม้วน 60×40)
+    h('div', { className:'bg-sky-50 border-2 border-sky-300 rounded p-4', 'data-testid':'policy-lot-label-size' },
+      h('div', { className:'font-bold text-sky-900 mb-1' }, '🖨️ ขนาดสติ๊กเกอร์ล็อต (พิมพ์ผ่านเครื่องพิมพ์ฉลาก)'),
+      h('div', { className:'text-xs text-sky-800 mb-2' }, 'ใช้เมื่อหน้ารับของ/พิมพ์ซ้ำต่อเครื่องพิมพ์ Bluetooth/USB อยู่ (แผง 🖨️ มุมขวาล่าง) · ต้องตรงกับม้วนที่ใส่ในเครื่อง · สถานีชั่งใช้ 100×75 แยกต่างหาก'),
+      h('select', { value: st.lotLabelSize || '60x40', onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ lotLabelSize: e.target.value } }), className:'px-3 py-2 border-2 rounded text-sm', 'data-testid':'select-lot-label-size' },
+        Object.keys(global.ERP.LOT_LABEL_SIZES || {}).map(k => h('option', { key:k, value:k }, global.ERP.LOT_LABEL_SIZES[k].label)))),
 
     // 🆕 ACCT-V2 (user 2026-09-18): เงินสดย่อย = บันทึกอย่างเดียว (ไม่ต้องเติมเงินเข้าระบบก่อนจ่าย) — settings.pettyRecordOnly (default true)
     h('div', { className:'bg-emerald-50 border-2 border-emerald-300 rounded p-4', 'data-testid':'policy-petty-record-only' },
