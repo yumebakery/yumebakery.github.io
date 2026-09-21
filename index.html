@@ -69092,13 +69092,15 @@ function UsersSettings({ state, dispatch }){
   const cloudAuth = !!(state.settings && state.settings.cloudAuth);
   // ต้องซิงก์: ยังไม่ซิงก์ (active) · หรือค้าง pending ไม่ว่าจะ active หรือถูกระงับ (ระงับที่ ban ไม่ผ่านต้องตามไปปิดให้ได้)
   const needSync = users.filter(u => u.cloudPending || (u.active !== false && !u.cloudAuth));
-  const [fnPing, setFnPing] = useState(null);   // { ok, isAdmin, rank, error } — session นี้สั่งฟังก์ชันได้ไหม (แสดงก่อนกด)
+  const [fnPing, setFnPing] = useState(null);   // { ok, isAdmin, rank, caller, error } — session นี้สั่งฟังก์ชันได้ไหม (แสดงก่อนกด)
+  const [pingTick, setPingTick] = useState(0);  // ↻ ตรวจอีกครั้ง (หลังเพิ่ม secret/redeploy ไม่ต้องรีเฟรชหน้า)
   useEffect(() => {
     if(!cloudOn){ setFnPing(null); return; }
     let alive = true;
+    setFnPing(null);
     global.ERP.SBSync.callUsersFn('ping', {}).then(r => { if(alive) setFnPing(r); }).catch(e => { if(alive) setFnPing({ ok:false, error: String(e && e.message || e) }); });
     return () => { alive = false; };
-  }, [cloudOn]);
+  }, [cloudOn, pingTick]);
   const fnReady = !!(fnPing && fnPing.ok && fnPing.isAdmin);
   // ☁️ ซิงก์บัญชี cloud ทั้งหมด: ผู้ใช้ที่ต้องซิงก์ → Edge Function upsert เป็นชุด → MARK ตามผลรายคน
   //   🆕 UAT: ไม่ส่งรหัสอ่อน (1234/สั้น/เท่ากับ username) ขึ้น cloud — บัญชีตัวอย่างในซอร์สสาธารณะจะกลายเป็นบัญชีที่ใครก็ล็อกอินได้ · แอดมินต้องตั้งรหัส ≥6 หรือระงับก่อน
@@ -69192,8 +69194,14 @@ function UsersSettings({ state, dispatch }){
         canWrite && h(Button, { variant:'primary', size:'sm', onClick:()=>{ setEdit(null); setShowModal(true); } }, '+ เพิ่มผู้ใช้'))
     ),
     syncReport && h('div', { className: cls('text-xs rounded px-3 py-2 mb-3 border', syncReport.ok ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'), 'data-cloud-sync-report':'1' }, syncReport.text),
-    cloudOn && fnPing && !fnReady && h('div', { className:'text-xs bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 text-amber-900', 'data-cloud-fn-status':'1' },
-      `⚠️ เครื่องนี้สั่งสร้าง/แก้บัญชี cloud ไม่ได้: ${fnPing.error || 'บัญชีที่ล็อกอินอยู่ไม่ใช่ผู้ดูแล (GM/Admin/ผู้จัดการ หรืออีเมลเจ้าของ)'} — แก้ผู้ใช้ได้ แต่บัญชี cloud จะค้าง ⏳ จนกว่าผู้ดูแลจะกดซิงก์`),
+    // แสดงอีเมล cloud ที่ฟังก์ชันเห็น (fnPing.caller) — ถ้าไม่ตรง secret ERP_ADMIN_EMAILS จะได้รู้ทันทีว่าต้องแก้ตัวไหน · ↻ ตรวจอีกครั้งหลังแก้ secret (ไม่ต้องรีเฟรช)
+    cloudOn && fnPing && !fnReady && h('div', { className:'text-xs bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 text-amber-900 flex items-start gap-2 flex-wrap', 'data-cloud-fn-status':'1' },
+      h('span', { className:'flex-1 min-w-0' },
+        `⚠️ เครื่องนี้สั่งสร้าง/แก้บัญชี cloud ไม่ได้: ${fnPing.error || 'บัญชีที่ล็อกอินอยู่ไม่ใช่ผู้ดูแล (GM/Admin หรืออีเมลเจ้าของใน ERP_ADMIN_EMAILS)'}`,
+        fnPing.caller ? ` · ฟังก์ชันเห็นว่าคุณล็อกอินด้วย "${fnPing.caller}"${fnPing.isAdmin === false ? ' ซึ่งยังไม่อยู่ในรายชื่อผู้ดูแล — ใส่อีเมลนี้ใน Secrets → ERP_ADMIN_EMAILS (คั่นด้วย ,) แล้วกด ↻' : ''}` : '',
+        ' — แก้ผู้ใช้ได้ แต่บัญชี cloud จะค้าง ⏳ จนกว่าผู้ดูแลจะกดซิงก์'),
+      h('button', { type:'button', onClick:()=>setPingTick(t => t + 1), className:'shrink-0 px-2 py-1 rounded border border-amber-400 bg-white text-amber-900 hover:bg-amber-100' }, '↻ ตรวจอีกครั้ง')),
+    cloudOn && !fnPing && h('div', { className:'text-xs text-gray-500 mb-3', 'data-cloud-fn-status':'checking' }, '⏳ กำลังตรวจสิทธิ์ฟังก์ชัน cloud…'),
     cloudOn && !cloudAuth && h('div', { className:'text-xs bg-blue-50 border border-blue-200 rounded px-3 py-2 mb-3 text-blue-900' },
       '☁️ ล็อกอินชั้นเดียว (ยังไม่เปิด): ตอนนี้ทุกเครื่องต้องเข้าด้วยอีเมลผู้ดูแลก่อน · เมื่อพร้อม (ติดตั้ง Edge Function erp-users แล้ว) กดปุ่มด้านบน — พนักงานจะเข้าด้วยชื่อผู้ใช้+รหัสของตัวเองที่หน้าแรก และรหัสจะย้ายไปเก็บฝั่ง cloud'),
 
