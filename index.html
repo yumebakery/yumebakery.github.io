@@ -3171,6 +3171,29 @@ function bomsForWeigh(state, user, branchId){
 // Resize image file → base64 string (auto compress)
 // maxDim: longest side (default 1200px), quality: JPEG quality (default 0.7)
 // Returns Promise<{ dataUrl, sizeKB, w, h }>
+// 📎 อ่านไฟล์แนบ/รูปถ่ายให้พร้อมเก็บ (2026-09-22 — user: "ถ่ายรูปตอนรับของแล้วระบบแจ้งว่าใหญ่เกิน")
+//   รูปจากกล้องมือถือ 3–8MB → ย่ออัตโนมัติ (1280px · jpeg 0.72 → ถ้ายังเกิน ลดเป็น 1024/0.6 → 800/0.5) แล้วค่อยเช็คขนาด · ไฟล์ที่ไม่ใช่รูป (PDF) เช็คขนาดตรง ๆ
+//   คืน { name, size, type, dataUrl, uploadedAt, resized } · โยน Error ข้อความไทยพร้อมแสดงได้ (HEIC ที่เบราว์เซอร์ถอดไม่ได้ / PDF ใหญ่เกิน)
+async function readUploadFile(file, opts){
+  const o = opts || {};
+  const maxKB = o.maxKB || 800;
+  const isImage = !!(file && file.type && file.type.startsWith('image/'));
+  if(!file) throw new Error('ไม่มีไฟล์');
+  if(!isImage){
+    if(file.size > maxKB * 1024) throw new Error(`${file.name} ใหญ่เกิน ${maxKB >= 1024 ? Math.round(maxKB / 1024) + 'MB' : maxKB + 'KB'}`);
+    const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error('อ่านไฟล์ไม่ได้')); r.onload = () => res(String(r.result)); r.readAsDataURL(file); });
+    return { name:file.name, size:file.size, type:file.type, dataUrl, uploadedAt:Date.now(), resized:false };
+  }
+  const steps = [[o.imageMaxDim || 1280, o.imageQuality || 0.72], [1024, 0.6], [800, 0.5]];
+  let last = null;
+  for(const [dim, q] of steps){
+    try { last = await resizeImageToBase64(file, dim, q); } catch(e){ throw new Error(`${file.name}: เปิดรูปไม่ได้ (${file.type || 'ไม่ทราบชนิด'}) — ถ้าเป็น HEIC ให้ตั้งกล้องเป็น "เข้ากันได้มากที่สุด" (JPEG) หรือส่งเป็น JPG`); }
+    if(last.sizeKB <= maxKB) break;
+  }
+  if(!last || last.sizeKB > maxKB) throw new Error(`${file.name} ย่อแล้วยังใหญ่เกิน ${maxKB}KB`);
+  const bytes = Math.round(last.dataUrl.length * 0.75);
+  return { name: file.name.replace(/\.[^.]+$/, '') + (last.dataUrl.startsWith('data:image/jpeg') ? '.jpg' : ''), size: bytes, type:'image/jpeg', dataUrl: last.dataUrl, uploadedAt:Date.now(), resized:true, w:last.w, h:last.h, origSize:file.size };
+}
 function resizeImageToBase64(file, maxDim, quality){
   maxDim = maxDim || 1200;
   quality = quality || 0.7;
@@ -4185,7 +4208,7 @@ Object.assign(global.ERP, {
   WHT_CATEGORIES, WHT_SUB5_TYPES, WHT_SECTION_LABELS, genWHNumber, buildWHTCerts,
   findDupSupInv, consumeSupplierCredit,
   // Helpers
-  genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
+  genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines, readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, getBaseUnit, findItemUnit, toBaseQty, unitsForPurpose, unitsForIssue, hasUnitForPurpose, isReversalPair,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,
@@ -16696,22 +16719,11 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
   );
   const photoRef = useRef(null);
 
+  // 📷 รูปจากกล้องมือถือใหญ่ 3–8MB → ย่ออัตโนมัติ (readUploadFile) ไม่เด้ง "ใหญ่เกิน" อีก (2026-09-22)
   const onPhotoCapture = (e) => {
     const files = Array.from(e.target.files || []);
     files.forEach(file => {
-      if(file.size > 800 * 1024) {
-        alert(`📷 ${file.name} ใหญ่เกิน 800KB — บีบอัดก่อน`);
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = () => {
-        setPhotos(prev => [...prev, {
-          name: file.name, size: file.size,
-          dataUrl: String(reader.result),
-          uploadedAt: Date.now()
-        }]);
-      };
-      reader.readAsDataURL(file);
+      global.ERP.readUploadFile(file, { maxKB: 800 }).then(ph => setPhotos(prev => [...prev, ph])).catch(err => alert('📷 ' + (err && err.message || err)));
     });
     if(photoRef.current) photoRef.current.value = '';
   };
@@ -20795,13 +20807,8 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
 
   const onPhotoCapture = (e) => {
     const files = Array.from(e.target.files || []);
-    files.forEach(file => {
-      if(file.size > 800 * 1024) return alert(`${file.name} ใหญ่เกิน 800KB`);
-      const reader = new FileReader();
-      reader.onload = () => {
-        setPhotos(p => [...p, { name:file.name, size:file.size, dataUrl:String(reader.result) }]);
-      };
-      reader.readAsDataURL(file);
+    files.forEach(file => {   // 📷 ย่อรูปอัตโนมัติ (readUploadFile) — รูปมือถือไม่เด้ง "ใหญ่เกิน"
+      global.ERP.readUploadFile(file, { maxKB: 800 }).then(ph => setPhotos(p => [...p, ph])).catch(err => alert('📷 ' + (err && err.message || err)));
     });
     if(photoRef.current) photoRef.current.value = '';
   };
@@ -44064,19 +44071,8 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
   // File attachment
   const onFileAttach = (e) => {
     const files = Array.from(e.target.files || []);
-    files.forEach(file => {
-      if(file.size > 500 * 1024) {
-        alert(`${file.name} ใหญ่เกิน 500KB — บีบอัดก่อน`);
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = () => {
-        setAttachments(prev => [...prev, {
-          name: file.name, size: file.size, type: file.type,
-          dataUrl: String(reader.result), uploadedAt: Date.now()
-        }]);
-      };
-      reader.readAsDataURL(file);
+    files.forEach(file => {   // 📎 รูปย่ออัตโนมัติ · PDF/อื่น ≤500KB (readUploadFile)
+      global.ERP.readUploadFile(file, { maxKB: 500 }).then(uf => setAttachments(prev => [...prev, uf])).catch(err => alert(err && err.message || err));
     });
     if(fileRef.current) fileRef.current.value = '';
   };
@@ -47049,10 +47045,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   const onInvImage = (e) => {
     const f = e.target.files?.[0];
     if(!f) return;
-    if(f.size > 1024*1024) return alert('ไฟล์ใหญ่เกิน 1MB');
-    const r = new FileReader();
-    r.onload = () => setSupInvImage({ name:f.name, size:f.size, dataUrl:String(r.result), uploadedAt:Date.now() });
-    r.readAsDataURL(f);
+    global.ERP.readUploadFile(f, { maxKB: 1024 }).then(uf => setSupInvImage(uf)).catch(err => alert(err && err.message || err));   // 📎 ย่อรูปอัตโนมัติ
   };
 
   // Credit Note carry-over: ดูว่า supplier นี้มี creditDue ค้างอยู่ไหม
@@ -52237,14 +52230,7 @@ function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
   const onSlip = (e) => {
     const files = Array.from(e.target.files || []);
     if(files.length === 0) return;
-    Promise.all(files.map(file => {
-      if(file.size > 800*1024){ alert(`${file.name} ใหญ่เกิน 800KB · ข้าม`); return null; }
-      return new Promise(res => {
-        const r = new FileReader();
-        r.onload = () => res({ name:file.name, size:file.size, dataUrl:String(r.result), uploadedAt:Date.now() });
-        r.readAsDataURL(file);
-      });
-    })).then(results => {
+    Promise.all(files.map(file => global.ERP.readUploadFile(file, { maxKB: 800 }).catch(err => { alert((err && err.message || err) + ' · ข้าม'); return null; }))).then(results => {   // 📎 ย่อรูปอัตโนมัติ
       setSlips([...slips, ...results.filter(Boolean)]);
     });
     e.target.value = '';  // reset เผื่อเลือกไฟล์ซ้ำได้
@@ -64704,10 +64690,8 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
   const onSlip = (e) => {
     const file = e.target.files?.[0];
     if(!file) return;
-    if(file.size > 800*1024) { alert('ไฟล์ใหญ่เกิน 800KB'); return; }
-    const reader = new FileReader();
-    reader.onload = () => setSlip({ name:file.name, size:file.size, dataUrl:String(reader.result) });
-    reader.readAsDataURL(file);
+    // 📎 รูปสลิปจากมือถือย่ออัตโนมัติ (readUploadFile) · PDF เช็ค 800KB
+    global.ERP.readUploadFile(file, { maxKB: 800 }).then(f => setSlip(f)).catch(err => alert(err && err.message || err));
   };
 
   const confirm_ = () => {
@@ -66773,18 +66757,17 @@ function SlipCell({ p, dispatch, user }){
   const onFile = (e) => {
     const f = e.target.files && e.target.files[0];
     if(!f) return;
-    if(f.size > 3 * 1024 * 1024) return alert('ไฟล์ใหญ่เกิน 3MB — ย่อรูปก่อน');
-    const r = new FileReader();
-    r.onload = () => {
-      const slip = { name:f.name, size:f.size, dataUrl:String(r.result),
+    // 📎 ย่อรูปอัตโนมัติ (readUploadFile · เก็บลง state ควรเล็ก ≤800KB) · PDF ≤3MB
+    global.ERP.readUploadFile(f, { maxKB: f.type && f.type.startsWith('image/') ? 800 : 3072 }).catch(err => { alert(err && err.message || err); return null; }).then(uf => {
+      if(!uf) return;
+      const slip = { name:uf.name, size:uf.size, dataUrl:uf.dataUrl,
         uploadedBy:user.username, uploadedAt:Date.now() };
       dispatch({ type:'UPDATE_PAY', data:{ ...p, slip } });
       dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'pay_slip_attach',
         by:user.username, byName:user.name||user.username, ts:Date.now(),
         note:`แนบสลิปย้อนหลัง ${p.pvNumber||p.id} · ${f.name}`,
         summary:`แนบสลิป ${p.pvNumber||''}` }});
-    };
-    r.readAsDataURL(f);
+    });
     e.target.value = '';
   };
   return h('div', null,
@@ -68070,10 +68053,7 @@ function ReceivePaymentModal({ si, state, dispatch, user, onClose }){
   const onSlip = (e) => {
     const f = e.target.files?.[0];
     if(!f) return;
-    if(f.size > 800*1024) return alert('ไฟล์ใหญ่เกิน 800KB');
-    const r = new FileReader();
-    r.onload = () => setSlip({ name:f.name, size:f.size, dataUrl:String(r.result) });
-    r.readAsDataURL(f);
+    global.ERP.readUploadFile(f, { maxKB: 800 }).then(uf => setSlip(uf)).catch(err => alert(err && err.message || err));   // 📎 ย่อรูปอัตโนมัติ
   };
 
   const receive = () => {
