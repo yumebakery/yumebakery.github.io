@@ -6028,6 +6028,14 @@ function reducer(s, a){
     // ---------- Items ----------
     case 'ADD_ITEM':     return { ...s, items:[...s.items, a.data] };
     case 'UPDATE_ITEM':  return { ...s, items:s.items.map(i => i.id===a.data.id ? a.data : i) };
+    // 🆕 ตั้งราคาขายหลายรายการรวดเดียว (ตั้งค่า › สินค้า › 💲 ตั้งราคาขาย) — แตะเฉพาะ salePrice
+    case 'SET_SALE_PRICES': {
+      const rows = (a.data && a.data.rows) || a.data || [];
+      const m = new Map();
+      rows.forEach(r => { if(r && r.id) m.set(r.id, Math.max(0, Number(r.salePrice) || 0)); });
+      if(!m.size) return s;
+      return { ...s, items: s.items.map(i => m.has(i.id) ? { ...i, salePrice: m.get(i.id) } : i) };
+    }
     case 'DELETE_ITEM':  return { ...s, items:s.items.filter(i => i.id!==a.data) };
     case 'UPDATE_STOCK': return { ...s, items:s.items.map(it => it.id===a.data.id ? { ...it, stockByBranch:{ ...it.stockByBranch, ...a.data.stockByBranch } } : it) };
     // 🆕 FT: ปรับ stock แบบ delta ที่ shape-safe (multi-warehouse) — ใช้แทน UPDATE_STOCK ที่ pre-compute total
@@ -9319,16 +9327,30 @@ function reducer(s, a){
 
     // ---------- Bulk item import (จาก CSV) ----------
     case 'IMPORT_ITEMS': {
-      // a.data = [{ item object, fresh=true means new }, ...]
+      // a.data = [{ ...ฟิลด์ที่ไฟล์ส่งมาจริง, __new?:{ค่าตั้งต้นสำหรับ "สร้างใหม่" } }, ...]
+      // กฎกันข้อมูลหาย: code ซ้ำ = อัปเดต "เฉพาะฟิลด์ที่ส่งมา" เท่านั้น
+      //   สต๊อกคงเหลือ + หน่วยนับ/ตัวแปลงหน่วย ของเดิม "ห้ามถูกทับ" เด็ดขาด
       let items = [...s.items];
       let tags = new Set(s.itemTags||[]);
-      for(const it of a.data){
-        // merge tags into pool
-        (it.tags||[]).forEach(t => tags.add(t));
-        // replace if same code exists
+      for(const raw of a.data){
+        if(!raw) continue;
+        const { __new, ...it } = raw;
+        ((it.tags || (__new && __new.tags) || [])).forEach(t => tags.add(t));
         const idx = items.findIndex(x => (x.code||'').toLowerCase() === (it.code||'').toLowerCase() && it.code);
-        if(idx >= 0) items[idx] = { ...items[idx], ...it };
-        else items.push(it);
+        if(idx >= 0){
+          const prev = items[idx];
+          const next = { ...prev, ...it, id: prev.id };
+          next.stockByBranch = prev.stockByBranch;        // สต๊อกเดิมคงไว้เสมอ
+          if(it.issueUnit && Array.isArray(prev.units) && prev.units.length
+             && !prev.units.some(u => u && u.name === it.issueUnit)){
+            next.units = [...prev.units, { name: it.issueUnit, toBase: 1 }];  // เพิ่มหน่วยใหม่ ไม่ล้างของเดิม
+          } else {
+            next.units = prev.units;
+          }
+          items[idx] = next;
+        } else {
+          items.push({ ...(__new || {}), ...it });
+        }
       }
       return { ...s, items, itemTags: [...tags] };
     }
@@ -68758,6 +68780,7 @@ const _useOpenDoc = typeof useOpenDoc === 'function' ? useOpenDoc : function(){}
 const _restoreMin = (docKey) => !!(restoreMinimized && restoreMinimized(docKey));
 const _toastWarn = (msg) => { if(toast && toast.warning) toast.warning(msg); else if(toast) toast(msg, 'warning'); else alert(msg); };
 const _toastInfo = (msg) => { if(toast && toast.info) toast.info(msg); else if(toast) toast(msg, 'info'); };
+const _toastOk   = (msg) => { if(toast && toast.success) toast.success(msg); else if(toast) toast(msg, 'success'); };
 // เลื่อนแถวที่ไฮไลต์ให้เห็น (หลัง filter/หน้าอัปเดต) — modal เปิดทับอยู่ก็ไม่เป็นไร ปิดแล้วเจอแถวทันที
 const _scrollRowIntoView = (attr, id) => {
   if(!id) return;
@@ -70316,6 +70339,7 @@ function ItemsSettings({ state, dispatch }){
   const [showModal, setShowModal] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showEcount, setShowEcount] = useState(false);   // 📦 (ชั่วคราว) ชุดนำเข้า Ecount ฝังใน build
+  const [showPrices, setShowPrices] = useState(false);   // 💲 ตั้งราคาขายหลายรายการรวดเดียว
   const [edit, setEdit] = useState(null);
   const [typeFilter, setTypeFilter] = useState('all');
   const [tagFilter, setTagFilter] = useState('');
@@ -70397,6 +70421,8 @@ function ItemsSettings({ state, dispatch }){
       h('div', { className:'flex gap-2' },
         canImport && h(Button, { variant:'warning', size:'sm', onClick:()=>setShowEcount(true) }, '📦 นำเข้าจากไฟล์'),
         canImport && h(Button, { variant:'secondary', size:'sm', onClick:()=>setShowImport(true) }, '📥 นำเข้า CSV'),
+        canEdit && h(Button, { variant:'secondary', size:'sm', 'data-testid':'items-bulk-price',
+          onClick:()=>setShowPrices(true) }, '💲 ตั้งราคาขาย'),
         canCreate && h(Button, { variant:'primary', size:'sm', onClick:()=>{ setEdit(null); setShowModal(true); } }, '+ เพิ่มสินค้า')
       )
     ),
@@ -70482,7 +70508,130 @@ function ItemsSettings({ state, dispatch }){
     // key ตาม id — กัน React reuse instance (useState init จาก item) เมื่อย่อ A แล้วเปิด B
     showModal && h(ItemEditModal, { key: edit ? edit.id : 'new', item:edit, state, dispatch, onClose:()=>setShowModal(false) }),
     showImport && h(ItemImportModal, { state, dispatch, onClose:()=>setShowImport(false) }),
-    showEcount && h(EcountImportModal, { state, dispatch, onClose:()=>setShowEcount(false) })
+    showEcount && h(EcountImportModal, { state, dispatch, onClose:()=>setShowEcount(false) }),
+    showPrices && h(BulkPriceModal, { state, dispatch, onClose:()=>setShowPrices(false) })
+  );
+}
+
+// 💲 ตั้งราคาขายหลายรายการรวดเดียว — ราคาที่ตั้งไว้จะเด้งเองตอนเลือกสินค้าในบิลขาย (SI ใช้ item.salePrice)
+//    แตะเฉพาะ salePrice ไม่ยุ่งกับต้นทุน/สต๊อก/หน่วยนับ
+function BulkPriceModal({ state, dispatch, onClose }){
+  const types = state.itemTypes || [];
+  const hasFinished = types.some(t => t.id === 'finished');
+  const [typeFilter, setTypeFilter] = useState(hasFinished ? 'finished' : 'all');
+  const [search, setSearch] = useState('');
+  const [onlyBlank, setOnlyBlank] = useState(false);
+  const [draft, setDraft] = useState({});          // { [itemId]: 'ข้อความในช่อง' }
+
+  const list = useMemo(() => {
+    let l = (state.items||[]).filter(i => i.active !== false);
+    if(typeFilter !== 'all') l = l.filter(i => i.type === typeFilter);
+    if(onlyBlank) l = l.filter(i => !(Number(i.salePrice) > 0));
+    if(search){
+      const q = search.toLowerCase();
+      l = l.filter(i => (i.name||'').toLowerCase().includes(q)
+        || (i.code||'').toLowerCase().includes(q)
+        || (i.barcode||'').toLowerCase().includes(q));
+    }
+    return l.slice().sort((a,b) => (a.code||'').localeCompare(b.code||''));
+  }, [state.items, typeFilter, search, onlyBlank]);
+
+  const pg = usePaged(list, 50);
+  const blankCount = (state.items||[]).filter(i => i.active !== false && !(Number(i.salePrice) > 0)).length;
+
+  // แถวที่ "แก้แล้วจริง" (ค่าในช่อง ≠ ราคาเดิม)
+  const changed = useMemo(() => {
+    const out = [];
+    (state.items||[]).forEach(i => {
+      if(!(i.id in draft)) return;
+      const v = Math.max(0, Number(String(draft[i.id]).replace(/[, ฿]/g,'')) || 0);
+      if(v !== (Number(i.salePrice) || 0)) out.push({ id:i.id, salePrice:v, name:i.name });
+    });
+    return out;
+  }, [draft, state.items]);
+
+  const save = () => {
+    if(!changed.length) return;
+    dispatch({ type:'SET_SALE_PRICES', data:{ rows: changed.map(c => ({ id:c.id, salePrice:c.salePrice })) } });
+    _toastOk(`ตั้งราคาขาย ${changed.length} รายการแล้ว`);
+    setDraft({});
+    onClose();
+  };
+
+  const valOf = (i) => (i.id in draft) ? draft[i.id] : (Number(i.salePrice) > 0 ? String(i.salePrice) : '');
+
+  return h(Modal, { isOpen:true, title:'💲 ตั้งราคาขาย (หลายรายการ)', onClose, size:'xl' },
+    h('div', { className:'space-y-3' },
+      h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-900' },
+        'ราคาที่ตั้งไว้ตรงนี้ = ราคาที่ "เด้งขึ้นมาเอง" ตอนพิมพ์ชื่อสินค้าในบิลขาย (แก้ทีหลังในบิลได้) · หน้านี้แตะเฉพาะราคาขาย ไม่ยุ่งกับต้นทุน/สต๊อก'),
+
+      h('div', { className:'flex flex-wrap items-center gap-2' },
+        h('select', { value:typeFilter, onChange:e=>setTypeFilter(e.target.value),
+          className:'px-2 py-1 border rounded text-xs' },
+          h('option', { value:'all' }, 'ทุกประเภท'),
+          types.map(t => h('option', { key:t.id, value:t.id }, `${t.icon||''} ${t.name}`))
+        ),
+        h('input', { type:'search', value:search, onChange:e=>setSearch(e.target.value),
+          'data-testid':'bulk-price-search', placeholder:'ค้นหา รหัส/ชื่อ',
+          className:'px-3 py-1 border rounded text-xs w-52' }),
+        h('label', { className:'flex items-center gap-1 text-xs cursor-pointer' },
+          h('input', { type:'checkbox', checked:onlyBlank, 'data-testid':'bulk-price-blank',
+            onChange:e=>setOnlyBlank(e.target.checked) }),
+          `เฉพาะที่ยังไม่ตั้งราคา (${blankCount})`),
+        h('span', { className:'text-xs text-gray-500 ml-auto' }, `แสดง ${list.length} รายการ`)
+      ),
+
+      h('div', { className:'border rounded overflow-hidden' },
+        h('div', { className:'max-h-96 overflow-y-auto' },
+          h('table', { className:'w-full text-sm' },
+            h('thead', { className:'bg-gray-50 sticky top-0' },
+              h('tr', null,
+                h('th', { className:'px-2 py-1 text-left text-xs font-medium' }, 'รหัส'),
+                h('th', { className:'px-2 py-1 text-left text-xs font-medium' }, 'ชื่อ'),
+                h('th', { className:'px-2 py-1 text-center text-xs font-medium' }, 'หน่วย'),
+                h('th', { className:'px-2 py-1 text-right text-xs font-medium' }, 'ต้นทุน'),
+                h('th', { className:'px-2 py-1 text-right text-xs font-medium' }, 'ราคาขาย')
+              )
+            ),
+            h('tbody', { className:'divide-y' },
+              pg.shown.length === 0
+                ? h('tr', null, h('td', { colSpan:5, className:'px-3 py-6 text-center text-sm text-gray-400' },
+                    'ไม่พบสินค้าตามที่กรอง'))
+                : pg.shown.map(i => {
+                    const dirty = changed.some(c => c.id === i.id);
+                    return h('tr', { key:i.id, 'data-price-row':i.id,
+                        className: cls('hover:bg-gray-50', dirty && 'bg-amber-50') },
+                      h('td', { className:'px-2 py-1 font-mono text-xs' }, i.code || '—'),
+                      h('td', { className:'px-2 py-1' }, i.name),
+                      h('td', { className:'px-2 py-1 text-center text-xs text-gray-500' }, i.issueUnit || '-'),
+                      h('td', { className:'px-2 py-1 text-right text-xs text-gray-500' }, fmtCur(i.costPrice||0)),
+                      h('td', { className:'px-2 py-1 text-right' },
+                        h('input', {
+                          type:'number', min:'0', step:'0.01', inputMode:'decimal',
+                          'data-testid':'price-input-' + (i.code || i.id),
+                          value: valOf(i),
+                          onChange: e => setDraft(d => ({ ...d, [i.id]: e.target.value })),
+                          placeholder:'0.00',
+                          className: cls('w-28 px-2 py-1 border rounded text-right text-sm',
+                            dirty && 'border-amber-500 bg-white font-medium')
+                        })
+                      )
+                    );
+                  })
+            )
+          )
+        ),
+        h(Pager, { pg, label:'สินค้า' })
+      ),
+
+      h('div', { className:'flex items-center gap-2 pt-3 border-t' },
+        h(Button, { variant:'primary', onClick:save, disabled:!changed.length, 'data-testid':'bulk-price-save' },
+          changed.length ? `💾 บันทึกราคา ${changed.length} รายการ` : '💾 บันทึกราคา'),
+        h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'),
+        changed.length > 0 && h('span', { className:'text-xs text-amber-700' },
+          `แก้ไว้ ${changed.length} รายการ — ยังไม่บันทึก`)
+      )
+    )
   );
 }
 
@@ -71397,6 +71546,15 @@ RM-010,กลูโคสไซรัป,material,กก.,75,0,5,50,"แช่�
 FG-010,บราวนี่ช็อกโกแลต,finished,ชิ้น,0,85,0,30,"บราวนี่,ขายดี,แช่เย็น",
 PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,500,,`;
 
+  // ตัวอย่างไฟล์ "อัปเดตราคาขายอย่างเดียว" — ใช้กับสินค้าที่มีอยู่แล้ว (จับคู่ด้วย code)
+  const priceSample = (() => {
+    const fg = (state.items||[]).filter(i => i.code).slice(0, 3);
+    const lines = fg.length
+      ? fg.map(i => `${i.code},${i.name},${i.salePrice || 0}`)
+      : ['FG-010,บราวนี่ช็อกโกแลต,85', 'FG-011,ครัวซองต์,45'];
+    return 'code,name,salePrice\n' + lines.join('\n');
+  })();
+
   const parseCSV = (text) => {
     const lines = text.trim().split(/\r?\n/);
     if(lines.length < 2) return { rows:[], errors:['ไฟล์ว่างหรือไม่มีข้อมูล'] };
@@ -71409,7 +71567,11 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
       const cells = parseCSVLine(lines[i]);
       const obj = {};
       headers.forEach((h,idx) => { obj[h.trim()] = (cells[idx]||'').trim(); });
-      if(!obj.name) { errs.push(`บรรทัด ${i+1}: ไม่มี name`); continue; }
+      // 🆕 อัปเดตของเดิมด้วย code อย่างเดียวก็ได้ (เช่นไฟล์ code,salePrice) — ชื่อบังคับเฉพาะ "สินค้าใหม่"
+      const curItem = obj.code
+        ? (state.items||[]).find(x => (x.code||'').toLowerCase() === String(obj.code).toLowerCase())
+        : null;
+      if(!obj.name && !curItem) { errs.push(`บรรทัด ${i+1}: ไม่มี name (สินค้าใหม่ต้องมีชื่อ)`); continue; }
       // resolve type
       const types = state.itemTypes || [];
       let typeId = obj.type;
@@ -71419,22 +71581,35 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         if(byName) typeId = byName.id;
         else { errs.push(`บรรทัด ${i+1}: ประเภท "${obj.type}" ไม่พบ — ใช้ 'material' แทน`); typeId = 'material'; }
       }
-      parsed.push({
+      // 🆕 ส่งเฉพาะคอลัมน์ที่ "มีอยู่จริงในไฟล์" — คอลัมน์ที่ไม่ใส่ = ของเดิมไม่ถูกแตะ
+      const hasCol = (k) => headers.some(hh => (hh||'').trim() === k);
+      const csvTags = (obj.tags||'').split(/[,;]/).map(t=>t.trim()).filter(Boolean);
+      const row = { code: obj.code || '' };
+      if(obj.name) row.name = obj.name;
+      if(hasCol('barcode')) row.barcode = obj.barcode || '';
+      if(hasCol('type')) row.type = typeId || 'material';
+      if(hasCol('issueUnit') && obj.issueUnit) row.issueUnit = obj.issueUnit;
+      if(hasCol('costPrice')) row.costPrice = csvNum(obj.costPrice);   // 🆕 A6: ตัด comma/฿ ก่อน parse
+      if(hasCol('salePrice')) row.salePrice = csvNum(obj.salePrice);
+      if(hasCol('minStock')) row.minStock = csvNum(obj.minStock);
+      if(hasCol('maxStock')) row.maxStock = csvNum(obj.maxStock);
+      if(hasCol('tags')) row.tags = csvTags;
+      // ค่าตั้งต้น ใช้เฉพาะตอนสร้างสินค้าใหม่เท่านั้น (ของเดิมที่ code ซ้ำจะไม่โดน)
+      row.__new = {
         id: genId('i'),
-        code: obj.code || '',
-        name: obj.name,
         barcode: obj.barcode || '',
         type: typeId || 'material',
         issueUnit: obj.issueUnit || 'ชิ้น',
         units: [{ name: obj.issueUnit||'ชิ้น', toBase:1 }],
-        costPrice: csvNum(obj.costPrice),   // 🆕 A6: ตัด comma/฿ ก่อน parse
+        costPrice: csvNum(obj.costPrice),
         salePrice: csvNum(obj.salePrice),
         minStock: csvNum(obj.minStock),
         maxStock: csvNum(obj.maxStock),
-        tags: (obj.tags||'').split(/[,;]/).map(t=>t.trim()).filter(Boolean),
+        tags: csvTags,
         active: true,
         stockByBranch: Object.fromEntries(state.branches.map(b => [b.id, 0])),
-      });
+      };
+      parsed.push(row);
     }
     return { rows:parsed, errors:errs };
   };
@@ -71454,11 +71629,19 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
     reader.readAsText(file, 'utf-8');
   };
 
+  // code ที่มีอยู่แล้วในระบบ → แถวนั้นคือ "อัปเดต" ไม่ใช่ "เพิ่มใหม่"
+  const codeMap = {};
+  (state.items||[]).forEach(it => { if(it.code) codeMap[String(it.code).toLowerCase()] = it; });
+  const isUpdateRow = (r) => !!(r.code && codeMap[String(r.code).toLowerCase()]);
+  const updCount = rows.filter(isUpdateRow).length;
+  const newCount = rows.length - updCount;
+
   const doImport = () => {
     if(rows.length === 0) return alert('ไม่มีข้อมูล');
-    if(!confirm(`Import ${rows.length} รายการ?\n(ถ้า code ซ้ำจะแทนที่)`)) return;
+    const msg = `นำเข้า ${rows.length} รายการ?\n• เพิ่มใหม่ ${newCount}\n• อัปเดตของเดิม (code ซ้ำ) ${updCount}\n\nอัปเดตเฉพาะคอลัมน์ที่มีในไฟล์เท่านั้น\nสต๊อกคงเหลือและหน่วยนับเดิมไม่ถูกแก้`;
+    if(!confirm(msg)) return;
     dispatch({ type:'IMPORT_ITEMS', data:rows });
-    alert(`เพิ่ม ${rows.length} รายการเรียบร้อย`);
+    alert(`เรียบร้อย — เพิ่มใหม่ ${newCount} · อัปเดต ${updCount}`);
     onClose();
   };
 
@@ -71470,8 +71653,17 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         h('div', { className:'text-blue-800 text-xs mb-2' },
           'คอลัมน์ที่รองรับ (เรียงตามลำดับได้): code, name *, type (material/finished/packaging/custom), issueUnit, costPrice, salePrice, minStock, maxStock, tags (คั่น , ใน " "), barcode'
         ),
-        h('button', { type:'button', onClick:()=>onTextChange(sample),
-          className:'text-xs bg-blue-200 hover:bg-blue-300 px-2 py-1 rounded font-medium' }, '📄 ใส่ข้อมูลตัวอย่าง')
+        h('div', { className:'text-blue-900 text-xs mb-2 bg-white/70 border border-blue-200 rounded p-2' },
+          h('div', { className:'font-medium mb-0.5' }, '✅ ใส่เฉพาะคอลัมน์ที่อยากแก้ก็ได้'),
+          h('div', null, 'ถ้า code ซ้ำกับสินค้าเดิม = อัปเดตทับ "เฉพาะคอลัมน์ที่มีในไฟล์" · คอลัมน์ที่ไม่ใส่คงค่าเดิม · สต๊อกคงเหลือและหน่วยนับ/ตัวแปลงหน่วยไม่ถูกแก้'),
+          h('div', { className:'mt-1 font-mono text-[11px] text-blue-700' }, 'เช่น อัปเดตราคาขายอย่างเดียว → code,salePrice')
+        ),
+        h('div', { className:'flex gap-2 flex-wrap' },
+          h('button', { type:'button', onClick:()=>onTextChange(sample),
+            className:'text-xs bg-blue-200 hover:bg-blue-300 px-2 py-1 rounded font-medium' }, '📄 ใส่ข้อมูลตัวอย่าง'),
+          h('button', { type:'button', 'data-testid':'csv-sample-price', onClick:()=>onTextChange(priceSample),
+            className:'text-xs bg-blue-200 hover:bg-blue-300 px-2 py-1 rounded font-medium' }, '💲 ตัวอย่าง: อัปเดตราคาขายอย่างเดียว')
+        )
       ),
 
       h('div', null,
@@ -71503,22 +71695,33 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
           h('table', { className:'w-full text-xs' },
             h('thead', { className:'bg-gray-50 sticky top-0' },
               h('tr', null,
-                ['code','name','type','unit','ต้นทุน','ขาย','tags'].map(k =>
+                ['สถานะ','code','name','type','unit','ต้นทุน','ขาย','tags'].map(k =>
                   h('th', { key:k, className:'px-2 py-1 text-left' }, k))
               )
             ),
             h('tbody', null,
-              rows.slice(0,20).map((r,i) =>
-                h('tr', { key:i, className:'border-t hover:bg-gray-50' },
+              rows.slice(0,20).map((r,i) => {
+                const upd = isUpdateRow(r);
+                const cell = (v) => (v === undefined || v === null || v === '')
+                  ? h('span', { className:'text-gray-300' }, '—')
+                  : v;
+                return h('tr', { key:i, className:'border-t hover:bg-gray-50' },
+                  h('td', { className:'px-2 py-1' },
+                    h('span', { className: upd
+                      ? 'px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-medium'
+                      : 'px-1.5 py-0.5 rounded bg-green-100 text-green-800 text-[10px] font-medium' },
+                      upd ? 'อัปเดต' : 'ใหม่')),
                   h('td', { className:'px-2 py-1 font-mono' }, r.code || '—auto—'),
-                  h('td', { className:'px-2 py-1' }, r.name),
-                  h('td', { className:'px-2 py-1' }, r.type),
-                  h('td', { className:'px-2 py-1' }, r.issueUnit),
-                  h('td', { className:'px-2 py-1 text-right' }, r.costPrice),
-                  h('td', { className:'px-2 py-1 text-right' }, r.salePrice),
-                  h('td', { className:'px-2 py-1 text-indigo-700' }, r.tags.join(', '))
-                )
-              )
+                  h('td', { className:'px-2 py-1' },
+                    r.name || h('span', { className:'text-gray-500' },
+                      (codeMap[String(r.code).toLowerCase()] || {}).name || '—')),
+                  h('td', { className:'px-2 py-1' }, cell(r.type)),
+                  h('td', { className:'px-2 py-1' }, cell(r.issueUnit)),
+                  h('td', { className:'px-2 py-1 text-right' }, cell(r.costPrice)),
+                  h('td', { className:'px-2 py-1 text-right' }, cell(r.salePrice)),
+                  h('td', { className:'px-2 py-1 text-indigo-700' }, cell((r.tags||[]).join(', ')))
+                );
+              })
             )
           )
         ),
@@ -71527,7 +71730,9 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
 
       h('div', { className:'flex gap-2 pt-3 border-t' },
         h(Button, { variant:'primary', onClick:doImport, disabled:rows.length===0 },
-          rows.length>0 ? `💾 Import ${rows.length} รายการ` : 'Import'),
+          rows.length>0
+            ? `💾 นำเข้า ${rows.length} รายการ (ใหม่ ${newCount} · อัปเดต ${updCount})`
+            : 'นำเข้า'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
       )
     )
