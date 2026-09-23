@@ -230,8 +230,37 @@ function isReversalPair(m){
   if(!m) return false;
   return !!m.reversed
     || (m.type === 'adjust_in' && /^VOID-/.test(String(m.ref || '')))
-    || m.type === 'adjust_reverse';
+    || m.type === 'adjust_reverse'
+    || m.type === 'sale_void'          // 🆕 SALES: ยกเลิกใบกำกับ/บันทึกขาย (คู่กับ sale_out ที่ถูก mark reversed)
+    || m.type === 'sale_light_void';
 }
+// 🆕 SALES-W2: สินค้าที่ "มีตัวตนจริงในคลัง" — ชุดสินค้า (kit) ไม่มีสต๊อกของตัวเอง
+//   ใช้กรองทุกที่ที่คิดสต๊อก/มูลค่า/ของติดลบ ไม่งั้นกล่องชุดจะโผล่เป็น 0 เต็มรายงานและขึ้นเตือนติดลบ
+function isPhysicalItem(item){
+  return !!item && item.type !== 'kit';
+}
+
+// 🆕 SALES-W2: รวมแถวชุดเพื่อ "พิมพ์" — แถวลูก (kit_child) ผูกกับแถวแม่ด้วย kitId
+//   mode: 'single' (เห็นแต่ชื่อชุด) · 'withNames' (ชื่อชุด + บรรทัดเล็ก "ประกอบด้วย…") · 'withChildren' (แถวลูกเยื้อง ไม่มีราคา)
+//   → [{ ...line, _kidNames?:string, _children?:[line] }] เฉพาะแถวที่ต้องพิมพ์ (ลูกถูกยุบเข้าแม่เสมอ)
+function groupKitForPrint(lines, mode){
+  const src = lines || [];
+  const kids = {};
+  src.forEach(l => { if(l && l.lineKind === 'kit_child'){ (kids[l.kitId] = kids[l.kitId] || []).push(l); } });
+  const out = [];
+  src.forEach(l => {
+    if(!l || l.lineKind === 'kit_child') return;
+    if(l.lineKind === 'kit'){
+      const ch = kids[l.kitId] || [];
+      const m = mode || l.kitPrintMode || 'single';
+      out.push({ ...l,
+        _kidNames: m === 'withNames' ? ch.map(c => c.itemName).filter(Boolean).join(', ') : '',
+        _children: m === 'withChildren' ? ch : [] });
+    } else out.push({ ...l });
+  });
+  return out;
+}
+
 // 🆕 SALES-W1: ราคาขาย 1 จุดเดียวของทั้งระบบ (SI · บันทึกขายสาขา · รายได้ POS)
 //   item.priceBook = { byUnit:{ 'ลัง':720 }, byTier:{ wholesale:{ _base:28, 'ลัง':640 } } }  (optional ทั้งก้อน)
 //   ลำดับ: byTier[tier][unit] → byTier[tier]._base → byUnit[unit] → salePrice → 0
@@ -582,9 +611,11 @@ const PERM_TREE = {
     approvals:    { label:'คำขออนุมัติ',     actions:['view','approve'] },
   }},
   sales: { label:'ขาย', icon:'🛒', tabs:{
-    so:    { label:'SO (ใบสั่งขาย)',     actions:['view','create','edit','delete'] },
+    so:    { label:'ใบเสนอราคา (QT)',    actions:['view','create','edit','delete'] },   // คีย์เดิม 'so' — สิทธิ์ที่ให้ไว้แล้วไม่พัง
     si:    { label:'ใบกำกับขาย (SI)',    actions:['view','create','edit','delete','void'] },
-    dn:    { label:'ใบส่งของ (DN)',      actions:['view','create','edit','delete'] },
+    bn:    { label:'ใบวางบิล (BN)',      actions:['view','create','edit','void'] },      // 🆕 SALES-W4
+    kit:   { label:'ชุดสินค้า (Snack Box)', actions:['view','create','edit'] },            // 🆕 SALES-W2
+    dn:    { label:'ใบส่งของ (DN)',      actions:['view','create','edit','delete'] },     // ยังไม่มี UI แยก (ใบกำกับ = ใบส่งของ)
     ar:    { label:'AR/รับชำระ',         actions:['view','create','edit'] },
     light: { label:'บันทึกขายแบบง่าย',    actions:['view','create','edit','delete'] },
   }},
@@ -4240,7 +4271,7 @@ Object.assign(global.ERP, {
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines, readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, getBaseUnit, findItemUnit, toBaseQty, unitsForPurpose, unitsForIssue, hasUnitForPurpose, isReversalPair,
-  resolvePrice,
+  resolvePrice, isPhysicalItem, groupKitForPrint,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,
   getStockUnitsRanked, getAllUnitsRanked, formatQtyMulti, multiUnitsToBase,
   resolveDisplayUnit,
@@ -5113,7 +5144,7 @@ function _expenseItemsFromCats(cats){
 
 // ==================== INITIAL STATE ====================
 const INIT_STATE = {
-  version: 36,
+  version: 37,
   currentUser: null,
   currentBranch: 'b1',
 
@@ -5327,6 +5358,8 @@ const INIT_STATE = {
     { id:'semi_fg',   name:'สินค้ากึ่งสำเร็จ (เก็บได้)', icon:'🍮', color:'teal',    isBuiltin:true },
     { id:'finished',  name:'สินค้าสำเร็จ',         icon:'🎂', color:'purple',  isBuiltin:true },
     { id:'packaging', name:'บรรจุภัณฑ์',          icon:'📦', color:'amber',   isBuiltin:true },
+    // 🎁 SALES-W2: ชุดสินค้า (Snack Box) — ไม่มีสต๊อกของตัวเอง ตัดสต๊อกจากของข้างในตอนขาย
+    { id:'kit',       name:'ชุดสินค้า (Snack Box)', icon:'🎁', color:'pink',   isBuiltin:true },
   ],
   // Tags — เลือกจาก list เท่านั้น (ไม่ให้พิมพ์อิสระ)
   itemTags: ['แช่เย็น','แช่แข็ง','ขายดี','บราวนี่','เค้ก','คุกกี้','เครื่องดื่ม','พรีเมียม'],
@@ -5630,6 +5663,8 @@ const INIT_STATE = {
 
   // ---------- Sales (HQ full + store light) ----------
   salesOrders: [],
+  // 📨 SALES-W4: ใบวางบิล / ใบแจ้งหนี้ล่วงหน้า (ไม่ใช่ใบกำกับภาษี ไม่ลง JE ซ้ำ)
+  salesBillings: [],
   salesInvoices: [],
   salesPayments: [],
   deliveryNotes: [],
@@ -10761,6 +10796,33 @@ function reducer(s, a){
     // ---------- Sales ----------
     case 'ADD_SO':         return { ...s, salesOrders:[...s.salesOrders, a.data], seq:{ ...s.seq, so:s.seq.so+1 } };
     case 'UPDATE_SO':      return { ...s, salesOrders:s.salesOrders.map(so => so.id===a.data.id ? a.data : so) };
+    // 📨 SALES-W4: ใบวางบิล (รวมหลายใบกำกับ) / ใบแจ้งหนี้ล่วงหน้า — ไม่แตะ stock ไม่ post JE
+    case 'ADD_SALES_BILLING': {
+      const bn = a.data || {};
+      const ids = new Set(bn.siIds || []);
+      // ⭐ patch เฉพาะ 2 ฟิลด์บนใบกำกับสด — ห้ามให้ UI ส่ง object ทั้งใบมาทับ (สิ้นเดือนติ๊ก 20 ใบ ค่าจากเครื่องอื่นจะย้อน)
+      const salesInvoices = ids.size
+        ? (s.salesInvoices||[]).map(si => ids.has(si.id)
+            ? { ...si, billingId: bn.id, billingNumber: bn.bnNumber } : si)
+        : s.salesInvoices;
+      return { ...s, salesBillings:[...(s.salesBillings||[]), bn], salesInvoices };
+    }
+    case 'UPDATE_SALES_BILLING': return { ...s, salesBillings:(s.salesBillings||[]).map(b => b.id===a.data.id ? a.data : b) };
+    case 'VOID_SALES_BILLING': {
+      const { id, by, reason } = a.data || {};
+      const bn = (s.salesBillings||[]).find(b => b.id === id);
+      if(!bn || bn.voided) return s;
+      const now = Date.now();
+      return { ...s,
+        salesBillings: (s.salesBillings||[]).map(b => b.id === id
+          ? { ...b, voided:true, voidedAt:now, voidedBy:by||'', voidReason:reason||'', status:'void' } : b),
+        // ปลดใบกำกับออกจากใบวางบิลที่ยกเลิก (ไม่งั้นวางบิลใบใหม่ไม่ได้)
+        salesInvoices: (s.salesInvoices||[]).map(si => (bn.siIds||[]).includes(si.id)
+          ? { ...si, billingId: undefined, billingNumber: undefined } : si),
+        auditLog: [...(s.auditLog||[]), { id:'al_' + now.toString(36) + Math.random().toString(36).slice(2,5), ts:now,
+          type:'sales_billing', subType:'void_billing', by: by||'',
+          summary:`ยกเลิกใบวางบิล ${bn.bnNumber} (${(bn.siIds||[]).length} ใบกำกับ)` + (reason ? ' — ' + reason : '') }] };
+    }
     case 'ADD_SALES_INV':  return { ...s, salesInvoices:[...(s.salesInvoices||[]), a.data], seq:{ ...s.seq, si:s.seq.si+1 } };
     case 'UPDATE_SALES_INV': return { ...s, salesInvoices:(s.salesInvoices||[]).map(i => i.id===a.data.id ? a.data : i) };
     case 'ADD_SALES_PAY':  return { ...s, salesPayments:[...(s.salesPayments||[]), a.data], seq:{ ...s.seq, sipay:(s.seq.sipay||1)+1 } };
@@ -10770,6 +10832,55 @@ function reducer(s, a){
     case 'ADD_SALES_LIGHT': return { ...s, salesLight:[...(s.salesLight||[]), a.data] };
 
     // 🆕 FIX-7 (SALES-C3): ยกเลิกใบกำกับขาย (sales-full) — คืน stock/FIFO + กลับ JE + กันยกเลิกซ้ำ/period lock
+    // 🆕 M5 (UAT): กลับรายการรับชำระจากลูกค้า — เดิมพอรับเงินแล้วแก้อะไรไม่ได้เลย
+    //   (ข้อความตอนยกเลิกใบกำกับบอกให้ "กลับรายการรับเงินก่อน" แต่ระบบไม่มีทางทำ)
+    //   คืนยอดลูกหนี้ + ยอดเงินในบัญชีธนาคาร + กลับ JE + audit
+    case 'VOID_SALES_PAY': {
+      const { payId, id, reason, by } = a.data || {};
+      const targetId = payId || id;
+      const pay = (s.salesPayments||[]).find(p => p.id === targetId);
+      if(!pay) return s;
+      if(pay.voided){ alert('รายการรับชำระนี้ถูกกลับรายการไปแล้ว'); return s; }
+      const locked = _checkDateLock(s, pay.date, 'กลับรายการรับชำระ');
+      if(locked) return locked;
+      const amt = Number(pay.amount) || 0;
+      // คืนยอดในใบกำกับ
+      const salesInvoices = (s.salesInvoices||[]).map(si => {
+        if(si.id !== pay.siId) return si;
+        const paid = Math.max(0, (Number(si.paidAmount)||0) - amt);
+        return { ...si, paidAmount: paid,
+          paymentStatus: si.voided ? si.paymentStatus : (paid <= 0.009 ? 'unpaid' : 'partial') };
+      });
+      // คืนเงินออกจากบัญชีธนาคาร (ถ้ารับเข้าบัญชี)
+      const bankAccounts = pay.bankId
+        ? (s.bankAccounts||[]).map(b => b.id === pay.bankId ? { ...b, balance:(Number(b.balance)||0) - amt } : b)
+        : s.bankAccounts;
+      // กลับ JE รับชำระ
+      const now = Date.now();
+      const origJes = (s.journalEntries||[]).filter(j => j.source === 'sales_pay' && j.sourceId === targetId && !j.voidedReversal);
+      const revJes = origJes.filter(j => j.status === 'posted').map(j => ({
+        id: 'je_voidpay_' + now.toString(36) + Math.random().toString(36).slice(2,5),
+        jeNumber: 'JE-VOID-' + (j.jeNumber||''),
+        date: getToday(),
+        description: 'กลับรายการรับชำระ ' + (j.sourceRef || '') + ' — ' + (reason||'-'),
+        source: 'sales_pay_void', sourceId: targetId, sourceRef: j.sourceRef,
+        branchId: j.branchId,
+        status:'posted', postedBy: by, postedAt: now, voidedReversal: true,
+        totalDebit: j.totalCredit||0, totalCredit: j.totalDebit||0,
+        lines: (j.lines||[]).map(l => ({ accountId:l.accountId || l.account, accountCode:l.accountCode,
+          accountName:l.accountName, debit:l.credit||0, credit:l.debit||0, description:l.description })),
+      }));
+      return { ...s,
+        salesInvoices, bankAccounts,
+        salesPayments: (s.salesPayments||[]).map(p => p.id === targetId
+          ? { ...p, voided:true, voidedAt:now, voidedBy:by||'', voidReason:reason||'' } : p),
+        journalEntries: [ ...(s.journalEntries||[]), ...revJes ],
+        auditLog: [ ...(s.auditLog||[]), { id:'al_' + now.toString(36) + Math.random().toString(36).slice(2,5), ts:now,
+          type:'sales_pay_void', by: by||'', entityId:targetId, entityRef: pay.ref || '',
+          summary:`กลับรายการรับชำระ ${amt.toLocaleString('en-US')} บาท ของใบ ${(s.salesInvoices||[]).find(x => x.id === pay.siId)?.siNumber || ''}`
+            + (reason ? ' — ' + reason : '') }] };
+    }
+
     case 'VOID_SALES_INV': {
       const { siId, id, reason, by } = a.data;
       const targetId = siId || id;
@@ -10777,13 +10888,22 @@ function reducer(s, a){
       if(!si) return s;
       if(si.voided){ alert('ใบกำกับนี้ยกเลิกไปแล้ว'); return s; }
       if(si.paymentStatus && si.paymentStatus !== 'unpaid'){
-        alert('⚠️ ใบกำกับนี้รับชำระแล้ว — กรุณากลับรายการรับเงินก่อน จึงจะยกเลิกได้'); return s;
+        alert('⚠️ ใบกำกับนี้รับชำระแล้ว — เปิดใบกำกับ → ปุ่ม "↩︎ กลับรายการ" ที่รายการรับชำระก่อน จึงจะยกเลิกได้'); return s;
+      }
+      // 📨 อยู่ในใบวางบิลที่ยังไม่ยกเลิก → ยอดบนใบวางบิลจะผิดและปิดไม่ลงถาวร ต้องยกเลิกใบวางบิลก่อน
+      {
+        const _bn = (s.salesBillings||[]).find(b => !b.voided
+          && (b.id === si.billingId || (b.siIds||[]).includes(si.id)));
+        if(_bn){
+          alert(`⚠️ ใบกำกับนี้อยู่ในใบวางบิล ${_bn.bnNumber} แล้ว\n\nไปที่ ขาย → 📨 ใบวางบิล แล้วยกเลิกใบวางบิลนั้นก่อน จึงจะยกเลิกใบกำกับได้`);
+          return s;
+        }
       }
       const locked = _checkDateLock(s, si.invDate, 'ยกเลิกใบกำกับขาย');
       if(locked) return locked;
       let items = s.items.slice();
       let fifoLayers = s.fifoLayers.slice();
-      let movements = s.movements || [];
+      let movements = (s.movements || []).slice();   // ต้อง copy — หน้าที่ memo ด้วย state.movements จะไม่รีเฟรชถ้า mutate ตัวเดิม
       for(const ln of (si.lines||[])){
         const bq = Number(ln.baseQty)||0;
         if(!(bq > 0)) continue;
@@ -10805,6 +10925,9 @@ function reducer(s, a){
           note: 'ยกเลิกการขาย ' + (si.siNumber||''), by,
         });
       }
+      // 🆕 คู่หักล้าง: mark movement ขาออกของใบนี้เป็น reversed → รายงานข้ามทั้งคู่ผ่าน isReversalPair (00-core)
+      movements = movements.map(m => (m && m.type === 'sale_out' && m.ref === si.siNumber && !m.reversed)
+        ? { ...m, reversed: true } : m);
       const origJes = (s.journalEntries||[]).filter(je => je.source === 'sales_inv' && je.sourceId === targetId);
       let journalEntries = s.journalEntries || [];
       const reverseJes = origJes.filter(j => !j.voidedReversal && j.status === 'posted').map(j => ({
@@ -10823,10 +10946,27 @@ function reducer(s, a){
         })),
       }));
       journalEntries = [...journalEntries, ...reverseJes];
+      // 🆕 W3: ใบนี้แปลงมาจากใบเสนอราคา → คืนจำนวนที่ใช้ไป (ไม่งั้นใบเสนอราคาค้างสถานะ "แปลงครบแล้ว" ตลอดกาล)
+      let salesOrders = s.salesOrders;
+      if(si.quoteId && !si.quoteRolledBack){
+        const back = {};
+        (si.lines||[]).forEach(l => { if(l.lineKind === 'kit_child' || !l.qtLineNo) return;
+          // qtApplied = จำนวนที่ถูกบวกเข้า usedQty จริงตอนออกใบ (ถูก clamp ไม่ให้เกินยอดในใบเสนอราคา)
+          const add = (l.qtApplied !== undefined && l.qtApplied !== null) ? Number(l.qtApplied) : (Number(l.qty)||0);
+          back[l.qtLineNo] = (back[l.qtLineNo] || 0) + add; });
+        salesOrders = (s.salesOrders||[]).map(q => q.id !== si.quoteId ? q : ({
+          ...q,
+          lines: (q.lines||[]).map(l => back[l.lineNo]
+            ? { ...l, usedQty: Math.max(0, (Number(l.usedQty)||0) - back[l.lineNo]) } : l),
+          siIds: (q.siIds||[]).filter(x => x !== targetId),
+        }));
+      }
       return {
         ...s,
+        salesOrders,
         salesInvoices: (s.salesInvoices||[]).map(i => i.id === targetId
-          ? { ...i, voided:true, voidedAt:Date.now(), voidedBy:by, voidReason:reason, paymentStatus:'voided' }
+          ? { ...i, voided:true, voidedAt:Date.now(), voidedBy:by, voidReason:reason, paymentStatus:'voided',
+              quoteRolledBack: si.quoteId ? true : undefined }
           : i),
         items, fifoLayers, movements, journalEntries,
         auditLog: [...(s.auditLog||[]), { id:'al_'+Date.now().toString(36), ts:Date.now(),
@@ -10845,7 +10985,7 @@ function reducer(s, a){
       if(locked) return locked;
       let items = s.items.slice();
       let fifoLayers = s.fifoLayers.slice();
-      let movements = s.movements || [];
+      let movements = (s.movements || []).slice();   // ต้อง copy — หน้าที่ memo ด้วย state.movements จะไม่รีเฟรชถ้า mutate ตัวเดิม
       for(const ln of (e.lines||[])){
         const bq = Number(ln.baseQty)||0;
         if(!(bq > 0)) continue;
@@ -10867,6 +11007,9 @@ function reducer(s, a){
           note: 'ยกเลิกบันทึกขาย ' + (e.slNumber||''), by,
         });
       }
+      // 🆕 คู่หักล้าง: mark movement ขาออกของบันทึกขายใบนี้ (รายงานข้ามทั้งคู่)
+      movements = movements.map(m => (m && m.type === 'sale_out' && m.ref === e.slNumber && !m.reversed)
+        ? { ...m, reversed: true } : m);
       const origJes = (s.journalEntries||[]).filter(je => je.source === 'sales_light' && je.sourceId === targetId);
       let journalEntries = s.journalEntries || [];
       const reverseJes = origJes.filter(j => !j.voidedReversal && j.status === 'posted').map(j => ({
@@ -11020,6 +11163,7 @@ function reducer(s, a){
         fgDispatchKeys: [],   // 🆕 FIX-4: ล้าง dedupe keys ด้วย (ไม่งั้น re-produce order id เดิมจะถูกข้าม)
         staffAdvances: [],    // 🆕 Y1: ล้างสำรองจ่ายพนักงาน/กรรมการ (ไม่งั้นค้างหลัง clear)
         salesOrders: (s.salesOrders||[]).filter(() => false),
+        salesBillings: (s.salesBillings||[]).filter(() => false),
         salesInvoices: (s.salesInvoices||[]).filter(() => false),
         salesLight: (s.salesLight||[]).filter(() => false),
         salesPayments: (s.salesPayments||[]).filter(() => false),
@@ -11487,6 +11631,21 @@ function _migrateStateOnce(s){
     const settings = { ...(s.settings||{}), weighUrl: (s.settings && s.settings.weighUrl) || 'weigh/index.html' };
     return { ...s, version: 36, operationTemplates: tpl, weighLogs: s.weighLogs || [], settings };
   }
+  // 🆕 v36 → v37 (SALES W1–W4): ชุดสินค้า (itemTypes 'kit' เข้าอัตโนมัติผ่าน re-sync builtin)
+  //   + salesBillings (ใบวางบิล/ใบแจ้งหนี้ล่วงหน้า) + นโยบายราคา/VAT ของฝั่งขาย
+  if(s.version === 36){
+    const settings = { ...(s.settings||{}) };
+    if(settings.salePriceVat === undefined) settings.salePriceVat = 'inclusive';   // ราคาป้าย = รวม VAT แล้ว
+    if(settings.siRequirePrice === undefined) settings.siRequirePrice = 'warn';    // เตือนเมื่อบิลมีราคา 0
+    if(settings.quoteValidDays === undefined) settings.quoteValidDays = 15;        // ใบเสนอราคายืนราคา 15 วัน
+    // ⚠️ block re-sync builtin (:6521 `version >= 27 return s`) ไม่รันกับ state จริง → ต้องเติม builtin ที่ขาดเอง
+    //    append-only: custom type ของผู้ใช้ต้องไม่หาย
+    const _missingTypes = (INIT_STATE.itemTypes||[]).filter(t => !(s.itemTypes||[]).some(x => x.id === t.id));
+    // ใบกำกับที่ออกไปแล้วก่อนมีคิวจัดของ = ส่งของไปแล้วทั้งนั้น → stamp fulfilled กันคิววันแรกบวมทั้งระบบ
+    const _sis = (s.salesInvoices||[]).map(si => si.fulfillmentStatus ? si : ({ ...si, fulfillmentStatus:'fulfilled' }));
+    return { ...s, version: 37, settings, salesBillings: s.salesBillings || [], salesInvoices: _sis,
+      itemTypes: _missingTypes.length ? [ ...(s.itemTypes||[]), ..._missingTypes ] : s.itemTypes };
+  }
   if(s.version === 27){
     const coa = [...(s.chartOfAccounts||[])];
     const need = [
@@ -11657,6 +11816,7 @@ function _migrateStateOnce(s){
     ...s,
     version: 21,
     supplierMemos: s.supplierMemos || [],
+    salesBillings: s.salesBillings || [],   // 📨 SALES-W4
     storageLocations: s.storageLocations && s.storageLocations.length
       ? s.storageLocations
       : INIT_STATE.storageLocations,
@@ -12171,7 +12331,9 @@ mod('settings',    'ตั้งค่า',    { icon:'⚙️', group:'admin', h
 {
   const pg = pager('sales-full', 'sales', 'ขาย', { hq:true });
   pg('dashboard', 'ภาพรวม',             null, { old:'📊 Dashboard', aliases:['ภาพรวมขาย'] });
+  pg('quotes',    'ใบเสนอราคา (QT)',     null, { old:'📝 ใบเสนอราคา', aliases:['QT','quotation','ใบเสนอราคา','เสนอราคา','ใบเสนอ'] });
   pg('invoices',  'ใบกำกับ (SI)',        null, { old:'🧾 ใบกำกับ', aliases:['SI','sales invoice','ใบกำกับภาษีขาย','ออกบิล','ขาย'] });
+  pg('billing',   'ใบวางบิล (BN)',       null, { old:'📨 ใบวางบิล', aliases:['BN','billing note','ใบวางบิล','วางบิล','ใบแจ้งหนี้'] });
   pg('receive',   'รับชำระ',             null, { old:'💰 รับชำระ', aliases:['รับเงิน','ชำระ','receive payment','ลูกค้าจ่าย'] });
   pg('aging',     'ลูกหนี้ค้าง (AR Aging)', null, { kind:'report', old:'⏱️ AR Aging', aliases:['AR','aging','ลูกหนี้','ค้างชำระ'] });
   pg('customers', 'ลูกค้า',              null, { old:'👥 ลูกค้า', dup:true, aliases:['customer','ลูกค้า'] });
@@ -12300,6 +12462,8 @@ const NAV_DOC_KINDS = [
   { kind:'to',   label:'ใบส่งของ',             abbr:'TO',  nav:{ tab:'transfer',    subs:{ transfer:'to' } },                           hq:false, collection:'transferOrders',   numberField:'toNumber' },
   { kind:'mo',   label:'ออเดอร์ผลิต',          abbr:'MO',  nav:{ tab:'production',  subs:{ production:'orders' } },                     hq:false, collection:'productionOrders', numberField:'orderNumber' },
   { kind:'si',   label:'ใบกำกับขาย',           abbr:'SI',  nav:{ tab:'sales-full',  subs:{ sales:'invoices' } },                        hq:true,  collection:'salesInvoices',    numberField:'siNumber',      party:'customerId' },
+  { kind:'qt',   label:'ใบเสนอราคา',           abbr:'QT',  nav:{ tab:'sales-full',  subs:{ sales:'quotes' } },                          hq:true,  collection:'salesOrders',      numberField:'qtNumber',      party:'customerId' },
+  { kind:'bn',   label:'ใบวางบิล',             abbr:'BN',  nav:{ tab:'sales-full',  subs:{ sales:'billing' } },                         hq:true,  collection:'salesBillings',    numberField:'bnNumber',      party:'customerId' },
   { kind:'je',   label:'สมุดรายวัน',           abbr:'JE',  nav:{ tab:'accounting',  subs:{ acct:'je' } },                               hq:true,  collection:'journalEntries',   numberField:'jeNumber' },
   { kind:'scrap',label:'ใบตัดของเสีย',          abbr:'SCR', nav:{ tab:'stock',       subs:{ stock:'scrap' } },                           hq:false, collection:'scrapEntries',     numberField:'scrapNumber' },
   { kind:'item', label:'สินค้า',              abbr:'ITEM',nav:{ tab:'settings',    subs:{ settings:'itemList' } },                     hq:true,  collection:'items',            numberField:'code',          searchFields:['name','code','barcode'] },
@@ -14355,6 +14519,12 @@ function buildDocIndex(state, names, scope){
   for(const o of (state.productionOrders||[])) push('mo','MO', o.id, o.orderNumber || o.orderNo || o.id, o.productName || itemName(o.productId || o.itemId), 0, o.status, o.orderNumber ? (o.orderNo || '') : '', [o.branchId || o.branch]);
   for(const sc of (state.scrapEntries||[])){ if(sc.scrapNumber) push('scrap','SCR', sc.id, sc.scrapNumber, (sc.reason || '') + (sc.items && sc.items.length ? ` · ${sc.items.length} รายการ` : ''), 0, sc.status || '', null, [sc.branchId || sc.branch]); }
   for(const si of (state.salesInvoices||[])) push('si','SI', si.id, si.siNumber, cusName(si.customerId), si.total || si.netTotal, si.voided ? 'voided' : (si.paymentStatus || si.status));
+  // 🆕 SALES W3/W4: ใบเสนอราคา + ใบวางบิล ต้องค้นด้วย Ctrl+K ได้ (nav kind qt/bn ลงทะเบียนไว้แล้วใน 02-nav)
+  for(const q of (state.salesOrders||[])){ if(q && q.docType === 'quote' && q.qtNumber)
+    push('qt','QT', q.id, q.qtNumber, cusName(q.customerId), q.netTotal, q.status || 'draft', q.customerPoRef || ''); }
+  for(const b of (state.salesBillings||[])){ if(b && b.bnNumber)
+    push('bn','BN', b.id, b.bnNumber, cusName(b.customerId), b.netTotal, b.voided ? 'voided' : (b.status || 'open'),
+      (b.siSnapshot||[]).map(x => x.siNumber).join(' ') + ' ' + (b.quoteNumber || '')); }
   for(const je of (state.journalEntries||[])) push('je','JE', je.id, je.jeNumber, je.description, je.totalDebit, je.voided ? 'voided' : je.status);
   return out;
 }
@@ -15619,6 +15789,7 @@ const {
   usePaged, Pager,
   KeepAliveTabs, getPendingAssetLines,   // 🆕 keep-alive sub-tab (modal ย่อไม่หาย) · 💎 ทรัพย์สินรอบันทึก (derived)
   Fragment,
+  isPhysicalItem,   // 🎁 SALES-W2: ตัดชุดสินค้า (kit) ออกจากตัวเลขคลัง
 } = global.ERP;
 
 // 🆕 Y3: หน้าแจ้งไม่มีสิทธิ์ (กันเข้าถึง tab อ่อนไหวผ่าน URL/state)
@@ -16010,7 +16181,8 @@ function StockDashboard({ state, user, setTab }){
   const [showLowStockDetail, setShowLowStockDetail] = useState(false);
   const [showExpiryDetail, setShowExpiryDetail] = useState(false);
 
-  const items = state.items || [];
+  // 🎁 SALES-W2: ชุดสินค้า (kit) ไม่มีสต๊อกของตัวเอง — ตัดออกจากทุกตัวเลขคลัง
+  const items = (state.items || []).filter(i => !isPhysicalItem || isPhysicalItem(i));
   const totalItems = items.filter(i => i.active !== false).length;
   const totalStockQty = items.reduce((s,i) => {
     return s + Object.entries(i.stockByBranch||{})
@@ -18016,7 +18188,7 @@ function StockListTab({ state, user }){
   );
 
   const rows = useMemo(() => {
-    let list = state.items;
+    let list = (state.items||[]).filter(i => !isPhysicalItem || isPhysicalItem(i));   // 🎁 ชุดสินค้าไม่มีสต๊อกของตัวเอง
     if(typeFilter !== 'all') list = list.filter(i => i.type === typeFilter);
     // Multi-tag filter: item ต้องมี tag อย่างน้อย 1 ตัวที่เลือก (OR)
     if(selectedTags.length > 0){
@@ -18826,7 +18998,7 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
   }, [state.fifoLayers, branchId, branchLocFilter]);
 
   const items = useMemo(() => {
-    let list = (state.items||[]).filter(i => i.active !== false);
+    let list = (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
     // 🆕 CT: ถ้ามาจาก picker → จำกัดให้แค่ item ที่ติ๊กไว้ (override filter อื่นๆ)
     if(isPickedMode){
       list = list.filter(i => pickedItemIds.has(i.id));
@@ -19252,7 +19424,7 @@ function AdjustTab({ state, dispatch, user }){
   }
 
   const itemTypes = state.itemTypes || [];
-  const items = (state.items||[]).filter(i => i.active !== false);
+  const items = (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
   // 🆕 R18: filter ตาม search + ประเภท
   const filtered = (itemSearch || typeFilter !== 'all')
     ? items.filter(i => {
@@ -22202,26 +22374,92 @@ function OutgoingReportTab({ state, user }){
 function SalesFulfillmentTab({ state, dispatch, user }){
   const allowedBranches = getAllowedBranches(user, state);
   const branchIds = allowedBranches.map(b => b.id);
+  const dr = useDateRange(7);          // คิวจัดของ = งานวันนี้/สัปดาห์นี้ ไม่ใช่ทั้งปี
 
-  // SIs ที่ยังไม่ได้จ่ายของ — สถานะ unfulfilled (ยังไม่ตัด stock) หรือ partial
+  // SIs ที่ยังไม่ได้จัดของ — 🐛 เดิมกรองด้วย si.branchId ซึ่งใบกำกับไม่มี (เก็บเป็น si.branch) → คนที่ไม่ใช่ admin ไม่เห็นแถวเลย
   const pendingSIs = (state.salesInvoices||[])
     .filter(si => !si.voided)
-    .filter(si => isSuperUser(user) || branchIds.includes(si.branchId))
+    .filter(si => isSuperUser(user) || branchIds.includes(si.branch || si.branchId))
     .filter(si => (si.fulfillmentStatus || 'pending') !== 'fulfilled')
+    .filter(si => inDateRange(si.invDate, dr.startDate, dr.endDate))
     .sort((a,b) => (a.invDate||'').localeCompare(b.invDate||''));
 
+  // 📝 W3: ใบเสนอราคาที่ลูกค้าตอบรับแล้วแต่ยังไม่ออกใบกำกับ — ครัวจัดของก่อน แล้วค่อยออกใบตอนส่งจริง
+  const acceptedQTs = (state.salesOrders||[])
+    .filter(q => q.docType === 'quote' && !q.voided)
+    .filter(q => isSuperUser(user) || branchIds.includes(q.branch))
+    .filter(q => {
+      const st = (global.ERP.quoteStatus ? global.ERP.quoteStatus(q, getToday()) : q.status);
+      return st === 'accepted' || st === 'partial';
+    })
+    .sort((a,b) => (a.deliveryDate||a.date||'').localeCompare(b.deliveryDate||b.date||''));
+
+  const pgSI = usePaged(pendingSIs, 25);
+  const pgQT = usePaged(acceptedQTs, 25);
+
   return h('div', null,
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
+      h(DateRangeBar, { ...dr, showAll:true, label:'ช่วงวันที่เอกสาร:' })),
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 mb-3 text-sm text-blue-800' },
-      '🛒 คลังจ่ายของออกตามใบขาย (Sales Invoice) · ',
-      'ฝ่ายขายเปิดใบ SI → คลังเห็นที่นี่ → กด "📤 จ่ายของ" → ตัด stock ออก'
+      '🛒 คลังจ่ายของตามใบขาย · ',
+      'ฝ่ายขายตอบรับใบเสนอราคา → คลังพิมพ์ "ใบจัดของ" หยิบของ → ออกใบกำกับตอนส่งจริง (สต๊อกตัดตอนนั้น)'
     ),
+
+    // 📝 ออเดอร์ที่ลูกค้าตอบรับแล้ว รอจัดของ (ยังไม่ออกใบกำกับ = ยังแก้ได้ถ้าของไม่พอ)
+    acceptedQTs.length > 0 && h('div', { className:'bg-white rounded-lg shadow overflow-hidden mb-3' },
+      h('div', { className:'px-3 py-2 bg-indigo-50 border-b text-sm font-medium text-indigo-900' },
+        `📝 ออเดอร์ที่ลูกค้าตอบรับแล้ว รอจัดของ (${acceptedQTs.length})`),
+      h('table', { className:'w-full text-sm' },
+        h('thead', { className:'bg-gray-50 border-b' },
+          h('tr', null,
+            h('th', { className:'px-3 py-2 text-left text-xs' }, 'ใบเสนอราคา'),
+            h('th', { className:'px-3 py-2 text-left text-xs' }, 'ลูกค้า'),
+            h('th', { className:'px-3 py-2 text-center text-xs' }, 'กำหนดส่ง'),
+            h('th', { className:'px-3 py-2 text-left text-xs' }, 'ของที่ต้องจัด'),
+            h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'))),
+        h('tbody', { className:'divide-y' },
+          pgQT.shown.map(q => h('tr', { key:q.id, className:'hover:bg-gray-50' },
+            h('td', { className:'px-3 py-2 font-mono text-xs' }, q.qtNumber),
+            h('td', { className:'px-3 py-2' }, q.customerSnapshot?.name || q.customerName || '-'),
+            h('td', { className:'px-3 py-2 text-center text-xs' },
+              q.deliveryDate ? fmtDate(q.deliveryDate) : '—'),
+            h('td', { className:'px-3 py-2 text-xs' },
+              (q.lines||[]).filter(l => l.lineKind !== 'kit_child')
+                .map(l => `${l.itemName} × ${fmtNum((Number(l.qty)||0) - (Number(l.usedQty)||0))}`).join(' · ')),
+            h('td', { className:'px-3 py-2 text-center' },
+              h(Button, { variant:'secondary', size:'sm', 'data-testid':'fulfill-print-qt-' + q.qtNumber,
+                onClick:()=>{
+                  const printer = (global.ERP.MODULES && global.ERP.MODULES['sales-full'] && global.ERP.MODULES['sales-full'].printPackingList);
+                  // พิมพ์เฉพาะส่วนที่ยังไม่ได้ออกใบกำกับ (หัก usedQty) — แถวลูกของชุดคิดตามจำนวนแม่ที่เหลือ
+                  const _rem = {};
+                  const _lines = [];
+                  (q.lines||[]).forEach(l => {
+                    if(l.lineKind === 'kit_child') return;
+                    const left = (Number(l.qty)||0) - (Number(l.usedQty)||0);
+                    if(!(left > 0)) return;
+                    _rem[l.kitId || l.lineNo] = left;
+                    _lines.push({ ...l, qty: left });
+                  });
+                  (q.lines||[]).forEach(l => {
+                    if(l.lineKind !== 'kit_child') return;
+                    const left = _rem[l.kitId];
+                    if(!(left > 0)) return;
+                    _lines.push({ ...l, qty: (Number(l.qtyPerKit)||0) * left });
+                  });
+                  if(!_lines.length){ alert('ใบนี้ออกใบกำกับครบแล้ว ไม่มีของค้างจัด'); return; }
+                  if(printer) printer({ siNumber: q.qtNumber, invDate: q.date, branch: q.branch,
+                    docLabel: 'อ้างอิงใบเสนอราคาเลขที่', deliveryDate: q.deliveryDate, deliveryPlace: q.deliveryPlace,
+                    contactName: q.contactName, contactPhone: q.contactPhone,
+                    customerSnapshot: q.customerSnapshot, customerName: q.customerName, lines: _lines }, state);
+                  else alert('พิมพ์ใบจัดของไม่ได้ — เปิดหน้า ขาย › ใบเสนอราคา แล้วสั่งพิมพ์จากที่นั่น');
+                } }, '🖨️ พิมพ์ใบจัดของ')))))),
+      h(Pager, { pg: pgQT, label:'ใบเสนอราคารอจัดของ' })),
 
     pendingSIs.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
           h('div', { className:'text-3xl mb-2' }, '✨'),
           h('div', null, 'ไม่มีใบขายรอจ่ายของ'),
-          h('div', { className:'text-xs mt-1' },
-            'ฝ่ายขายเปิด SI ใหม่ → จะเห็นในนี้ทันที (ยังไม่มีระบบ SI ตอนนี้ — จะเพิ่มในรอบหน้า)'))
+          h('div', { className:'text-xs mt-1' }, 'ฝ่ายขายออกใบกำกับใหม่ → จะเห็นในนี้ทันที'))
       : h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
           h('table', { className:'w-full text-sm' },
             h('thead', { className:'bg-gray-50 border-b' },
@@ -22234,7 +22472,7 @@ function SalesFulfillmentTab({ state, dispatch, user }){
               )
             ),
             h('tbody', { className:'divide-y' },
-              pendingSIs.map(si => {
+              pgSI.shown.map(si => {
                 const cust = state.customers.find(c => c.id === si.customerId);
                 return h('tr', { key:si.id, className:'hover:bg-gray-50' },
                   h('td', { className:'px-3 py-2 font-mono text-xs' }, si.siNumber || si.invNumber),
@@ -22242,14 +22480,24 @@ function SalesFulfillmentTab({ state, dispatch, user }){
                   h('td', { className:'px-3 py-2 text-center text-xs' }, fmtDate(si.invDate)),
                   h('td', { className:'px-3 py-2 text-center' },
                     h('span', { className:'px-2 py-0.5 bg-amber-100 text-amber-800 rounded text-xs' },
-                      si.fulfillmentStatus || '⏳ รอจ่าย')),
+                      si.fulfillmentStatus === 'fulfilled' ? '✓ จัดครบแล้ว' : '⏳ รอจัดของ')),
                   h('td', { className:'px-3 py-2 text-center' },
-                    h(Button, { variant:'primary', size:'sm',
-                      onClick:()=>alert('🚧 ระบบจ่ายของ SI กำลังพัฒนา (Phase ถัดไป)\n\nรอ ระบบ Sales Invoice + DN ก่อน — ตอนนี้ใช้ Transfer ทดแทนได้')
-                    }, '📤 จ่ายของ')));
+                    h('div', { className:'flex gap-1 justify-center' },
+                      h(Button, { variant:'secondary', size:'sm', 'data-testid':'fulfill-print-' + (si.siNumber||''),
+                        onClick:()=>{
+                          const printer = (global.ERP.MODULES && global.ERP.MODULES['sales-full'] && global.ERP.MODULES['sales-full'].printPackingList);
+                          if(printer) printer(si, state); else alert('พิมพ์ใบจัดของไม่ได้จากหน้านี้ — สั่งพิมพ์ที่ ขาย › ใบกำกับ');
+                        } }, '🖨️ ใบจัดของ'),
+                      h(Button, { variant:'primary', size:'sm', 'data-testid':'fulfill-done-' + (si.siNumber||''),
+                        onClick:()=>{
+                          if(!confirm(`ยืนยันว่าจัดของตามใบ ${si.siNumber} ครบแล้ว?\n\n(สต๊อกถูกตัดไปแล้วตอนออกใบกำกับ — ปุ่มนี้แค่ปิดงานในคิวจัดของ)`)) return;
+                          dispatch({ type:'UPDATE_SALES_INV', data:{ ...si, fulfillmentStatus:'fulfilled',
+                            fulfilledAt: Date.now(), fulfilledBy: user.username } });
+                        } }, '✓ จัดครบแล้ว'))));
               })
             )
-          ))
+          ),
+          h(Pager, { pg: pgSI, label:'ใบกำกับรอจัดของ' }))
   );
 }
 
@@ -23295,7 +23543,8 @@ function ItemPickerModal({ state, user, onCancel, onConfirm }){
   const branchLocs = (branch?.locations) || [];
 
   const items = useMemo(() => {
-    let list = (state.items||[]).filter(i => i.active !== false);
+    // 🎁 ชุดสินค้าไม่เข้าใบนับสต๊อก (ให้ตรงกับหน้านับที่กรองไว้แล้ว ไม่งั้นติ๊ก 20 ได้ 19)
+    let list = (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
     if(typeFilter !== '__all__') list = list.filter(i => i.type === typeFilter);
     if(search){
       const q = search.toLowerCase();
@@ -23428,6 +23677,7 @@ const {
   // 🆕 GO-LIVE: ซ่อนต้นทุน · แถวมือถือ · รายการโปรด
   canSeeStockValue, getStockAtBranch, getUserAssignedLines, getFavoriteList, resolveItemFavorites,
   LineRow, FavoriteLinesSection, FavoritesEditorModal,
+  isPhysicalItem,   // 🎁 SALES-W2: ตัดชุดสินค้า (kit) ออกจากตัวเลขคลัง
 } = global.ERP;
 // 🆕 UI-v2 openDoc: Command palette (Ctrl+K) เลือก TR/TO → useOpenDoc(kind, fn) เรียก fn(id) ตอน mount (คิวใน erp_v5__q__<kind>) + ทุก erp:open-doc
 //   guard: ถ้า core รุ่นเก่าไม่มี useOpenDoc ให้เป็น no-op (hook ต้องถูกเรียกทุก render เสมอ — ห้ามเรียกแบบมีเงื่อนไข)
@@ -23622,7 +23872,8 @@ function PushTransferModal({ state, dispatch, user, onClose }){
   // 🆕 location options ของ branch ปัจจุบัน (สำหรับ intra-branch mode)
   const myBranchObj = (state.branches||[]).find(b => b.id === myBranch);
   const myLocations = myBranchObj?.locations || [];
-  const activeItems = useMemo(() => (state.items||[]).filter(i => i.active !== false), [state.items]);
+  const activeItems = useMemo(() => (state.items||[]).filter(i => i.active !== false
+    && (!isPhysicalItem || isPhysicalItem(i))), [state.items]);   // 🎁 ชุดสินค้าโอนไม่ได้
   const filtered = !search ? activeItems.slice(0,12)
     : activeItems.filter(i =>
         (i.name||'').toLowerCase().includes(search.toLowerCase()) ||
@@ -24131,7 +24382,7 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
   _usePruneFavValues(favIds, setFavValues);
 
   const activeItems = useMemo(() =>
-    (state.items||[]).filter(i => i.active !== false), [state.items]);
+    (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i))), [state.items]);
 
   const filteredItems = itemSearch
     ? activeItems.filter(i =>
@@ -24529,7 +24780,7 @@ function EditPresetModal({ preset, state, dispatch, onClose }){
   const [itemSearch, setItemSearch] = useState('');
   const icons = ['⭐','🧁','🥧','🎂','🍪','🥖','🥛','🧈','🍫','🍬','📦','🎁'];
 
-  const activeItems = (state.items||[]).filter(i => i.active !== false);
+  const activeItems = (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
   const filteredItems = itemSearch
     ? activeItems.filter(i => (i.name||'').toLowerCase().includes(itemSearch.toLowerCase()) || (i.code||'').toLowerCase().includes(itemSearch.toLowerCase()))
     : [];
@@ -36412,6 +36663,7 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
 
   const allPossibleMaterials = (state.items||[]).filter(i =>
     i.active !== false && !outputs.some(o => o.productId === i.id)
+    && (!global.ERP.isPhysicalItem || global.ERP.isPhysicalItem(i))   // 🎁 ชุดสินค้าใส่ในสูตร BOM ไม่ได้ (ไม่มีสต๊อกของตัวเอง)
   );
   const filteredItems = itemSearch ? allPossibleMaterials.filter(i =>
     (i.name||'').toLowerCase().includes(itemSearch.toLowerCase()) ||
@@ -36801,7 +37053,8 @@ function POSImportTab({ state, dispatch, user, branchId }){
   const pgPreview = usePaged(parsed ? parsed.rows : [], 50);
 
   const branches = (state.branches || []);
-  const allItems = state.items || [];
+  // 🎁 ชุดสินค้าไม่เข้ากระบวนการนำเข้า POS (ไม่มีสต๊อกของตัวเอง — จะกลายเป็นสต๊อกผี)
+  const allItems = (state.items || []).filter(i => (!global.ERP.isPhysicalItem || global.ERP.isPhysicalItem(i)));
   const history = state.posImports || [];
 
   const parse = () => {
@@ -41260,7 +41513,7 @@ const {
   getBranch, hasPerm,
   Modal, Button,
   useDateRange, DateRangeBar, inDateRange, exportCSV,
-  toBaseQty, unitsForPurpose, deductFIFO, resolvePrice, getStockAtBranch,
+  toBaseQty, unitsForPurpose, deductFIFO, resolvePrice, getStockAtBranch, isPhysicalItem,
   BEDateInput,
 } = global.ERP;
 
@@ -41466,8 +41719,9 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
   const [search, setSearch] = useState('');
   const [showAllItems, setShowAllItems] = useState(false);   // 🆕 ปุ่มดูทั้งหมด
 
+  // 🎁 ชุดสินค้า (kit) ขายที่นี่ไม่ได้ — หน้านี้ตัดสต๊อกตาม itemId ตรง ๆ ของข้างในกล่องจะไม่ถูกตัด
   const activeItems = useMemo(() => (state.items||[])
-    .filter(i => i.active !== false && i.type !== 'material'), [state.items]);
+    .filter(i => i.active !== false && i.type !== 'material' && (!isPhysicalItem || isPhysicalItem(i))), [state.items]);
   const matchedItems = search
     ? activeItems.filter(i =>
         (i.name||'').toLowerCase().includes(search.toLowerCase()) ||
@@ -41495,6 +41749,14 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
     if(savingRef.current) return;  // 🆕 FIX-8: กันกดซ้ำ
     const valid = lines.filter(l => l.itemId && l.qty > 0);
     if(valid.length === 0) return alert('ใส่รายการอย่างน้อย 1');
+    // 🎁 hard guard: ถ้ามีชุดสินค้าหลุดเข้ามา (ข้อมูลเก่า/ลากมาจากที่อื่น) ห้ามบันทึก — ของข้างในจะไม่ถูกตัด
+    {
+      const kitLine = valid.find(l => ((state.items||[]).find(x => x.id === l.itemId)||{}).type === 'kit');
+      if(kitLine){
+        const nm = ((state.items||[]).find(x => x.id === kitLine.itemId)||{}).name || 'ชุดสินค้า';
+        return alert(`🎁 "${nm}" เป็นชุดสินค้า (Snack Box)\n\nต้องขายผ่าน ขาย → 🧾 ใบกำกับ แล้วกด "จัดกล่อง" เพื่อเลือกของข้างใน\nถ้าขายจากหน้านี้ ของข้างในกล่องจะไม่ถูกตัดสต๊อก`);
+      }
+    }
     // 🆕 W1: เตือนบรรทัดราคา 0 (ยอดขาย/รายได้จะเป็น 0 เงียบ ๆ ถ้าไม่เตือน)
     const _zeroMode = state.settings?.siRequirePrice || 'warn';
     const _zero = valid.filter(l => !(Number(l.unitPrice) > 0));
@@ -41559,7 +41821,7 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
       }
       // 🆕 FT: shape-safe deduct
       dispatch({ type:'ADJUST_BRANCH_STOCK', data:{ id:l.itemId, branch, delta:-baseQty } });
-      dispatch({ type:'DEDUCT_FIFO_LAYERS', data:[{ itemId:l.itemId, qty:baseQty, branch }] });
+      dispatch({ type:'DEDUCT_FIFO_LAYERS', data:[{ itemId:l.itemId, qty:baseQty, branch, allowNegative:true }] });
       dispatch({ type:'ADD_MOVEMENT', data:{
         id: genId('mv'), type:'sale_out', itemId:l.itemId, qty: -baseQty,
         branch, date, ref: slNumber,
@@ -41764,7 +42026,8 @@ const {
   h, useState, useMemo, cls, fmtCur, fmtNum, fmtDate, getToday, getBranch,
   isSuperUser, getAllowedBranches, getBaseUnit, calcBomCost,
   useDateRange, DateRangeBar, inDateRange, Button, usePaged, Pager, usePersistedTab,
-  canSeeStockValue, isReversalPair, findLine,   // 🆕 GO-LIVE UAT: gate ฿ ทุก sub-report + ข้ามคู่หักล้าง + ชื่อไลน์ในรายงานใบเบิก
+  canSeeStockValue, isReversalPair, findLine,   // 🆕 GO-LIVE UAT: gate ฿ ทุก sub-report + ข้ามคู่หักล้าง + ชื่อไลน์ในรายงานใบเบิก,
+  isPhysicalItem,   // 🎁 SALES-W2: ตัดชุดสินค้า (kit) ออกจากตัวเลขคลัง
 } = global.ERP;
 
 const EMPTY_ROWS = [];   // อ้างอิงคงที่ กัน re-render โดยไม่จำเป็นตอนยังไม่ได้เลือกสินค้า
@@ -42639,7 +42902,7 @@ function StockCardReport({ state, user, allowedBranches }){
   const dr = useDateRange(60);
 
   const items = useMemo(() => {
-    let list = (state.items||[]).filter(i => i.active !== false);
+    let list = (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));   // 🎁 ตัดชุดสินค้า
     if(search){
       const q = search.toLowerCase();
       list = list.filter(i => (i.name||'').toLowerCase().includes(q) || (i.code||'').toLowerCase().includes(q));
@@ -44145,7 +44408,7 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
   const [saving, setSaving] = useState(false);
 
   const activeItems = useMemo(() =>
-    (state.items||[]).filter(i => i.active !== false), [state.items]);
+    (state.items||[]).filter(i => i.active !== false && (!global.ERP.isPhysicalItem || global.ERP.isPhysicalItem(i))), [state.items]);   // 🎁 ชุดสินค้าซื้อเข้าไม่ได้
 
   const filteredItems = itemSearch
     ? activeItems.filter(i =>
@@ -67539,7 +67802,12 @@ function SalesFullModule({ state, dispatch }){
   }
   const [tab, setTab] = usePersistedTab('sales', 'dashboard');
   const unpaidCount = (state.salesInvoices||[]).filter(i => !i.voided && (i.paymentStatus||'unpaid') !== 'paid').length;
-  const pendingSlips = (state.salesPayments||[]).filter(p => !p.slip).length;
+  const pendingSlips = (state.salesPayments||[]).filter(p => !p.slip && !p.voided).length;
+  // 📝 W3: ใบเสนอราคาที่ยังต้องตาม (ร่าง/ส่งแล้ว/ตอบรับ/แปลงบางส่วน — ไม่นับหมดอายุ/ปิดแล้ว)
+  const quoteOpenCount = (state.salesOrders||[]).filter(q => q.docType === 'quote'
+    && ['draft','sent','accepted','partial'].includes(quoteStatus(q, getToday()))).length;
+  const billingOpenCount = (state.salesBillings||[]).filter(b => !b.voided
+    && ['open','partial'].includes(billingStatus(b, state))).length;
 
   return h('div', null,
     h('div', { className:'mb-4' },
@@ -67551,7 +67819,9 @@ function SalesFullModule({ state, dispatch }){
         { k:'dashboard', label:'📊 Dashboard' },
         { k:'vatByInv',  label:'📋 VAT ขายตาม SI' },
         { k:'vatByPay',  label:'💰 VAT ขายตามวันรับ' },
+        { k:'quotes',    label:'📝 ใบเสนอราคา', badge: quoteOpenCount },
         { k:'invoices',  label:'🧾 ใบกำกับ', badge: unpaidCount },
+        { k:'billing',   label:'📨 ใบวางบิล', badge: billingOpenCount },
         { k:'receive',   label:'💰 รับชำระ' },
         { k:'aging',     label:'⏱️ AR Aging' },
         { k:'customers', label:'👥 ลูกค้า' },
@@ -67564,7 +67834,9 @@ function SalesFullModule({ state, dispatch }){
       )
     ),
     tab==='dashboard' && h(SDashboard, { state }),
+    tab==='quotes'    && h(QuoteList,  { state, dispatch, user }),
     tab==='invoices'  && h(SIList,     { state, dispatch, user }),
+    tab==='billing'   && h(BillingList, { state, dispatch, user }),
     tab==='receive'   && h(ARReceiveTab, { state, dispatch, user }),
     tab==='aging'     && h(ARAgingReport, { state }),
     tab==='vatByInv'  && h(SalesVATByInvReport, { state }),
@@ -67753,7 +68025,9 @@ function SIList({ state, dispatch, user }){
                       st !== 'paid' && h(Button, { variant:'success', size:'sm',
                         onClick:()=>setReceivingSI(i) }, '💰 รับชำระ'),
                       h(Button, { variant:'ghost', size:'sm',
-                        onClick:()=>printSalesInvoice(i, state) }, '🖨️')
+                        title: (Number(i.printCount)||0) > 0 ? 'พิมพ์ซ้ำ = สำเนา' : 'พิมพ์ต้นฉบับ',
+                        onClick:()=>printSI(i, state, dispatch, user) },
+                        (Number(i.printCount)||0) > 0 ? '🖨️ สำเนา' : '🖨️')
                     )
                   )
                 );
@@ -67773,90 +68047,43 @@ function SIList({ state, dispatch, user }){
 }
 
 // ---------- New SI Modal ----------
-function NewSIModal({ state, dispatch, user, onClose }){
+// fromQuote = ใบเสนอราคาที่กำลังแปลงเป็นใบกำกับ (prefill + ผูกเอกสารกลับ)
+function NewSIModal({ state, dispatch, user, onClose, fromQuote }){
   const savingRef = useRef(false);  // 🆕 FIX-8: กันกดบันทึกซ้ำ (double-submit)
   const allowedBranchesForSI = (state.branches||[]).filter(b => {
     if(state.currentUser?.role === 'gm' || state.currentUser?.role === 'admin') return true;
     return b.id === state.currentBranch;
   });
-  const [customerId, setCustomerId] = useState('');
+  const [customerId, setCustomerId] = useState(fromQuote ? (fromQuote.customerId || '') : '');
   const [showAddCust, setShowAddCust] = useState(false);  // 🆕 quick-add ลูกค้า
-  const [sourceBranch, setSourceBranch] = useState(state.currentBranch);
+  const [sourceBranch, setSourceBranch] = useState((fromQuote && fromQuote.branch) || state.currentBranch);
+  // ⚠️ วันที่ใบกำกับ = วันที่แปลง (วันส่งมอบ) ไม่ใช่วันที่ใบเสนอราคา — ม.78 จุดความรับผิดทางภาษี
   const [invDate, setInvDate] = useState(getToday());
   const [dueDate, setDueDate] = useState(getToday());
-  const [priceMode, setPriceMode] = useState(
-    (state.settings?.salePriceVat || 'inclusive') === 'inclusive' ? 'inclusive' : 'exclusive');
-  const [lines, setLines] = useState([]);
+  const [priceMode, setPriceMode] = useState(fromQuote
+    ? (fromQuote.priceMode || 'inclusive')
+    : ((state.settings?.salePriceVat || 'inclusive') === 'inclusive' ? 'inclusive' : 'exclusive'));
+  // 📝 W3: แปลงจากใบเสนอราคา — ตั้งต้นจำนวน = คงเหลือที่ยังไม่ได้ออกใบ (ส่งหลายงวดได้)
+  const [lines, setLines] = useState(() => {
+    if(!fromQuote) return [];
+    return (fromQuote.lines||[])
+      .filter(l => l.lineKind !== 'kit_child')
+      .map(l => ({ ...l, qty: Math.max(0, (Number(l.qty)||0) - (Number(l.usedQty)||0)), _qtLineNo: l.lineNo }))
+      .filter(l => l.qty > 0);
+  });
   const [vatRate, setVatRate] = useState(7);
-  const [whtRate, setWhtRate] = useState(0);  // ลูกค้าหักเรา (ถ้ามี)
+  const [whtRate, setWhtRate] = useState(fromQuote ? (Number(fromQuote.whtRate)||0) : 0);  // ลูกค้าหักเรา (ถ้ามี)
   const [note, setNote] = useState('');
-  const [showAllItems, setShowAllItems] = useState(false);   // 🆕 ปุ่มดูทั้งหมดของตัวเลือกสินค้า
-  const [itemLimit, setItemLimit] = useState(200);           // ทยอยแสดงทีละ 200 (สินค้าจริง 863 ตัว)
-  const [itemSearch, setItemSearch] = useState('');
 
   const customer = state.customers.find(c => c.id === customerId);
 
   // sync due date when customer selected
   //   🆕 แก้ 2 บั๊ก: (1) credit||30 → ลูกค้าเงินสด (credit=0) กลายเป็นเครดิต 30 วัน · (2) นับจากวันนี้ ไม่ใช่วันที่บนใบกำกับ
   useEffect(() => {
-    if(customer){
-      const _cd = (customer.credit == null || customer.credit === '') ? 30 : (Number(customer.credit) || 0);
-      // คิดเป็น UTC ล้วน — ถ้าใช้ new Date(x+'T00:00:00') (local TZ) แล้ว toISOString() วันจะเพี้ยนไป 1 วันในไทย (UTC+7)
-      const d = new Date((invDate || getToday()) + 'T00:00:00Z');
-      d.setUTCDate(d.getUTCDate() + _cd);
-      setDueDate(d.toISOString().slice(0,10));
-    }
+    if(customer) setDueDate(dueFromCredit(customer, invDate));
   }, [customerId, invDate]);
 
-  // 🆕 ปุ่ม "ดูทั้งหมด" (แบบเดียวกับทะเบียนรายจ่าย) — เดิมถ้าไม่พิมพ์ค้นจะไม่เห็นรายการสินค้าเลย
-  const filteredItems = useMemo(() => {
-    const base = (state.items||[]).filter(i => i.active !== false);
-    const q = (itemSearch||'').trim().toLowerCase();
-    if(!q) return base;
-    return base.filter(i => (i.name||'').toLowerCase().includes(q)
-      || (i.code||'').toLowerCase().includes(q)
-      || (i.barcode||'').toLowerCase().includes(q));
-  }, [state.items, itemSearch]);
-  const shownItems = filteredItems.slice(0, showAllItems ? itemLimit : 20);
-  const moreItems  = filteredItems.length - shownItems.length;
-
-  const _price = (item, unitName) => (resolvePrice
-    ? resolvePrice(item, unitName, customer?.priceTier)
-    : { price: (item && item.salePrice) || 0, warnUnit:false, warnZero: !(item && item.salePrice > 0) });
-
-  const addLine = (item) => {
-    const sellUnits = unitsForPurpose(item, 'sale') || [{ name:item.issueUnit||'' }];   // 'sale' = ช่อง "ขาย" ใน item editor (เดิม 'sell' ไม่ตรง)
-    const defaultUnit = sellUnits[0]?.name || item.issueUnit || '';
-    // 🆕 W1: ราคาผ่าน resolvePrice (หน่วยขาย + กลุ่มราคาลูกค้า) · _priceAuto = ยังไม่มีใครแก้ราคาเอง
-    const pr = _price(item, defaultUnit);
-    setLines([...lines, {
-      itemId: item.id, qty: 1, unit: defaultUnit,
-      unitPrice: pr.price, vatRate, _priceAuto: true,
-    }]);
-    setItemSearch('');
-  };
-
-  // เปลี่ยนหน่วย → ราคาตามหน่วยใหม่ (ถ้ายังไม่เคยแก้ราคาเอง) · แก้เองแล้วถามก่อน
-  const changeUnit = (i, unitName) => {
-    const l = lines[i];
-    const it = state.items.find(x => x.id === l.itemId);
-    const pr = _price(it, unitName);
-    if(l._priceAuto !== false && pr.price !== Number(l.unitPrice)){
-      setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName, unitPrice:pr.price } : x));
-      return;
-    }
-    if(pr.price > 0 && pr.price !== Number(l.unitPrice)
-       && confirm(`เปลี่ยนหน่วยเป็น "${unitName}" — ใช้ราคาของหน่วยใหม่ (${fmtCur(pr.price)}) แทนราคาที่แก้ไว้ (${fmtCur(l.unitPrice)}) ไหม?`)){
-      setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName, unitPrice:pr.price, _priceAuto:true } : x));
-      return;
-    }
-    setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName } : x));
-  };
-
-  const updateLine = (i, k, v) => setLines(lines.map((l,idx) =>
-    idx===i ? { ...l, [k]:v, ...(k === 'unitPrice' ? { _priceAuto:false } : null) } : l));
-  const removeLine = (i) => setLines(lines.filter((_,idx) => idx !== i));
-
+  // 🧾 W3: บล็อกเลือกสินค้า/ตารางบรรทัด ย้ายไป SalesLineTable (ใช้ร่วมกับใบเสนอราคา)
   // totals
   const calc = lines.map(l => {
     const lineEx = priceMode === 'inclusive'
@@ -67891,21 +68118,75 @@ function NewSIModal({ state, dispatch, user, onClose }){
           + 'แก้เลขภาษีที่ข้อมูลลูกค้าก่อน หรือยืนยันออกต่อ (กรณีขายให้บุคคลธรรมดา/ผู้ไม่จด VAT)?')) return;
       }
     }
+    // 📝 W3 guard: ออกใบกำกับเกินจำนวนคงเหลือในใบเสนอราคา → ต้องรู้ตัว (usedQty จะถูก clamp)
+    if(fromQuote){
+      const liveQt0 = (state.salesOrders||[]).find(q => q.id === fromQuote.id) || fromQuote;
+      const over = [];
+      valid.forEach(l => {
+        if(!l._qtLineNo) return;
+        const src = (liveQt0.lines||[]).find(x => x.lineNo === l._qtLineNo);
+        if(!src) return;
+        const left = (Number(src.qty)||0) - (Number(src.usedQty)||0);
+        if(Number(l.qty) > left + 0.0001){
+          over.push(`• ${src.itemName || ''}: ใบเสนอราคาเหลือ ${fmtNum(left)} แต่กำลังออก ${fmtNum(l.qty)}`);
+        }
+      });
+      if(over.length && !confirm(`⚠️ ออกใบกำกับเกินจำนวนในใบเสนอราคา ${liveQt0.qtNumber}:\n\n${over.join('\n')}\n\n`
+        + 'ส่วนที่เกินจะไม่ถูกนับกลับเข้าใบเสนอราคา (ใบเสนอราคาจะขึ้นว่าออกครบแล้ว) — ออกใบต่อไหม?')){
+        return;
+      }
+    }
+
+    // 🎁 SALES-W2 guard: แถวชุดต้องมีจำนวน+หน่วย (ม.86/4(5)) และต้องมีของข้างในอย่างน้อย 1 อย่าง
+    {
+      const badKit = valid.find(l => l.lineKind === 'kit'
+        && (!(Number(l.qty) > 0) || !l.unit || !(l.kitComponents||[]).some(c => c.itemId && Number(c.qtyPerKit) > 0)));
+      if(badKit){
+        const nm = (state.items.find(x => x.id === badKit.itemId)||{}).name || 'ชุดสินค้า';
+        return alert(`🎁 ${nm}: ต้องระบุจำนวน หน่วย และของข้างในกล่องอย่างน้อย 1 อย่าง\n\nกดปุ่ม "🎁 จัดกล่อง" ที่บรรทัดนั้นก่อน`);
+      }
+    }
     savingRef.current = true;
     setTimeout(() => { savingRef.current = false; }, 3000);  // ปลดล็อกเผื่อ error
 
-    // Check stock (warn only — allow negative)
-    const shortages = [];
-    for(const l of valid){
-      const it = state.items.find(x => x.id === l.itemId);
-      const stockHQ = getStockAtBranch ? (getStockAtBranch(it, sourceBranch) || 0) : (it?.stockByBranch?.[sourceBranch] || 0);
-      const baseQty = toBaseQty(it, l.qty, l.unit);
-      if(baseQty > stockHQ){
-        shortages.push(`${it?.name}: มี ${fmtNum(stockHQ)}, จะขาย ${fmtNum(baseQty)}`);
+    // 🎁 SALES-W2: แตกชุด (kit) เป็น "ของที่มีตัวตนจริง" — ใช้ตรวจสต๊อก/QC/ตัดสต๊อก/ต้นทุน
+    //   แถวแม่ของชุดไม่มีสต๊อกของตัวเอง (type 'kit') จึงห้ามอยู่ในชุดนี้
+    const stockLines = [];
+    valid.forEach(l => {
+      if(l.lineKind === 'kit'){
+        const kitItem = state.items.find(x => x.id === l.itemId) || {};
+        (l.kitComponents||[]).forEach(c => {
+          if(!c.itemId || !(Number(c.qtyPerKit) > 0)) return;
+          stockLines.push({ itemId:c.itemId, qty: Number(c.qtyPerKit) * Number(l.qty), unit:c.unit,
+            _kitId: l.kitId, _kitName: kitItem.name || '', _fromKit:true });
+        });
+      } else {
+        stockLines.push({ itemId:l.itemId, qty:Number(l.qty), unit:l.unit });
       }
-    }
+    });
+
+    // Check stock (warn only — allow negative) · รวมยอดต่อสินค้าก่อนเทียบ
+    //   ใบเดียวมี Snack Box S + M ที่ใช้บราวนี่ตัวเดียวกัน → ถ้าเทียบทีละบรรทัดจะไม่เตือนทั้งที่รวมแล้วเกิน
+    const _need = {};
+    stockLines.forEach(l => {
+      const it = state.items.find(x => x.id === l.itemId);
+      const q = toBaseQty(it, l.qty, l.unit);
+      const e = _need[l.itemId] || (_need[l.itemId] = { qty:0, name: it?.name || l.itemId, from:new Set() });
+      e.qty += q;
+      if(l._fromKit) e.from.add(l._kitName);
+    });
+    const shortages = [];
+    Object.keys(_need).forEach(id => {
+      const it = state.items.find(x => x.id === id);
+      const stockHQ = getStockAtBranch ? (getStockAtBranch(it, sourceBranch) || 0) : (it?.stockByBranch?.[sourceBranch] || 0);
+      const e = _need[id];
+      if(e.qty > stockHQ){
+        shortages.push(`${e.name}: มี ${fmtNum(stockHQ)}, จะขาย ${fmtNum(e.qty)}`
+          + (e.from.size ? ` (จาก 🎁 ${[...e.from].join(', ')})` : ''));
+      }
+    });
     if(shortages.length > 0){
-      if(!confirm('⚠️ สต๊อกไม่พอ (จะติดลบ):\n\n' + shortages.join('\n') + '\n\nดำเนินการต่อ?')) return;
+      if(!confirm('⚠️ สต๊อกไม่พอ (จะติดลบ):\n\n' + shortages.join('\n') + '\n\nดำเนินการต่อ?')){ savingRef.current = false; return; }
     }
 
     // 🆕 W1: เตือนบรรทัดราคา 0 (settings.siRequirePrice: 'warn' ค่าตั้งต้น · 'off' ปิด · 'block' ห้ามออกใบ)
@@ -67927,12 +68208,12 @@ function NewSIModal({ state, dispatch, user, onClose }){
     }
 
     // 🆕 QC soft-warn: เตือนถ้าสินค้าที่ตั้งค่าว่าต้อง QC มี FG ล็อตยังไม่ผ่าน QC (ไม่บล็อก — soft-warn)
-    const _qcPend = (global.ERP.collectUnQCdForLines && global.ERP.collectUnQCdForLines(state, valid, sourceBranch)) || [];
+    const _qcPend = (global.ERP.collectUnQCdForLines && global.ERP.collectUnQCdForLines(state, stockLines, sourceBranch)) || [];
     if(_qcPend.length > 0){
       const _anyFail = _qcPend.some(w => w.hasFailed);
       if(!confirm((_anyFail ? '⛔ มีล็อตที่ QC "ตรวจแล้วไม่ผ่าน" อยู่ในรายการขาย!\n\n' : '⚠️ ล็อตต่อไปนี้ยังไม่มีบันทึก QC ผ่าน:\n\n') +
         _qcPend.map(w => '• ' + w.itemName + ': ' + w.lotsText).join('\n') +
-        (_anyFail ? '\n\n‼️ ควรปรึกษาหัวหน้า/QC ก่อนขาย ' : '\n\n') + 'ยืนยันขายต่อหรือไม่?')) return;
+        (_anyFail ? '\n\n‼️ ควรปรึกษาหัวหน้า/QC ก่อนขาย ' : '\n\n') + 'ยืนยันขายต่อหรือไม่?')){ savingRef.current = false; return; }
       // 🆕 audit qc_override — บันทึกว่าใครกดข้าม QC ขายของยังไม่ผ่าน (ให้สอบย้อนได้ตอน recall)
       dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'qc_override', subType:'qc_override_sale', by:user.username, refType:'sale', anyFailed:_anyFail,
         summary:'ขายข้าม QC: ' + _qcPend.map(w => w.itemName + ' (' + w.lots + (w.hasFailed ? ', ❌ตรวจไม่ผ่าน' : '') + ')').join('; ') } });
@@ -67941,6 +68222,43 @@ function NewSIModal({ state, dispatch, user, onClose }){
     const _qcFailed = _qcPend.some(w => w.hasFailed);
 
     const siNumber = global.ERP.genDocNumber('SI', invDate, state.salesInvoices||[], 'siNumber');
+
+    // 🎁 SALES-W2: แบนบรรทัดลงใบ — แถวปกติ / แถวแม่ของชุด (baseQty 0 → VOID ข้ามเอง) / แถวลูก (มี baseQty+cogs → VOID คืนของเอง)
+    //   ยอดเงินอยู่ที่แถวแม่เท่านั้น · แถวลูกราคา/VAT = 0 เสมอ (snapshot ของข้างในกล่องใบนี้)
+    function _buildSILines(){
+      const out = [];
+      const nameOf = (id) => ((state.items||[]).find(x => x.id === id)||{});
+      valid.forEach(l => {
+        const c = calc[lines.indexOf(l)];
+        const it = nameOf(l.itemId);
+        const base = {
+          itemId: l.itemId,
+          // 🆕 snapshot ชื่อ/รหัสสินค้า ณ วันออกใบกำกับ (ม.86/4 พิมพ์ซ้ำต้องได้เนื้อหาเดิม)
+          itemName: it.name || '',
+          itemCode: it.code || '',
+          qty: Number(l.qty), unit: l.unit,
+          unitPrice: Number(l.unitPrice),
+          vatRate: Number(l.vatRate)||0,
+          lineEx: Number(c.ex.toFixed(2)),
+          lineVat: Number(c.vat.toFixed(2)),
+          lineTotal: Number(c.inc.toFixed(2)),
+        };
+        // 📝 W3: ผูกกลับบรรทัดใบเสนอราคาด้วย lineNo (ห้ามใช้ itemId — ของซ้ำชื่อในใบเดียวมีจริง)
+        if(l._qtLineNo) base.qtLineNo = l._qtLineNo;
+        if(l.lineKind !== 'kit'){ out.push({ ...base, lineNo: out.length + 1 }); return; }
+        out.push({ ...base, lineNo: out.length + 1, lineKind:'kit', isKit:true, kitId:l.kitId,
+          baseQty: 0, kitPrintMode: l.kitPrintMode || (it.kit?.printMode) || 'single' });
+        (l.kitComponents||[]).forEach(cp => {
+          if(!cp.itemId || !(Number(cp.qtyPerKit) > 0)) return;
+          const ci = nameOf(cp.itemId);
+          out.push({ lineNo: out.length + 1, lineKind:'kit_child', kitId:l.kitId,
+            itemId: cp.itemId, itemName: ci.name || '', itemCode: ci.code || '',
+            qtyPerKit: Number(cp.qtyPerKit), qty: Number(cp.qtyPerKit) * Number(l.qty), unit: cp.unit || ci.issueUnit || '',
+            unitPrice: 0, vatRate: 0, lineEx: 0, lineVat: 0, lineTotal: 0 });
+        });
+      });
+      return out;
+    }
 
     const si = {
       id: genId('si'),
@@ -67957,18 +68275,7 @@ function NewSIModal({ state, dispatch, user, onClose }){
       } : null,
       branch: sourceBranch,
       priceMode,
-      lines: valid.map((l,idx) => ({
-        itemId: l.itemId,
-        // 🆕 snapshot ชื่อ/รหัสสินค้า ณ วันออกใบกำกับ (ม.86/4 พิมพ์ซ้ำต้องได้เนื้อหาเดิม)
-        itemName: ((state.items||[]).find(x => x.id === l.itemId)||{}).name || '',
-        itemCode: ((state.items||[]).find(x => x.id === l.itemId)||{}).code || '',
-        qty: Number(l.qty), unit: l.unit,
-        unitPrice: Number(l.unitPrice),
-        vatRate: Number(l.vatRate)||0,
-        lineEx: Number(calc[lines.indexOf(l)].ex.toFixed(2)),
-        lineVat: Number(calc[lines.indexOf(l)].vat.toFixed(2)),
-        lineTotal: Number(calc[lines.indexOf(l)].inc.toFixed(2)),
-      })),
+      lines: _buildSILines(),
       subtotal, vat: vatTotal, total,
       whtRate: Number(whtRate), whtAmount: wht,
       netTotal,
@@ -67978,35 +68285,89 @@ function NewSIModal({ state, dispatch, user, onClose }){
       qcWarned: _qcWarned || undefined,   // 🆕 QC soft-warn: ใบนี้ขายทั้งที่ล็อตยังไม่ผ่าน QC
       qcFailed: _qcFailed || undefined,
       createdBy: user.username, createdAt: Date.now(),
+      // 📝 W3: ลูกถือ pointer ไปหาพ่อ (แพตเทิร์นเดียวกับ gr.poId / inv.grId)
+      quoteId: fromQuote ? fromQuote.id : undefined,
+      quoteNumber: fromQuote ? fromQuote.qtNumber : undefined,
+      // ข้อมูลส่งของ/ผู้ติดต่อจากใบเสนอราคา — คลังต้องใช้ตอนจัดของและส่งของ
+      deliveryDate: fromQuote ? (fromQuote.deliveryDate || undefined) : undefined,
+      deliveryPlace: fromQuote ? (fromQuote.deliveryPlace || undefined) : undefined,
+      contactName: fromQuote ? (fromQuote.contactName || undefined) : undefined,
+      contactPhone: fromQuote ? (fromQuote.contactPhone || undefined) : undefined,
+      customerPoRef: fromQuote ? (fromQuote.customerPoRef || undefined) : undefined,
+      paymentTerms: fromQuote ? (fromQuote.paymentTerms || undefined) : undefined,
     };
 
     // Deduct stock + FIFO + จับต้นทุน FIFO (COGS) จาก clone (ไม่กระทบ layer จริง)
     const _cogLayers = state.fifoLayers.map(x => ({ ...x }));
     let cogsTotal = 0;
     const _genealogyDispatch = [];   // 🆕 LT: FG ล็อตที่จ่ายออกขาย
-    valid.forEach((l, i) => {
+    const _kitCogs = {};             // 🎁 รวมต้นทุนของข้างในขึ้นแถวแม่ (kitId → ฿)
+    si.lines.forEach((l) => {
+      if(l.lineKind === 'kit') return;        // 🎁 แถวแม่ไม่มีสต๊อกของตัวเอง (ของจริงอยู่แถวลูก)
       const it = state.items.find(x => x.id === l.itemId);
       const baseQty = toBaseQty(it, l.qty, l.unit);
       const _cogRes = deductFIFO(_cogLayers, l.itemId, baseQty, sourceBranch);
       const lineCost = Number((_cogRes.cost || 0).toFixed(2));
       cogsTotal += lineCost;
+      if(l.lineKind === 'kit_child' && l.kitId) _kitCogs[l.kitId] = (_kitCogs[l.kitId] || 0) + lineCost;
       // 🆕 LT: capture FG lot ที่จ่าย (breakdown มีอยู่แล้ว — เก็บเพื่อ recall)
       for(const b of (_cogRes.breakdown||[])){
         _genealogyDispatch.push({ kind:'dispatch', fgItemId:l.itemId, fgLot:b.lot||'-',
           qty:b.qty||0, branch:sourceBranch, date:invDate, channel:'sale', ref:siNumber,
-          destination: customer?.name || 'ลูกค้าทั่วไป', by:user.username, at:Date.now() });
+          destination: customer?.name || 'ลูกค้าทั่วไป', by:user.username, at:Date.now(),
+          kitOf: l.kitId || undefined });
       }
-      if(si.lines[i]){ si.lines[i].baseQty = baseQty; si.lines[i].cogs = lineCost; }  // 🆕 FIX-7: เก็บไว้ใช้ตอน void (คืน stock/FIFO)
+      l.baseQty = baseQty; l.cogs = lineCost;   // 🆕 FIX-7: เก็บไว้ใช้ตอน void (คืน stock/FIFO)
       // 🆕 FT: shape-safe deduct (กัน HQ multi-warehouse stock เพี้ยน NaN)
       dispatch({ type:'ADJUST_BRANCH_STOCK', data:{ id:l.itemId, branch:sourceBranch, delta:-baseQty } });
-      dispatch({ type:'DEDUCT_FIFO_LAYERS', data:[{ itemId:l.itemId, qty:baseQty, branch:sourceBranch }] });
+      // allowNegative: ขายเกินสต๊อก → สร้าง NEG layer ให้หักล้างตอนรับของเข้าใหม่ (ไม่งั้น GL ≠ รายงานคลังถาวร)
+      dispatch({ type:'DEDUCT_FIFO_LAYERS', data:[{ itemId:l.itemId, qty:baseQty, branch:sourceBranch, allowNegative:true }] });
       dispatch({ type:'ADD_MOVEMENT', data:{
         id: genId('mv'), type:'sale_out', itemId:l.itemId, qty: -baseQty,
         branch: sourceBranch, date: invDate, ref: siNumber,
-        note:`ขาย ${customer?.name||''}`, by: user.username }});
+        note:`ขาย ${customer?.name||''}` + (l.lineKind === 'kit_child'
+          ? ` (ในชุด ${(si.lines.find(x => x.lineKind === 'kit' && x.kitId === l.kitId)||{}).itemName || ''})` : ''),
+        by: user.username }});
+    });
+    // 🎁 ต้นทุนของกล่อง = Σ ของข้างใน (กำไรขั้นต้นต่อกล่องถูกต้องแม้ราคาของลูกเป็น 0)
+    si.lines.forEach(l => {
+      if(l.lineKind === 'kit' && _kitCogs[l.kitId] !== undefined){
+        l.kitCogs = Number(_kitCogs[l.kitId].toFixed(2));
+        l.cogs = l.kitCogs;
+      }
     });
     si.cogsTotal = Number(cogsTotal.toFixed(2));   // 🆕 FIX-5: เก็บต้นทุนขายไว้ post COGS JE (perpetual)
     if(_genealogyDispatch.length > 0) dispatch({ type:'ADD_LOT_GENEALOGY', data:_genealogyDispatch });  // 🆕 LT
+
+    // 📝 W3: อัปเดตใบเสนอราคา — usedQty สะสม + siIds (อ่านสดจาก state กันกดพร้อมกัน 2 เครื่อง)
+    //   ⭐ เก็บ qtApplied = จำนวนที่บวกเข้า usedQty จริง (หลัง clamp) ลงบรรทัดใบกำกับ
+    //     ไม่งั้นตอนยกเลิกใบจะคืนเกิน → ใบเสนอราคากลับมาออกใบกำกับซ้ำได้
+    if(fromQuote){
+      const liveQt = (state.salesOrders||[]).find(q => q.id === fromQuote.id);
+      if(liveQt){
+        const usedByLineNo = {};
+        si.lines.forEach(l => {
+          if(l.lineKind === 'kit_child' || !l.qtLineNo) return;
+          usedByLineNo[l.qtLineNo] = (usedByLineNo[l.qtLineNo] || 0) + Number(l.qty || 0);
+        });
+        const appliedByLineNo = {};
+        const qtLines = (liveQt.lines||[]).map(l => {
+          const add = usedByLineNo[l.lineNo];
+          if(!add) return l;
+          const before = Number(l.usedQty)||0;
+          const after = Math.min(Number(l.qty)||0, before + add);
+          appliedByLineNo[l.lineNo] = after - before;       // ที่ลงได้จริง (อาจน้อยกว่าที่ออกใบ ถ้าส่งเกินใบเสนอราคา)
+          return { ...l, usedQty: after };
+        });
+        si.lines.forEach(l => {
+          if(l.lineKind === 'kit_child' || !l.qtLineNo) return;
+          l.qtApplied = appliedByLineNo[l.qtLineNo] !== undefined ? appliedByLineNo[l.qtLineNo] : 0;
+        });
+        dispatch({ type:'UPDATE_SO', data:{ ...liveQt, lines: qtLines,
+          siIds: [ ...(liveQt.siIds||[]), si.id ],
+          status: liveQt.status === 'draft' || liveQt.status === 'sent' ? 'accepted' : liveQt.status } });
+      }
+    }
 
     dispatch({ type:'ADD_SALES_INV', data: si });
 
@@ -68019,6 +68380,13 @@ function NewSIModal({ state, dispatch, user, onClose }){
 
   return h(Modal, { isOpen:true, title:'🧾 ออกใบกำกับภาษี (Sales Invoice)', onClose, size:'xl' },
     h('div', { className:'space-y-3' },
+      fromQuote && h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-2 text-xs text-indigo-900',
+        'data-testid':'si-from-quote' },
+        `📝 แปลงจากใบเสนอราคา ${fromQuote.qtNumber} (ยืนราคาถึง ${fmtDate(fromQuote.validUntil)})`,
+        String(fromQuote.validUntil||'') && String(fromQuote.validUntil) < getToday()
+          && h('span', { className:'ml-2 text-orange-700 font-medium' }, '⚠️ ใบเสนอราคาหมดอายุแล้ว — ตรวจราคากับลูกค้าก่อนออกใบ'),
+        h('div', { className:'text-[11px] mt-0.5' }, 'จำนวนตั้งต้น = ส่วนที่ยังไม่ได้ออกใบกำกับ · วันที่ใบกำกับ = วันส่งมอบจริง (แก้ได้)')),
+
       h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
         h('div', { className:'md:col-span-2' },
           h('label', { className:'block text-xs font-medium mb-1' }, 'ลูกค้า *'),
@@ -68077,92 +68445,8 @@ function NewSIModal({ state, dispatch, user, onClose }){
             className:'w-full px-3 py-2 border-2 rounded text-sm' })),
       ),
 
-      // Item search
-      h('div', null,
-        h('div', { className:'flex items-center justify-between mb-1' },
-          h('label', { className:'block text-xs font-medium' }, '➕ เพิ่มสินค้า'),
-          h('button', { type:'button', 'data-testid':'si-show-all', onClick:()=>{ setItemLimit(200); setShowAllItems(v=>!v); },
-            className:'text-xs px-2 py-0.5 rounded bg-blue-100 hover:bg-blue-200 text-blue-800 font-medium' },
-            showAllItems ? '✕ ย่อรายการ' : `📋 ดูทั้งหมด (${filteredItems.length})`)
-        ),
-        h('input', { type:'search', value:itemSearch, onChange:e=>setItemSearch(e.target.value),
-          placeholder:'พิมพ์ชื่อ/รหัส/บาร์โค้ด — หรือกด "ดูทั้งหมด"',
-          className:'w-full px-3 py-2 border-2 rounded text-sm' }),
-        (itemSearch || showAllItems) && h('div', { className:'mt-1 bg-white border rounded max-h-40 overflow-y-auto', 'data-si-items':'1' },
-          filteredItems.length === 0
-            ? h('div', { className:'px-3 py-2 text-xs text-gray-400' },
-                itemSearch ? `ไม่พบ "${itemSearch}"` : 'ยังไม่มีสินค้าที่ขายได้ — ตั้งค่า › สินค้า แล้วเพิ่ม/เปิดใช้งานสินค้าก่อน')
-            : shownItems.map(it => h('button', { key:it.id, type:'button', onClick:()=>addLine(it),
-                className:'w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 border-b last:border-0' },
-                h('div', { className:'font-medium' }, it.name,
-                  (it.type === 'material' || it.type === 'packaging') && h('span',
-                    { className:'ml-1 text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-500' },
-                    it.type === 'material' ? 'วัตถุดิบ' : 'บรรจุภัณฑ์')),
-                h('div', { className:'text-xs text-gray-500 flex justify-between' },
-                  h('span', null, it.code),
-                  (() => { const pr = _price(it, null);
-                    return h('span', null, `${fmtNum(getStockAtBranch ? getStockAtBranch(it, sourceBranch) : 0)} · ` +
-                      (pr.warnZero ? '⚠️ ยังไม่ตั้งราคา' : fmtCur(pr.price))); })()
-                ))),
-          moreItems > 0 && h('button', { type:'button', 'data-testid':'si-show-more',
-            onClick:()=>{ setShowAllItems(true); setItemLimit(n => n + 200); },
-            className:'w-full px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-50 font-medium border-t' },
-            moreItems > 200 ? `⌄ แสดงเพิ่มอีก 200 (เหลือ ${moreItems} รายการ)` : `⌄ แสดงทั้งหมดอีก ${moreItems} รายการ`)
-        )
-      ),
-
-      // Lines table
-      lines.length > 0 && h('div', { className:'bg-white border rounded overflow-x-auto' },
-        h('table', { className:'w-full text-sm' },
-          h('thead', { className:'bg-gray-50' },
-            h('tr', null,
-              h('th', { className:'px-2 py-1.5 text-left text-xs' }, 'สินค้า'),
-              h('th', { className:'px-2 py-1.5 text-right text-xs w-20' }, 'จำนวน'),
-              h('th', { className:'px-2 py-1.5 text-left text-xs w-24' }, 'หน่วย'),
-              h('th', { className:'px-2 py-1.5 text-right text-xs w-24' }, 'ราคา/หน่วย'),
-              h('th', { className:'px-2 py-1.5 text-center text-xs w-16' }, 'VAT%'),
-              h('th', { className:'px-2 py-1.5 text-right text-xs w-28' }, 'รวม'),
-              h('th', { className:'px-2 py-1.5 w-8' }),
-            )
-          ),
-          h('tbody', { className:'divide-y' },
-            lines.map((l,i) => {
-              const it = state.items.find(x => x.id === l.itemId);
-              const units = it ? unitsForPurpose(it, 'sale') : [];
-              return h('tr', { key:i },
-                h('td', { className:'px-2 py-1' },
-                  h('div', { className:'font-medium' }, it?.name||l.itemId),
-                  h('div', { className:'text-[10px] text-gray-500 font-mono' }, it?.code||'')),
-                h('td', { className:'px-2 py-1' },
-                  h('input', { type:'number', value:l.qty, step:'any', min:0,
-                    onChange:e=>updateLine(i,'qty',Number(e.target.value)||0),
-                    className:'w-full px-1 py-1 border rounded text-xs text-right' })),
-                h('td', { className:'px-2 py-1' },
-                  h('select', { value:l.unit||'', onChange:e=>changeUnit(i, e.target.value),
-                    className:'w-full px-1 py-1 border rounded text-xs' },
-                    (units.length>0 ? units : [{ name:it?.issueUnit||'' }]).map(u =>
-                      h('option', { key:u.name, value:u.name }, u.name)))),
-                h('td', { className:'px-2 py-1' },
-                  h('input', { type:'number', value:l.unitPrice, step:'0.01',
-                    onChange:e=>updateLine(i,'unitPrice',Number(e.target.value)||0),
-                    onWheel:e=>e.currentTarget.blur(),
-                    title: !(Number(l.unitPrice) > 0) ? 'ยังไม่ได้ตั้งราคาขายของสินค้านี้' : '',
-                    className: cls('w-full px-1 py-1 border rounded text-xs text-right font-mono',
-                      !(Number(l.unitPrice) > 0) && 'border-orange-400 bg-orange-50') })),
-                h('td', { className:'px-2 py-1' },
-                  h('select', { value:l.vatRate, onChange:e=>updateLine(i,'vatRate',Number(e.target.value)),
-                    className:'w-full px-1 py-1 border rounded text-xs' },
-                    h('option', { value:0 }, '0'),
-                    h('option', { value:7 }, '7'))),
-                h('td', { className:'px-2 py-1 text-right font-medium' }, fmtCur(calc[i]?.inc||0)),
-                h('td', { className:'px-2 py-1 text-center' },
-                  h('button', { type:'button', onClick:()=>removeLine(i),
-                    className:'text-red-500 hover:bg-red-50 p-1 rounded' }, '×'))
-              );
-            })
-          )
-        )
-      ),
+      h(SalesLineTable, { state, dispatch, user, branch: sourceBranch, customer,
+        lines, setLines, vatRate, priceMode, testPrefix:'si' }),
 
       // Totals
       lines.length > 0 && h('div', { className:'bg-gray-50 rounded p-3 space-y-1 text-sm' },
@@ -68195,6 +68479,1381 @@ function NewSIModal({ state, dispatch, user, onClose }){
 }
 
 // ---------- SI Detail ----------
+// 🖨️ พิมพ์ใบกำกับ "เส้นเดียว" ของทั้งโมดูล — ต้นฉบับได้ครั้งเดียว ที่เหลือเป็นสำเนา (ม.86/5) + เก็บ log ว่าใครพิมพ์
+//   ทุกปุ่มพิมพ์ใบกำกับต้องเรียกตัวนี้ ห้ามเรียก printSalesInvoice ตรง ๆ จาก UI
+function printSI(si, state, dispatch, user){
+  const hasKit = (si.lines||[]).some(l => l.lineKind === 'kit');
+  const first = !((Number(si.printCount) || 0) > 0);
+  // ครั้งแรกเลือกว่าจะโชว์ของข้างในไหม แล้วจำไว้บนใบ — พิมพ์ซ้ำต้องได้เนื้อหาเดียวกับต้นฉบับ
+  let showChildren = !!si.kitShowChildren;
+  if(hasKit && first){
+    showChildren = confirm('ใบนี้มีชุดสินค้า (Snack Box)\n\n'
+      + 'กด "ตกลง" = แสดงรายการของข้างในบนใบกำกับ (ไม่มีราคา)\n'
+      + 'กด "ยกเลิก" = พิมพ์เป็นบรรทัดเดียว (ค่าตั้งต้น)');
+  }
+  printSalesInvoice(si, state, { showChildren, copy: !first });
+  if(dispatch) dispatch({ type:'UPDATE_SALES_INV', data:{ ...si,
+    printCount: (Number(si.printCount)||0) + 1,
+    kitShowChildren: hasKit ? showChildren : undefined,
+    lastPrintedAt: Date.now(), lastPrintedBy: (user && user.username) || '' } });
+}
+
+// 📨 SALES-W4: ใบวางบิล (Billing Note) + ใบแจ้งหนี้ล่วงหน้า (Proforma)
+//   ⚖️ ข้อบังคับ: ห้ามมีคำว่า "ใบกำกับภาษี" บนเอกสารนี้ (ยกเว้นวลี "ตามใบกำกับภาษีเลขที่") ·
+//      ห้ามแตกยอด VAT รายบรรทัด · ไม่ post JE ซ้ำ (รายได้/ภาษีขายลงตอนออกใบกำกับไปแล้ว)
+function billingStatus(bn, state){
+  if(!bn) return 'open';
+  if(bn.voided) return 'void';
+  if(bn.mode === 'proforma') return bn.status || 'open';
+  const sis = (state.salesInvoices||[]).filter(si => (bn.siIds||[]).includes(si.id));
+  if(!sis.length) return bn.status || 'open';
+  if(sis.every(si => (si.paymentStatus||'unpaid') === 'paid')) return 'paid';
+  if(sis.some(si => (si.paymentStatus||'unpaid') !== 'unpaid')) return 'partial';
+  return 'open';
+}
+const BN_STATUS = {
+  open:    ['รอเก็บเงิน', 'bg-blue-100 text-blue-700'],
+  partial: ['รับบางส่วน', 'bg-amber-100 text-amber-800'],
+  paid:    ['เก็บครบแล้ว', 'bg-green-100 text-green-700'],
+  void:    ['ยกเลิก', 'bg-gray-200 text-gray-600'],
+};
+
+function BillingList({ state, dispatch, user }){
+  const [mode, setMode] = useState(null);     // 'billing' | 'proforma' → เปิดฟอร์ม
+  const [detail, setDetail] = useState(null);
+  const [filter, setFilter] = useState('open');
+  const [search, setSearch] = useState('');
+  const dr = useDateRange(60);
+  const canCreate = canSalesDoc(user, 'bn', 'create');
+  const canVoid   = canSalesDoc(user, 'bn', 'void');
+
+  // Ctrl+K → เปิดใบวางบิลใบนั้น (ขยายช่วงวัน + ปลดชิป ถ้าตัวกรองซ่อนแถวอยู่)
+  _useOpenDoc('bn', (id) => {
+    const key = String(id == null ? '' : id).trim();
+    const all = state.salesBillings || [];
+    const doc = all.find(b => b.id === key) || all.find(b => String(b.bnNumber||'').toLowerCase() === key.toLowerCase());
+    if(!doc){ if(toast && toast.warning) toast.warning('ไม่พบใบวางบิล ' + key); return; }
+    const d = String(doc.bnDate||'').slice(0,10);
+    if(d && dr.startDate && d < dr.startDate) dr.setStartDate(d);
+    if(filter !== 'all') setFilter('all');
+    setDetail(doc);
+  });
+
+  const list = useMemo(() => {
+    let l = (state.salesBillings||[]).filter(b => inDateRange(b.bnDate, dr.startDate, dr.endDate));
+    if(filter !== 'all') l = l.filter(b => billingStatus(b, state) === filter);
+    if(search){
+      const q = search.toLowerCase();
+      l = l.filter(b => (b.bnNumber||'').toLowerCase().includes(q)
+        || String(b.customerSnapshot?.name||'').toLowerCase().includes(q));
+    }
+    return l.sort((a,b) => (b.bnDate||'').localeCompare(a.bnDate||''));
+  }, [state.salesBillings, state.salesInvoices, filter, search, dr.startDate, dr.endDate]);
+  const pg = usePaged(list, 50);
+
+  return h('div', null,
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' }, h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' })),
+    h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 mb-3 text-xs text-amber-900' },
+      '📨 ใบวางบิล = เอกสารทวงเงิน ไม่ใช่ใบกำกับภาษี · ใช้รวมใบกำกับหลายใบไปเก็บเงินทีเดียว (ไม่ลงบัญชีซ้ำ) · ',
+      'ใบแจ้งหนี้ล่วงหน้า = เรียกเก็บ/มัดจำก่อนส่งของ (ใบกำกับออกตอนส่งของจริง)'),
+    h('div', { className:'flex justify-between items-center mb-3 flex-wrap gap-2' },
+      h('div', { className:'flex gap-2 flex-wrap items-center' },
+        [['open','รอเก็บเงิน'],['all','ทั้งหมด'],['partial','รับบางส่วน'],['paid','เก็บครบแล้ว'],['void','ยกเลิก']].map(([k,lb]) =>
+          h('button', { key:k, onClick:()=>setFilter(k), 'data-testid':'bn-filter-' + k,
+            className: cls('px-3 py-1 rounded text-xs font-medium',
+              filter===k ? 'bg-gray-800 text-white' : 'bg-white border hover:bg-gray-100') }, lb)),
+        h('input', { type:'search', value:search, onChange:e=>setSearch(e.target.value),
+          placeholder:'🔍 BN-number / ลูกค้า', className:'px-3 py-1 border rounded text-xs w-48' })),
+      canCreate && h('div', { className:'flex gap-2' },
+        h(Button, { variant:'primary', 'data-testid':'bn-new-billing', onClick:()=>setMode('billing') },
+          '➕ ใบวางบิล (รวมหลายใบกำกับ)'),
+        h(Button, { variant:'secondary', 'data-testid':'bn-new-proforma', onClick:()=>setMode('proforma') },
+          '➕ ใบแจ้งหนี้ล่วงหน้า (จากใบเสนอราคา)'))),
+
+    list.length === 0
+      ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
+          (state.salesBillings||[]).length === 0 ? 'ยังไม่มีใบวางบิล' : 'ไม่พบตามตัวกรอง')
+      : h('div', { className:'bg-white rounded-lg shadow overflow-x-auto' },
+          h('table', { className:'w-full text-sm' },
+            h('thead', { className:'bg-gray-50 border-b' },
+              h('tr', null,
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'เลขที่'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'ชนิด'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'วันที่'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'ลูกค้า'),
+                h('th', { className:'px-3 py-2 text-center text-xs' }, 'อ้างอิง'),
+                h('th', { className:'px-3 py-2 text-right text-xs' }, 'ยอดรวม'),
+                h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
+                h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'))),
+            h('tbody', { className:'divide-y' },
+              pg.shown.map(b => {
+                const st = billingStatus(b, state);
+                const [lb, clsx] = BN_STATUS[st] || BN_STATUS.open;
+                return h('tr', { key:b.id, 'data-bn-row':b.id, className: cls('hover:bg-gray-50', b.voided && 'opacity-60') },
+                  h('td', { className:'px-3 py-2 font-mono text-xs' }, b.bnNumber),
+                  h('td', { className:'px-3 py-2 text-xs' },
+                    b.mode === 'proforma' ? '📄 ใบแจ้งหนี้ล่วงหน้า' : '📨 ใบวางบิล'),
+                  h('td', { className:'px-3 py-2 text-xs' }, fmtDate(b.bnDate)),
+                  h('td', { className:'px-3 py-2' }, b.customerSnapshot?.name || '-'),
+                  h('td', { className:'px-3 py-2 text-center text-xs' },
+                    b.mode === 'proforma' ? (b.quoteNumber || '-') : `${(b.siIds||[]).length} ใบกำกับ`),
+                  h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(b.netTotal||0)),
+                  h('td', { className:'px-3 py-2 text-center' },
+                    h('span', { className: cls('px-2 py-0.5 rounded text-xs', clsx) }, lb)),
+                  h('td', { className:'px-3 py-2' },
+                    h('div', { className:'flex gap-1 justify-center flex-wrap' },
+                      h(Button, { variant:'secondary', size:'sm', onClick:()=>setDetail(b) }, '👁 ดู'),
+                      h(Button, { variant:'secondary', size:'sm', 'data-testid':'bn-print-' + b.bnNumber,
+                        onClick:()=>printBilling(b, state) }, '🖨'),
+                      !b.voided && b.mode === 'proforma' && st !== 'paid' && canCreate && h(Button, { variant:'success', size:'sm',
+                        'data-testid':'bn-close-' + b.bnNumber,
+                        onClick:()=>{
+                          if(!confirm(`บันทึกว่าได้รับเงินตามใบแจ้งหนี้ ${b.bnNumber} แล้ว?\n\n`
+                            + '⚠️ เมื่อรับเงินก่อนส่งของ ต้องออกใบกำกับภาษีตามจำนวนที่รับด้วย (ม.78(1))')) return;
+                          dispatch({ type:'UPDATE_SALES_BILLING', data:{ ...b, status:'paid',
+                            paidAt: Date.now(), paidBy: user.username } });
+                        } }, '✓ รับเงินแล้ว'),
+                      !b.voided && b.mode === 'proforma' && st !== 'paid' && canCreate && h(Button, { variant:'success', size:'sm',
+                        'data-testid':'bn-close-' + b.bnNumber,
+                        onClick:()=>{
+                          if(!confirm(`บันทึกว่าได้รับเงินตามใบแจ้งหนี้ ${b.bnNumber} แล้ว?\n\n`
+                            + '⚠️ เมื่อรับเงินก่อนส่งของ ต้องออกใบกำกับภาษีตามจำนวนที่รับด้วย (ม.78(1))')) return;
+                          dispatch({ type:'UPDATE_SALES_BILLING', data:{ ...b, status:'paid',
+                            paidAt: Date.now(), paidBy: user.username } });
+                        } }, '✓ รับเงินแล้ว'),
+                      !b.voided && st !== 'paid' && canVoid && h(Button, { variant:'danger', size:'sm',
+                        'data-testid':'bn-void-' + b.bnNumber,
+                        onClick:()=>{ const r = (prompt('เหตุผลที่ยกเลิกใบวางบิลนี้?') || '').trim();
+                          if(!r) return alert('ต้องระบุเหตุผล (เอกสารนี้ส่งลูกค้าไปแล้ว ต้องมีร่องรอยว่าทำไมถึงยกเลิก)');
+                          dispatch({ type:'VOID_SALES_BILLING', data:{ id:b.id, by:user.username, reason:r } }); } }, 'ยกเลิก'))));
+              }))),
+          h(Pager, { pg, label:'ใบวางบิล' })),
+
+    mode && h(NewBillingModal, { state, dispatch, user, mode, onClose:()=>setMode(null) }),
+    detail && h(BillingDetailModal, { bn:detail, state, onClose:()=>setDetail(null) })
+  );
+}
+
+function BillingDetailModal({ bn, state, onClose }){
+  const sis = (state.salesInvoices||[]).filter(si => (bn.siIds||[]).includes(si.id));
+  return h(Modal, { isOpen:true, size:'lg', onClose,
+    title: (bn.mode === 'proforma' ? '📄 ใบแจ้งหนี้ล่วงหน้า ' : '📨 ใบวางบิล ') + bn.bnNumber },
+    h('div', { className:'space-y-3 text-sm' },
+      h('div', { className:'grid grid-cols-2 gap-3' },
+        h('div', null, h('div', { className:'text-xs text-gray-500' }, 'ลูกค้า'),
+          h('div', { className:'font-medium' }, bn.customerSnapshot?.name || '-')),
+        h('div', null, h('div', { className:'text-xs text-gray-500' }, 'วันที่ / ครบกำหนด'),
+          h('div', null, `${fmtDate(bn.bnDate)} → ${fmtDate(bn.dueDate)}`))),
+      bn.mode === 'proforma'
+        ? h('div', { className:'bg-white border rounded p-3' },
+            h('div', { className:'text-xs text-gray-500 mb-1' }, 'อ้างอิงใบเสนอราคา ' + (bn.quoteNumber||'-')),
+            (bn.lines||[]).filter(l => l.lineKind !== 'kit_child').map((l,i) =>
+              h('div', { key:i, className:'flex justify-between py-0.5 border-b last:border-0' },
+                h('span', null, `${l.itemName} × ${fmtNum(l.qty)} ${l.unit||''}`),
+                h('span', null, fmtCur(l.lineTotal||0)))))
+        : h('div', { className:'bg-white border rounded overflow-hidden' },
+            h('table', { className:'w-full text-sm' },
+              h('thead', { className:'bg-gray-50 text-xs' },
+                h('tr', null,
+                  h('th', { className:'px-2 py-1 text-left' }, 'เลขที่ใบกำกับ'),
+                  h('th', { className:'px-2 py-1 text-left' }, 'วันที่'),
+                  h('th', { className:'px-2 py-1 text-center' }, 'สถานะ'),
+                  h('th', { className:'px-2 py-1 text-right' }, 'ยอดทั้งใบ'))),
+              h('tbody', { className:'divide-y' },
+                (bn.siSnapshot||[]).map((x,i) => {
+                  const live = sis.find(si => si.id === x.siId);
+                  return h('tr', { key:i },
+                    h('td', { className:'px-2 py-1 font-mono text-xs' }, x.siNumber),
+                    h('td', { className:'px-2 py-1 text-xs' }, fmtDate(x.invDate)),
+                    h('td', { className:'px-2 py-1 text-center text-xs' },
+                      live ? (SI_STATUS[live.paymentStatus||'unpaid']||[])[0] || '-' : '—'),
+                    h('td', { className:'px-2 py-1 text-right' },
+                      fmtCur(x.amount !== undefined ? x.amount : (x.netTotal||0)),
+                      (Number(x.paidBefore)||0) > 0 && h('div', { className:'text-[10px] text-gray-400' },
+                        `เต็มใบ ${fmtCur(x.netTotal||0)} · รับก่อนหน้า ${fmtCur(x.paidBefore)}`)));
+                })))),
+      h('div', { className:'flex justify-between font-bold border-t pt-2' },
+        h('span', null, 'รวมที่ต้องเก็บ'), h('span', null, fmtCur(bn.netTotal||0))),
+      bn.voided && h('div', { className:'bg-red-50 border border-red-200 rounded p-2 text-xs text-red-800' },
+        `🚫 ยกเลิกแล้ว${bn.voidReason ? ' — ' + bn.voidReason : ''}`),
+      h('div', { className:'flex gap-2 pt-2 border-t' },
+        h(Button, { variant:'primary', onClick:()=>printBilling(bn, state) }, '🖨️ พิมพ์'),
+        h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'))));
+}
+
+function NewBillingModal({ state, dispatch, user, mode, onClose }){
+  const savingRef = useRef(false);
+  const [customerId, setCustomerId] = useState('');
+  const [bnDate, setBnDate] = useState(getToday());
+  const [dueDate, setDueDate] = useState(getToday());
+  const [picked, setPicked] = useState([]);       // si ids (mode billing)
+  const [quoteId, setQuoteId] = useState('');     // mode proforma
+  const [depositPct, setDepositPct] = useState(0);
+  const [collectDate, setCollectDate] = useState('');
+  const [note, setNote] = useState('');
+  const dr = useDateRange(90);
+
+  const customer = (state.customers||[]).find(c => c.id === customerId);
+
+  useEffect(() => {
+    if(!customer) return;
+    setDueDate(dueFromCredit(customer, bnDate));
+  }, [customerId, bnDate]);
+
+  // ใบกำกับที่วางบิลได้: ยังไม่ถูกวางบิล · ยังไม่จ่ายครบ · ไม่ถูกยกเลิก
+  const openSIs = useMemo(() => {
+    if(!customerId) return [];
+    const bns = (state.salesBillings||[]).filter(b => !b.voided);
+    return (state.salesInvoices||[]).filter(si => si.customerId === customerId
+      && !si.voided && (si.paymentStatus||'unpaid') !== 'paid'
+      && !bns.some(b => (b.siIds||[]).includes(si.id))
+      && inDateRange(si.invDate, dr.startDate, dr.endDate))
+      .sort((a,b) => (a.invDate||'').localeCompare(b.invDate||''));
+  }, [state.salesInvoices, state.salesBillings, customerId, dr.startDate, dr.endDate]);
+
+  // ใบที่หลุดจากตัวกรอง (เปลี่ยนช่วงวัน/ถูกวางบิลจากอีกเครื่อง) ต้องหลุดจากที่ติ๊กไว้ด้วย ไม่งั้นยอดกับเอกสารไม่ตรง
+  useEffect(() => {
+    setPicked(p => { const ok = new Set(openSIs.map(si => si.id));
+      const next = p.filter(id => ok.has(id));
+      return next.length === p.length ? p : next; });
+  }, [openSIs]);
+
+  // ใบเสนอราคาที่ยังเปิดอยู่เท่านั้น + ตัดใบที่ออกใบแจ้งหนี้ล่วงหน้าไปแล้ว (กันเรียกเก็บซ้ำ)
+  const quotes = useMemo(() => {
+    const used = new Set((state.salesBillings||[]).filter(b => !b.voided && b.mode === 'proforma')
+      .map(b => b.quoteId).filter(Boolean));
+    return (state.salesOrders||[]).filter(q => q.docType === 'quote' && q.customerId === customerId
+      && !used.has(q.id)
+      && !['rejected','closed'].includes(global.ERP.quoteStatus ? global.ERP.quoteStatus(q, getToday()) : (q.status||'draft')));
+  }, [state.salesOrders, state.salesBillings, customerId]);
+  const quote = quotes.find(q => q.id === quoteId);
+
+  const remainOf = (si) => Math.max(0, (Number(si.netTotal)||0) - (Number(si.paidAmount)||0));   // รับบางส่วนแล้ว → วางบิลเฉพาะส่วนที่เหลือ
+  const total = mode === 'billing'
+    ? openSIs.filter(si => picked.includes(si.id)).reduce((n,si) => n + remainOf(si), 0)
+    : (quote ? (Number(quote.netTotal)||0) * (Number(depositPct) > 0 ? Number(depositPct)/100 : 1) : 0);
+
+  const save = () => {
+    if(savingRef.current) return;
+    if(!customerId) return alert('เลือกลูกค้า');
+    if(mode === 'billing' && picked.length === 0) return alert('เลือกใบกำกับอย่างน้อย 1 ใบ');
+    if(mode === 'proforma' && !quote) return alert('เลือกใบเสนอราคา');
+    if(mode === 'proforma'){
+      const dupPro = (state.salesBillings||[]).find(b => !b.voided && b.mode === 'proforma' && b.quoteId === quote.id);
+      if(dupPro) return alert(`ใบเสนอราคา ${quote.qtNumber} ออกใบแจ้งหนี้ล่วงหน้าไปแล้ว (${dupPro.bnNumber})\n\nถ้าจะเรียกเก็บใหม่ ให้ยกเลิกใบเดิมก่อน`);
+    }
+    savingRef.current = true;
+    setTimeout(() => { savingRef.current = false; }, 3000);
+
+    // อ่านสดจาก state กันวางบิลซ้ำจากอีกเครื่อง
+    const bns = (state.salesBillings||[]).filter(b => !b.voided);
+    const dup = picked.filter(id => bns.some(b => (b.siIds||[]).includes(id)));
+    if(dup.length){
+      savingRef.current = false;
+      return alert('ใบกำกับบางใบถูกวางบิลไปแล้ว (อีกเครื่องเพิ่งทำ) — ปิดแล้วเปิดใหม่อีกครั้ง');
+    }
+
+    const bnNumber = global.ERP.genDocNumber('BN', bnDate, state.salesBillings||[], 'bnNumber');
+    const sis = openSIs.filter(si => picked.includes(si.id));
+    const doc = {
+      id: genId('bn'), bnNumber, bnDate, dueDate, mode,
+      customerId, customerSnapshot: customer ? { name:customer.name||'', taxId:customer.taxId||'',
+        branchCode:customer.branchCode||'', address:customer.address||'', phone:customer.phone||'' } : null,
+      collectDate, note, status:'open',
+      createdBy: user.username, createdAt: Date.now(),
+    };
+    if(mode === 'billing'){
+      doc.siIds = sis.map(si => si.id);
+      doc.siSnapshot = sis.map(si => ({ siId:si.id, siNumber:si.siNumber, invDate:si.invDate,
+        netTotal: Number(si.netTotal)||0,                 // ยอดเต็มของใบ (อ้างอิง)
+        paidBefore: Number(si.paidAmount)||0,             // รับไปแล้วก่อนวางบิล
+        amount: remainOf(si) }));                          // ⭐ ยอดที่เรียกเก็บในใบวางบิลนี้
+      doc.netTotal = Number(total.toFixed(2));
+    } else {
+      doc.quoteId = quote.id; doc.quoteNumber = quote.qtNumber;
+      doc.lines = (quote.lines||[]).map(l => ({ ...l }));
+      doc.priceMode = quote.priceMode;
+      doc.depositPct = Number(depositPct) || 0;
+      doc.subtotal = Number(quote.subtotal)||0; doc.vat = Number(quote.vat)||0; doc.total = Number(quote.total)||0;
+      doc.whtAmount = Number(quote.whtAmount)||0;
+      doc.quoteNet = Number(quote.netTotal)||0;     // ฐานที่ใช้คิด % เรียกเก็บ (ยอดสุทธิของใบเสนอราคา)
+      doc.netTotal = Number(total.toFixed(2));
+      doc.depositAmount = Number(depositPct) > 0 ? Number(total.toFixed(2)) : 0;
+    }
+    // reducer ผูก billingId/billingNumber ให้บนใบกำกับสดเอง (ห้ามส่ง object ทั้งใบมาทับจากหน้าจอ)
+    dispatch({ type:'ADD_SALES_BILLING', data: doc });
+    alert(`✅ ${mode === 'billing' ? 'ออกใบวางบิล' : 'ออกใบแจ้งหนี้ล่วงหน้า'} ${bnNumber}\nยอดรวม ${fmtCur(doc.netTotal)}`);
+    onClose();
+  };
+
+  return h(Modal, { isOpen:true, size:'xl', onClose,
+    title: mode === 'billing' ? '📨 ใบวางบิลใหม่ (รวมหลายใบกำกับ)' : '📄 ใบแจ้งหนี้ล่วงหน้า (ก่อนส่งของ)' },
+    h('div', { className:'space-y-3' },
+      h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 text-xs text-amber-900' },
+        mode === 'billing'
+          ? 'เอกสารนี้ไม่ใช่ใบกำกับภาษี — ใช้ไปเก็บเงินตามใบกำกับที่ออกไปแล้ว (ไม่ลงบัญชีซ้ำ ไม่แตก VAT รายบรรทัด)'
+          : 'เอกสารนี้ไม่ใช่ใบกำกับภาษี — ใช้เรียกเก็บเงิน/มัดจำก่อนส่งของ · เมื่อได้รับเงินแล้วต้องออกใบกำกับภาษีตามจำนวนที่รับ (ม.78(1)) ส่วนที่เหลือออกตอนส่งมอบ'),
+
+      h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
+        h('div', { className:'md:col-span-2' },
+          h('label', { className:'block text-xs font-medium mb-1' }, 'ลูกค้า *'),
+          h(Combobox, { value:customerId, onChange:(v)=>{ setCustomerId(v); setPicked([]); setQuoteId(''); },
+            options:(state.customers||[]).filter(c => c.active !== false),
+            getLabel:(c)=>c.name, getKey:(c)=>c.id,
+            getSearchText:(c)=>`${c.name||''} ${c.taxId||''} ${c.code||''}`,
+            placeholder:'— เลือก — (พิมพ์ชื่อ/เลขภาษี/รหัส)' })),
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'วันที่วางบิล'),
+          h(BEDateInput, { value:bnDate, onChange:setBnDate, className:'w-full px-2 py-2 border-2 rounded text-sm' }))),
+
+      h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'ครบกำหนดชำระ'),
+          h(BEDateInput, { value:dueDate, onChange:setDueDate, className:'w-full px-2 py-2 border-2 rounded text-sm' })),
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'วันนัดรับเช็ค/รับเงิน'),
+          h(BEDateInput, { value:collectDate, onChange:setCollectDate, className:'w-full px-2 py-2 border-2 rounded text-sm' })),
+        mode === 'proforma' && h('div', null,
+          h('label', { className:'block text-xs font-medium mb-1' }, 'เรียกเก็บ (% ของยอด · ว่าง/0 = เต็มจำนวน)'),
+          h('input', { type:'number', min:'0', max:'100', value:depositPct, onWheel:e=>e.currentTarget.blur(),
+            onChange:e=>setDepositPct(e.target.value),
+            className:'w-full px-2 py-2 border-2 rounded text-sm text-right' }))),
+
+      mode === 'proforma'
+        ? h('div', null,
+            h('label', { className:'block text-xs font-medium mb-1' }, 'ใบเสนอราคา'),
+            quotes.length === 0
+              ? h('div', { className:'text-xs text-gray-500 border rounded p-3' },
+                  customerId ? 'ลูกค้ารายนี้ยังไม่มีใบเสนอราคา' : 'เลือกลูกค้าก่อน')
+              : h('select', { value:quoteId, onChange:e=>setQuoteId(e.target.value), 'data-testid':'bn-quote',
+                  className:'w-full px-3 py-2 border-2 rounded text-sm' },
+                  h('option', { value:'' }, '— เลือกใบเสนอราคา —'),
+                  quotes.map(q => h('option', { key:q.id, value:q.id },
+                    `${q.qtNumber} · ${fmtDate(q.date)} · ${fmtCur(q.netTotal||0)}`))))
+        : h('div', null,
+            h('div', { className:'flex items-center justify-between mb-1' },
+              h('label', { className:'block text-xs font-medium' }, 'ใบกำกับที่ยังไม่ได้วางบิล'),
+              h('div', { className:'flex items-center gap-2' },
+                h(DateRangeBar, { ...dr, showAll:true, label:'ช่วงใบกำกับ:', compact:true }),
+                h('button', { type:'button', 'data-testid':'bn-pick-all',
+                  onClick:()=>setPicked(openSIs.map(si => si.id)),
+                  className:'text-xs px-2 py-0.5 rounded bg-blue-100 hover:bg-blue-200 text-blue-800 font-medium' },
+                  'เลือกทั้งหมด'))),
+            h('div', { className:'border rounded max-h-64 overflow-y-auto', 'data-bn-si-list':'1' },
+              !customerId
+                ? h('div', { className:'px-3 py-4 text-xs text-gray-500' }, 'เลือกลูกค้าก่อน')
+                : openSIs.length === 0
+                  ? h('div', { className:'px-3 py-4 text-xs text-gray-500' }, 'ไม่มีใบกำกับค้างชำระที่ยังไม่ได้วางบิลในช่วงนี้')
+                  : h('table', { className:'w-full text-sm' },
+                      h('tbody', { className:'divide-y' },
+                        openSIs.map(si => h('tr', { key:si.id, className:'hover:bg-blue-50' },
+                          h('td', { className:'px-2 py-1 w-8' },
+                            h('input', { type:'checkbox', 'data-testid':'bn-pick-' + si.siNumber,
+                              checked: picked.includes(si.id),
+                              onChange:e=>setPicked(p => e.target.checked ? [...p, si.id] : p.filter(x => x !== si.id)) })),
+                          h('td', { className:'px-2 py-1 font-mono text-xs' }, si.siNumber),
+                          h('td', { className:'px-2 py-1 text-xs' }, fmtDate(si.invDate)),
+                          h('td', { className:'px-2 py-1 text-xs text-gray-500' },
+                            ((SI_STATUS[si.paymentStatus||'unpaid']||[])[0] || '')
+                            + ((Number(si.paidAmount)||0) > 0 ? ` · รับแล้ว ${fmtCur(si.paidAmount)}` : '')),
+                          h('td', { className:'px-2 py-1 text-right font-medium' }, fmtCur(remainOf(si)),
+                            (Number(si.paidAmount)||0) > 0 && h('div', { className:'text-[10px] text-gray-400 font-normal' },
+                              `เต็มใบ ${fmtCur(si.netTotal||0)}`)))))))),
+
+      h('div', { className:'bg-gray-50 rounded p-3 flex justify-between items-center' },
+        h('span', { className:'font-medium' },
+          mode === 'billing' ? `เลือกแล้ว ${picked.length} ใบกำกับ` : 'ยอดเรียกเก็บ'),
+        h('span', { className:'text-lg font-bold text-green-700', 'data-testid':'bn-total' }, fmtCur(total))),
+
+      h('label', { className:'text-sm block' }, 'หมายเหตุ',
+        h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
+          className:'w-full px-2 py-1 border rounded text-sm mt-0.5' })),
+
+      h('div', { className:'flex gap-2 pt-3 border-t justify-end' },
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
+        h(Button, { variant:'primary', onClick:save, 'data-testid':'bn-save' },
+          mode === 'billing' ? '💾 ออกใบวางบิล' : '💾 ออกใบแจ้งหนี้ล่วงหน้า'))));
+}
+
+// 🖨️ ใบวางบิล / ใบแจ้งหนี้ล่วงหน้า — ห้ามมีคำว่า "ใบกำกับภาษี" (ยกเว้นวลีอ้างอิง) · ห้ามแตก VAT รายบรรทัด
+function printBilling(bn, state){
+  const company = state.company || {};
+  const cs = bn.customerSnapshot || {};
+  const thDate = (s2) => { if(!s2) return '-'; const [y,m,d] = s2.split('-'); return `${parseInt(d)}/${parseInt(m)}/${parseInt(y)+543}`; };
+  const fmt = n => Number(n||0).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  const isPro = bn.mode === 'proforma';
+  const rows = isPro
+    ? (global.ERP.groupKitForPrint ? global.ERP.groupKitForPrint(bn.lines||[], 'single') : (bn.lines||[]))
+        .map((l,i) => { const inc2 = bn.priceMode === 'inclusive';
+          const amt = inc2 ? (l.lineTotal||0) : (l.lineEx != null ? l.lineEx : (l.lineTotal||0));
+          const unit = Number(l.qty) > 0 ? amt / Number(l.qty) : Number(l.unitPrice||0);
+          return `<tr><td style="text-align:center">${i+1}</td><td>${l.itemName||''}</td>
+          <td style="text-align:right">${fmt(l.qty)} ${l.unit||''}</td>
+          <td style="text-align:right">${fmt(unit)}</td>
+          <td style="text-align:right">${fmt(amt)}</td></tr>`; }).join('')
+    : (bn.siSnapshot||[]).map((x,i) => `<tr><td style="text-align:center">${i+1}</td>
+        <td>${x.siNumber}${(Number(x.paidBefore)||0) > 0
+          ? `<br/><span style="font-size:8pt;color:#666">ยอดเต็มใบ ${fmt(x.netTotal)} · รับชำระแล้ว ${fmt(x.paidBefore)}</span>` : ''}</td>
+        <td style="text-align:center">${thDate(x.invDate)}</td>
+        <td style="text-align:right">${fmt(x.amount !== undefined ? x.amount : x.netTotal)}</td></tr>`).join('');
+  const head = isPro
+    ? `<thead><tr><th style="width:10mm">#</th><th>รายการ</th><th style="width:28mm">จำนวน</th>
+        <th style="width:26mm">ราคา/หน่วย</th><th style="width:30mm">จำนวนเงิน</th></tr></thead>`
+    : `<thead><tr><th style="width:10mm">#</th><th>เลขที่เอกสาร</th><th style="width:32mm">วันที่</th>
+        <th style="width:34mm">จำนวนเงิน</th></tr></thead>`;
+  const html = `<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"/>
+<title>${isPro ? 'ใบแจ้งหนี้' : 'ใบวางบิล'} ${bn.bnNumber}</title>
+<style>
+  @page { size:A4; margin:10mm; }
+  body { font-family:'Sarabun','TH SarabunNew',sans-serif; font-size:11pt; color:#000; }
+  h1 { font-size:16pt; text-align:center; margin:0 0 1mm; }
+  .sub { text-align:center; font-size:10pt; color:#666; margin-bottom:3mm; }
+  .warn { text-align:center; font-size:9.5pt; color:#a00; border:1px solid #a00; padding:1.5mm; margin-bottom:4mm; }
+  .info { display:grid; grid-template-columns:1fr 1fr; gap:4mm; font-size:10pt; margin-bottom:4mm; }
+  .box { border:1px solid #000; padding:3mm; }
+  table { width:100%; border-collapse:collapse; font-size:10pt; }
+  th { background:#eee; border:1px solid #000; padding:2mm; }
+  td { border:1px solid #000; padding:2mm; }
+  .totals { margin-left:auto; width:70mm; font-size:11pt; margin-top:4mm; }
+  .totals .row { display:flex; justify-content:space-between; padding:1mm 3mm; }
+  .totals .row.final { font-weight:bold; font-size:12pt; border-top:2px solid #000; background:#f5f5f5; }
+  .note { font-size:9.5pt; margin-top:3mm; }
+  .sign { display:grid; grid-template-columns:1fr 1fr; gap:10mm; margin-top:14mm; font-size:10pt; text-align:center; }
+  .sign div { border-top:1px dotted #000; padding-top:2mm; }
+</style></head><body>
+<h1>${isPro ? 'ใบแจ้งหนี้ / INVOICE' : 'ใบวางบิล / BILLING NOTE'}</h1>
+<div class="sub">เลขที่ ${bn.bnNumber} · วันที่ ${thDate(bn.bnDate)} · ครบกำหนดชำระ ${thDate(bn.dueDate)}</div>
+<div class="warn">${isPro
+  ? 'เอกสารนี้ไม่ใช่ใบกำกับภาษี ใช้เครดิตภาษีซื้อไม่ได้ — เมื่อบริษัทได้รับชำระเงินตามเอกสารนี้ จะออกใบกำกับภาษีตามจำนวนที่ได้รับ'
+  : 'เอกสารนี้ไม่ใช่ใบกำกับภาษี ใช้สำหรับเรียกเก็บเงินตามเอกสารที่ออกไปแล้ว'}</div>
+<div class="info">
+  <div class="box"><b>ผู้วางบิล</b><br/>${company.name||''}<br/>${company.address||'-'}<br/>
+    เลขประจำตัวผู้เสียภาษี ${company.taxId||'-'}<br/>โทร ${company.phone||'-'}</div>
+  <div class="box"><b>ลูกค้า</b><br/>${cs.name||'-'}<br/>${cs.address||''}<br/>
+    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId : ''}</div>
+</div>
+<table>${head}<tbody>${rows}</tbody></table>
+${isPro ? `<div style="font-size:9.5pt;margin:2mm 0">ราคาข้างต้น <b>${bn.priceMode === 'inclusive' ? 'รวมภาษีมูลค่าเพิ่ม 7% แล้ว' : 'ยังไม่รวมภาษีมูลค่าเพิ่ม 7%'}</b></div>` : ''}
+<div class="totals">
+  ${isPro ? `<div class="row"><span>ยอดก่อน VAT</span><span>${fmt(bn.subtotal)}</span></div>
+  <div class="row"><span>ภาษีมูลค่าเพิ่ม 7%</span><span>${fmt(bn.vat)}</span></div>
+  ${(bn.whtAmount||0) > 0 ? `<div class="row"><span>หัก ณ ที่จ่าย</span><span>- ${fmt(bn.whtAmount)}</span></div>` : ''}
+  <div class="row"><span>ยอดตามใบเสนอราคา (สุทธิ)</span><span>${fmt(bn.quoteNet != null ? bn.quoteNet : bn.netTotal)}</span></div>` : ''}
+  ${isPro && (bn.depositPct||0) > 0 ? `<div class="row"><span>เรียกเก็บครั้งนี้ ${bn.depositPct}%</span><span>${fmt(bn.netTotal)}</span></div>` : ''}
+  <div class="row final"><span>รวมที่ต้องชำระ</span><span>${fmt(bn.netTotal)}</span></div>
+</div>
+<div class="note">
+  ${isPro ? (bn.quoteNumber ? 'อ้างอิงใบเสนอราคาเลขที่ ' + bn.quoteNumber : '')
+          : 'ตามใบกำกับภาษีเลขที่ ' + (bn.siSnapshot||[]).map(x => x.siNumber).join(', ') + ' รวม ' + (bn.siSnapshot||[]).length + ' ฉบับ'}
+  ${bn.collectDate ? '<br/>นัดรับเงิน/เช็ค: ' + thDate(bn.collectDate) : ''}
+  ${bn.note ? '<br/>' + String(bn.note).replace(/\n/g,'<br/>') : ''}
+</div>
+<div class="sign"><div>ผู้วางบิล<br/><span style="font-size:9pt;color:#666">วันที่ ____/____/______</span></div>
+  <div>ผู้รับวางบิล<br/><span style="font-size:9pt;color:#666">ลงชื่อ ______________ วันที่ ____/____/______</span></div></div>
+<script>window.onload = () => window.print();<\/script>
+</body></html>`;
+  const w = window.open('', '_blank');
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
+// 📝 SALES-W3: ใบเสนอราคา (QT) — เก็บที่ state.salesOrders (docType 'quote')
+//   ไม่ตัดสต๊อก ไม่ลงบัญชี · แปลงเป็นใบกำกับตอนส่งของ (ม.78 จุดความรับผิด = วันส่งมอบ)
+const QT_STATUS = {
+  draft:    ['ร่าง', 'bg-gray-100 text-gray-700'],
+  sent:     ['ส่งให้ลูกค้าแล้ว', 'bg-blue-100 text-blue-700'],
+  accepted: ['ลูกค้าตอบรับ', 'bg-green-100 text-green-700'],
+  rejected: ['ลูกค้าไม่เอา', 'bg-red-100 text-red-700'],
+  partial:  ['ออกใบกำกับบางส่วน', 'bg-amber-100 text-amber-800'],
+  closed:   ['ออกใบกำกับครบแล้ว', 'bg-emerald-100 text-emerald-800'],
+  expired:  ['หมดอายุ', 'bg-orange-100 text-orange-800'],
+};
+
+// สถานะคำนวณสด — เก็บบนเอกสารเฉพาะที่คนกด (sent/accepted/rejected)
+function quoteStatus(qt, today){
+  if(!qt) return 'draft';
+  const lines = (qt.lines||[]).filter(l => l.lineKind !== 'kit_child');
+  const used = lines.reduce((n,l) => n + (Number(l.usedQty)||0), 0);
+  const total = lines.reduce((n,l) => n + (Number(l.qty)||0), 0);
+  if(qt.status === 'rejected') return 'rejected';          // ปิดใบด้วยมือ = จบ ไม่ว่าจะออกไปแล้วเท่าไร
+  if(total > 0 && used >= total) return 'closed';
+  if(used > 0) return 'partial';
+  // ⭐ ใบที่ลูกค้าตอบรับแล้ว ห้ามกลายเป็น "หมดอายุ" — ไม่งั้นหลุดคิวจัดของทั้งที่ยังต้องส่งของ
+  if(qt.status === 'accepted') return 'accepted';
+  if(qt.validUntil && String(qt.validUntil) < String(today || getToday())) return 'expired';
+  return qt.status || 'draft';
+}
+
+// สิทธิ์แบบไม่ตัดของเดิม: คนที่ออกใบกำกับได้อยู่แล้ว ต้องทำใบเสนอราคา/ใบวางบิลได้ ถ้าแอดมินยังไม่ได้ตั้งคีย์ใหม่
+const canSalesDoc = (user, tab, action) =>
+  hasPerm(user, 'sales', tab, action) || hasPerm(user, 'sales', 'si', action === 'void' ? 'void' : 'create');
+
+function QuoteList({ state, dispatch, user }){
+  const [showNew, setShowNew] = useState(false);
+  const [edit, setEdit] = useState(null);       // { quote, mode:'edit'|'revise' }
+  const [convert, setConvert] = useState(null); // quote ที่กำลังแปลงเป็นใบกำกับ
+  const [filter, setFilter] = useState('open');
+  const [search, setSearch] = useState('');
+  const dr = useDateRange(60);
+  const today = getToday();
+  const canCreate = canSalesDoc(user, 'so', 'create');
+
+  const quotes = useMemo(() => (state.salesOrders||[]).filter(q => q.docType === 'quote'), [state.salesOrders]);
+
+  const filtered = useMemo(() => {
+    let list = quotes.filter(q => inDateRange(q.date, dr.startDate, dr.endDate));
+    if(filter !== 'all'){
+      list = list.filter(q => {
+        const st = quoteStatus(q, today);
+        if(filter === 'open') return ['draft','sent','accepted','partial'].includes(st);
+        if(filter === 'soon'){
+          if(['closed','rejected'].includes(st)) return false;
+          if(!q.validUntil) return false;
+          const d = (new Date(q.validUntil + 'T00:00:00Z') - new Date(today + 'T00:00:00Z')) / 86400000;
+          return d >= 0 && d <= 3;
+        }
+        return st === filter;
+      });
+    }
+    if(search){
+      const q2 = search.toLowerCase();
+      list = list.filter(q => (q.qtNumber||'').toLowerCase().includes(q2)
+        || String(q.customerSnapshot?.name || q.customerName || '').toLowerCase().includes(q2));
+    }
+    return list.sort((a,b) => (b.date||'').localeCompare(a.date||''));
+  }, [quotes, filter, search, dr.startDate, dr.endDate, today]);
+
+  const pg = usePaged(filtered, 50);
+
+  _useOpenDoc('qt', (id) => {
+    const key = String(id == null ? '' : id).trim();
+    const doc = quotes.find(q => q.id === key) || quotes.find(q => String(q.qtNumber||'').toLowerCase() === key.toLowerCase());
+    if(!doc){ if(toast && toast.warning) toast.warning('ไม่พบใบเสนอราคา ' + key); return; }
+    const d = String(doc.date||'').slice(0,10);
+    if(d && dr.startDate && d < dr.startDate) dr.setStartDate(d);
+    if(filter !== 'all') setFilter('all');
+    setEdit({ quote: doc, mode:'edit' });
+  });
+
+  const setStatus = (q, st) => dispatch({ type:'UPDATE_SO', data:{ ...q, status: st,
+    statusAt: { ...(q.statusAt||{}), [st]: Date.now() } } });
+
+  return h('div', null,
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' }, h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' })),
+    h('div', { className:'flex justify-between items-center mb-3 flex-wrap gap-2' },
+      h('div', { className:'flex gap-2 flex-wrap items-center' },
+        [['open','ที่ยังเปิดอยู่'],['all','ทั้งหมด'],['draft','ร่าง'],['sent','ส่งแล้ว'],['accepted','ตอบรับ'],
+         ['soon','ใกล้หมดอายุ (≤3 วัน)'],['expired','หมดอายุ'],['closed','แปลงแล้ว'],['rejected','ปิด/ไม่เอา']].map(([k,lb]) =>
+          h('button', { key:k, onClick:()=>setFilter(k), 'data-testid':'qt-filter-' + k,
+            className: cls('px-3 py-1 rounded text-xs font-medium',
+              filter===k ? 'bg-gray-800 text-white' : 'bg-white border hover:bg-gray-100') }, lb)),
+        h('input', { type:'search', value:search, onChange:e=>setSearch(e.target.value),
+          placeholder:'🔍 QT-number / ลูกค้า', 'data-testid':'qt-search',
+          className:'px-3 py-1 border rounded text-xs w-48' })),
+      canCreate && h(Button, { variant:'primary', onClick:()=>setShowNew(true), 'data-testid':'qt-new' }, '➕ ใบเสนอราคาใหม่')),
+
+    filtered.length === 0
+      ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
+          quotes.length === 0 ? 'ยังไม่มีใบเสนอราคา — กด "➕ ใบเสนอราคาใหม่" เพื่อเริ่ม' : 'ไม่พบใบเสนอราคาตามตัวกรอง')
+      : h('div', { className:'bg-white rounded-lg shadow overflow-x-auto' },
+          h('table', { className:'w-full text-sm' },
+            h('thead', { className:'bg-gray-50 border-b' },
+              h('tr', null,
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'เลขที่'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'วันที่'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'ลูกค้า'),
+                h('th', { className:'px-3 py-2 text-left text-xs' }, 'ยืนราคาถึง'),
+                h('th', { className:'px-3 py-2 text-right text-xs' }, 'ยอดสุทธิ'),
+                h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
+                h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'))),
+            h('tbody', { className:'divide-y' },
+              pg.shown.map(q => {
+                const st = quoteStatus(q, today);
+                const [lb, clsx] = QT_STATUS[st] || QT_STATUS.draft;
+                return h('tr', { key:q.id, 'data-qt-row':q.id, className:'hover:bg-gray-50' },
+                  h('td', { className:'px-3 py-2 font-mono text-xs' }, q.qtNumber,
+                    q.revisionOf && h('span', { className:'ml-1 text-[10px] text-indigo-600' }, `rev.${q.revNo||2}`)),
+                  h('td', { className:'px-3 py-2 text-xs' }, fmtDate(q.date)),
+                  h('td', { className:'px-3 py-2' }, q.customerSnapshot?.name || q.customerName || '-'),
+                  h('td', { className:'px-3 py-2 text-xs' }, fmtDate(q.validUntil)),
+                  h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(q.netTotal||0)),
+                  h('td', { className:'px-3 py-2 text-center' },
+                    h('span', { className: cls('px-2 py-0.5 rounded text-xs', clsx) }, lb)),
+                  h('td', { className:'px-3 py-2' },
+                    h('div', { className:'flex gap-1 justify-center flex-wrap' },
+                      h(Button, { variant:'secondary', size:'sm', 'data-testid':'qt-view-' + q.qtNumber,
+                        onClick:()=>setEdit({ quote:q, mode:'edit' }) }, '👁 ดู/แก้'),
+                      h(Button, { variant:'secondary', size:'sm', onClick:()=>printQuote(q, state) }, '🖨'),
+                      st === 'draft' && h(Button, { variant:'secondary', size:'sm',
+                        onClick:()=>setStatus(q, 'sent') }, '📨 ส่งแล้ว'),
+                      ['sent','draft'].includes(st) && h(Button, { variant:'success', size:'sm',
+                        onClick:()=>setStatus(q, 'accepted') }, '✓ ตอบรับ'),
+                      canCreate && !['closed','rejected'].includes(st) && h(Button, { variant:'primary', size:'sm',
+                        'data-testid':'qt-to-si-' + q.qtNumber, onClick:()=>setConvert(q) }, '🧾 ออกใบกำกับ'),
+                      h(Button, { variant:'secondary', size:'sm', 'data-testid':'qt-revise-' + q.qtNumber,
+                        onClick:()=>setEdit({ quote:q, mode:'revise' }) }, '📄 ทำใบใหม่จากใบนี้'),
+                      st !== 'rejected' && st !== 'closed' && h(Button, { variant:'danger', size:'sm',
+                        'data-testid':'qt-reject-' + q.qtNumber,
+                        onClick:()=>{
+                          const r = prompt(`ปิดใบเสนอราคา ${q.qtNumber}\n(ลูกค้าไม่เอา / ยกเลิกงาน / ใช้ใบใหม่แทน)\n\nเหตุผล:`);
+                          if(r === null) return;
+                          dispatch({ type:'UPDATE_SO', data:{ ...q, status:'rejected', rejectReason:r || '',
+                            statusAt:{ ...(q.statusAt||{}), rejected: Date.now() } } });
+                        } }, '✕ ปิดใบ'))));
+              }))),
+          h(Pager, { pg, label:'ใบเสนอราคา' })),
+
+    showNew && h(NewQuoteModal, { state, dispatch, user, onClose:()=>setShowNew(false) }),
+    edit && h(NewQuoteModal, { key: edit.quote.id + edit.mode, state, dispatch, user,
+      quote: edit.quote, revise: edit.mode === 'revise', onClose:()=>setEdit(null) }),
+    convert && h(NewSIModal, { state, dispatch, user, fromQuote: convert, onClose:()=>setConvert(null) })
+  );
+}
+
+function NewQuoteModal({ state, dispatch, user, quote, revise, onClose }){
+  const isEdit = !!quote && !revise;
+  const savingRef = useRef(false);
+  const [customerId, setCustomerId] = useState(quote?.customerId || '');
+  const [date, setDate] = useState(revise ? getToday() : (quote?.date || getToday()));
+  const [validUntil, setValidUntil] = useState(quote?.validUntil || '');
+  const [priceMode, setPriceMode] = useState(quote?.priceMode
+    || ((state.settings?.salePriceVat || 'inclusive') === 'inclusive' ? 'inclusive' : 'exclusive'));
+  const [vatRate] = useState(7);
+  const [whtRate, setWhtRate] = useState(quote?.whtRate || 0);
+  const [lines, setLines] = useState(() => (quote?.lines || [])
+    .filter(l => l.lineKind !== 'kit_child')
+    .map(l => ({ ...l, usedQty: revise ? 0 : (l.usedQty || 0) })));
+  const [note, setNote] = useState(quote?.note || '');
+  const [contactName, setContactName] = useState(quote?.contactName || '');
+  const [contactPhone, setContactPhone] = useState(quote?.contactPhone || '');
+  const [deliveryDate, setDeliveryDate] = useState(quote?.deliveryDate || '');
+  const [deliveryPlace, setDeliveryPlace] = useState(quote?.deliveryPlace || '');
+  const [paymentTerms, setPaymentTerms] = useState(quote?.paymentTerms || '');
+  const [depositPct, setDepositPct] = useState(quote?.depositPct || 0);
+  const [customerPoRef, setCustomerPoRef] = useState(revise ? '' : (quote?.customerPoRef || ''));
+  const branch = quote?.branch || state.currentBranch;
+
+  const customer = (state.customers||[]).find(c => c.id === customerId);
+
+  // ยืนราคาถึง = วันที่ + settings.quoteValidDays (ค่าตั้งต้น 15 วัน)
+  useEffect(() => {
+    if(quote && !revise) return;
+    const days = Number(state.settings?.quoteValidDays) || 15;
+    const d = new Date((date || getToday()) + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + days);
+    setValidUntil(d.toISOString().slice(0,10));
+  }, [date]);
+
+  const calc = lines.map(l => {
+    const lineEx = priceMode === 'inclusive'
+      ? (l.unitPrice * l.qty) / (1 + (l.vatRate||0)/100)
+      : l.unitPrice * l.qty;
+    const vat = lineEx * (l.vatRate||0) / 100;
+    return { ex:lineEx, vat, inc:lineEx + vat };
+  });
+  const subtotal = calc.reduce((s2,c) => s2 + c.ex, 0);
+  const vatTotal = calc.reduce((s2,c) => s2 + c.vat, 0);
+  const total = subtotal + vatTotal;
+  const wht = subtotal * (Number(whtRate)||0) / 100;
+  const netTotal = total - wht;
+
+  const usedLocked = (l) => (Number(l.usedQty) || 0) > 0;
+
+  const save = () => {
+    if(savingRef.current) return;
+    if(!customerId) return alert('เลือกลูกค้า');
+    const valid = lines.filter(l => l.itemId && l.qty > 0);
+    if(!valid.length) return alert('ใส่สินค้าอย่างน้อย 1 รายการ');
+    const badKit = valid.find(l => l.lineKind === 'kit'
+      && !(l.kitComponents||[]).some(c => c.itemId && Number(c.qtyPerKit) > 0));
+    if(badKit) return alert('🎁 ชุดสินค้ายังไม่ได้เลือกของข้างใน — กด "🎁 จัดกล่อง" ก่อน');
+    // ⭐ บรรทัดที่ออกใบกำกับไปแล้วบางส่วน ห้ามลด/ลบให้ต่ำกว่าที่ออกไป (ไม่งั้นคิวจัดของติดลบ + สถานะเพี้ยน)
+    if(quote){
+      const live = (state.salesOrders||[]).find(q => q.id === quote.id) || quote;
+      const bad = [];
+      (live.lines||[]).filter(l => l.lineKind !== 'kit_child' && (Number(l.usedQty)||0) > 0).forEach(l => {
+        const now = valid.find(v => (v.lineNo && v.lineNo === l.lineNo) || (!v.lineNo && v.itemId === l.itemId));
+        const q2 = now ? (Number(now.qty)||0) : 0;
+        if(q2 < (Number(l.usedQty)||0) - 0.0001){
+          bad.push(`• ${l.itemName || ''}: ออกใบกำกับไปแล้ว ${fmtNum(l.usedQty)} ${l.unit||''} — แก้ให้น้อยกว่านี้ไม่ได้`
+            + (now ? '' : ' (บรรทัดถูกลบ)'));
+        }
+      });
+      if(bad.length) return alert('🔒 แก้ใบเสนอราคาไม่ได้:\n\n' + bad.join('\n')
+        + '\n\nถ้าลูกค้าลดจำนวนจริง ให้ยกเลิกใบกำกับที่ออกไปก่อน หรือกด "📄 ทำใบใหม่จากใบนี้"');
+    }
+    savingRef.current = true;
+    setTimeout(() => { savingRef.current = false; }, 3000);
+
+    // บรรทัดลงเอกสาร: แถวแม่ + แถวลูกของชุด (shape เดียวกับใบกำกับ → แปลงต่อได้ตรง ๆ)
+    const out = [];
+    valid.forEach(l => {
+      const c = calc[lines.indexOf(l)];
+      const it = (state.items||[]).find(x => x.id === l.itemId) || {};
+      const base = { lineNo: out.length + 1, itemId: l.itemId, itemName: it.name || '', itemCode: it.code || '',
+        qty: Number(l.qty), unit: l.unit, unitPrice: Number(l.unitPrice), vatRate: Number(l.vatRate)||0,
+        lineEx: Number(c.ex.toFixed(2)), lineVat: Number(c.vat.toFixed(2)), lineTotal: Number(c.inc.toFixed(2)),
+        usedQty: Number(l.usedQty) || 0 };
+      if(l.lineKind !== 'kit'){ out.push(base); return; }
+      out.push({ ...base, lineKind:'kit', isKit:true, kitId:l.kitId, baseQty:0,
+        kitPrintMode: l.kitPrintMode || it.kit?.printMode || 'single',
+        kitComponents: (l.kitComponents||[]).map(c2 => ({ ...c2 })) });
+      (l.kitComponents||[]).forEach(cp => {
+        if(!cp.itemId || !(Number(cp.qtyPerKit) > 0)) return;
+        const ci = (state.items||[]).find(x => x.id === cp.itemId) || {};
+        out.push({ lineNo: out.length + 1, lineKind:'kit_child', kitId:l.kitId, itemId:cp.itemId,
+          itemName: ci.name || '', itemCode: ci.code || '', qtyPerKit: Number(cp.qtyPerKit),
+          qty: Number(cp.qtyPerKit) * Number(l.qty), unit: cp.unit || ci.issueUnit || '',
+          unitPrice: 0, vatRate: 0, lineEx: 0, lineVat: 0, lineTotal: 0 });
+      });
+    });
+
+    const body = {
+      docType:'quote', customerId,
+      customerName: customer?.name,
+      customerSnapshot: customer ? { name:customer.name||'', taxId:customer.taxId||'', branchCode:customer.branchCode||'',
+        address:customer.address||'', phone:customer.phone||'' } : null,
+      contactName, contactPhone, date, validUntil, branch, priceMode,
+      lines: out, subtotal, vat: vatTotal, total, whtRate: Number(whtRate), whtAmount: wht, netTotal,
+      deliveryDate, deliveryPlace, paymentTerms, depositPct: Number(depositPct)||0,
+      customerPoRef, note,
+    };
+
+    if(isEdit){
+      dispatch({ type:'UPDATE_SO', data:{ ...quote, ...body } });
+      alert(`✅ บันทึกใบเสนอราคา ${quote.qtNumber}`);
+    } else {
+      const qtNumber = global.ERP.genDocNumber('QT', date, state.salesOrders||[], 'qtNumber');
+      dispatch({ type:'ADD_SO', data:{ id: genId('qt'), qtNumber, ...body,
+        status:'draft', statusAt:{}, siIds:[],
+        revisionOf: revise ? quote.id : undefined,
+        revNo: revise ? (Number(quote.revNo)||1) + 1 : undefined,
+        createdBy: user.username, createdAt: Date.now() } });
+      // ทำใบใหม่แทนใบเดิม → ปิดใบเดิม (ยังดูย้อนหลังได้) กันออกใบกำกับจากราคาเก่า
+      if(revise){
+        const live = (state.salesOrders||[]).find(q => q.id === quote.id) || quote;
+        const usedAny = (live.lines||[]).some(l => (Number(l.usedQty)||0) > 0);
+        if(!usedAny){
+          dispatch({ type:'UPDATE_SO', data:{ ...live, status:'rejected', supersededByNumber: qtNumber,
+            rejectReason:'ทำใบใหม่แทน (' + qtNumber + ')',
+            statusAt:{ ...(live.statusAt||{}), rejected: Date.now() } } });
+        }
+      }
+      alert(`✅ ออกใบเสนอราคา ${qtNumber}`
+        + (revise ? `\n(ทำใหม่จาก ${quote.qtNumber} — ใบเดิมถูกปิดให้แล้ว ถ้ายังไม่ได้ออกใบกำกับ)` : ''));
+    }
+    onClose();
+  };
+
+  return h(Modal, { isOpen:true, size:'xl',
+    title: isEdit ? `📝 แก้ไขใบเสนอราคา ${quote.qtNumber}` : (revise ? `📄 ทำใบเสนอราคาใหม่จาก ${quote.qtNumber}` : '📝 ใบเสนอราคาใหม่'),
+    onClose },
+    h('div', { className:'space-y-3' },
+      h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-900' },
+        'ใบเสนอราคายังไม่ตัดสต๊อกและไม่ลงบัญชี — ระบบจะตัดของและลงภาษีขายตอน "ออกใบกำกับ" (วันส่งมอบ) ตามกฎหมาย'),
+
+      h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
+        h('div', { className:'md:col-span-2' },
+          h('label', { className:'block text-xs font-medium mb-1' }, 'ลูกค้า *'),
+          h(Combobox, { value: customerId, onChange: setCustomerId,
+            options: (state.customers||[]).filter(c => c.active !== false),
+            getLabel: (c) => c.name, getKey: (c) => c.id,
+            getSearchText: (c) => `${c.name||''} ${c.taxId||''} ${c.code||''} ${c.extCode||''}`,
+            placeholder:'— เลือก — (พิมพ์ชื่อ/เลขภาษี/รหัส)' })),
+        h('div', null,
+          h('label', { className:'block text-xs font-medium mb-1' }, 'ราคา'),
+          h('select', { value:priceMode, onChange:e=>setPriceMode(e.target.value),
+            className:'w-full px-3 py-2 border-2 rounded text-sm' },
+            h('option', { value:'exclusive' }, 'Exclusive (ยังไม่รวม VAT)'),
+            h('option', { value:'inclusive' }, 'Inclusive (รวม VAT แล้ว)')))),
+
+      h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3' },
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'วันที่'),
+          h(BEDateInput, { value:date, onChange:setDate, className:'w-full px-2 py-2 border-2 rounded text-sm' })),
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'ยืนราคาถึง'),
+          h(BEDateInput, { value:validUntil, onChange:setValidUntil, className:'w-full px-2 py-2 border-2 rounded text-sm' })),
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'กำหนดส่ง'),
+          h(BEDateInput, { value:deliveryDate, onChange:setDeliveryDate, className:'w-full px-2 py-2 border-2 rounded text-sm' })),
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'มัดจำ (%)'),
+          h('input', { type:'number', min:'0', max:'100', value:depositPct, onWheel:e=>e.currentTarget.blur(),
+            onChange:e=>setDepositPct(e.target.value), className:'w-full px-2 py-2 border-2 rounded text-sm text-right' }))),
+
+      h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'ผู้ติดต่อ'),
+          h('input', { value:contactName, onChange:e=>setContactName(e.target.value),
+            className:'w-full px-2 py-1.5 border rounded text-sm' })),
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'โทร'),
+          h('input', { value:contactPhone, onChange:e=>setContactPhone(e.target.value),
+            className:'w-full px-2 py-1.5 border rounded text-sm' })),
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'เลขที่ใบสั่งซื้อของลูกค้า'),
+          h('input', { value:customerPoRef, onChange:e=>setCustomerPoRef(e.target.value),
+            className:'w-full px-2 py-1.5 border rounded text-sm' }))),
+
+      h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'สถานที่ส่ง'),
+          h('input', { value:deliveryPlace, onChange:e=>setDeliveryPlace(e.target.value),
+            className:'w-full px-2 py-1.5 border rounded text-sm' })),
+        h('div', null, h('label', { className:'block text-xs font-medium mb-1' }, 'เงื่อนไขชำระเงิน'),
+          h('input', { value:paymentTerms, onChange:e=>setPaymentTerms(e.target.value),
+            placeholder:'เช่น มัดจำ 50% ที่เหลือเครดิต 30 วัน',
+            className:'w-full px-2 py-1.5 border rounded text-sm' }))),
+
+      lines.some(usedLocked) && h('div', { className:'text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2' },
+        '🔒 บรรทัดที่ออกใบกำกับไปแล้วบางส่วน แก้จำนวนให้น้อยกว่าที่ออกไปแล้วไม่ได้'),
+
+      h(SalesLineTable, { state, dispatch, user, branch, customer, lines, setLines, vatRate, priceMode, testPrefix:'qt' }),
+
+      lines.length > 0 && h('div', { className:'bg-gray-50 rounded p-3 space-y-1 text-sm' },
+        h('div', { className:'flex justify-between' }, h('span', null, 'ยอดก่อน VAT:'), h('span', null, fmtCur(subtotal))),
+        h('div', { className:'flex justify-between' }, h('span', null, 'VAT:'), h('span', null, fmtCur(vatTotal))),
+        h('div', { className:'flex justify-between font-bold border-t pt-1' }, h('span', null, 'ยอดรวม:'), h('span', null, fmtCur(total))),
+        h('div', { className:'flex justify-between items-center' },
+          h('span', null, 'หัก ณ ที่จ่าย (ลูกค้าหักเรา)'),
+          h('div', { className:'flex gap-1 items-center' },
+            h('input', { type:'number', value:whtRate, step:'0.1', onWheel:e=>e.currentTarget.blur(),
+              onChange:e=>setWhtRate(Number(e.target.value)||0),
+              className:'w-14 px-1 py-1 border rounded text-xs text-right' }),
+            h('span', null, '% = - ' + fmtCur(wht)))),
+        (Number(depositPct)||0) > 0 && h('div', { className:'flex justify-between text-blue-700' },
+          h('span', null, `มัดจำ ${depositPct}%`), h('span', null, fmtCur(netTotal * (Number(depositPct)||0) / 100))),
+        h('div', { className:'flex justify-between font-bold text-lg text-green-700 border-t pt-2' },
+          h('span', null, 'สุทธิ:'), h('span', null, fmtCur(netTotal)))),
+
+      h('label', { className:'text-sm block' }, 'หมายเหตุ / เงื่อนไขอื่น',
+        h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
+          className:'w-full px-2 py-1 border rounded text-sm mt-0.5' })),
+
+      h('div', { className:'flex gap-2 pt-3 border-t justify-end' },
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
+        h(Button, { variant:'primary', onClick:save, 'data-testid':'qt-save' },
+          isEdit ? '💾 บันทึก' : '💾 ออกใบเสนอราคา'))
+    ));
+}
+
+// 🖨️ ใบเสนอราคา — ห้ามมีคำว่า "ใบกำกับภาษี" · ต้องบอกยืนราคาถึง + ราคารวม/ไม่รวม VAT + ช่องเซ็นลูกค้าอนุมัติ
+function printQuote(qt, state){
+  const company = state.company || {};
+  const b = (state.branches||[]).find(x => x.id === qt.branch);
+  const cs = qt.customerSnapshot || {};
+  const thDate = (s2) => { if(!s2) return '-'; const [y,m,d] = s2.split('-'); return `${parseInt(d)}/${parseInt(m)}/${parseInt(y)+543}`; };
+  const fmt = n => Number(n||0).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  const printLines = (global.ERP.groupKitForPrint ? global.ERP.groupKitForPrint(qt.lines||[], 'single') : (qt.lines||[]));
+  // ⚖️ ยอดต่อบรรทัดต้องอยู่ฐานเดียวกับยอดสรุปท้ายใบ — exclusive = ยอดก่อน VAT (lineEx) ไม่งั้นบวกเลขไม่ลง
+  const _inc = qt.priceMode === 'inclusive';
+  const _amt = (l) => _inc ? (l.lineTotal||0) : (l.lineEx != null ? l.lineEx : (l.lineTotal||0));
+  const _unit = (l) => (Number(l.qty) > 0) ? _amt(l) / Number(l.qty) : Number(l.unitPrice||0);
+  const rows = printLines.map((l,i) => `<tr>
+      <td style="text-align:center">${i+1}</td>
+      <td>${l.itemName || ''}<br/><span style="font-size:8pt;color:#666">${l.itemCode || ''}</span>${
+        l._kidNames ? `<br/><span style="font-size:8pt;color:#666">ประกอบด้วย: ${l._kidNames}</span>` : ''}</td>
+      <td style="text-align:right">${fmt(l.qty)} ${l.unit||''}</td>
+      <td style="text-align:right">${fmt(_unit(l))}</td>
+      <td style="text-align:right">${fmt(_amt(l))}</td>
+    </tr>`).join('');
+  const html = `<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"/>
+<title>ใบเสนอราคา ${qt.qtNumber}</title>
+<style>
+  @page { size:A4; margin:10mm; }
+  body { font-family:'Sarabun','TH SarabunNew',sans-serif; font-size:11pt; color:#000; }
+  h1 { font-size:16pt; text-align:center; margin:0 0 1mm; }
+  .sub { text-align:center; font-size:10pt; color:#666; margin-bottom:5mm; }
+  .info { display:grid; grid-template-columns:1fr 1fr; gap:4mm; font-size:10pt; margin-bottom:4mm; }
+  .box { border:1px solid #000; padding:3mm; }
+  .box .label { font-weight:bold; font-size:9pt; color:#333; margin-bottom:1mm; }
+  table.items { width:100%; border-collapse:collapse; font-size:10pt; margin-bottom:4mm; }
+  table.items th { background:#eee; border:1px solid #000; padding:2mm; }
+  table.items td { border:1px solid #000; padding:2mm; vertical-align:top; }
+  .totals { margin-left:auto; width:70mm; font-size:10pt; }
+  .totals .row { display:flex; justify-content:space-between; padding:1mm 3mm; }
+  .totals .row.final { font-weight:bold; font-size:12pt; border-top:2px solid #000; background:#f5f5f5; }
+  .terms { font-size:9.5pt; border:1px solid #666; padding:3mm; margin-top:3mm; }
+  .sign { display:grid; grid-template-columns:1fr 1fr; gap:10mm; margin-top:14mm; font-size:10pt; text-align:center; }
+  .sign div { border-top:1px dotted #000; padding-top:2mm; }
+</style></head><body>
+<h1>ใบเสนอราคา / QUOTATION</h1>
+<div class="sub">เลขที่ ${qt.qtNumber} · วันที่ ${thDate(qt.date)} · <b>ยืนราคาถึง ${thDate(qt.validUntil)}</b></div>
+<div class="info">
+  <div class="box"><div class="label">ผู้เสนอราคา</div>
+    ${company.name || ''}${b && b.branchType !== 'hq' ? ' (สาขา: ' + b.name + ')' : ''}<br/>
+    ${(b && b.address) || company.address || '-'}<br/>
+    เลขประจำตัวผู้เสียภาษี ${company.taxId || '-'}<br/>โทร ${(b && b.phone) || company.phone || '-'}</div>
+  <div class="box"><div class="label">ลูกค้า</div>
+    ${cs.name || qt.customerName || '-'}<br/>${cs.address || ''}<br/>
+    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + '<br/>' : ''}
+    ${qt.contactName ? 'ผู้ติดต่อ: ' + qt.contactName : ''} ${qt.contactPhone || ''}</div>
+</div>
+<table class="items">
+  <thead><tr><th style="width:10mm">#</th><th>รายการ</th><th style="width:28mm">จำนวน</th>
+    <th style="width:26mm">ราคา/หน่วย</th><th style="width:30mm">จำนวนเงิน</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+<div style="font-size:9.5pt;margin-bottom:2mm">ราคาข้างต้น <b>${qt.priceMode === 'inclusive' ? 'รวมภาษีมูลค่าเพิ่ม 7% แล้ว' : 'ยังไม่รวมภาษีมูลค่าเพิ่ม 7%'}</b></div>
+<div class="totals">
+  <div class="row"><span>ยอดก่อน VAT</span><span>${fmt(qt.subtotal)}</span></div>
+  <div class="row"><span>ภาษีมูลค่าเพิ่ม 7%</span><span>${fmt(qt.vat)}</span></div>
+  ${(qt.whtAmount||0) > 0 ? `<div class="row"><span>หัก ณ ที่จ่าย ${qt.whtRate}%</span><span>- ${fmt(qt.whtAmount)}</span></div>` : ''}
+  <div class="row final"><span>สุทธิ</span><span>${fmt(qt.netTotal)}</span></div>
+</div>
+<div class="terms">
+  <b>เงื่อนไข</b><br/>
+  ${qt.paymentTerms ? 'การชำระเงิน: ' + qt.paymentTerms + '<br/>' : ''}
+  ${(qt.depositPct||0) > 0 ? 'มัดจำ ' + qt.depositPct + '% = ' + fmt((qt.netTotal||0) * qt.depositPct / 100) + ' บาท<br/>' : ''}
+  ${qt.deliveryDate ? 'กำหนดส่ง: ' + thDate(qt.deliveryDate) + '<br/>' : ''}
+  ${qt.deliveryPlace ? 'สถานที่ส่ง: ' + qt.deliveryPlace + '<br/>' : ''}
+  ${qt.note ? qt.note.replace(/\n/g,'<br/>') : ''}
+</div>
+<div class="sign"><div>ผู้เสนอราคา<br/><span style="font-size:9pt;color:#666">วันที่ ____/____/______</span></div>
+  <div>ลูกค้าอนุมัติ / สั่งซื้อ<br/><span style="font-size:9pt;color:#666">ลงชื่อ ______________ วันที่ ____/____/______</span></div></div>
+<script>window.onload = () => window.print();<\/script>
+</body></html>`;
+  const w = window.open('', '_blank');
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
+// 📅 วันครบกำหนดชำระ = วันที่เอกสาร + เครดิตลูกค้า (วัน) — ใช้สูตรเดียวกันทุกเอกสาร (ใบกำกับ/ใบวางบิล)
+//   คิดเป็น UTC ล้วน ไม่งั้น toISOString() จะเพี้ยนไป 1 วันในไทย (UTC+7) · ไม่มีเครดิต = ครบกำหนดวันเดียวกับเอกสาร
+function dueFromCredit(customer, baseDate){
+  const cd = (!customer || customer.credit == null || customer.credit === '') ? 0 : (Number(customer.credit) || 0);
+  const d = new Date((baseDate || getToday()) + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + cd);
+  return d.toISOString().slice(0,10);
+}
+
+// 🧾 SALES-W3: ตารางบรรทัดของเอกสารขาย (ใบกำกับ + ใบเสนอราคา ใช้ตัวเดียวกัน)
+//   - เลือกสินค้า (ปุ่ม 📋 ดูทั้งหมด · ทยอยทีละ 200 · ป้ายประเภท/ราคา)
+//   - ราคาเด้งตามหน่วย/กลุ่มลูกค้า (resolvePrice) · เปลี่ยนหน่วยแล้วราคาตาม
+//   - 🎁 ชุดสินค้า: เปิดหน้าจัดกล่อง · แถวเดียวในเอกสาร
+//   ⚠️ ห้ามใส่ side-effect (ตัดสต๊อก/JE) ที่นี่ — ผู้เรียกเป็นคนจัดการตอนบันทึกเอกสาร
+function SalesLineTable({ state, dispatch, user, branch, customer, lines, setLines, vatRate, priceMode, testPrefix }){
+  const [itemSearch, setItemSearch] = useState('');
+  const [showAllItems, setShowAllItems] = useState(false);
+  const [itemLimit, setItemLimit] = useState(200);
+  const [kitEdit, setKitEdit] = useState(null);
+  const tp = testPrefix || 'si';
+
+  const _price = (item, unitName) => (resolvePrice
+    ? resolvePrice(item, unitName, customer?.priceTier)
+    : { price:(item && item.salePrice) || 0, warnUnit:false, warnZero: !(item && item.salePrice > 0) });
+
+  const filteredItems = useMemo(() => {
+    const base = (state.items||[]).filter(i => i.active !== false);
+    const q = (itemSearch||'').trim().toLowerCase();
+    if(!q) return base;
+    return base.filter(i => (i.name||'').toLowerCase().includes(q)
+      || (i.code||'').toLowerCase().includes(q)
+      || (i.barcode||'').toLowerCase().includes(q));
+  }, [state.items, itemSearch]);
+  const shownItems = filteredItems.slice(0, showAllItems ? itemLimit : 20);
+  const moreItems  = filteredItems.length - shownItems.length;
+
+  const calc = lines.map(l => {
+    const lineEx = priceMode === 'inclusive'
+      ? (l.unitPrice * l.qty) / (1 + (l.vatRate||0)/100)
+      : l.unitPrice * l.qty;
+    const vat = lineEx * (l.vatRate||0) / 100;
+    return { ex:lineEx, vat, inc:lineEx + vat };
+  });
+
+  const addLine = (item) => {
+    const sellUnits = unitsForPurpose(item, 'sale') || [{ name:item.issueUnit||'' }];
+    const defaultUnit = sellUnits[0]?.name || item.issueUnit || '';
+    const pr = _price(item, defaultUnit);
+    const row = { itemId: item.id, qty: 1, unit: defaultUnit, unitPrice: pr.price, vatRate, _priceAuto: true };
+    if(item.type === 'kit'){
+      row.lineKind = 'kit';
+      row.kitId = 'k_' + Math.random().toString(36).slice(2,8);
+      row.kitPrintMode = item.kit?.printMode || 'single';
+      row.kitComponents = (item.kit?.components || []).map(c => {
+        const ci = (state.items||[]).find(x => x.id === c.itemId) || {};
+        return { itemId:c.itemId, qtyPerKit: Number(c.qty)||1, unit: c.unit || ci.issueUnit || '',
+          role: c.role || 'content', locked: !!c.locked };
+      });
+      setLines(ls => [...ls, row]);
+      setItemSearch('');
+      setKitEdit(lines.length);
+      return;
+    }
+    setLines([...lines, row]);
+    setItemSearch('');
+  };
+
+  const changeUnit = (i, unitName) => {
+    const l = lines[i];
+    const it = state.items.find(x => x.id === l.itemId);
+    const pr = _price(it, unitName);
+    if(l._priceAuto !== false && pr.price !== Number(l.unitPrice)){
+      setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName, unitPrice:pr.price } : x));
+      return;
+    }
+    if(pr.price > 0 && pr.price !== Number(l.unitPrice)
+       && confirm(`เปลี่ยนหน่วยเป็น "${unitName}" — ใช้ราคาของหน่วยใหม่ (${fmtCur(pr.price)}) แทนราคาที่แก้ไว้ (${fmtCur(l.unitPrice)}) ไหม?`)){
+      setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName, unitPrice:pr.price, _priceAuto:true } : x));
+      return;
+    }
+    setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName } : x));
+  };
+
+  const updateLine = (i, k, v) => setLines(lines.map((l,idx) =>
+    idx===i ? { ...l, [k]:v, ...(k === 'unitPrice' ? { _priceAuto:false } : null) } : l));
+  const removeLine = (i) => setLines(lines.filter((_,idx) => idx !== i));
+
+  return h('div', { className:'space-y-3' },
+    // Item search
+      h('div', null,
+        h('div', { className:'flex items-center justify-between mb-1' },
+          h('label', { className:'block text-xs font-medium' }, '➕ เพิ่มสินค้า'),
+          h('button', { type:'button', 'data-testid': tp + '-show-all', onClick:()=>{ setItemLimit(200); setShowAllItems(v=>!v); },
+            className:'text-xs px-2 py-0.5 rounded bg-blue-100 hover:bg-blue-200 text-blue-800 font-medium' },
+            showAllItems ? '✕ ย่อรายการ' : `📋 ดูทั้งหมด (${filteredItems.length})`)
+        ),
+        h('input', { type:'search', value:itemSearch, onChange:e=>setItemSearch(e.target.value),
+          placeholder:'พิมพ์ชื่อ/รหัส/บาร์โค้ด — หรือกด "ดูทั้งหมด"',
+          className:'w-full px-3 py-2 border-2 rounded text-sm' }),
+        (itemSearch || showAllItems) && h('div', { className:'mt-1 bg-white border rounded max-h-40 overflow-y-auto', 'data-si-items':'1' },
+          filteredItems.length === 0
+            ? h('div', { className:'px-3 py-2 text-xs text-gray-400' },
+                itemSearch ? `ไม่พบ "${itemSearch}"` : 'ยังไม่มีสินค้าที่ขายได้ — ตั้งค่า › สินค้า แล้วเพิ่ม/เปิดใช้งานสินค้าก่อน')
+            : shownItems.map(it => h('button', { key:it.id, type:'button', onClick:()=>addLine(it),
+                className:'w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 border-b last:border-0' },
+                h('div', { className:'font-medium' }, it.name,
+                  (it.type === 'material' || it.type === 'packaging') && h('span',
+                    { className:'ml-1 text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-500' },
+                    it.type === 'material' ? 'วัตถุดิบ' : 'บรรจุภัณฑ์')),
+                h('div', { className:'text-xs text-gray-500 flex justify-between' },
+                  h('span', null, it.code),
+                  (() => { const pr = _price(it, null);
+                    return h('span', null, `${fmtNum(getStockAtBranch ? getStockAtBranch(it, branch) : 0)} · ` +
+                      (pr.warnZero ? '⚠️ ยังไม่ตั้งราคา' : fmtCur(pr.price))); })()
+                ))),
+          moreItems > 0 && h('button', { type:'button', 'data-testid': tp + '-show-more',
+            onClick:()=>{ setShowAllItems(true); setItemLimit(n => n + 200); },
+            className:'w-full px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-50 font-medium border-t' },
+            moreItems > 200 ? `⌄ แสดงเพิ่มอีก 200 (เหลือ ${moreItems} รายการ)` : `⌄ แสดงทั้งหมดอีก ${moreItems} รายการ`)
+        )
+      ),
+
+      // Lines table
+      lines.length > 0 && h('div', { className:'bg-white border rounded overflow-x-auto' },
+        h('table', { className:'w-full text-sm' },
+          h('thead', { className:'bg-gray-50' },
+            h('tr', null,
+              h('th', { className:'px-2 py-1.5 text-left text-xs' }, 'สินค้า'),
+              h('th', { className:'px-2 py-1.5 text-right text-xs w-20' }, 'จำนวน'),
+              h('th', { className:'px-2 py-1.5 text-left text-xs w-24' }, 'หน่วย'),
+              h('th', { className:'px-2 py-1.5 text-right text-xs w-24' }, 'ราคา/หน่วย'),
+              h('th', { className:'px-2 py-1.5 text-center text-xs w-16' }, 'VAT%'),
+              h('th', { className:'px-2 py-1.5 text-right text-xs w-28' }, 'รวม'),
+              h('th', { className:'px-2 py-1.5 w-8' }),
+            )
+          ),
+          h('tbody', { className:'divide-y' },
+            lines.map((l,i) => {
+              const it = state.items.find(x => x.id === l.itemId);
+              const units = it ? unitsForPurpose(it, 'sale') : [];
+              return h('tr', { key:i },
+                h('td', { className:'px-2 py-1' },
+                  h('div', { className:'font-medium' },
+                    l.lineKind === 'kit' && h('span', { className:'mr-1' }, '🎁'),
+                    it?.name||l.itemId),
+                  h('div', { className:'text-[10px] text-gray-500 font-mono' }, it?.code||''),
+                  l.lineKind === 'kit' && h('div', { className:'text-[11px] text-pink-700 flex items-center gap-2 flex-wrap mt-0.5' },
+                    h('span', null, (l.kitComponents||[]).length
+                      ? 'ในกล่อง: ' + (l.kitComponents||[]).map(c => {
+                          const ci = (state.items||[]).find(x => x.id === c.itemId) || {};
+                          return `${ci.name || '?'}${Number(c.qtyPerKit) > 1 ? ' ×' + c.qtyPerKit : ''}`;
+                        }).join(', ')
+                      : '⚠️ ยังไม่ได้เลือกของข้างใน'),
+                    h('button', { type:'button', 'data-testid':'kit-edit-' + i, onClick:()=>setKitEdit(i),
+                      className:'px-1.5 py-0.5 rounded bg-pink-100 hover:bg-pink-200 text-pink-800 font-medium' },
+                      '🎁 จัดกล่อง'))),
+                h('td', { className:'px-2 py-1' },
+                  h('input', { type:'number', value:l.qty, step:'any', min:0,
+                    onChange:e=>updateLine(i,'qty',Number(e.target.value)||0),
+                    className:'w-full px-1 py-1 border rounded text-xs text-right' })),
+                h('td', { className:'px-2 py-1' },
+                  h('select', { value:l.unit||'', onChange:e=>changeUnit(i, e.target.value),
+                    className:'w-full px-1 py-1 border rounded text-xs' },
+                    (units.length>0 ? units : [{ name:it?.issueUnit||'' }]).map(u =>
+                      h('option', { key:u.name, value:u.name }, u.name)))),
+                h('td', { className:'px-2 py-1' },
+                  h('input', { type:'number', value:l.unitPrice, step:'0.01',
+                    onChange:e=>updateLine(i,'unitPrice',Number(e.target.value)||0),
+                    onWheel:e=>e.currentTarget.blur(),
+                    title: !(Number(l.unitPrice) > 0) ? 'ยังไม่ได้ตั้งราคาขายของสินค้านี้' : '',
+                    className: cls('w-full px-1 py-1 border rounded text-xs text-right font-mono',
+                      !(Number(l.unitPrice) > 0) && 'border-orange-400 bg-orange-50') })),
+                h('td', { className:'px-2 py-1' },
+                  h('select', { value:l.vatRate, onChange:e=>updateLine(i,'vatRate',Number(e.target.value)),
+                    className:'w-full px-1 py-1 border rounded text-xs' },
+                    h('option', { value:0 }, '0'),
+                    h('option', { value:7 }, '7'))),
+                h('td', { className:'px-2 py-1 text-right font-medium' }, fmtCur(calc[i]?.inc||0)),
+                h('td', { className:'px-2 py-1 text-center' },
+                  h('button', { type:'button', onClick:()=>removeLine(i),
+                    className:'text-red-500 hover:bg-red-50 p-1 rounded' }, '×'))
+              );
+            })
+          )
+        )
+      ),
+
+    kitEdit !== null && lines[kitEdit] && h(KitBuilderModal, {
+      state, dispatch, line: lines[kitEdit], branch, user, priceMode, allLines: lines, lineIndex: kitEdit,
+      onClose: () => setKitEdit(null),
+      onSave: (patch) => { setLines(ls => ls.map((x,idx) => idx === kitEdit ? { ...x, ...patch } : x)); setKitEdit(null); },
+    })
+  );
+}
+
+// 🎁 SALES-W2: หน้า "จัดกล่อง" — เลือกของข้างในต่อ 1 กล่อง (ลูกค้าเลือกได้ทุกเมนู)
+//   บอก "ของที่มีพอทำได้กี่กล่อง" + ต้นทุน/กำไรต่อกล่อง ก่อนตกลง · เก็บ ⭐ สูตรที่ใช้บ่อย ไว้ที่ตัวสินค้าชุด
+function KitBuilderModal({ state, dispatch, line, branch, user, onClose, onSave, priceMode, allLines, lineIndex }){
+  const kitItem = (state.items||[]).find(x => x.id === line.itemId) || {};
+  const kitCfg = kitItem.kit || {};
+  const [comps, setComps] = useState(() => (line.kitComponents || []).map(c => ({ ...c })));
+  const [qty, setQty] = useState(Number(line.qty) || 1);
+  const [price, setPrice] = useState(Number(line.unitPrice) || 0);
+  const [q, setQ] = useState('');
+  const [showAll, setShowAll] = useState(false);
+
+  const canSeeValue = !global.ERP.canSeeStockValue || global.ERP.canSeeStockValue(user, state);
+  const stockOf = (it) => (getStockAtBranch ? (getStockAtBranch(it, branch) || 0) : 0);
+
+  const pool = useMemo(() => {
+    let l = (state.items||[]).filter(i => i.active !== false && i.type !== 'kit');
+    const tagFilter = (kitCfg.pickFrom && kitCfg.pickFrom.tags) || [];
+    if(tagFilter.length) l = l.filter(i => (i.tags||[]).some(t => tagFilter.includes(t)));
+    if(q){
+      const s2 = q.toLowerCase();
+      l = l.filter(i => (i.name||'').toLowerCase().includes(s2) || (i.code||'').toLowerCase().includes(s2));
+    }
+    return l;
+  }, [state.items, q, kitCfg]);
+  const shown = showAll || q ? pool.slice(0, 200) : pool.slice(0, 15);
+
+  // ⭐ ของที่มีพอทำได้กี่กล่อง = min(floor(สต๊อก / จำนวนต่อกล่อง)) — รับออเดอร์ทางโทรศัพท์ต้องตอบได้ทันที
+  //   ⭐ หักของที่บรรทัดอื่นในใบนี้จองไว้แล้ว — คนรับโทรศัพท์เชื่อตัวเลขนี้ที่สุด ห้ามบอกเกินจริง
+  const reserved = useMemo(() => {
+    const m = {};
+    (allLines || []).forEach((l, idx) => {
+      if(idx === lineIndex) return;
+      if(l.lineKind === 'kit'){
+        (l.kitComponents||[]).forEach(c => {
+          const it = (state.items||[]).find(x => x.id === c.itemId);
+          if(!it || !(Number(c.qtyPerKit) > 0)) return;
+          m[c.itemId] = (m[c.itemId] || 0) + toBaseQty(it, Number(c.qtyPerKit) * (Number(l.qty)||0), c.unit);
+        });
+      } else if(l.itemId){
+        const it = (state.items||[]).find(x => x.id === l.itemId);
+        if(!it) return;
+        m[l.itemId] = (m[l.itemId] || 0) + toBaseQty(it, Number(l.qty)||0, l.unit);
+      }
+    });
+    return m;
+  }, [allLines, lineIndex, state.items]);
+
+  const capacity = useMemo(() => {
+    let min = null, limiter = '';
+    comps.forEach(c => {
+      const it = (state.items||[]).find(x => x.id === c.itemId);
+      if(!it || !(Number(c.qtyPerKit) > 0)) return;
+      const per = toBaseQty(it, Number(c.qtyPerKit), c.unit);
+      if(!(per > 0)) return;
+      const avail = stockOf(it) - (reserved[c.itemId] || 0);
+      const n = Math.floor(avail / per);
+      if(min === null || n < min){ min = n; limiter = it.name || ''; }
+    });
+    return { n: min === null ? null : Math.max(0, min), limiter };
+  }, [comps, state.items, branch, reserved]);
+
+  // ต้นทุน/กล่อง จาก FIFO จริง (clone — ไม่แตะ layer จริง) ทีละกล่อง
+  const costInfo = useMemo(() => {
+    if(!canSeeValue) return null;
+    const layers = (state.fifoLayers||[]).map(x => ({ ...x }));
+    let sum = 0, missing = 0;
+    comps.forEach(c => {
+      const it = (state.items||[]).find(x => x.id === c.itemId);
+      if(!it || !(Number(c.qtyPerKit) > 0)) return;
+      const base = toBaseQty(it, Number(c.qtyPerKit), c.unit);
+      const r = deductFIFO(layers, c.itemId, base, branch);
+      sum += Number(r.cost || 0);
+      // ไม่มีล็อต/ต้นทุนให้ตัด → ตัวเลขต้นทุนไม่ครบ ห้ามโชว์ % กำไรลวงตา (ของจริงต้นทุน 0 ทั้ง 863 ตัว)
+      if(Number(r.shortage || 0) > 0 || !(Number(r.cost) > 0)) missing++;
+    });
+    return { cost: Number(sum.toFixed(2)), missing };
+  }, [comps, state.fifoLayers, branch, canSeeValue]);
+  const costPerBox = costInfo ? costInfo.cost : null;
+  // ราคาที่คีย์อาจเป็นแบบรวม VAT → ต้องถอดก่อนเทียบต้นทุน ไม่งั้นกำไรเกินจริง ~7%
+  const priceEx = priceMode === 'inclusive'
+    ? (Number(price)||0) / (1 + ((Number(line.vatRate)||0) / 100))
+    : (Number(price)||0);
+
+  const totalItems = comps.filter(c => (c.role || 'content') !== 'packaging')
+    .reduce((n,c) => n + (Number(c.qtyPerKit)||0), 0);
+  const hasPackaging = comps.some(c => {
+    if(!(Number(c.qtyPerKit) > 0)) return false;    // ตั้ง 0 = ไม่ได้ใส่จริง (บรรทัดจะถูกตัดทิ้งตอนบันทึก)
+    const it = (state.items||[]).find(x => x.id === c.itemId);
+    return it && it.type === 'packaging';
+  });
+  const minItems = Number(kitCfg.minItems) || 0;
+  const maxItems = Number(kitCfg.maxItems) || 0;
+
+  const add = (it) => {
+    setComps(cs => {
+      const idx = cs.findIndex(c => c.itemId === it.id);
+      if(idx >= 0) return cs.map((c,i) => i===idx ? { ...c, qtyPerKit: (Number(c.qtyPerKit)||0) + 1 } : c);
+      const u = ((unitsForPurpose(it, 'sale')||[])[0] || {}).name || it.issueUnit || '';
+      return [...cs, { itemId: it.id, qtyPerKit: 1, unit: u,
+        role: it.type === 'packaging' ? 'packaging' : 'content', locked: false }];
+    });
+    setQ('');
+  };
+
+  const _toastKit = (m) => { if(toast && toast.success) toast.success(m); else if(toast) toast(m, 'success'); };
+  const saveRecipe = () => {
+    const nm = (prompt('ตั้งชื่อสูตรนี้ (เช่น "เบรคเช้า 3 ชิ้น")') || '').trim();
+    if(!nm) return;
+    // อ่านสินค้าสดจาก state (คนอื่นอาจเพิ่งเพิ่มสูตรอื่นไว้) — ห้ามทับด้วย snapshot ตอนเปิดหน้า
+    const live = (state.items||[]).find(x => x.id === kitItem.id) || kitItem;
+    const cfg = live.kit || {};
+    const old = (cfg.savedRecipes || []);
+    if(old.some(r => r.name === nm) && !confirm(`มีสูตรชื่อ "${nm}" อยู่แล้ว — เขียนทับไหม?`)) return;
+    const next = [ ...old.filter(r => r.name !== nm), { name: nm, components: comps.map(c => ({ ...c })) } ];
+    dispatch({ type:'UPDATE_ITEM', data:{ ...live, kit: { ...cfg, savedRecipes: next } } });
+    dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'kit_recipe', subType:'save_recipe', by:(user && user.username) || '',
+      summary:`บันทึกสูตรชุด "${nm}" ของ ${live.name}` } });
+    _toastKit(`บันทึกสูตร "${nm}" แล้ว`);
+  };
+
+  const useRecipe = (r) => {
+    const rec = (r.components || []).map(c => ({ ...c }));
+    // ของที่ตั้งค่าไว้ว่า "ติดมาทุกกล่อง" (ล็อก) ต้องกลับมาเสมอ แม้สูตรเก่าจะไม่มี
+    (kitCfg.components || []).filter(c => c.locked).forEach(c => {
+      if(rec.some(x => x.itemId === c.itemId)) return;
+      const ci = (state.items||[]).find(x => x.id === c.itemId) || {};
+      rec.push({ itemId:c.itemId, qtyPerKit: Number(c.qty)||1, unit: c.unit || ci.issueUnit || '',
+        role: c.role || 'packaging', locked: true });
+    });
+    setComps(rec);
+  };
+
+  const commit = () => {
+    const usable = comps.filter(c => c.itemId && Number(c.qtyPerKit) > 0);
+    if(!usable.length) return alert('เลือกของใส่กล่องอย่างน้อย 1 อย่าง');
+    if(minItems && totalItems < minItems
+       && !confirm(`ชุดนี้ตั้งไว้ว่าอย่างน้อย ${minItems} ชิ้น/กล่อง (ตอนนี้ ${totalItems}) — ใส่ในใบเลยไหม?`)) return;
+    if(maxItems && totalItems > maxItems
+       && !confirm(`ชุดนี้ตั้งไว้ไม่เกิน ${maxItems} ชิ้น/กล่อง (ตอนนี้ ${totalItems}) — ใส่ในใบเลยไหม?`)) return;
+    if(!hasPackaging
+       && !confirm('ยังไม่ได้ใส่กล่อง/บรรจุภัณฑ์ในชุดนี้\n\nสต๊อกและต้นทุนกล่องจะไม่ถูกตัด — ใส่ในใบเลยไหม?')) return;
+    if(kitCfg.allowCustomize === false){
+      const orig = JSON.stringify((kitCfg.components||[]).map(c => [c.itemId, Number(c.qty)||0]).sort());
+      const now  = JSON.stringify(usable.map(c => [c.itemId, Number(c.qtyPerKit)||0]).sort());
+      if(orig !== now){
+        if(!confirm('ชุดนี้ตั้งเป็นสูตรตายตัว — แก้เฉพาะใบนี้ใช่ไหม?')) return;
+        dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'kit_customized', by:user?.username || '',
+          refType:'sale', summary:`แก้ของในชุด ${kitItem.name} เฉพาะใบที่กำลังออก` } });
+      }
+    }
+    onSave({ kitComponents: usable, qty: Number(qty) || 1, unitPrice: Number(price) || 0,
+      _priceAuto: Number(price) === Number(line.unitPrice) ? line._priceAuto : false });
+  };
+
+  return h(Modal, { isOpen:true, title:`🎁 จัดกล่อง: ${kitItem.name || ''}`, onClose, size:'xl' },
+    h('div', { className:'space-y-3' },
+      h('div', { className:'flex flex-wrap items-center gap-3 bg-pink-50 border border-pink-200 rounded p-2' },
+        h('label', { className:'text-sm flex items-center gap-2' }, 'จำนวน',
+          h('input', { type:'number', min:'1', step:'1', value:qty, 'data-testid':'kit-box-qty',
+            onChange:e=>setQty(Number(e.target.value)||0), onWheel:e=>e.currentTarget.blur(),
+            className:'w-24 px-2 py-1 border rounded text-right text-sm' }),
+          h('span', { className:'text-xs text-gray-600' }, line.unit || 'กล่อง')),
+        h('label', { className:'text-sm flex items-center gap-2' }, 'ราคา/กล่อง',
+          h('input', { type:'number', step:'0.01', value:price, 'data-testid':'kit-box-price',
+            onChange:e=>setPrice(Number(e.target.value)||0), onWheel:e=>e.currentTarget.blur(),
+            className:'w-28 px-2 py-1 border rounded text-right text-sm' })),
+        h('span', { className:'text-sm font-medium ml-auto' },
+          `รวม ${fmtNum(qty)} × ${fmtCur(price)} = ${fmtCur((Number(qty)||0) * (Number(price)||0))}`)),
+
+      h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
+        // ซ้าย: เลือกของ
+        h('div', { className:'border rounded overflow-hidden' },
+          h('div', { className:'p-2 border-b bg-gray-50 flex items-center gap-2' },
+            h('input', { type:'search', value:q, onChange:e=>setQ(e.target.value),
+              'data-testid':'kit-search', placeholder:'พิมพ์ชื่อของที่จะใส่',
+              className:'flex-1 px-2 py-1 border rounded text-xs' }),
+            h('button', { type:'button', 'data-testid':'kit-show-all', onClick:()=>setShowAll(v=>!v),
+              className:'text-xs px-2 py-1 rounded bg-blue-100 hover:bg-blue-200 text-blue-800 font-medium' },
+              showAll ? '✕ ย่อ' : `📋 ดูทั้งหมด (${pool.length})`)),
+          h('div', { className:'max-h-64 overflow-y-auto divide-y' },
+            shown.length === 0
+              ? h('div', { className:'px-3 py-4 text-xs text-gray-400 text-center' }, 'ไม่พบสินค้า')
+              : shown.map(it => h('button', { key:it.id, type:'button', onClick:()=>add(it),
+                  'data-testid':'kit-pick-' + (it.code || it.id),
+                  className:'w-full text-left px-3 py-1.5 text-sm hover:bg-pink-50 flex justify-between gap-2' },
+                  h('span', null, it.name,
+                    h('span', { className:'ml-1 text-[10px] text-gray-500 font-mono' }, it.code || '')),
+                  h('span', { className: cls('text-xs', stockOf(it) > 0 ? 'text-gray-500' : 'text-orange-600') },
+                    'คงเหลือ ' + fmtNum(stockOf(it))))) ),
+          (kitCfg.savedRecipes||[]).length > 0 && h('div', { className:'p-2 border-t bg-amber-50 flex flex-wrap gap-1 items-center' },
+            h('span', { className:'text-xs text-amber-900 font-medium' }, '⭐ สูตรที่ใช้บ่อย:'),
+            (kitCfg.savedRecipes||[]).map(r => h('button', { key:r.name, type:'button',
+              'data-testid':'kit-recipe-' + r.name, onClick:()=>useRecipe(r),
+              className:'text-xs px-2 py-0.5 rounded bg-amber-200 hover:bg-amber-300 text-amber-900' }, r.name)))),
+
+        // ขวา: ในกล่องนี้
+        h('div', { className:'border rounded overflow-hidden' },
+          h('div', { className:'p-2 border-b bg-gray-50 text-xs font-medium' },
+            `ในกล่องนี้ (ต่อ 1 ${line.unit || 'กล่อง'}) — ${totalItems} ชิ้น`
+            + (maxItems ? ` / สูงสุด ${maxItems}` : '')),
+          h('div', { className:'max-h-64 overflow-y-auto divide-y', 'data-kit-box':'1' },
+            comps.length === 0
+              ? h('div', { className:'px-3 py-6 text-xs text-gray-400 text-center' }, 'ยังไม่มีของในกล่อง — เลือกจากทางซ้าย')
+              : comps.map((c, idx) => {
+                  const it = (state.items||[]).find(x => x.id === c.itemId) || {};
+                  return h('div', { key:idx, className:'flex items-center gap-2 px-2 py-1' },
+                    c.locked && h('span', { title:'ของที่ติดมาทุกกล่อง' }, '🔒'),
+                    h('span', { className:'text-sm flex-1' }, it.name || c.itemId),
+                    h('input', { type:'number', min: c.locked ? '1' : '0', step:'any', value:c.qtyPerKit,
+                      'data-testid':'kit-comp-qty-' + idx, onWheel:e=>e.currentTarget.blur(),
+                      disabled: !!c.locked,          // 🔒 ของที่ติดมาทุกกล่อง (กล่อง/ริบบิ้น) ถอดไม่ได้ ตั้ง 0 ก็ไม่ได้
+                      title: c.locked ? 'ของที่ติดมาทุกกล่อง — แก้จำนวนได้ที่ ตั้งค่า › สินค้า' : '',
+                      onChange:e=>setComps(cs => cs.map((x,i) => i===idx ? { ...x, qtyPerKit:Number(e.target.value)||0 } : x)),
+                      className: cls('w-20 px-2 py-1 border rounded text-right text-sm', c.locked && 'bg-gray-100 text-gray-500') }),
+                    h('span', { className:'text-xs text-gray-500 w-12' }, c.unit || it.issueUnit || ''),
+                    !c.locked && h('button', { type:'button', className:'text-red-600 px-1',
+                      'data-testid':'kit-comp-del-' + idx,
+                      onClick:()=>setComps(cs => cs.filter((_,i) => i!==idx)) }, '✕'));
+                })))),
+
+      h('div', { className:'flex flex-wrap items-center gap-4 bg-gray-50 border rounded p-2' },
+        h('div', null,
+          h('div', { className:'text-xs text-gray-600' }, 'ของที่มีพอทำได้'),
+          h('div', { className: cls('text-2xl font-bold',
+              capacity.n === null ? 'text-gray-400'
+                : capacity.n >= (Number(qty)||0) ? 'text-green-700' : 'text-orange-600'),
+            'data-testid':'kit-capacity' },
+            capacity.n === null ? '—' : `${fmtNum(capacity.n)} ${line.unit || 'กล่อง'}`),
+          capacity.n !== null && capacity.limiter && h('div', { className:'text-[11px] text-gray-500' },
+            `ติดที่ ${capacity.limiter}`)),
+        canSeeValue && costPerBox !== null && h('div', null,
+          h('div', { className:'text-xs text-gray-600' },
+            'ต้นทุน/กล่อง' + (priceMode === 'inclusive' ? ' (เทียบราคาก่อน VAT)' : '')),
+          costInfo.missing > 0
+            ? h('div', { className:'text-sm font-medium text-orange-700', 'data-testid':'kit-cost-incomplete' },
+                `⚠️ ต้นทุนยังไม่ครบ (${costInfo.missing} รายการไม่มีต้นทุนในระบบ) — ตัวเลขกำไรยังเชื่อไม่ได้`)
+            : h('div', { className:'text-sm font-medium' }, fmtCur(costPerBox),
+                h('span', { className: cls('ml-2', (priceEx - costPerBox) >= 0 ? 'text-green-700' : 'text-red-600') },
+                  `กำไร ${fmtCur(priceEx - costPerBox)}`
+                  + (priceEx > 0 ? ` (${(((priceEx - costPerBox)/priceEx)*100).toFixed(1)}%)` : '')))),
+        !hasPackaging && h('div', { className:'text-xs text-orange-700 bg-orange-50 border border-orange-200 rounded px-2 py-1' },
+          '⚠️ ยังไม่ได้ใส่กล่อง/บรรจุภัณฑ์ — สต๊อกและต้นทุนกล่องจะไม่ขยับ'),
+        capacity.n !== null && capacity.n < (Number(qty)||0) && h('div', { className:'text-xs text-orange-700' },
+          `⚠️ ของไม่พอทำ ${fmtNum(qty)} กล่อง (ขายได้แต่สต๊อกจะติดลบ)`)),
+
+      h('div', { className:'flex gap-2 pt-2 border-t' },
+        h(Button, { variant:'primary', onClick:commit, 'data-testid':'kit-commit' }, '💾 ใส่ในใบ'),
+        hasPerm(user, 'settings', 'items', 'edit') && h(Button, { variant:'secondary', onClick:saveRecipe,
+          'data-testid':'kit-save-recipe' }, '⭐ บันทึกเป็นสูตรที่ใช้บ่อย'),
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'))
+    ));
+}
+
 function SIDetailModal({ si, state, dispatch, user, onClose, onReceive }){
   const c = siBuyer(state, si);   // 🆕 snapshot ผู้ซื้อ ณ วันออกใบ
   const remain = (si.netTotal||0) - (si.paidAmount||0);
@@ -68230,11 +69889,16 @@ function SIDetailModal({ si, state, dispatch, user, onClose, onReceive }){
           h('tbody', { className:'divide-y' },
             (si.lines||[]).map((l,i) => {
               const it = state.items.find(x => x.id === l.itemId);
-              return h('tr', { key:i },
-                h('td', { className:'px-2 py-1' }, it?.name||l.itemId),
-                h('td', { className:'px-2 py-1 text-right' }, `${fmtNum(l.qty)} ${l.unit}`),
-                h('td', { className:'px-2 py-1 text-right' }, fmtCur(l.unitPrice||0)),
-                h('td', { className:'px-2 py-1 text-right font-medium' }, fmtCur(l.lineTotal||0)));
+              const isChild = l.lineKind === 'kit_child';
+              return h('tr', { key:i, className: isChild ? 'text-gray-600' : '' },
+                h('td', { className: cls('px-2 py-1', isChild && 'pl-6 text-xs') },
+                  isChild ? '• ' : (l.lineKind === 'kit' ? '🎁 ' : ''),
+                  l.itemName || it?.name || l.itemId,
+                  isChild && l.qtyPerKit ? h('span', { className:'ml-1 text-[10px] text-gray-500' },
+                    `(${fmtNum(l.qtyPerKit)} ต่อกล่อง)`) : null),
+                h('td', { className: cls('px-2 py-1 text-right', isChild && 'text-xs') }, `${fmtNum(l.qty)} ${l.unit||''}`),
+                h('td', { className:'px-2 py-1 text-right' }, isChild ? '—' : fmtCur(l.unitPrice||0)),
+                h('td', { className:'px-2 py-1 text-right font-medium' }, isChild ? '—' : fmtCur(l.lineTotal||0)));
             }))
         )),
       h('div', { className:'bg-white border rounded p-3 text-sm space-y-1' },
@@ -68255,23 +69919,52 @@ function SIDetailModal({ si, state, dispatch, user, onClose, onReceive }){
                 h('th', { className:'px-2 py-1 text-left' }, 'วันที่'),
                 h('th', { className:'px-2 py-1 text-left' }, 'วิธี'),
                 h('th', { className:'px-2 py-1 text-left' }, 'อ้างอิง'),
-                h('th', { className:'px-2 py-1 text-right' }, 'จำนวน'))),
+                h('th', { className:'px-2 py-1 text-right' }, 'จำนวน'),
+                h('th', { className:'px-2 py-1 text-center' }, 'จัดการ'))),
             h('tbody', { className:'divide-y' },
-              pays.map(p => h('tr', { key:p.id },
+              pays.map(p => h('tr', { key:p.id, className: p.voided ? 'text-gray-400 line-through' : '' },
                 h('td', { className:'px-2 py-1 text-xs' }, fmtDate(p.date)),
                 h('td', { className:'px-2 py-1 text-xs' }, p.method),
                 h('td', { className:'px-2 py-1 text-xs font-mono' }, p.ref||'-'),
-                h('td', { className:'px-2 py-1 text-right font-medium' }, fmtCur(p.amount||0))))
-            )
+                h('td', { className:'px-2 py-1 text-right font-medium' }, fmtCur(p.amount||0)),
+                h('td', { className:'px-2 py-1 text-center' },
+                  p.voided
+                    ? h('span', { className:'text-[10px] text-gray-500 no-underline' }, 'กลับรายการแล้ว')
+                    : (hasPerm(user,'sales','si','void') && h(Button, { variant:'danger', size:'sm',
+                        'data-testid':'pay-void-' + p.id,
+                        onClick:()=>{
+                          const reason = prompt(`กลับรายการรับชำระ ${fmtCur(p.amount||0)} ของใบ ${si.siNumber}\n\n`
+                            + 'ใช้เมื่อคีย์ผิด/เงินไม่เข้าจริง — ระบบจะคืนยอดลูกหนี้ ถอนเงินออกจากบัญชี และกลับ JE\n\nเหตุผล:');
+                          if(reason === null) return;
+                          dispatch({ type:'VOID_SALES_PAY', data:{ payId:p.id, reason, by:user.username } });
+                        } }, '↩︎ กลับรายการ'))))))
           ))
       ),
+      (si.quoteNumber || si.billingNumber || si.customerPoRef) && h('div', { className:'flex flex-wrap gap-2 text-xs' },
+        si.quoteNumber && h('span', { className:'px-2 py-1 rounded bg-indigo-50 border border-indigo-200 text-indigo-800' },
+          `📝 จากใบเสนอราคา ${si.quoteNumber}`),
+        si.billingNumber && h('span', { className:'px-2 py-1 rounded bg-amber-50 border border-amber-200 text-amber-900' },
+          `📨 อยู่ในใบวางบิล ${si.billingNumber}`),
+        si.customerPoRef && h('span', { className:'px-2 py-1 rounded bg-gray-100 border text-gray-700' },
+          `PO ลูกค้า: ${si.customerPoRef}`)),
       si.voided && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-sm text-red-800' },
         '🚫 ใบกำกับนี้ถูกยกเลิกแล้ว', si.voidReason && ` — ${si.voidReason}`),
       h('div', { className:'flex gap-2 pt-3 border-t' },
         !si.voided && st !== 'paid' && h(Button, { variant:'success', onClick:onReceive }, '💰 รับชำระ'),
-        h(Button, { variant:'primary', onClick:()=>printSalesInvoice(si, state) }, '🖨️ พิมพ์ใบกำกับ'),
+        h(Button, { variant:'primary', 'data-testid':'si-print', onClick:()=>{
+          printSI(si, state, dispatch, user); } },
+          (Number(si.printCount) || 0) > 0 ? '🖨️ พิมพ์ซ้ำ (สำเนา)' : '🖨️ พิมพ์ใบกำกับ'),
+        (si.lines||[]).some(l => l.lineKind === 'kit') && h(Button, { variant:'secondary',
+          'data-testid':'si-print-packing', onClick:()=>printPackingList(si, state) }, '📦 ใบจัดของ'),
         // 🆕 FIX-7: ยกเลิกใบกำกับ (เฉพาะที่ยังไม่รับชำระ + ยังไม่ถูกยกเลิก)
         !si.voided && st === 'unpaid' && hasPerm(user,'sales','si','void') && h(Button, { variant:'danger', onClick:()=>{
+          // 📨 อยู่ในใบวางบิลที่ยังไม่ยกเลิก → บอกตั้งแต่ตรงนี้ (reducer ก็กันอีกชั้น) ไม่ให้ขึ้น "ยกเลิกแล้ว" ทั้งที่ไม่ได้ยกเลิก
+          const _bnLive = (state.salesBillings||[]).find(b => !b.voided
+            && (b.id === si.billingId || (b.siIds||[]).includes(si.id)));
+          if(_bnLive){
+            alert(`⚠️ ใบกำกับนี้อยู่ในใบวางบิล ${_bnLive.bnNumber} แล้ว\n\nไปที่ ขาย → 📨 ใบวางบิล แล้วยกเลิกใบวางบิลนั้นก่อน จึงจะยกเลิกใบกำกับได้`);
+            return;
+          }
           const reason = prompt('เหตุผลที่ยกเลิกใบกำกับ ' + si.siNumber + ':\n(คืนสต๊อก + กลับรายการบัญชีอัตโนมัติ)');
           if(reason === null) return;
           if(!confirm('ยืนยันยกเลิกใบกำกับ ' + si.siNumber + '?\nระบบจะคืนสต๊อก + กลับ JE (รายได้/VAT/ต้นทุน)')) return;
@@ -68619,6 +70312,7 @@ function SalesVATByPayReport({ state }){
   const dr = useDateRange(31);
   const rows = useMemo(() => {
     const pays = (state.salesPayments||[])
+      .filter(p => !p.voided)          // 🆕 ไม่นับรายการที่กลับรายการแล้ว (VOID_SALES_PAY)
       .filter(p => inDateRange(p.date, dr.startDate, dr.endDate))
       .sort((a,b) => (a.date||'').localeCompare(b.date||''));
     return pays.map(p => {
@@ -68802,11 +70496,20 @@ function autoPostSalesReceive(pay, si, bank, state, dispatch, user){
   const find = (type, hint) => accs.find(a => a.type===type && (a.name||'').includes(hint))
     || accs.find(a => a.type===type);
   const arAcc = find('asset', 'ลูกหนี้');
-  const cashAcc = find('asset', 'เงินฝาก') || find('asset', 'เงินสด');
+  // 🆕 บัญชีเดบิตต้องตรงกับวิธีรับเงินจริง — เงินสดเข้าลิ้นชัก ไม่ใช่บัญชีธนาคาร · เช็คยังไม่ขึ้นเงิน
+  const bankAcc = accs.find(a => a.type==='asset' && (a.name||'').includes('เงินฝาก'));
+  const cashOnly = accs.find(a => a.type==='asset' && (a.name||'').includes('เงินสด'));
+  const chequeAcc = accs.find(a => a.type==='asset' && (a.name||'').includes('เช็ค'));
+  const cashAcc = pay.method === 'cash' ? (cashOnly || bankAcc)
+    : pay.method === 'cheque' ? (chequeAcc || bankAcc || cashOnly)
+    : (bankAcc || cashOnly);
   if(!arAcc || !cashAcc) return;
+  const _methodLabel = { cash:'เงินสด', transfer:'โอนเข้าบัญชี', cheque:'เช็ค', card:'บัตร' }[pay.method] || pay.method;
   const lines = [
     { accountId:cashAcc.id, accountCode:cashAcc.code, accountName:cashAcc.name,
-      debit: pay.amount, credit:0, description: bank ? `${bank.bank||''} ${bank.name}` : pay.method },
+      debit: pay.amount, credit:0,
+      description: (bank ? `${bank.bank||''} ${bank.name}` : _methodLabel)
+        + (pay.method === 'cheque' ? ` (เช็ค ${pay.ref||''} รอเรียกเก็บ)` : '') },
     { accountId:arAcc.id, accountCode:arAcc.code, accountName:arAcc.name,
       debit:0, credit: pay.amount, description:`รับชำระ ${si.siNumber}` },
   ];
@@ -68827,7 +70530,9 @@ function autoPostSalesReceive(pay, si, bank, state, dispatch, user){
 }
 
 // ==================== PRINT ====================
-function printSalesInvoice(si, state){
+// opts: { showChildren?:boolean, copy?:boolean } — copy = พิมพ์ซ้ำ ต้องขึ้น "สำเนา" (กฎหมายห้ามมีต้นฉบับ 2 ใบ)
+function printSalesInvoice(si, state, opts){
+  opts = opts || {};
   const c = siBuyer(state, si);   // 🆕 พิมพ์ใบกำกับด้วยข้อมูล ณ วันออกใบ (แก้/ลบลูกค้าทีหลังไม่กระทบใบเก่า)
   const company = state.company || {};
   // ⭐ ใช้ข้อมูลของสาขาที่ขายเป็นหัวบิล (ไม่ใช่ company HQ ทุกครั้ง)
@@ -68846,18 +70551,40 @@ function printSalesInvoice(si, state){
   };
   const fmt = n => Number(n||0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 
-  const rows = (si.lines||[]).map((l,i) => {
+  // ⚖️ ม.86/4(6): มูลค่าสินค้าบนใบกำกับต้องเป็นยอด "ก่อน VAT" เพื่อให้ Σ บรรทัด = ยอดก่อน VAT แล้วบวก VAT ท้ายใบ
+  //    (ราคาที่คีย์อาจเป็นแบบรวม VAT — lineEx ถูกถอด VAT ไว้ให้แล้วตอนออกใบ)
+  // อัตรา VAT ที่พิมพ์: ทุกบรรทัดเท่ากัน → บอกอัตรานั้น · ผสม → บอกว่าเป็นยอดรวมของหลายอัตรา
+  const _rates = [...new Set((si.lines||[]).filter(l => l.lineKind !== 'kit_child')
+    .map(l => Number(l.vatRate)||0))];
+  const _vatLabel = _rates.length === 1 ? `ภาษีมูลค่าเพิ่ม ${_rates[0]}%` : 'ภาษีมูลค่าเพิ่ม (หลายอัตรา)';
+  const _unitEx = (l) => (Number(l.qty) > 0 && l.lineEx != null)
+    ? Number(l.lineEx) / Number(l.qty)
+    : Number(l.unitPrice || 0);
+  // 🎁 SALES-W2: ยุบแถวลูกของชุดเข้าแถวแม่ — โหมด single = ไม่โชว์ของข้างในเลย (ค่าตั้งต้น)
+  const _kitMode = opts.showChildren ? 'withChildren' : 'single';   // ชัดเจนเสมอ — ห้าม fallback ไปค่าบนบรรทัด (ต้นฉบับ/สำเนาต้องตรงกัน)
+  const _printLines = (global.ERP.groupKitForPrint
+    ? global.ERP.groupKitForPrint(si.lines||[], _kitMode)
+    : (si.lines||[]));
+  const rows = _printLines.map((l,i) => {
     const it = state.items.find(x => x.id === l.itemId);
     // 🆕 ใช้ชื่อ ณ วันออกใบก่อนเสมอ (ใบเก่าพิมพ์ซ้ำต้องเหมือนฉบับที่ออกไป)
     const _nm = l.itemName || it?.name || l.itemId;
     const _cd = l.itemCode || it?.code || '';
+    const _kids = (l._children || []).map(ch => `<tr>
+      <td></td>
+      <td style="padding-left:8mm;font-size:9pt;color:#444">• ${ch.itemName || ''}</td>
+      <td style="text-align:right;font-size:9pt;color:#444">${fmt(ch.qty)} ${ch.unit||''}</td>
+      <td style="text-align:right;color:#888">—</td>
+      <td style="text-align:right;color:#888">—</td>
+    </tr>`).join('');
     return `<tr>
       <td style="text-align:center">${i+1}</td>
-      <td>${_nm}<br/><span style="font-size:8pt;color:#666">${_cd}</span></td>
+      <td>${_nm}<br/><span style="font-size:8pt;color:#666">${_cd}</span>${
+        l._kidNames ? `<br/><span style="font-size:8pt;color:#666">ประกอบด้วย: ${l._kidNames}</span>` : ''}</td>
       <td style="text-align:right">${fmt(l.qty)} ${l.unit||''}</td>
-      <td style="text-align:right">${fmt(l.unitPrice||0)}</td>
-      <td style="text-align:right">${fmt(l.lineTotal||0)}</td>
-    </tr>`;
+      <td style="text-align:right">${fmt(_unitEx(l))}</td>
+      <td style="text-align:right">${fmt(l.lineEx != null ? l.lineEx : (l.lineTotal||0))}</td>
+    </tr>${_kids}`;
   }).join('');
 
   const html = `<!DOCTYPE html>
@@ -68890,7 +70617,7 @@ function printSalesInvoice(si, state){
 </div>
 <div class="sheet">
   <h1>ใบกำกับภาษี / ใบส่งของ</h1>
-  <div class="sub">(Tax Invoice / Delivery Note) — ${si.voided ? '<b style="color:#c00">*** ยกเลิกแล้ว / CANCELLED ***</b>' : 'ต้นฉบับ'}</div>
+  <div class="sub">(Tax Invoice / Delivery Note) — ${si.voided ? '<b style="color:#c00">*** ยกเลิกแล้ว / CANCELLED ***</b>' : (opts.copy ? 'สำเนา (COPY)' : 'ต้นฉบับ')}</div>
   <div class="info">
     <div class="box">
       <div class="label">ผู้ขาย / Seller</div>
@@ -68924,7 +70651,7 @@ function printSalesInvoice(si, state){
   </table>
   <div class="totals">
     <div class="row"><span>ยอดก่อน VAT:</span><span>${fmt(si.subtotal||0)}</span></div>
-    <div class="row"><span>VAT 7%:</span><span>${fmt(si.vat||0)}</span></div>
+    <div class="row"><span>${_vatLabel}</span><span>${fmt(si.vat||0)}</span></div>
     <div class="row" style="border-top:1px solid #000"><span>รวม:</span><span>${fmt(si.total||0)}</span></div>
     ${(si.whtAmount||0) > 0 ? `<div class="row"><span>หัก ณ ที่จ่าย (${si.whtRate||0}%):</span><span>- ${fmt(si.whtAmount||0)}</span></div>` : ''}
     <div class="row final"><span>สุทธิ:</span><span>${fmt(si.netTotal||0)}</span></div>
@@ -68941,7 +70668,75 @@ function printSalesInvoice(si, state){
   w.document.close();
 }
 
-global.ERP.registerModule('sales-full', { main: SalesFullModule });
+// 📦 SALES-W2: ใบจัดของ (Packing List) — ให้ครัว/คนแพ็คหยิบของ · ไม่มีราคา · ไม่ใช่เอกสารภาษี
+// doc: { docLabel?, deliveryDate?, deliveryPlace?, contactName?, contactPhone? } — ใบจัดของใช้ได้ทั้งจากใบกำกับและใบเสนอราคา
+function printPackingList(si, state){
+  const c = siBuyer(state, si);
+  const company = state.company || {};
+  const sellerBranch = (state.branches||[]).find(b => b.id === (si.branch || state.currentBranch));
+  const thDate = (s2) => { if(!s2) return ''; const [y,m,d] = s2.split('-'); return `${parseInt(d)}/${parseInt(m)}/${parseInt(y)+543}`; };
+  const fmt = n => Number(n||0).toLocaleString('en-US', { maximumFractionDigits:2 });
+  const kids = {};
+  (si.lines||[]).forEach(l => { if(l.lineKind === 'kit_child') (kids[l.kitId] = kids[l.kitId] || []).push(l); });
+  let no = 0;
+  const rows = (si.lines||[]).filter(l => l.lineKind !== 'kit_child').map(l => {
+    no++;
+    const head = `<tr>
+      <td style="text-align:center">${no}</td>
+      <td>${l.lineKind === 'kit' ? '🎁 ' : ''}${l.itemName || ''}<br/><span style="font-size:8pt;color:#666">${l.itemCode || ''}</span></td>
+      <td style="text-align:right">${fmt(l.qty)} ${l.unit||''}</td>
+      <td style="text-align:center;width:14mm">☐</td>
+    </tr>`;
+    const ch = (kids[l.kitId] || []).map(x => `<tr>
+      <td></td>
+      <td style="padding-left:8mm;font-size:9.5pt">• ${x.itemName || ''} <span style="color:#666">(${fmt(x.qtyPerKit)} ต่อกล่อง)</span></td>
+      <td style="text-align:right;font-size:9.5pt">รวม ${fmt(x.qty)} ${x.unit||''}</td>
+      <td style="text-align:center">☐</td>
+    </tr>`).join('');
+    return head + ch;
+  }).join('');
+
+  const html = `<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"/>
+<title>ใบจัดของ ${si.siNumber}</title>
+<style>
+  @page { size:A4; margin:10mm; }
+  body { font-family:'Sarabun','TH SarabunNew',sans-serif; font-size:11pt; color:#000; }
+  h1 { font-size:16pt; text-align:center; margin:0 0 1mm; }
+  .sub { text-align:center; font-size:10pt; color:#666; margin-bottom:5mm; }
+  .warn { text-align:center; font-size:9.5pt; color:#a00; border:1px solid #a00; padding:1.5mm; margin-bottom:4mm; }
+  .info { display:grid; grid-template-columns:1fr 1fr; gap:4mm; font-size:10pt; margin-bottom:4mm; }
+  .box { border:1px solid #000; padding:3mm; }
+  table { width:100%; border-collapse:collapse; font-size:10.5pt; }
+  th { background:#eee; border:1px solid #000; padding:2mm; }
+  td { border:1px solid #000; padding:2mm; vertical-align:top; }
+  .sign { display:grid; grid-template-columns:repeat(3,1fr); gap:6mm; margin-top:12mm; font-size:10pt; text-align:center; }
+  .sign div { border-top:1px dotted #000; padding-top:2mm; }
+</style></head><body>
+<h1>ใบจัดของ / Packing List</h1>
+<div class="sub">${si.docLabel || 'อ้างอิงใบกำกับเลขที่'} ${si.siNumber} · วันที่ ${thDate(si.invDate)}${
+  si.deliveryDate ? ' · กำหนดส่ง ' + thDate(si.deliveryDate) : ''}</div>
+<div class="warn">เอกสารนี้ไม่ใช่ใบกำกับภาษี และไม่ใช่เอกสารทางบัญชี</div>
+<div class="info">
+  <div class="box"><b>ผู้ส่ง</b><br/>${company.name || ''}${sellerBranch ? ' — ' + sellerBranch.name : ''}</div>
+  <div class="box"><b>ลูกค้า</b><br/>${(c && c.name) || si.customerName || ''}<br/>${(c && c.address) || ''}
+    ${si.deliveryPlace ? `<br/><b>สถานที่ส่ง:</b> ${si.deliveryPlace}` : ''}
+    ${si.contactName || si.contactPhone ? `<br/><b>ผู้ติดต่อ:</b> ${si.contactName || ''} ${si.contactPhone || ''}` : ''}</div>
+</div>
+<table>
+  <thead><tr><th style="width:10mm">#</th><th>รายการ</th><th style="width:40mm">จำนวน</th><th>ตรวจ</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+<div class="sign"><div>ผู้จัดของ</div><div>ผู้ตรวจ</div><div>ผู้รับของ</div></div>
+<script>window.onload = () => window.print();<\/script>
+</body></html>`;
+  const w = window.open('', '_blank');
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
+global.ERP.registerModule('sales-full', { main: SalesFullModule, printSalesInvoice, printPackingList, printQuote, printBilling });
+// helper ที่โมดูลอื่นต้องใช้ (คลัง: คิวจัดของจากใบเสนอราคาที่ตอบรับแล้ว)
+global.ERP.quoteStatus = quoteStatus;
+global.ERP.billingStatus = billingStatus;
 
 })(window);
 
@@ -71327,6 +73122,13 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
   const [defaultSupplierId, setDefaultSupplierId] = useState(item?.defaultSupplierId || '');
   const [tags, setTags] = useState(item?.tags || []);
   const [active, setActive] = useState(item?.active !== false);
+  // 🎁 SALES-W2: ตั้งค่าชุดสินค้า (Snack Box) — ของข้างในเลือกต่อใบตอนขาย ที่นี่ตั้งแค่ "ของที่ติดมาทุกกล่อง" + กติกา
+  const [kitComponents, setKitComponents] = useState(() => (item?.kit?.components || []).map(c => ({ ...c })));
+  const [kitAllowCustomize, setKitAllowCustomize] = useState(item?.kit?.allowCustomize !== false);
+  const [kitMin, setKitMin] = useState(item?.kit?.minItems || 0);
+  const [kitMax, setKitMax] = useState(item?.kit?.maxItems || 0);
+  const [kitPrintMode, setKitPrintMode] = useState(item?.kit?.printMode || 'single');
+  const [kitSearch, setKitSearch] = useState('');
   // 🥡 trayConfig — สำหรับขั้นบ่ม/อบ (จำนวนที่วางต่อถาด)
   const [unitsPerTray, setUnitsPerTray] = useState(item?.trayConfig?.unitsPerTray || 0);
   const [trayName, setTrayName] = useState(item?.trayConfig?.trayName || 'ถาด');
@@ -71387,6 +73189,16 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
       }
       if(problems.length) return alert('⛓️ หน่วยตั้งไม่ถูกต้อง — แก้ก่อนบันทึก:\n• ' + problems.join('\n• '));
     }
+    // 🎁 ชุดสินค้า: ต้องมีหน่วยที่ติ๊ก "ขาย" (ม.86/4(5) ใบกำกับต้องมีปริมาณ+หน่วย) + เตือนถ้าไม่มีบรรจุภัณฑ์ติดมาด้วย
+    if(type === 'kit'){
+      const saleU = (units||[]).filter(u => u.name && (u.isBase || (u.purposes||[]).includes('sale')));
+      if(!saleU.length) return alert('ชุดสินค้าต้องมีหน่วยขายอย่างน้อย 1 หน่วย (เช่น "กล่อง") — ติ๊กช่อง "ขาย" ในส่วนหน่วยนับ');
+      const hasPack = kitComponents.some(c => {
+        const it2 = (state.items||[]).find(x => x.id === c.itemId);
+        return it2 && it2.type === 'packaging';
+      });
+      if(!hasPack && !confirm('ชุดนี้ยังไม่ได้ใส่กล่อง/บรรจุภัณฑ์เป็นของที่ติดมาทุกกล่อง\n\nสต๊อกและต้นทุนบรรจุภัณฑ์จะไม่ถูกตัดตอนขาย — บันทึกต่อไหม?')) return;
+    }
     let finalCode = code.trim();
     if(!finalCode){
       const t = types.find(tt => tt.id === type);
@@ -71419,6 +73231,16 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
       costPrice: Number(costPrice)||0, salePrice: Number(salePrice)||0,
       shelfLife: Number(shelfLife)||0, shelf: shelf.trim(),
       defaultSupplierId, tags, active, stockByBranch,
+      // 🎁 ชุดสินค้า — เก็บเฉพาะตอน type = 'kit' (ประเภทอื่นเคลียร์ทิ้ง กันข้อมูลค้าง)
+      kit: type === 'kit' ? {
+        components: kitComponents.filter(c => c.itemId && (Number(c.qty)||0) > 0)
+          .map(c => ({ itemId:c.itemId, qty:Number(c.qty)||0, unit:c.unit||'', role:c.role||'content', locked: !!c.locked })),
+        allowCustomize: !!kitAllowCustomize,
+        minItems: Number(kitMin)||0,
+        maxItems: Number(kitMax)||0,
+        printMode: kitPrintMode || 'single',
+        savedRecipes: (_liveItem?.kit?.savedRecipes || item?.kit?.savedRecipes || []),   // อ่านสดจาก state — ฝ่ายขายอาจเพิ่งบันทึกสูตรใหม่
+      } : undefined,
       trayConfig: (Number(unitsPerTray)||0) > 0 ? {
         unitsPerTray: Number(unitsPerTray)||0,
         trayName: trayName.trim() || 'ถาด',
@@ -71607,29 +73429,91 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
         )
       ),
 
+      // 🎁 SALES-W2: ตั้งค่าชุดสินค้า (แสดงเฉพาะ type = kit)
+      type === 'kit' && h('div', { className:'bg-pink-50 border-2 border-pink-200 rounded p-3', 'data-testid':'kit-config' },
+        h('h4', { className:'font-bold text-sm mb-1' }, '🎁 ตั้งค่าชุดสินค้า (Snack Box)'),
+        h('div', { className:'text-xs text-pink-900 mb-2' },
+          'ของข้างในกล่อง "เลือกตอนขาย" ทุกใบ — ที่นี่ตั้งเฉพาะของที่ติดมาทุกกล่อง (เช่น กล่องกระดาษ ริบบิ้น) และกติกาของชุด · '
+          + 'ตั้งราคาต่อกล่องที่ช่อง "ราคาขาย" ด้านล่าง'),
+        h('div', { className:'space-y-1 mb-2' },
+          kitComponents.length === 0
+            ? h('div', { className:'text-xs text-gray-500' }, 'ยังไม่มีของที่ติดมาทุกกล่อง')
+            : kitComponents.map((c, idx) => {
+                const it2 = (state.items||[]).find(x => x.id === c.itemId) || {};
+                return h('div', { key:idx, className:'flex items-center gap-2 bg-white border rounded px-2 py-1' },
+                  h('span', { className:'text-sm flex-1' }, it2.name || c.itemId,
+                    h('span', { className:'ml-1 text-[10px] text-gray-500 font-mono' }, it2.code || '')),
+                  h('input', { type:'number', step:'any', min:'0', value:c.qty,
+                    'data-testid':'kit-qty-' + idx,
+                    onChange:e=>setKitComponents(list => list.map((x,i) => i===idx ? { ...x, qty:Number(e.target.value)||0 } : x)),
+                    className:'w-20 px-2 py-1 border rounded text-sm text-right' }),
+                  h('span', { className:'text-xs text-gray-500 w-14' }, c.unit || it2.issueUnit || ''),
+                  h('label', { className:'flex items-center gap-1 text-xs cursor-pointer' },
+                    h('input', { type:'checkbox', checked: !!c.locked,
+                      onChange:e=>setKitComponents(list => list.map((x,i) => i===idx ? { ...x, locked:e.target.checked } : x)) }),
+                    'ล็อก'),
+                  h('button', { type:'button', className:'text-red-600 text-sm px-1',
+                    onClick:()=>setKitComponents(list => list.filter((_,i) => i!==idx)) }, '✕'));
+              })),
+        h('input', { type:'search', value:kitSearch, onChange:e=>setKitSearch(e.target.value),
+          'data-testid':'kit-add-search', placeholder:'พิมพ์ชื่อของที่ติดมาทุกกล่อง (เช่น กล่อง Snack)',
+          className:'w-full px-3 py-2 border-2 rounded text-sm' }),
+        kitSearch && h('div', { className:'mt-1 bg-white border rounded max-h-32 overflow-y-auto' },
+          (state.items||[]).filter(i2 => i2.id !== item?.id && i2.type !== 'kit' && i2.active !== false
+              && ((i2.name||'').toLowerCase().includes(kitSearch.toLowerCase()) || (i2.code||'').toLowerCase().includes(kitSearch.toLowerCase())))
+            .slice(0, 12)
+            .map(i2 => h('button', { key:i2.id, type:'button',
+              className:'w-full text-left px-3 py-1.5 text-sm hover:bg-pink-50 border-b last:border-0',
+              onClick:()=>{ setKitComponents(list => [...list, { itemId:i2.id, qty:1,
+                  unit:((unitsForPurpose ? unitsForPurpose(i2,'sale') : [])[0]||{}).name || i2.issueUnit || '',
+                  role: i2.type === 'packaging' ? 'packaging' : 'content', locked: i2.type === 'packaging' }]);
+                setKitSearch(''); } },
+              i2.name, h('span', { className:'ml-1 text-[10px] text-gray-500 font-mono' }, i2.code || ''))) ),
+        h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-2 mt-2' },
+          h(Field, { label:'จำนวนชิ้นขั้นต่ำ/กล่อง' },
+            h('input', { type:'number', min:'0', value:kitMin, onChange:e=>setKitMin(e.target.value),
+              'data-testid':'kit-min', className:'w-full px-2 py-1 border-2 rounded text-sm text-right' })),
+          h(Field, { label:'สูงสุด/กล่อง (0 = ไม่จำกัด)' },
+            h('input', { type:'number', min:'0', value:kitMax, onChange:e=>setKitMax(e.target.value),
+              'data-testid':'kit-max', className:'w-full px-2 py-1 border-2 rounded text-sm text-right' })),
+          h(Field, { label:'แสดงบนใบกำกับ' },
+            h('select', { value:kitPrintMode, onChange:e=>setKitPrintMode(e.target.value),
+              'data-testid':'kit-print-mode', className:'w-full px-2 py-1 border-2 rounded text-sm' },
+              h('option', { value:'single' }, 'บรรทัดเดียว (ไม่แสดงของข้างใน)'),
+              h('option', { value:'withNames' }, 'บรรทัดเดียว + ชื่อของข้างในตัวเล็ก'),
+              h('option', { value:'withChildren' }, 'แสดงของข้างในเป็นบรรทัดย่อย (ไม่มีราคา)'))),
+          h(Field, { label:'ลูกค้าเลือกของเองได้' },
+            h('label', { className:'flex items-center gap-2 text-sm px-2 py-1' },
+              h('input', { type:'checkbox', checked:kitAllowCustomize, 'data-testid':'kit-allow-custom',
+                onChange:e=>setKitAllowCustomize(e.target.checked) }), 'เลือกได้ทุกเมนู'))),
+        h('div', { className:'text-xs text-pink-800 mt-1' },
+          '💡 ชื่อชุดควรบอกชนิด/ปริมาณ เช่น "Snack Box S (ขนม 3 ชิ้น + เครื่องดื่ม)" — ชื่อลอย ๆ ที่ราคาต่างกันทุกใบเสี่ยงถูกสรรพากรทัก')),
+
       // 4. Pricing + stock
       h('div', null,
-        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' }, '💰 ราคา + สต๊อก'),
+        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' },
+          type === 'kit' ? '💰 ราคาต่อกล่อง' : '💰 ราคา + สต๊อก'),
         h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3' },
-          h(Field, { label:'ต้นทุน' },
+          // 🎁 ชุดสินค้า: ต้นทุน/ขั้นต่ำ/สูงสุด ไม่มีความหมาย (ต้นทุนมาจากของข้างในตาม FIFO · ไม่มีสต๊อกของตัวเอง)
+          type !== 'kit' && h(Field, { label:'ต้นทุน' },
             h('input', { type:'number', step:'0.01', value:costPrice, onChange:e=>setCostPrice(e.target.value),
               className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
           ),
-          h(Field, { label:'ราคาขาย' },
+          h(Field, { label: type === 'kit' ? 'ราคาขายต่อกล่อง' : 'ราคาขาย' },
             h('input', { type:'number', step:'0.01', value:salePrice, onChange:e=>setSalePrice(e.target.value),
               className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
           ),
-          h(Field, { label:'ขั้นต่ำ' },
+          type !== 'kit' && h(Field, { label:'ขั้นต่ำ' },
             h('input', { type:'number', value:minStock, onChange:e=>setMinStock(e.target.value),
               className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
           ),
-          h(Field, { label:'สูงสุด' },
+          type !== 'kit' && h(Field, { label:'สูงสุด' },
             h('input', { type:'number', value:maxStock, onChange:e=>setMaxStock(e.target.value),
               className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
           ),
         ),
         h('div', { className:'grid grid-cols-2 gap-3' },
-          h(Field, { label:'อายุ (วัน)', hint:'0 = ไม่มี expiry' },
+          type !== 'kit' && h(Field, { label:'อายุ (วัน)', hint:'0 = ไม่มี expiry' },
             h('input', { type:'number', value:shelfLife, onChange:e=>setShelfLife(e.target.value),
               className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
           ),
@@ -81731,6 +83615,65 @@ C.registerGroup({
         if(noPrice.length) detail.push('ไม่มีราคา: ' + noPrice.slice(0,3).map(i => i.name || i.id).join(', '));
         if(noUnit.length)  detail.push('ไม่มีหน่วยขาย: ' + noUnit.slice(0,3).map(i => i.name || i.id).join(', '));
         return { count:ids.size, noPrice:noPrice.length, noUnit:noUnit.length, detail }; } },
+
+    // ================= 🎁 SALES W2–W4: ชุดสินค้า / ใบเสนอราคา / ใบวางบิล =================
+    // ref: mod-settings.js (ItemEditModal kit-config) · mod-sales-full.js (KitBuilderModal, _buildSILines)
+    //      ชุดที่ยังไม่มีของข้างในหรือยังไม่ตั้งราคา = ขายแล้วสต๊อก/ต้นทุนไม่ขยับ (บรรทัดเปล่าบนใบกำกับ)
+    { key:'sales_kit_incomplete', label:'ชุดสินค้า (Snack Box) ที่ยังตั้งค่าไม่ครบ', severity:'block',
+      show: (ctx) => ctx.can('sales-full'),
+      nav: itemsNav,
+      hint: (ctx) => hqPrefix(ctx) + 'ตั้งค่า → 📦 สินค้า → แก้ชุดนั้น → ใส่ "ของที่ติดมาทุกกล่อง" (กล่อง/ริบบิ้น) + ราคาต่อกล่อง'
+        + ' · ชุดที่ยังไม่ตั้งราคา ถ้าถูกขาย จะออกใบกำกับยอด 0 และต้นทุนไม่ถูกตัด',
+      run: (ctx) => { const kits = (ctx.state.items||[]).filter(i => i && i.active !== false && i.type === 'kit');
+        const bad = kits.filter(i => !(_n(i.salePrice) > 0));
+        return { count:bad.length, total:kits.length,
+          detail:bad.slice(0,6).map(i => (i.name || i.id) + ' — ยังไม่ตั้งราคาต่อกล่อง') }; } },
+
+    { key:'sales_kit_no_packaging', label:'ชุดสินค้าที่ยังไม่ได้ใส่กล่อง/บรรจุภัณฑ์', severity:'warn',
+      show: (ctx) => ctx.can('sales-full'),
+      nav: itemsNav,
+      hint: (ctx) => hqPrefix(ctx) + 'ตั้งค่า → 📦 สินค้า → แก้ชุด → เพิ่มกล่อง/บรรจุภัณฑ์เป็น "ของที่ติดมาทุกกล่อง" (ติ๊กล็อก)'
+        + ' · ไม่งั้นสต๊อกกล่องและต้นทุนกล่องจะไม่ถูกตัดตอนขาย',
+      run: (ctx) => { const items = ctx.state.items||[];
+        const kits = items.filter(i => i && i.active !== false && i.type === 'kit');
+        const bad = kits.filter(k => !((k.kit && k.kit.components) || []).some(c => {
+          const it = items.find(x => x.id === c.itemId); return it && it.type === 'packaging'; }));
+        return { count:bad.length, total:kits.length, detail:bad.slice(0,6).map(i => i.name || i.id) }; } },
+
+    // ref: mod-sales-full.js quoteStatus() — สถานะคำนวณสดจาก usedQty/validUntil
+    { key:'sales_qt_expiring', label:'ใบเสนอราคาใกล้หมดอายุ / หมดอายุแล้วแต่ยังไม่ปิด', severity: (ctx, res) => res.expired > 0 ? 'warn' : 'info',
+      show: (ctx) => ctx.can('sales-full'),
+      nav: (ctx) => ({ tab:'sales-full', subs:{ sales:'quotes' } }),
+      hint: () => 'ขาย → 📝 ใบเสนอราคา → ชิป "ใกล้หมดอายุ" / "หมดอายุ" → โทรถามลูกค้า แล้วกด "✓ ตอบรับ" หรือ "📄 ทำใบใหม่จากใบนี้" (ยืนราคาใหม่)',
+      run: (ctx) => { const today = ctx.today;
+        const qs = (ctx.state.salesOrders||[]).filter(q => q && q.docType === 'quote' && !q.voided);
+        // เฉพาะใบที่ยังรอลูกค้าตอบ — ใบที่ตอบรับ/แปลงบางส่วนแล้วไม่ต้องเร่ง (ราคาตกลงกันแล้ว)
+        const openQ = qs.filter(q => { const st = (global.ERP.quoteStatus ? global.ERP.quoteStatus(q, today) : q.status);
+          return ['draft','sent','expired'].includes(st); });
+        const soon = openQ.filter(q => { if(!q.validUntil) return false;
+          const d = (new Date(q.validUntil + 'T00:00:00Z') - new Date(today + 'T00:00:00Z')) / 86400000;
+          return d >= 0 && d <= 3; });
+        const expired = openQ.filter(q => q.validUntil && String(q.validUntil) < today);
+        const l = [...soon, ...expired];
+        return { count:l.length, expired:expired.length,
+          detail:l.slice(0,6).map(q => `${q.qtNumber} · ${(q.customerSnapshot && q.customerSnapshot.name) || ''} · ยืนราคาถึง ${fmtDate(q.validUntil)}`
+            + (String(q.validUntil||'') < today ? ' (หมดอายุแล้ว)' : '')) }; } },
+
+    { key:'sales_bn_overdue', label:'ใบวางบิลเลยกำหนดชำระแล้วยังเก็บเงินไม่ครบ', severity:'warn',
+      show: (ctx) => ctx.can('sales-full'),
+      nav: (ctx) => ({ tab:'sales-full', subs:{ sales:'billing' } }),
+      hint: () => 'ขาย → 📨 ใบวางบิล → ดูใบที่เลยกำหนด แล้วตามเก็บเงิน · ถ้าลูกค้าจ่ายแล้วให้ไปบันทึกที่ 💰 รับชำระ ตามใบกำกับ',
+      run: (ctx) => { const today = ctx.today;
+        // นัดรับเช็ค/รับเงินไว้เมื่อไร ให้ยึดวันนั้นก่อน (ลูกค้าหลายเจ้าจ่ายตามรอบวางบิล ไม่ใช่วันครบกำหนดบนใบ)
+        const bns = (ctx.state.salesBillings||[]).filter(b => {
+          if(!b || b.voided) return false;
+          const due = b.collectDate || b.dueDate;
+          return due && String(due) < today;
+        });
+        const l = bns.filter(b => (global.ERP.billingStatus ? global.ERP.billingStatus(b, ctx.state) : 'open') !== 'paid');
+        return { count:l.length, amount:l.reduce((n,b) => n + (_n(b.netTotal)||0), 0),
+          detail:l.slice(0,6).map(b => `${b.bnNumber} · ${(b.customerSnapshot && b.customerSnapshot.name) || ''}`
+            + ` · ${b.collectDate ? 'นัดรับเงิน ' + fmtDate(b.collectDate) : 'ครบกำหนด ' + fmtDate(b.dueDate)} · ${fmtCur(b.netTotal||0)}`) }; } },
   ],
 });
 })(window);
@@ -82816,7 +84759,7 @@ const HOME_KPIS = {
   // ref: src/mod-sales-full.js:39 pendingSlips — salesPayments ที่ไม่มี slip
   slipMissing: { label:'รับชำระยังไม่แนบสลิป', icon:'📎', tone:'amber', compute(state, user, ctx){
     if(!ctx.can('sales-full') || !arr(state.salesPayments).length) return null;
-    const n = arr(state.salesPayments).filter(p => !p.slip).length;
+    const n = arr(state.salesPayments).filter(p => !p.slip && !p.voided).length;   // 🆕 ข้ามรายการที่กลับรายการแล้ว
     return { value: n, unit:'รายการ', tone: alertTone(n, 'amber'), nav: NAV_('sales-full', { sales:'receive' }) };
   } },
 
