@@ -2958,15 +2958,52 @@ function consumeSupplierCredit(creditNotes, amount){
   return { plan, consumed };
 }
 
+// ════════════════════════════════════════════════════════════════════
+// PARTY SNAPSHOT — ตรึงชื่อ/ที่อยู่คู่ค้าไว้กับเอกสาร
+//   เหตุผล: ทะเบียนคู่ค้าแก้ได้ตลอด (ย้ายที่อยู่ / เปลี่ยนชื่อ / เติมเลขสาขา)
+//   แต่ใบที่ยื่นกรมสรรพากรไปแล้ว (PI · ใบ 50 ทวิ ภ.ง.ด.3/53) ต้องพิมพ์ซ้ำได้เหมือนเดิมทุกตัวอักษร
+//   ใบเก่าที่ยังไม่มี snapshot → fallback อ่านทะเบียนสด (พฤติกรรมเดิม ไม่พัง)
+// ════════════════════════════════════════════════════════════════════
+function partySnapshot(p, fallbackName){
+  const fb = String(fallbackName || '').trim();
+  if(!p) return fb ? { name: fb, taxId:'', branchCode:'', branchType:'', address:'', phone:'' } : null;
+  return {
+    name: p.name || fb,
+    taxId: p.taxId || '',
+    branchCode: p.branchCode == null ? '' : String(p.branchCode),   // string เสมอ — 0 นำหน้าห้ามหาย
+    branchType: p.branchType || '',
+    address: p.address || '',
+    phone: p.phone || '',
+  };
+}
+
+// ผู้ขายบนเอกสารฝั่งซื้อ (PI / PV / RTV / PO / GR) — snapshot ก่อนเสมอ ไม่มีค่อยดูทะเบียนสด
+function piVendor(doc, state){
+  if(!doc) return null;
+  const snap = doc.supplierSnapshot;
+  if(snap && snap.name) return snap;
+  const live = doc.supplierId ? ((state && state.suppliers) || []).find(x => x.id === doc.supplierId) : null;
+  return partySnapshot(live, doc.supplierNameFreeform || doc.supplierName || '');
+}
+
+// ผู้ถูกหักภาษี ณ ที่จ่าย บนใบ 50 ทวิ — payeeSnapshot ของใบที่ยังไม่ยกเลิกก่อน → snapshot ของ PI → ทะเบียนสด
+function whtPayee(inv, state, cert){
+  const c = cert || ((inv && inv.whtCertificates) || []).find(x => x && !x.voided && x.payeeSnapshot && x.payeeSnapshot.name);
+  if(c && c.payeeSnapshot && c.payeeSnapshot.name) return c.payeeSnapshot;
+  return piVendor(inv, state);
+}
+
 // 🆕 WHT2: สร้าง array ของ WHT certificate จาก whtLines
 //   mode 'merge' (default) → group ตาม ภ.ง.ด. form → 1 ใบ 50ทวิ มีหลายแถวเงินได้ (มาตรฐาน)
 //   mode 'split'          → แยกแต่ละ whtLine เป็นคนละใบ 50ทวิ (เลขที่ต่างกัน)
-//   opts: { splitPerLine?:bool, startOffset?:number (กัน cert number ชน inv ที่มีอยู่), state }
+//   opts: { splitPerLine?:bool, startOffset?:number (กัน cert number ชน inv ที่มีอยู่), state, payee }
+//   payee = partySnapshot(ผู้ขาย) — ตรึงชื่อ/ที่อยู่ผู้ถูกหักไว้กับใบ (ใบที่ยื่นไปแล้วต้องนิ่ง)
 function buildWHTCerts(validLines, defaultForm, opts){
   opts = opts || {};
   const splitPerLine = !!opts.splitPerLine;
   const startOffset = Number(opts.startOffset) || 0;
   const state = opts.state || {};
+  const payee = (opts.payee && opts.payee.name) ? opts.payee : null;
   const lines = (validLines || []).filter(l => (Number(l.whtAmount)||0) > 0);
   if(lines.length === 0) return [];
   const grouped = {};
@@ -2987,6 +3024,7 @@ function buildWHTCerts(validLines, defaultForm, opts){
       totalAmount: g.total,
       whtAmount: g.total,                 // legacy alias
       splitCert: splitPerLine,            // flag ไว้ trace
+      payeeSnapshot: payee,               // 🔒 ผู้ถูกหัก ณ วันที่ออกใบ — พิมพ์ซ้ำได้เหมือนเดิม
       lines: g.lines.map(l => ({
         category: l.category, sub5: l.sub5 || null,
         rate: Number(l.rate)||0, base: Number(l.base)||0,
@@ -4287,6 +4325,7 @@ Object.assign(global.ERP, {
   STORAGE_KEY, LEGACY_KEY, APP_VERSION, MODULES, MODULE_FILES, ROLE_SCOPE, LZ,
   PERM_TREE, PERM_ACTION_LABEL, PERM_MODULE_LABEL, ROLE_DEFAULT_PERMS, QUICK_PROFILES,
   WHT_CATEGORIES, WHT_SUB5_TYPES, WHT_SECTION_LABELS, genWHNumber, buildWHTCerts,
+  partySnapshot, piVendor, whtPayee,
   findDupSupInv, consumeSupplierCredit,
   // Helpers
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines, readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
@@ -4555,8 +4594,20 @@ Object.assign(global.ERP, {
       var res = await sb.auth.updateUser({ password: newPassword });
       if(res.error) return { ok:false, error: res.error.message };
       // 🆕 ล้างธง initial password ฝั่ง cloud (Edge action pw_changed — ทำได้เฉพาะบัญชีตัวเอง) · ล้มเหลวไม่ถือว่าเปลี่ยนรหัสไม่สำเร็จ
-      try { if(sb.functions && sb.functions.invoke) await sb.functions.invoke(USERS_FN, { body:{ action:'pw_changed' } }); } catch(_pc){}
-      return { ok:true, user: res.data && res.data.user && res.data.user.email };
+      //   🆕 PWLOOP FIX: เดิมกลืน error ทิ้งเงียบ ๆ → ถ้าล้างธงไม่ผ่าน ผู้ใช้เห็น "สำเร็จ" แต่เข้าครั้งหน้าโดนบังคับซ้ำ
+      //   ตอนนี้คืน flagCleared ให้ผู้เรียกบอกผู้ใช้ได้ + รีเฟรช session ให้ JWT รับ app_metadata ชุดใหม่ทันที
+      var flagCleared = false, flagError = '';
+      try {
+        if(sb.functions && sb.functions.invoke){
+          var pc = await sb.functions.invoke(USERS_FN, { body:{ action:'pw_changed' } });
+          if(pc && pc.error) flagError = String(pc.error.message || pc.error);
+          else if(pc && pc.data && pc.data.ok === false) flagError = String(pc.data.error || 'ล้างธงไม่สำเร็จ');
+          else flagCleared = true;
+        }
+      } catch(_pc){ flagError = String(_pc && _pc.message || _pc); }
+      // token ที่ถืออยู่ยังเป็นชุดก่อนล้างธง — ขอชุดใหม่ ไม่งั้นโหลดหน้าใหม่จะโดนบังคับตั้งรหัสซ้ำ
+      if(flagCleared){ try { await sb.auth.refreshSession(); } catch(_rs){} }
+      return { ok:true, flagCleared: flagCleared, flagError: flagError, user: res.data && res.data.user && res.data.user.email };
     } catch(e){ return { ok:false, error: String(e && e.message || e) }; }
   }
   // 🆕 recovery detection — supabase-js auto-parse hash แล้ว fire PASSWORD_RECOVERY (บาง flow ก่อน UI mount)
@@ -4601,10 +4652,22 @@ Object.assign(global.ERP, {
       if(!u) return null;
       var meta = u.app_metadata || {};
       var internal = isInternalEmail(u.email);
+      // 🆕 PWLOOP FIX: getSession() คืน JWT ที่เก็บไว้ในเครื่อง = ภาพนิ่งของ app_metadata ณ ตอนล็อกอิน
+      //   ผู้ใช้เปลี่ยนรหัสแล้ว pw_changed ล้างธงฝั่ง cloud จริง แต่ token เดิมยังถือ erp_pw_initial:true
+      //   จนกว่าจะรีเฟรช (~1 ชม.) → โหลดหน้าใหม่เจอ "ตั้งรหัสผ่านใหม่ก่อนเริ่มใช้งาน" ซ้ำไม่จบ
+      //   ยิงถามเซิร์ฟเวอร์เฉพาะตอนธงเป็น true (เส้นทางที่บล็อกผู้ใช้อยู่แล้ว) — ปกติไม่เสียรอบเน็ตเพิ่ม
+      var pwInit = meta.erp_pw_initial === true;
+      if(pwInit){
+        try {
+          var fresh = await sb.auth.getUser();
+          var fu = fresh && fresh.data && fresh.data.user;
+          if(fu && fu.app_metadata) pwInit = fu.app_metadata.erp_pw_initial === true;
+        } catch(_pg){}   // ถามไม่ได้ (เน็ต/ฟังก์ชันล่ม) → คงค่าจาก token ไว้ตามเดิม
+      }
       return { email: u.email, id: u.id, internal: internal,
         username: meta.erp_username || (internal ? String(u.email).split('@')[0] : null),
         role: meta.erp_role || null, name: (u.user_metadata && u.user_metadata.name) || meta.erp_name || null,
-        pwInitial: meta.erp_pw_initial === true };   // 🆕 รหัสที่แอดมินตั้ง (initial) — ต้องเปลี่ยนก่อนใช้ (ธงอยู่ฝั่ง cloud แก้จาก state ไม่ได้)
+        pwInitial: pwInit };   // 🆕 รหัสที่แอดมินตั้ง (initial) — ต้องเปลี่ยนก่อนใช้ (ธงอยู่ฝั่ง cloud แก้จาก state ไม่ได้)
     } catch(e){ return null; }
   }
   // ยืนยันตัวตนซ้ำด้วยรหัสเดิม (ก่อนเปลี่ยนรหัสของฉัน — เครื่องที่จำ session ไว้ ใครเดินผ่านก็เปลี่ยนไม่ได้)
@@ -7953,7 +8016,26 @@ function reducer(s, a){
       const newSeq = isDP
         ? { ...s.seq, dp: (s.seq.dp||0) + 1 }
         : { ...s.seq, inv: s.seq.inv + 1 };
-      return { ...s, invoices:[...s.invoices, a.data], seq: newSeq, ..._twExtra };
+      // 🔒 PARTY-SNAP: ตรึงชื่อ/ที่อยู่/เลขภาษี/เลขสาขาของผู้ขายไว้กับใบตั้งแต่วินาทีที่สร้าง
+      //   ทำที่ reducer จุดเดียว → ครอบทุกทางสร้าง PI (PO/รวม GR/มัดจำ/ค่าใช้จ่าย/ทะเบียนรายจ่าย) และทางใหม่ในอนาคต
+      //   แก้ทะเบียนคู่ค้าทีหลังแล้วใบเก่า + ใบ 50 ทวิ ที่ยื่น ภ.ง.ด. ไปแล้วต้องพิมพ์ซ้ำได้เหมือนเดิม
+      let _invData = a.data;
+      try {
+        const _snapFn = global.ERP && global.ERP.partySnapshot;
+        if(typeof _snapFn === 'function'){
+          const _sup = _invData.supplierId ? (s.suppliers||[]).find(x => x.id === _invData.supplierId) : null;
+          const _ps = (_invData.supplierSnapshot && _invData.supplierSnapshot.name)
+            ? _invData.supplierSnapshot
+            : _snapFn(_sup, _invData.supplierNameFreeform || '');
+          if(_ps && _ps.name){
+            const _certs = Array.isArray(_invData.whtCertificates) && _invData.whtCertificates.length
+              ? _invData.whtCertificates.map(c => (c && c.payeeSnapshot && c.payeeSnapshot.name) ? c : { ...c, payeeSnapshot: _ps })
+              : _invData.whtCertificates;
+            _invData = { ..._invData, supplierSnapshot: _ps, ...(_certs ? { whtCertificates: _certs } : {}) };
+          }
+        }
+      } catch(_e){}
+      return { ...s, invoices:[...s.invoices, _invData], seq: newSeq, ..._twExtra };
     }
     case 'UPDATE_INV': {
       // 🆕 A4 (council): แก้ field การเงินของ PI → เก็บ revisionHistory + audit (กันแก้ยอด/ภาษีเงียบ หลังจ่าย)
@@ -8281,7 +8363,13 @@ function reducer(s, a){
       // ใบ 50ทวิ: ใบเก่า void (เก็บ trace) → ออกชุดใหม่จากบรรทัดใหม่ (ใช้ buildWHTCerts ของ core เหมือนตอนตั้งหนี้)
       const build = global.ERP.buildWHTCerts;
       const oldCerts = (inv.whtCertificates||[]).map(c => c.voided ? c : ({ ...c, voided:true, voidedAt: now, voidedBy: d.by, voidReason:'แก้ WHT — ออกใบใหม่' }));
-      const newCerts = (typeof build === 'function' && newWht > 0) ? build(lines.filter(l => l.whtAmount > 0), d.whtForm || inv.whtForm || '53', { splitPerLine: !!d.splitCert, state: s }) : [];
+      // 🔒 PARTY-SNAP: ใบ 50 ทวิ ชุดใหม่ ใช้ผู้ถูกหักที่ตรึงไว้กับ PI (ไม่ใช่ทะเบียนสด ณ วันแก้)
+      const _snapW = global.ERP && global.ERP.partySnapshot;
+      const _payeeW = (inv.supplierSnapshot && inv.supplierSnapshot.name) ? inv.supplierSnapshot
+        : (typeof _snapW === 'function'
+            ? _snapW((s.suppliers||[]).find(x => x.id === inv.supplierId), inv.supplierNameFreeform || '')
+            : null);
+      const newCerts = (typeof build === 'function' && newWht > 0) ? build(lines.filter(l => l.whtAmount > 0), d.whtForm || inv.whtForm || '53', { splitPerLine: !!d.splitCert, state: s, payee: _payeeW }) : [];
       // เลขที่ใบ 50ทวิ บนใบตั้งหนี้ = เลขของใบใหม่ (ใบเก่า void แล้ว — รายงานที่อ่าน inv.whtNumber ต้องไม่โชว์เลขที่ยกเลิก)
       const whtNumber = (newCerts[0] && newCerts[0].certNumber) || (newWht > 0 ? (inv.whtNumber || (typeof global.ERP.genWHNumber === 'function' ? global.ERP.genWHNumber(s) : '')) : '');
       const invNext = { ...inv,
@@ -15058,9 +15146,41 @@ function ChangeMyPasswordModal({ user, dispatch, onClose, forced }){
       if(!ra.ok){ setMsg({ ok:false, text:'❌ ' + (ra.error || 'รหัสเดิมไม่ถูกต้อง') }); return; }
       const r = SB && SB.updatePassword ? await SB.updatePassword(pw) : { ok:false, error:'ไม่พร้อม' };
       if(!r.ok){ setMsg({ ok:false, text:'❌ ' + (r.error || 'ไม่สำเร็จ') }); return; }
-      if(user && (user.seedPassword || user.mustChangePassword)) dispatch({ type:'UPDATE_USER', data:{ ...user, seedPassword:false, mustChangePassword:false, passwordChangedAt: Date.now() } });
-      setMsg({ ok:true, text:'✅ เปลี่ยนรหัสผ่านแล้ว — ใช้รหัสใหม่ครั้งถัดไปที่เข้าระบบ' });
+      // 🆕 PWLOOP FIX (ธงชั้นที่ 2): mustChangePassword อยู่ในข้อมูลบริษัท ซึ่ง push ขึ้น cloud แบบหน่วง 1500ms
+      //   (00-supabase.js scheduleCloudPush) แต่หน้านี้ปิดที่ 1200ms → ปิดแท็บ/โหลดใหม่เร็ว = ธงไม่ทันถูกบันทึก
+      //   เข้าครั้งหน้าโหลด state เก่าจาก cloud แล้วโดนบังคับตั้งรหัสซ้ำ → บังคับบันทึกให้จบก่อนปิด
+      let pushWarn = '';
+      if(user && (user.seedPassword || user.mustChangePassword)){
+        dispatch({ type:'UPDATE_USER', data:{ ...user, seedPassword:false, mustChangePassword:false, passwordChangedAt: Date.now() } });
+        try {
+          await new Promise(res => setTimeout(res, 400));   // รอ reducer + re-render ให้ __getState คืน state ชุดใหม่
+          const st = (typeof global.ERP.__getState === 'function') ? global.ERP.__getState() : null;
+          const uNow = st && (st.users||[]).find(x => x.id === user.id);
+          if(st && SB && SB.pushNow && uNow && uNow.mustChangePassword !== true){
+            const pr = await SB.pushNow(st, user.username);
+            if(!pr || !pr.ok) pushWarn = (pr && (pr.error || (pr.conflict ? 'ชนกับเครื่องอื่น' : ''))) || 'บันทึกขึ้น cloud ไม่สำเร็จ';
+          } else if(!uNow || uNow.mustChangePassword === true){
+            pushWarn = 'ธงในข้อมูลบริษัทยังไม่อัปเดต';
+          }
+        } catch(_pf){ pushWarn = String(_pf && _pf.message || _pf); }
+      }
       setOld(''); setPw(''); setPw2('');
+      if(pushWarn){
+        setMsg({ ok:false, text:'⚠️ เปลี่ยนรหัสผ่านสำเร็จแล้ว (ใช้รหัสใหม่ได้เลย) แต่บันทึกสถานะขึ้น cloud ไม่สำเร็จ — ' + pushWarn
+          + ' · อย่าเพิ่งปิดแท็บ รอสัญญาณ "☁️ บันทึกแล้ว" มุมขวาบน ไม่งั้นครั้งหน้าจะเจอหน้านี้อีก' });
+        setTimeout(onClose, 6000);
+        return;
+      }
+      // 🆕 PWLOOP FIX: ธง "ต้องตั้งรหัสใหม่" อยู่ฝั่ง cloud — ถ้าล้างไม่ผ่านต้องบอกตรง ๆ
+      //   เดิมกลืน error แล้วขึ้น "✅ สำเร็จ" → ผู้ใช้เข้าครั้งหน้าโดนหน้าบังคับซ้ำโดยไม่รู้สาเหตุ
+      if(r.flagCleared === false){
+        setMsg({ ok:false, text:'⚠️ เปลี่ยนรหัสผ่านสำเร็จแล้ว (ใช้รหัสใหม่ได้เลย) แต่ล้างธง "ต้องตั้งรหัสใหม่" ฝั่ง cloud ไม่ผ่าน'
+          + (r.flagError ? ' — ' + r.flagError : '')
+          + ' · ครั้งหน้าที่เข้าระบบอาจเจอหน้านี้อีก แจ้งผู้ดูแลให้ตรวจฟังก์ชัน erp-users' });
+        setTimeout(onClose, 6000);
+        return;
+      }
+      setMsg({ ok:true, text:'✅ เปลี่ยนรหัสผ่านแล้ว — ใช้รหัสใหม่ครั้งถัดไปที่เข้าระบบ' });
       setTimeout(onClose, 1200);
     } finally { setBusy(false); }
   };
@@ -72778,11 +72898,13 @@ function BulkPriceModal({ state, dispatch, onClose }){
 
   // สำรองราคาปัจจุบันเป็น CSV ก่อนแก้ (ระบบไม่มี undo — ต้องมีทางถอย)
   const backupCSV = () => {
-    const rows = (state.items||[]).map(i => ({
-      code: i.code || '', name: i.name || '', type: i.type || '',
-      salePrice: Number(i.salePrice) || 0, costPrice: Number(i.costPrice) || 0,
-    }));
-    if(exportCSV) exportCSV(rows, 'ราคาขาย-สำรอง-' + new Date().toISOString().slice(0,10) + '.csv');
+    // exportCSV(filename, rows) — rows = array ของ array (แถวแรกคือหัวตาราง)
+    const rows = [['รหัส','ชื่อ','ประเภท','ราคาขาย','ต้นทุน']];
+    (state.items||[]).forEach(i => rows.push([
+      i.code || '', i.name || '', i.type || '',
+      Number(i.salePrice) || 0, Number(i.costPrice) || 0,
+    ]));
+    if(exportCSV) exportCSV('ราคาขาย-สำรอง-' + new Date().toISOString().slice(0,10) + '.csv', rows);
     else _toastWarn('สำรองไฟล์ไม่ได้ในเครื่องนี้');
   };
 
@@ -73366,6 +73488,11 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
     tags.forEach(t => { if(!(state.itemTags||[]).includes(t)) dispatch({ type:'ADD_ITEM_TAG', data:t }); });
 
     const data = {
+      // 🔒 ITEM-KEEP: คงฟิลด์ที่ฟอร์มนี้ไม่ได้แก้ไว้ก่อนเสมอ แล้วค่อยทับด้วยค่าจากฟอร์ม
+      //   UPDATE_ITEM แทนที่ทั้ง record (01-state.js:990) → เดิมกดบันทึกครั้งเดียว
+      //   extCode/extGroup (รหัส Ecount ใช้จับคู่ตอนนำเข้ารอบหน้า · มีครบ 863 ตัว) · priceBook (ราคาตามหน่วย/กลุ่มลูกค้า) ·
+      //   minMaxUnit · ธง _migrated/_autoCreated หายเงียบทั้งหมด
+      ...(isEdit ? (_liveItem || item) : {}),
       id: isEdit ? item.id : genId('i'),
       code: finalCode, name: name.trim(), barcode: barcode.trim(),
       type, groupId,
@@ -74779,7 +74906,7 @@ const SUPPLIER_FIELDS = [
     requiredIf: v => !!v.vatRegistered,
     requiredMsg:'จด VAT แล้ว — ต้องใส่เลขผู้เสียภาษี (หรือเอาติ๊ก "จด VAT" ออกถ้าไม่จด)' },
   // 🆕 เลขสาขา (ภาษี) — ต้องมีในรายงานภาษีซื้อ · สำนักงานใหญ่ = 00000
-  { k:'branchCode', label:'เลขสาขา (ภาษี)', mono:true, defaultValue:'00000',
+  { k:'branchCode', label:'เลขสาขา (ภาษี)', mono:true, defaultValue:'00000', newOnlyDefault:true,
     hint:'ใช้ในรายงานภาษีซื้อ · สำนักงานใหญ่ = 00000 · สาขา = เลข 5 หลัก' },
   // 🆕 จด VAT? — กำหนดให้ระบบรู้ว่าต้องคาดหวังใบกำกับ หรือต้องแนบบัตรประชาชนแทน
   { k:'vatRegistered', label:'จด VAT (ออกใบกำกับภาษีได้)', type:'checkbox', defaultValue:true,
@@ -74802,7 +74929,7 @@ const CUSTOMER_FIELDS = [
   // 🔒 บังคับ เลขภาษี + ที่อยู่ (ออกใบกำกับภาษีให้ลูกค้าได้ครบ)
   { k:'taxId',     label:'เลขผู้เสียภาษี *', mono:true, required:true },
   // 🆕 เลขสาขา (ภาษี) — ต้องมีในรายงานภาษีขาย · สำนักงานใหญ่ = 00000
-  { k:'branchCode', label:'เลขสาขา (ภาษี)', mono:true, defaultValue:'00000',
+  { k:'branchCode', label:'เลขสาขา (ภาษี)', mono:true, defaultValue:'00000', newOnlyDefault:true,
     hint:'ใช้ในรายงานภาษีขาย · สำนักงานใหญ่ = 00000 · สาขา = เลข 5 หลัก' },
   { k:'address',   label:'ที่อยู่ *', type:'textarea', required:true },
   { k:'contact',   label:'ผู้ติดต่อ' },
@@ -75047,10 +75174,13 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
     const v = {};
     fs.forEach(f => {
       const cur = (base || {})[f.k];
+      // newOnlyDefault = ค่าเริ่มต้นใช้ได้เฉพาะตอน "เพิ่มใหม่" · รายเก่าที่ไม่มีคีย์ต้องปล่อยว่าง ห้ามเดาให้
+      // (เลขสาขาภาษี: ว่าง = ไม่ระบุ · '00000' = สำนักงานใหญ่ — ปั๊มให้เองแล้วใบกำกับผิด ม.86/4)
+      const hasDef = f.defaultValue !== undefined && !(f.newOnlyDefault && base);
       if(cur !== undefined && cur !== null) v[f.k] = cur;
-      else if(f.type === 'checkbox') v[f.k] = f.defaultValue !== undefined ? f.defaultValue : false;
+      else if(f.type === 'checkbox') v[f.k] = hasDef ? f.defaultValue : false;
       else if(f.type === 'number') v[f.k] = 0;
-      else v[f.k] = f.defaultValue !== undefined ? f.defaultValue : '';
+      else v[f.k] = hasDef ? f.defaultValue : '';
     });
     return v;
   };
