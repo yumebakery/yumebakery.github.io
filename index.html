@@ -232,6 +232,35 @@ function isReversalPair(m){
     || (m.type === 'adjust_in' && /^VOID-/.test(String(m.ref || '')))
     || m.type === 'adjust_reverse';
 }
+// 🆕 SALES-W1: ราคาขาย 1 จุดเดียวของทั้งระบบ (SI · บันทึกขายสาขา · รายได้ POS)
+//   item.priceBook = { byUnit:{ 'ลัง':720 }, byTier:{ wholesale:{ _base:28, 'ลัง':640 } } }  (optional ทั้งก้อน)
+//   ลำดับ: byTier[tier][unit] → byTier[tier]._base → byUnit[unit] → salePrice → 0
+//   ⚠️ ห้าม auto-scale ราคาด้วยตัวคูณหน่วย (ราคาลัง ≠ ราคาชิ้น × 12) — ไม่มีราคาของหน่วยนั้น = คืนราคาหน่วยฐาน + warnUnit
+function resolvePrice(item, unitName, tier){
+  const out = { price: 0, source: 'none', warnUnit: false, warnZero: true };
+  if(!item) return out;
+  const pb = item.priceBook || null;
+  const baseUnit = (getBaseUnit ? getBaseUnit(item) : null) || item.issueUnit || '';
+  const u = unitName || baseUnit;
+  const isBaseUnit = !u || u === baseUnit;
+  const num = (v) => (v === null || v === undefined || v === '' || isNaN(Number(v))) ? null : Number(v);
+  let price = null, source = 'none';
+  const tierMap = (pb && tier && pb.byTier) ? pb.byTier[tier] : null;
+  if(tierMap){
+    if(num(tierMap[u]) !== null){ price = num(tierMap[u]); source = 'tier-unit'; }
+    else if(num(tierMap._base) !== null){ price = num(tierMap._base); source = 'tier-base'; }
+  }
+  if(price === null && pb && pb.byUnit && num(pb.byUnit[u]) !== null){ price = num(pb.byUnit[u]); source = 'unit'; }
+  if(price === null && num(item.salePrice) !== null){ price = num(item.salePrice); source = 'base'; }
+  if(price === null){ price = 0; source = 'none'; }
+  out.price = price;
+  out.source = source;
+  // ได้ราคาหน่วยฐานมาใช้กับหน่วยอื่น = ต้องเตือน (คนขายจะได้รู้ว่ายังไม่ได้ตั้งราคาลัง/แพ็ค)
+  out.warnUnit = !isBaseUnit && (source === 'base' || source === 'tier-base');
+  out.warnZero = !(price > 0);
+  return out;
+}
+
 // 🆕 มีหน่วยที่ "ติ๊ก" purpose นี้จริงไหม (base/purposes ว่าง ไม่นับ) — ใช้แสดง "ยังไม่ตั้งหน่วย" แทน fallback เงียบ
 function hasUnitForPurpose(item, purpose){
   if(purpose === 'sell') purpose = 'sale';
@@ -4211,6 +4240,7 @@ Object.assign(global.ERP, {
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines, readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, getBaseUnit, findItemUnit, toBaseQty, unitsForPurpose, unitsForIssue, hasUnitForPurpose, isReversalPair,
+  resolvePrice,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,
   getStockUnitsRanked, getAllUnitsRanked, formatQtyMulti, multiUnitsToBase,
   resolveDisplayUnit,
@@ -6028,6 +6058,58 @@ function reducer(s, a){
     // ---------- Items ----------
     case 'ADD_ITEM':     return { ...s, items:[...s.items, a.data] };
     case 'UPDATE_ITEM':  return { ...s, items:s.items.map(i => i.id===a.data.id ? a.data : i) };
+    // 🆕 SALES-W1: ตั้งราคา/ประเภทเป็นชุด — แตะได้เฉพาะ salePrice · priceBook · type
+    //   priceBook:null = ลบทิ้ง (กลับไปใช้ salePrice อย่างเดียว) · ไม่ส่ง field ไหนมา = ไม่แตะ field นั้น
+    case 'SET_ITEM_PRICE_FIELDS': {
+      const rows = (a.data && a.data.rows) || [];
+      const by = (a.data && a.data.by) || '';
+      const m = new Map();
+      rows.forEach(r => { if(r && r.id) m.set(r.id, r); });
+      if(!m.size) return s;
+      const now = Date.now();
+      const items = s.items.map(i => {
+        const r = m.get(i.id);
+        if(!r) return i;
+        const next = { ...i, priceUpdatedAt: now, priceUpdatedBy: by };
+        if(r.salePrice !== undefined) next.salePrice = Math.max(0, Number(r.salePrice) || 0);
+        if(r.type) next.type = r.type;
+        if(r.priceBook !== undefined){
+          if(r.priceBook === null) delete next.priceBook;
+          else next.priceBook = { ...r.priceBook, updatedAt: now, updatedBy: by };
+        }
+        return next;
+      });
+      const tc = (a.data && a.data.typeChanges) || [];
+      const audit = { id:'al_' + now.toString(36) + Math.random().toString(36).slice(2,5), ts:now,
+        type:'price_change', subType: tc.length ? 'bulk_price_type_edit' : 'bulk_price_edit', by,
+        typeChanges: tc.length ? tc.slice(0, 500) : undefined,   // เก็บ from→to ไว้ย้อนได้
+        summary:`ตั้งราคา/ประเภทสินค้า ${m.size} รายการ`
+          + (tc.length ? ` (เปลี่ยนประเภท ${tc.length}: ` + tc.slice(0,5).map(x => `${x.code||x.name} ${x.from}→${x.to}`).join(', ')
+              + (tc.length > 5 ? ' …' : '') + ')' : '') };
+      return { ...s, items, auditLog: [...(s.auditLog||[]), audit] };
+    }
+
+    // 🆕 SALES-W1: ตั้งเครดิต (วัน) ให้คู่ค้าเป็นชุด — แตะเฉพาะ credit (1,404 ราย ไล่ทีละรายไม่ไหว)
+    case 'SET_PARTY_CREDIT': {
+      const rows = (a.data && a.data.rows) || [];
+      const by = (a.data && a.data.by) || '';
+      if(!rows.length) return s;
+      const cust = new Map(), sup = new Map();
+      rows.forEach(r => {
+        if(!r || !r.id) return;
+        const v = Math.max(0, Math.round(Number(r.credit) || 0));
+        if(r.kind === 'supplier') sup.set(r.id, v); else cust.set(r.id, v);
+      });
+      const now = Date.now();
+      const next = { ...s };
+      if(cust.size) next.customers = (s.customers||[]).map(c => cust.has(c.id) ? { ...c, credit: cust.get(c.id) } : c);
+      if(sup.size)  next.suppliers = (s.suppliers||[]).map(x => sup.has(x.id) ? { ...x, credit: sup.get(x.id) } : x);
+      next.auditLog = [...(s.auditLog||[]), { id:'al_' + now.toString(36) + Math.random().toString(36).slice(2,5), ts:now,
+        type:'party_change', subType:'bulk_credit', by,
+        summary:`ตั้งเครดิตคู่ค้า ${cust.size + sup.size} ราย` }];
+      return next;
+    }
+
     // 🆕 ตั้งราคาขายหลายรายการรวดเดียว (ตั้งค่า › สินค้า › 💲 ตั้งราคาขาย) — แตะเฉพาะ salePrice
     case 'SET_SALE_PRICES': {
       // a.data.rows = [{ id, salePrice?, type? }] — ใส่ field ไหนมาก็แก้เฉพาะ field นั้น
@@ -9340,7 +9422,8 @@ function reducer(s, a){
       //   สต๊อกคงเหลือ + หน่วยนับ/ตัวแปลงหน่วย ของเดิม "ห้ามถูกทับ" เด็ดขาด
       let items = [...s.items];
       let tags = new Set(s.itemTags||[]);
-      for(const raw of a.data){
+      const incoming = (a.data && a.data.items) || a.data || [];   // รับทั้ง [..] และ { items:[..] } (ImportCSVTab ส่งแบบหลัง)
+      for(const raw of incoming){
         if(!raw) continue;
         const { __new, ...it } = raw;
         ((it.tags || (__new && __new.tags) || [])).forEach(t => tags.add(t));
@@ -36841,7 +36924,8 @@ function POSImportTab({ state, dispatch, user, branchId }){
     matched.forEach(r => {
       const fgCost = _fgUnitCost(r.item);
       if(r.sold  > 0){
-        revenueTotal += r.sold * (Number(r.item.salePrice)||0); cogsSold += r.sold * fgCost;
+        const _pr = (global.ERP.resolvePrice ? global.ERP.resolvePrice(r.item, null, null).price : Number(r.item.salePrice)||0);
+        revenueTotal += r.sold * (Number(_pr)||0); cogsSold += r.sold * fgCost;
         if(!(fgCost > 0)) zeroCost.push(r.item.name);
       }
       if(r.scrap > 0){ cogsScrap += r.scrap * fgCost; scrapUnits += r.scrap; }
@@ -41176,7 +41260,7 @@ const {
   getBranch, hasPerm,
   Modal, Button,
   useDateRange, DateRangeBar, inDateRange, exportCSV,
-  toBaseQty, unitsForPurpose, deductFIFO,
+  toBaseQty, unitsForPurpose, deductFIFO, resolvePrice, getStockAtBranch,
   BEDateInput,
 } = global.ERP;
 
@@ -41392,10 +41476,14 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
   const filtered = showAllItems ? matchedItems : matchedItems.slice(0, 12);
   const moreItems = matchedItems.length - filtered.length;
 
+  const _price = (item, unitName) => (resolvePrice
+    ? resolvePrice(item, unitName, null)
+    : { price:(item && item.salePrice) || 0, warnZero: !(item && item.salePrice > 0) });
+
   const addLine = (item) => {
     const sellUnits = unitsForPurpose(item, 'sale');   // 'sale' = ช่อง "ขาย" ใน item editor (เดิม 'sell' ไม่ตรง)
     const defaultUnit = sellUnits[0]?.name || item.issueUnit;
-    setLines([...lines, { itemId:item.id, qty:1, unit:defaultUnit, unitPrice:item.salePrice||0 }]);
+    setLines([...lines, { itemId:item.id, qty:1, unit:defaultUnit, unitPrice:_price(item, defaultUnit).price }]);
     setSearch('');
   };
   const updateLine = (i, k, v) => setLines(lines.map((l,idx) => idx===i ? { ...l, [k]:v } : l));
@@ -41407,6 +41495,14 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
     if(savingRef.current) return;  // 🆕 FIX-8: กันกดซ้ำ
     const valid = lines.filter(l => l.itemId && l.qty > 0);
     if(valid.length === 0) return alert('ใส่รายการอย่างน้อย 1');
+    // 🆕 W1: เตือนบรรทัดราคา 0 (ยอดขาย/รายได้จะเป็น 0 เงียบ ๆ ถ้าไม่เตือน)
+    const _zeroMode = state.settings?.siRequirePrice || 'warn';
+    const _zero = valid.filter(l => !(Number(l.unitPrice) > 0));
+    if(_zero.length > 0 && _zeroMode !== 'off'){
+      const _names = _zero.map(l => '• ' + ((state.items.find(x => x.id === l.itemId)||{}).name || l.itemId)).join('\n');
+      if(_zeroMode === 'block'){ alert('⛔ มีรายการราคา 0 บาท — ตั้งราคาก่อนบันทึกขาย\n\n' + _names); return; }
+      if(!confirm('⚠️ มี ' + _zero.length + ' รายการราคา 0 บาท (ยอดขายจะไม่ขึ้น):\n\n' + _names + '\n\nบันทึกต่อหรือไม่?')) return;
+    }
     // 🆕 FIX-8: period lock check
     const lock = state.settings?.periodLockUntil;
     if(lock && String(date) < String(lock)){
@@ -41418,7 +41514,7 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
     const short = [];
     for(const l of valid){
       const it = state.items.find(x => x.id === l.itemId);
-      const stock = it?.stockByBranch?.[branch] || 0;
+      const stock = getStockAtBranch ? (getStockAtBranch(it, branch) || 0) : (it?.stockByBranch?.[branch] || 0);
       const baseQty = toBaseQty(it, l.qty, l.unit);
       if(baseQty > stock) short.push(`${it?.name}: มี ${fmtNum(stock)}, ขาย ${fmtNum(baseQty)}`);
     }
@@ -41508,7 +41604,8 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
 
   const searchResults = (!search && !showAllItems) ? null : h('div', { className:'mt-1 bg-white border rounded max-h-40 overflow-y-auto', 'data-sl-items':'1' },
     filtered.length === 0
-      ? h('div', { className:'px-3 py-2 text-xs text-gray-400' }, 'ไม่พบ "' + search + '"')
+      ? h('div', { className:'px-3 py-2 text-xs text-gray-400' },
+          search ? 'ไม่พบ "' + search + '"' : 'ยังไม่มีสินค้าที่ขายได้ในระบบ')
       : filtered.map(it => h('button', {
           key:it.id, type:'button', onClick:()=>addLine(it),
           className:'w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 border-b last:border-0 flex justify-between'
@@ -41517,9 +41614,10 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
           h('div', { className:'font-medium' }, it.name),
           h('div', { className:'text-[10px] text-gray-500 font-mono' }, it.code)),
         h('div', { className:'text-right' },
-          h('div', { className:'text-xs' }, 'คงเหลือ ' + fmtNum(it.stockByBranch?.[branch]||0)),
-          h('div', { className: it.salePrice > 0 ? 'text-xs font-bold text-green-700' : 'text-xs font-medium text-orange-600' },
-            it.salePrice > 0 ? fmtCur(it.salePrice) : '⚠️ ยังไม่ตั้งราคา')))),
+          h('div', { className:'text-xs' }, 'คงเหลือ ' + fmtNum(getStockAtBranch ? getStockAtBranch(it, branch) : 0)),
+          (() => { const pr = _price(it, null); return h('div',
+            { className: pr.warnZero ? 'text-xs font-medium text-orange-600' : 'text-xs font-bold text-green-700' },
+            pr.warnZero ? '⚠️ ยังไม่ตั้งราคา' : fmtCur(pr.price)); })()))),
     moreItems > 0 && h('button', { type:'button', 'data-testid':'sl-show-more', onClick:()=>setShowAllItems(true),
       className:'w-full px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-50 font-medium border-t' },
       '⌄ แสดงทั้งหมดอีก ' + moreItems + ' รายการ'));
@@ -41528,7 +41626,7 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
     const it = state.items.find(x => x.id === l.itemId);
     const units = it ? unitsForPurpose(it, 'sale') : [];
     const baseQty = it ? toBaseQty(it, l.qty, l.unit) : 0;
-    const stock = it?.stockByBranch?.[branch] || 0;
+    const stock = getStockAtBranch ? (getStockAtBranch(it, branch) || 0) : (it?.stockByBranch?.[branch] || 0);
     const short = baseQty > stock;
     return h('tr', { key:i, className: cls(short && 'bg-orange-50') },
       h('td', { className:'px-2 py-1' },
@@ -41576,7 +41674,8 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
   return h(Modal, { isOpen:true, title:'➕ บันทึกการขาย', onClose, size:'lg' },
     h('div', { className:'space-y-3' },
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-800' },
-        '💡 บันทึกการขายแบบเร็ว (ไม่ออกใบกำกับ) — ใช้เมื่อ POS ภายนอกเพื่อตัด stock back-office'),
+        h('div', null, '💡 บันทึกการขายแบบเร็ว (ไม่ออกใบกำกับ) — ใช้เมื่อ POS ภายนอกเพื่อตัด stock back-office'),
+        h('div', { className:'font-medium mt-0.5' }, '📌 ราคาที่ใส่ในหน้านี้ = ราคาป้าย "รวม VAT 7% แล้ว" (ระบบจะถอด VAT ให้เองตอนลงบัญชี)')),
       h('div', { className:'grid grid-cols-2 gap-3' },
         h('label', { className:'text-sm' }, 'วันที่ขาย',
           h(BEDateInput, { value:date, onChange:setDate,
@@ -41593,8 +41692,10 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
           className:'w-full px-3 py-2 border rounded text-sm' }),
         searchResults,
         activeItems.length === 0 && h('div', { className:'mt-1 text-xs text-orange-700 bg-orange-50 border border-orange-200 rounded p-2' },
-          '⚠️ ยังไม่มีสินค้าที่ขายได้เลย — สินค้าที่ย้ายมาจากระบบเก่าถูกตั้งเป็น "วัตถุดิบ" หน้านี้จะไม่แสดง '
-          + 'ให้ไปที่ ตั้งค่า › สินค้า › 💲 ตั้งราคาขาย แล้วเปลี่ยนประเภทเป็น "สินค้าสำเร็จ" ก่อน')),
+          '⚠️ ยังไม่มีสินค้าที่ขายได้เลย — สินค้าที่ย้ายมาจากระบบเก่าถูกตั้งเป็น "วัตถุดิบ" หน้านี้จึงไม่แสดง · '
+          + (hasPerm(user, 'settings', 'items', 'edit')
+              ? 'แก้ที่ ตั้งค่า › สินค้า › 💲 ราคาขาย/ประเภท แล้วเปลี่ยนประเภทเป็น "สินค้าสำเร็จ"'
+              : 'แจ้งสำนักงานใหญ่/ผู้ดูแลระบบให้ตั้งประเภทเป็น "สินค้าสำเร็จ" และใส่ราคาขายก่อน (สาขาแก้เองไม่ได้)'))),
       linesTable,
       h('label', { className:'text-sm block' }, 'หมายเหตุ',
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
@@ -67413,7 +67514,7 @@ const {
   Modal, Button, Combobox,
   useDateRange, usePersistedTab, DateRangeBar, inDateRange, exportCSV,
   usePaged, Pager,
-  toBaseQty, getBaseUnit, unitsForPurpose, deductFIFO,
+  toBaseQty, getBaseUnit, unitsForPurpose, deductFIFO, resolvePrice, getStockAtBranch,
   BEDateInput,
   toast, restoreMinimized, useOpenDoc,
 } = global.ERP;
@@ -67683,12 +67784,14 @@ function NewSIModal({ state, dispatch, user, onClose }){
   const [sourceBranch, setSourceBranch] = useState(state.currentBranch);
   const [invDate, setInvDate] = useState(getToday());
   const [dueDate, setDueDate] = useState(getToday());
-  const [priceMode, setPriceMode] = useState('exclusive');
+  const [priceMode, setPriceMode] = useState(
+    (state.settings?.salePriceVat || 'inclusive') === 'inclusive' ? 'inclusive' : 'exclusive');
   const [lines, setLines] = useState([]);
   const [vatRate, setVatRate] = useState(7);
   const [whtRate, setWhtRate] = useState(0);  // ลูกค้าหักเรา (ถ้ามี)
   const [note, setNote] = useState('');
   const [showAllItems, setShowAllItems] = useState(false);   // 🆕 ปุ่มดูทั้งหมดของตัวเลือกสินค้า
+  const [itemLimit, setItemLimit] = useState(200);           // ทยอยแสดงทีละ 200 (สินค้าจริง 863 ตัว)
   const [itemSearch, setItemSearch] = useState('');
 
   const customer = state.customers.find(c => c.id === customerId);
@@ -67714,20 +67817,44 @@ function NewSIModal({ state, dispatch, user, onClose }){
       || (i.code||'').toLowerCase().includes(q)
       || (i.barcode||'').toLowerCase().includes(q));
   }, [state.items, itemSearch]);
-  const shownItems = showAllItems ? filteredItems : filteredItems.slice(0, 20);
+  const shownItems = filteredItems.slice(0, showAllItems ? itemLimit : 20);
   const moreItems  = filteredItems.length - shownItems.length;
+
+  const _price = (item, unitName) => (resolvePrice
+    ? resolvePrice(item, unitName, customer?.priceTier)
+    : { price: (item && item.salePrice) || 0, warnUnit:false, warnZero: !(item && item.salePrice > 0) });
 
   const addLine = (item) => {
     const sellUnits = unitsForPurpose(item, 'sale') || [{ name:item.issueUnit||'' }];   // 'sale' = ช่อง "ขาย" ใน item editor (เดิม 'sell' ไม่ตรง)
     const defaultUnit = sellUnits[0]?.name || item.issueUnit || '';
+    // 🆕 W1: ราคาผ่าน resolvePrice (หน่วยขาย + กลุ่มราคาลูกค้า) · _priceAuto = ยังไม่มีใครแก้ราคาเอง
+    const pr = _price(item, defaultUnit);
     setLines([...lines, {
       itemId: item.id, qty: 1, unit: defaultUnit,
-      unitPrice: item.salePrice || 0, vatRate,
+      unitPrice: pr.price, vatRate, _priceAuto: true,
     }]);
     setItemSearch('');
   };
 
-  const updateLine = (i, k, v) => setLines(lines.map((l,idx) => idx===i ? { ...l, [k]:v } : l));
+  // เปลี่ยนหน่วย → ราคาตามหน่วยใหม่ (ถ้ายังไม่เคยแก้ราคาเอง) · แก้เองแล้วถามก่อน
+  const changeUnit = (i, unitName) => {
+    const l = lines[i];
+    const it = state.items.find(x => x.id === l.itemId);
+    const pr = _price(it, unitName);
+    if(l._priceAuto !== false && pr.price !== Number(l.unitPrice)){
+      setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName, unitPrice:pr.price } : x));
+      return;
+    }
+    if(pr.price > 0 && pr.price !== Number(l.unitPrice)
+       && confirm(`เปลี่ยนหน่วยเป็น "${unitName}" — ใช้ราคาของหน่วยใหม่ (${fmtCur(pr.price)}) แทนราคาที่แก้ไว้ (${fmtCur(l.unitPrice)}) ไหม?`)){
+      setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName, unitPrice:pr.price, _priceAuto:true } : x));
+      return;
+    }
+    setLines(lines.map((x,idx) => idx===i ? { ...x, unit:unitName } : x));
+  };
+
+  const updateLine = (i, k, v) => setLines(lines.map((l,idx) =>
+    idx===i ? { ...l, [k]:v, ...(k === 'unitPrice' ? { _priceAuto:false } : null) } : l));
   const removeLine = (i) => setLines(lines.filter((_,idx) => idx !== i));
 
   // totals
@@ -67771,7 +67898,7 @@ function NewSIModal({ state, dispatch, user, onClose }){
     const shortages = [];
     for(const l of valid){
       const it = state.items.find(x => x.id === l.itemId);
-      const stockHQ = it?.stockByBranch?.[sourceBranch] || 0;
+      const stockHQ = getStockAtBranch ? (getStockAtBranch(it, sourceBranch) || 0) : (it?.stockByBranch?.[sourceBranch] || 0);
       const baseQty = toBaseQty(it, l.qty, l.unit);
       if(baseQty > stockHQ){
         shortages.push(`${it?.name}: มี ${fmtNum(stockHQ)}, จะขาย ${fmtNum(baseQty)}`);
@@ -67779,6 +67906,24 @@ function NewSIModal({ state, dispatch, user, onClose }){
     }
     if(shortages.length > 0){
       if(!confirm('⚠️ สต๊อกไม่พอ (จะติดลบ):\n\n' + shortages.join('\n') + '\n\nดำเนินการต่อ?')) return;
+    }
+
+    // 🆕 W1: เตือนบรรทัดราคา 0 (settings.siRequirePrice: 'warn' ค่าตั้งต้น · 'off' ปิด · 'block' ห้ามออกใบ)
+    const _zeroMode = state.settings?.siRequirePrice || 'warn';
+    const _zeroLines = valid.filter(l => !(Number(l.unitPrice) > 0));
+    if(_zeroLines.length > 0 && _zeroMode !== 'off'){
+      const _names = _zeroLines.map(l => '• ' + ((state.items.find(x => x.id === l.itemId)||{}).name || l.itemId)).join('\n');
+      if(_zeroMode === 'block'){
+        alert(`⛔ มี ${_zeroLines.length} รายการราคา 0 บาท — ตั้งราคาก่อนออกใบ\n\n${_names}\n\nตั้งค่า → สินค้า → 💲 ตั้งราคาขาย`);
+        savingRef.current = false;
+        return;
+      }
+      if(!confirm(`⚠️ มี ${_zeroLines.length} รายการราคา 0 บาท:\n\n${_names}\n\nออกใบกำกับต่อหรือไม่? (ของแถม/ตัวอย่าง = ปกติ)`)){
+        savingRef.current = false;
+        return;
+      }
+      dispatch({ type:'ADD_AUDIT_LOG', data:{ type:'price_override', subType:'zero_price_sale', by:user.username,
+        refType:'sale', summary:'ออกใบกำกับที่มีราคา 0: ' + _zeroLines.map(l => (state.items.find(x => x.id === l.itemId)||{}).name || l.itemId).join(', ') } });
     }
 
     // 🆕 QC soft-warn: เตือนถ้าสินค้าที่ตั้งค่าว่าต้อง QC มี FG ล็อตยังไม่ผ่าน QC (ไม่บล็อก — soft-warn)
@@ -67936,7 +68081,7 @@ function NewSIModal({ state, dispatch, user, onClose }){
       h('div', null,
         h('div', { className:'flex items-center justify-between mb-1' },
           h('label', { className:'block text-xs font-medium' }, '➕ เพิ่มสินค้า'),
-          h('button', { type:'button', 'data-testid':'si-show-all', onClick:()=>setShowAllItems(v=>!v),
+          h('button', { type:'button', 'data-testid':'si-show-all', onClick:()=>{ setItemLimit(200); setShowAllItems(v=>!v); },
             className:'text-xs px-2 py-0.5 rounded bg-blue-100 hover:bg-blue-200 text-blue-800 font-medium' },
             showAllItems ? '✕ ย่อรายการ' : `📋 ดูทั้งหมด (${filteredItems.length})`)
         ),
@@ -67945,18 +68090,24 @@ function NewSIModal({ state, dispatch, user, onClose }){
           className:'w-full px-3 py-2 border-2 rounded text-sm' }),
         (itemSearch || showAllItems) && h('div', { className:'mt-1 bg-white border rounded max-h-40 overflow-y-auto', 'data-si-items':'1' },
           filteredItems.length === 0
-            ? h('div', { className:'px-3 py-2 text-xs text-gray-400' }, `ไม่พบ "${itemSearch}"`)
+            ? h('div', { className:'px-3 py-2 text-xs text-gray-400' },
+                itemSearch ? `ไม่พบ "${itemSearch}"` : 'ยังไม่มีสินค้าที่ขายได้ — ตั้งค่า › สินค้า แล้วเพิ่ม/เปิดใช้งานสินค้าก่อน')
             : shownItems.map(it => h('button', { key:it.id, type:'button', onClick:()=>addLine(it),
                 className:'w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 border-b last:border-0' },
-                h('div', { className:'font-medium' }, it.name),
+                h('div', { className:'font-medium' }, it.name,
+                  (it.type === 'material' || it.type === 'packaging') && h('span',
+                    { className:'ml-1 text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-500' },
+                    it.type === 'material' ? 'วัตถุดิบ' : 'บรรจุภัณฑ์')),
                 h('div', { className:'text-xs text-gray-500 flex justify-between' },
                   h('span', null, it.code),
-                  h('span', null, `${fmtNum(it.stockByBranch?.[sourceBranch]||0)} · ` +
-                    (it.salePrice > 0 ? fmtCur(it.salePrice) : '⚠️ ยังไม่ตั้งราคา'))
+                  (() => { const pr = _price(it, null);
+                    return h('span', null, `${fmtNum(getStockAtBranch ? getStockAtBranch(it, sourceBranch) : 0)} · ` +
+                      (pr.warnZero ? '⚠️ ยังไม่ตั้งราคา' : fmtCur(pr.price))); })()
                 ))),
-          moreItems > 0 && h('button', { type:'button', 'data-testid':'si-show-more', onClick:()=>setShowAllItems(true),
+          moreItems > 0 && h('button', { type:'button', 'data-testid':'si-show-more',
+            onClick:()=>{ setShowAllItems(true); setItemLimit(n => n + 200); },
             className:'w-full px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-50 font-medium border-t' },
-            `⌄ แสดงทั้งหมดอีก ${moreItems} รายการ`)
+            moreItems > 200 ? `⌄ แสดงเพิ่มอีก 200 (เหลือ ${moreItems} รายการ)` : `⌄ แสดงทั้งหมดอีก ${moreItems} รายการ`)
         )
       ),
 
@@ -67987,14 +68138,17 @@ function NewSIModal({ state, dispatch, user, onClose }){
                     onChange:e=>updateLine(i,'qty',Number(e.target.value)||0),
                     className:'w-full px-1 py-1 border rounded text-xs text-right' })),
                 h('td', { className:'px-2 py-1' },
-                  h('select', { value:l.unit||'', onChange:e=>updateLine(i,'unit',e.target.value),
+                  h('select', { value:l.unit||'', onChange:e=>changeUnit(i, e.target.value),
                     className:'w-full px-1 py-1 border rounded text-xs' },
                     (units.length>0 ? units : [{ name:it?.issueUnit||'' }]).map(u =>
                       h('option', { key:u.name, value:u.name }, u.name)))),
                 h('td', { className:'px-2 py-1' },
                   h('input', { type:'number', value:l.unitPrice, step:'0.01',
                     onChange:e=>updateLine(i,'unitPrice',Number(e.target.value)||0),
-                    className:'w-full px-1 py-1 border rounded text-xs text-right font-mono' })),
+                    onWheel:e=>e.currentTarget.blur(),
+                    title: !(Number(l.unitPrice) > 0) ? 'ยังไม่ได้ตั้งราคาขายของสินค้านี้' : '',
+                    className: cls('w-full px-1 py-1 border rounded text-xs text-right font-mono',
+                      !(Number(l.unitPrice) > 0) && 'border-orange-400 bg-orange-50') })),
                 h('td', { className:'px-2 py-1' },
                   h('select', { value:l.vatRate, onChange:e=>updateLine(i,'vatRate',Number(e.target.value)),
                     className:'w-full px-1 py-1 border rounded text-xs' },
@@ -68804,6 +68958,7 @@ const {
   PERM_TREE, PERM_ACTION_LABEL, ROLE_DEFAULT_PERMS, QUICK_PROFILES, ROLE_SCOPE,
   getUserPerms, isSuperUser, hasPerm, expandPaths, pathsToFlatMap,
   ROLE_LABEL, fmtCur, fmtNum, resolveToBase, getBaseUnit, hasUnitForPurpose, getStockAtBranch,
+  unitsForPurpose, resolvePrice, exportCSV,
   nextPartyCode,
   POSITION_OPTIONS, APPROVAL_ACTIONS,
   getBranchLines, getBranchLocations, findLine,
@@ -68923,6 +69078,32 @@ function SystemPolicyToggles({ state, dispatch }){
         h('div', null,
           h('div', { className:'font-bold text-indigo-900' }, '🏠 หน้าแรกแบบใหม่ (ทำเลย · ตัวเลขสำคัญ · รอฉันตัดสินใจ · สาขา×วันนี้)'),
           h('div', { className:'text-xs text-indigo-800 mt-0.5' }, 'ปิด = กลับไปใช้หน้าแรกแบบเดิมทุกเครื่องทันที (ใช้เมื่อหน้าใหม่มีปัญหา) · เมนูซ้ายสว่าง/เข้ม สลับได้ต่อเครื่องที่เมนูผู้ใช้มุมขวาบน')))),
+
+    // 💲 ฐานราคาขายที่กรอกในสินค้า — รวม VAT (ราคาป้ายหน้าร้าน) หรือยังไม่รวม (settings.salePriceVat)
+    //   คุมค่าตั้งต้นของช่อง "ราคา" ตอนออกใบกำกับ → กันบวก VAT ซ้ำบนราคาป้าย (หน้าบันทึกขายสาขาถือว่ารวม VAT เสมอ)
+    h('div', { className:'bg-teal-50 border-2 border-teal-300 rounded p-4', 'data-testid':'policy-sale-price-vat' },
+      h('div', { className:'font-bold text-teal-900 mb-1' }, '💲 ราคาขายที่กรอกในข้อมูลสินค้า รวม VAT แล้วหรือยัง'),
+      h('div', { className:'text-xs text-teal-800 mb-2' },
+        'เลือกให้ตรงกับวิธีคิดราคาของร้าน — ใช้เป็นค่าตั้งต้นของช่อง "ราคา" ตอนออกใบกำกับ (แก้รายใบได้) · '
+        + 'ถ้าตั้งราคาป้ายหน้าร้าน (เช่น 85 บาทรวม VAT แล้ว) ให้เลือก "รวม VAT แล้ว" ไม่งั้นระบบจะบวก 7% ทับเป็น 90.95'),
+      h('select', { value: st.salePriceVat || 'inclusive', 'data-testid':'select-sale-price-vat',
+        onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ salePriceVat: e.target.value } }),
+        className:'px-3 py-2 border-2 rounded text-sm' },
+        h('option', { value:'inclusive' }, 'ราคาป้าย = รวม VAT แล้ว (ค่าตั้งต้น)'),
+        h('option', { value:'exclusive' }, 'ราคายังไม่รวม VAT (ระบบบวก 7% ตอนออกบิล)'))),
+
+    // 🧾 เตือนเมื่อออกบิลที่มีราคา 0 (settings.siRequirePrice) — warn (ค่าตั้งต้น) / off / block
+    h('div', { className:'bg-orange-50 border-2 border-orange-300 rounded p-4', 'data-testid':'policy-si-require-price' },
+      h('div', { className:'font-bold text-orange-900 mb-1' }, '🧾 บิลขายที่มีรายการราคา 0 บาท'),
+      h('div', { className:'text-xs text-orange-800 mb-2' },
+        'ของแถม/ตัวอย่างราคา 0 มีจริง จึงตั้งต้นเป็น "เตือนก่อน" (กดยืนยันผ่านได้ + บันทึก audit) · '
+        + 'เลือก "ห้ามออกบิล" ถ้าต้องการบังคับให้ตั้งราคาก่อนเสมอ'),
+      h('select', { value: st.siRequirePrice || 'warn', 'data-testid':'select-si-require-price',
+        onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ siRequirePrice: e.target.value } }),
+        className:'px-3 py-2 border-2 rounded text-sm' },
+        h('option', { value:'warn' }, 'เตือนก่อน แล้วให้ผ่านได้ (ค่าตั้งต้น)'),
+        h('option', { value:'off' }, 'ไม่ต้องเตือน'),
+        h('option', { value:'block' }, 'ห้ามออกบิลถ้ามีราคา 0'))),
 
     // 🏠 เป้ายอดขายรายวัน (ทุกสาขารวม) — แถบเป้าบนการ์ด "ขายวันนี้" ของหน้าแรกใหม่ (settings.salesTargetDaily · 0/ว่าง = ไม่แสดงแถบ)
     h('div', { className:'bg-blue-50 border-2 border-blue-300 rounded p-4', 'data-testid':'policy-sales-target' },
@@ -70461,7 +70642,7 @@ function ItemsSettings({ state, dispatch }){
         canImport && h(Button, { variant:'warning', size:'sm', onClick:()=>setShowEcount(true) }, '📦 นำเข้าจากไฟล์'),
         canImport && h(Button, { variant:'secondary', size:'sm', onClick:()=>setShowImport(true) }, '📥 นำเข้า CSV'),
         canEdit && h(Button, { variant:'secondary', size:'sm', 'data-testid':'items-bulk-price',
-          onClick:()=>setShowPrices(true) }, '💲 ตั้งราคาขาย'),
+          onClick:()=>setShowPrices(true) }, '💲 ราคาขาย/ประเภท'),
         canCreate && h(Button, { variant:'primary', size:'sm', onClick:()=>{ setEdit(null); setShowModal(true); } }, '+ เพิ่มสินค้า')
       )
     ),
@@ -70563,11 +70744,19 @@ function BulkPriceModal({ state, dispatch, onClose }){
   const [draft, setDraft] = useState({});          // { [itemId]: 'ข้อความในช่อง' }
   const [tDraft, setTDraft] = useState({});        // { [itemId]: ประเภทใหม่ }
   const [bulkType, setBulkType] = useState('');    // ตั้งประเภทให้แถวที่แสดงทั้งหมด
+  const [tab, setTab] = useState('base');          // base = ราคาขาย+ประเภท · book = ราคาตามหน่วย/กลุ่มลูกค้า
+  const [markup, setMarkup] = useState('');        // ตั้งราคาจากต้นทุน × มาร์กอัป %
+  const [showOff, setShowOff] = useState(false);   // รวมสินค้าที่ปิดใช้งาน
+  const [onlyStock, setOnlyStock] = useState(false); // เฉพาะที่มีสต๊อก (เริ่มจากตัวที่ขายจริงก่อน)
+
+  // สต๊อกรวมทุกสาขา — ต้องผ่าน getStockAtBranch (สาขา multi-warehouse เก็บเป็น { _total, byLoc })
+  const totalStockOf = (i) => Object.keys(i.stockByBranch||{}).reduce((n,b) => n + (getStockAtBranch(i, b) || 0), 0);
 
   const list = useMemo(() => {
-    let l = (state.items||[]).filter(i => i.active !== false);
+    let l = (state.items||[]).filter(i => showOff || i.active !== false);
     if(typeFilter !== 'all') l = l.filter(i => i.type === typeFilter);
     if(onlyBlank) l = l.filter(i => !(Number(i.salePrice) > 0));
+    if(onlyStock) l = l.filter(i => totalStockOf(i) > 0);
     if(search){
       const q = search.toLowerCase();
       l = l.filter(i => (i.name||'').toLowerCase().includes(q)
@@ -70575,10 +70764,12 @@ function BulkPriceModal({ state, dispatch, onClose }){
         || (i.barcode||'').toLowerCase().includes(q));
     }
     return l.slice().sort((a,b) => (a.code||'').localeCompare(b.code||''));
-  }, [state.items, typeFilter, search, onlyBlank]);
+  }, [state.items, typeFilter, search, onlyBlank, onlyStock, showOff]);
 
   const pg = usePaged(list, 50);
-  const blankCount = (state.items||[]).filter(i => i.active !== false && !(Number(i.salePrice) > 0)).length;
+  // นับ "ยังไม่ตั้งราคา" ตามตัวกรองที่เปิดอยู่ (ไม่ใช่ทั้งคลัง) — ไม่งั้นขึ้น (863) ตลอดจนดูเหมือนงานไม่ลด
+  const blankCount = list.filter(i => !(Number(i.salePrice) > 0)).length;
+  const blankAll = (state.items||[]).filter(i => i.active !== false && !(Number(i.salePrice) > 0)).length;
 
   // แถวที่ "แก้แล้วจริง" (ค่าในช่อง ≠ ราคาเดิม)
   const changed = useMemo(() => {
@@ -70600,7 +70791,12 @@ function BulkPriceModal({ state, dispatch, onClose }){
 
   const save = () => {
     if(!changed.length) return;
-    dispatch({ type:'SET_SALE_PRICES', data:{ rows: changed.map(c => {
+    const _items = state.items || [];
+    const typeChanges = changed.filter(c => c.type).map(c => {
+      const prev = _items.find(x => x.id === c.id) || {};
+      return { id:c.id, code:prev.code || '', name:prev.name || '', from: prev.type || '', to: c.type };
+    });
+    dispatch({ type:'SET_ITEM_PRICE_FIELDS', data:{ by: state.currentUser?.username || '', typeChanges, rows: changed.map(c => {
       const r = { id:c.id };
       if(c.salePrice !== undefined) r.salePrice = c.salePrice;
       if(c.type) r.type = c.type;
@@ -70609,27 +70805,85 @@ function BulkPriceModal({ state, dispatch, onClose }){
     _toastOk(`บันทึก ${changed.length} รายการแล้ว`
       + (typeChanged ? ` (เปลี่ยนประเภท ${typeChanged})` : ''));
     setDraft({}); setTDraft({});
+    // ไม่ปิดหน้าต่าง — งานจริงคือไล่ทีละหน้า (863 รายการ = 18 หน้า) ปิดทุกครั้งตัวกรองหายหมด
+  };
+
+  // ปิดหน้าต่างทั้งที่ยังไม่บันทึก = งานที่คีย์ไว้หายเงียบ → ถามก่อน
+  const guardClose = () => {
+    if(changed.length && !confirm(`มี ${changed.length} รายการที่แก้ไว้แต่ยังไม่บันทึก — ปิดทิ้งเลยไหม?`)) return;
     onClose();
   };
 
+  // เติมราคาจากต้นทุน × มาร์กอัป % ให้แถวที่แสดงอยู่ (เติมในช่อง ยังไม่บันทึก — เห็นตัวเลขก่อนเสมอ)
+  const applyMarkup = () => {
+    const m = Number(markup);
+    if(!(m >= 0) || !list.length) return;
+    const next = { ...draft };
+    let n = 0;
+    list.forEach(i => {
+      const cost = Number(i.costPrice) || 0;
+      if(!(cost > 0)) return;                       // ไม่มีต้นทุน = เติมไม่ได้ (ข้อมูลที่ย้ายมา costPrice = 0)
+      next[i.id] = String(Math.round(cost * (1 + m/100)));
+      n++;
+    });
+    setDraft(next);
+    if(!n) _toastWarn('แถวที่แสดงอยู่ยังไม่มีต้นทุน — เติมจากต้นทุนไม่ได้');
+    else _toastOk(`เติมราคา ${n} รายการ (ต้นทุน + ${m}%) — ตรวจแล้วกดบันทึก`);
+  };
+
+  // สำรองราคาปัจจุบันเป็น CSV ก่อนแก้ (ระบบไม่มี undo — ต้องมีทางถอย)
+  const backupCSV = () => {
+    const rows = (state.items||[]).map(i => ({
+      code: i.code || '', name: i.name || '', type: i.type || '',
+      salePrice: Number(i.salePrice) || 0, costPrice: Number(i.costPrice) || 0,
+    }));
+    if(exportCSV) exportCSV(rows, 'ราคาขาย-สำรอง-' + new Date().toISOString().slice(0,10) + '.csv');
+    else _toastWarn('สำรองไฟล์ไม่ได้ในเครื่องนี้');
+  };
+
   // ตั้งประเภทให้ "ทุกแถวที่กรองอยู่ตอนนี้" ทีเดียว (ยืนยันก่อน — กระทบหลายรายการ)
+  const bulkTypeBlocked = typeFilter === 'all' && !search && !onlyBlank && !onlyStock;  // ไม่กรองอะไรเลย = กดทีเดียวโดนทั้งคลัง
   const applyBulkType = () => {
-    if(!bulkType || !list.length) return;
+    if(!bulkType || !list.length || bulkTypeBlocked) return;
     const tn = (types.find(t => t.id === bulkType)||{}).name || bulkType;
-    if(!confirm(`เปลี่ยนประเภทของสินค้า ${list.length} รายการที่แสดงอยู่ → "${tn}" ?\n\n(ยังไม่บันทึกจนกว่าจะกดปุ่มบันทึกด้านล่าง)`)) return;
+    const changing = list.filter(i => i.type !== bulkType);
+    if(!changing.length){ _toastInfo('รายการที่แสดงอยู่เป็นประเภทนี้อยู่แล้ว'); return; }
+    // ของที่ถูกใช้ในสูตร BOM — ถ้าเปลี่ยนเป็นสินค้าสำเร็จ หน้าเบิกวัตถุดิบ/สูตรจะหาไม่เจอ
+    const inBom = changing.filter(i => (state.boms||[]).some(b =>
+      (b.materials||[]).some(m => m.itemId === i.id))).length;
+    const sample = changing.slice(0, 8).map(i => `• ${i.code || ''} ${i.name}`).join('\n');
+    const warn = (bulkType !== 'material' && bulkType !== 'packaging')
+      ? '\n\n⚠️ ของที่ไม่ใช่วัตถุดิบ/บรรจุภัณฑ์ จะหายจากหน้าเบิกวัตถุดิบ สูตร BOM และสถานีชั่ง'
+        + (inBom ? `\n⛔ ในชุดนี้มี ${inBom} รายการที่ถูกใช้ในสูตร BOM อยู่` : '')
+      : '';
+    if(!confirm(`เปลี่ยนประเภท ${changing.length} รายการ → "${tn}"\n\n${sample}${changing.length > 8 ? `\n… และอีก ${changing.length - 8} รายการ` : ''}${warn}\n\n(ยังไม่บันทึกจนกว่าจะกดปุ่มบันทึกด้านล่าง)`)) return;
     const next = { ...tDraft };
-    list.forEach(i => { next[i.id] = bulkType; });
+    changing.forEach(i => { next[i.id] = bulkType; });
     setTDraft(next);
   };
 
   const valOf = (i) => (i.id in draft) ? draft[i.id] : (Number(i.salePrice) > 0 ? String(i.salePrice) : '');
 
-  return h(Modal, { isOpen:true, title:'💲 ตั้งราคาขาย + ประเภทสินค้า (หลายรายการ)', onClose, size:'xl' },
+  return h(Modal, { isOpen:true, title:'💲 ราคาขาย / ประเภทสินค้า (หลายรายการ)', onClose:guardClose, size:'xl' },
     h('div', { className:'space-y-3' },
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-900' },
-        'ราคาที่ตั้งไว้ตรงนี้ = ราคาที่ "เด้งขึ้นมาเอง" ตอนพิมพ์ชื่อสินค้าในบิลขาย (แก้ทีหลังในบิลได้) · หน้านี้แตะเฉพาะราคาขาย ไม่ยุ่งกับต้นทุน/สต๊อก'),
+        h('div', null, 'ราคาที่ตั้งไว้ตรงนี้ = ราคาที่ "เด้งขึ้นมาเอง" ตอนพิมพ์ชื่อสินค้าในบิลขาย (แก้ทีหลังในบิลได้)'),
+        h('div', null, 'หน้านี้แก้ได้เฉพาะ "ราคาขาย + ประเภทสินค้า" — ไม่ยุ่งกับต้นทุน สต๊อก หรือหน่วยนับ'),
+        h('div', { className:'font-medium mt-0.5' },
+          (state.settings?.salePriceVat || 'inclusive') === 'inclusive'
+            ? '💡 ราคาที่กรอก = ราคาป้าย "รวม VAT แล้ว" (ตั้งค่าได้ที่ ตั้งค่า › นโยบายระบบ)'
+            : '💡 ราคาที่กรอก = ราคา "ยังไม่รวม VAT" (ตั้งค่าได้ที่ ตั้งค่า › นโยบายระบบ)')),
 
-      h('div', { className:'flex flex-wrap items-center gap-2' },
+      h('div', { className:'flex gap-1 border-b' },
+        [['base','💲 ราคาขาย + ประเภท'], ['book','📐 ราคาตามหน่วย / กลุ่มลูกค้า']].map(([k, lb]) =>
+          h('button', { key:k, type:'button', 'data-testid':'price-tab-' + k, onClick:()=>setTab(k),
+            className: cls('px-3 py-1.5 text-sm font-medium border-b-2 -mb-px',
+              tab === k ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700') }, lb))
+      ),
+
+      tab === 'book' && h(ItemPriceBookPanel, { state, dispatch, onClose }),
+
+      tab === 'base' && h('div', { className:'flex flex-wrap items-center gap-2' },
         h('select', { value:typeFilter, onChange:e=>setTypeFilter(e.target.value),
           className:'px-2 py-1 border rounded text-xs' },
           h('option', { value:'all' }, 'ทุกประเภท'),
@@ -70641,40 +70895,65 @@ function BulkPriceModal({ state, dispatch, onClose }){
         h('label', { className:'flex items-center gap-1 text-xs cursor-pointer' },
           h('input', { type:'checkbox', checked:onlyBlank, 'data-testid':'bulk-price-blank',
             onChange:e=>setOnlyBlank(e.target.checked) }),
-          `เฉพาะที่ยังไม่ตั้งราคา (${blankCount})`),
+          `เฉพาะที่ยังไม่ตั้งราคา (${blankCount}${blankCount !== blankAll ? ' / ' + blankAll + ' ทั้งหมด' : ''})`),
+        h('label', { className:'flex items-center gap-1 text-xs cursor-pointer' },
+          h('input', { type:'checkbox', checked:onlyStock, 'data-testid':'bulk-price-stock',
+            onChange:e=>setOnlyStock(e.target.checked) }),
+          'เฉพาะที่มีสต๊อก'),
+        h('label', { className:'flex items-center gap-1 text-xs cursor-pointer' },
+          h('input', { type:'checkbox', checked:showOff, onChange:e=>setShowOff(e.target.checked) }),
+          'รวมที่ปิดใช้งาน'),
         h('span', { className:'text-xs text-gray-500 ml-auto' }, `แสดง ${list.length} รายการ`)
       ),
 
-      h('div', { className:'flex flex-wrap items-center gap-2 bg-amber-50 border border-amber-200 rounded p-2' },
+      tab === 'base' && h('div', { className:'flex flex-wrap items-center gap-2 text-xs' },
+        h('span', { className:'text-gray-600' }, 'ตั้งราคาจากต้นทุน +'),
+        h('input', { type:'text', inputMode:'decimal', value:markup, onChange:e=>setMarkup(e.target.value),
+          'data-testid':'bulk-price-markup', placeholder:'30',
+          className:'w-16 px-2 py-1 border rounded text-right' }),
+        h('span', { className:'text-gray-600' }, '%'),
+        h(Button, { variant:'secondary', size:'sm', disabled:!markup || !list.length,
+          'data-testid':'bulk-price-markup-apply', onClick:applyMarkup }, 'เติมให้แถวที่แสดง'),
+        h('span', { className:'text-gray-400' }, '(เติมในช่องให้ดูก่อน ยังไม่บันทึก · ของที่ต้นทุน 0 เติมไม่ได้)'),
+        h(Button, { variant:'link', size:'sm', onClick:backupCSV, 'data-testid':'bulk-price-backup' },
+          '⬇️ สำรองราคาปัจจุบันเป็น CSV')
+      ),
+
+      tab === 'base' && h('div', { className:'flex flex-wrap items-center gap-2 bg-amber-50 border border-amber-200 rounded p-2' },
         h('span', { className:'text-xs text-amber-900 font-medium' }, '⚡ ตั้งประเภทของแถวที่แสดงทั้งหมด:'),
         h('select', { value:bulkType, onChange:e=>setBulkType(e.target.value),
           'data-testid':'bulk-type-select', className:'px-2 py-1 border rounded text-xs' },
           h('option', { value:'' }, '— เลือกประเภท —'),
           types.map(t => h('option', { key:t.id, value:t.id }, `${t.icon||''} ${t.name}`))
         ),
-        h(Button, { variant:'warning', size:'sm', disabled:!bulkType || !list.length,
+        h(Button, { variant:'warning', size:'sm', disabled:!bulkType || !list.length || bulkTypeBlocked,
           'data-testid':'bulk-type-apply', onClick:applyBulkType }, `ใช้กับ ${list.length} รายการ`),
         h('span', { className:'text-xs text-amber-800' },
-          'สินค้าที่ย้ายมาจากระบบเก่าเป็น "วัตถุดิบ" ทั้งหมด → หน้าบันทึกขายสาขามองไม่เห็น ต้องเปลี่ยนเป็นสินค้าสำเร็จก่อน')
+          bulkTypeBlocked
+            ? '⚠️ ต้องกรองก่อน (ค้นรหัส/ชื่อ หรือเลือกประเภท) — กันเผลอเปลี่ยนทั้งคลังทีเดียว เช่น ค้น "P0" = ของที่ขายจริง'
+            : 'สินค้าที่ย้ายมาจากระบบเก่าเป็น "วัตถุดิบ" ทั้งหมด → หน้าบันทึกขายสาขามองไม่เห็น ต้องเปลี่ยนเป็นสินค้าสำเร็จก่อน')
       ),
 
-      h('div', { className:'border rounded overflow-hidden' },
-        h('div', { className:'max-h-96 overflow-y-auto' },
+      tab === 'base' && h('div', { className:'border rounded overflow-hidden' },
+        h('div', { className:'max-h-96 overflow-y-auto overflow-x-auto' },
           h('table', { className:'w-full text-sm' },
             h('thead', { className:'bg-gray-50 sticky top-0' },
               h('tr', null,
                 h('th', { className:'px-2 py-1 text-left text-xs font-medium' }, 'รหัส'),
                 h('th', { className:'px-2 py-1 text-left text-xs font-medium' }, 'ชื่อ'),
                 h('th', { className:'px-2 py-1 text-left text-xs font-medium' }, 'ประเภท'),
-                h('th', { className:'px-2 py-1 text-center text-xs font-medium' }, 'หน่วย'),
+                h('th', { className:'px-2 py-1 text-center text-xs font-medium' }, 'หน่วยขาย'),
+                h('th', { className:'px-2 py-1 text-right text-xs font-medium' }, 'คงเหลือ'),
                 h('th', { className:'px-2 py-1 text-right text-xs font-medium' }, 'ต้นทุน'),
-                h('th', { className:'px-2 py-1 text-right text-xs font-medium' }, 'ราคาขาย')
+                h('th', { className:'px-2 py-1 text-right text-xs font-medium' },
+                  'ราคาขาย' + ((state.settings?.salePriceVat || 'inclusive') === 'inclusive' ? ' (รวม VAT)' : ' (ไม่รวม VAT)'))
               )
             ),
             h('tbody', { className:'divide-y' },
               pg.shown.length === 0
-                ? h('tr', null, h('td', { colSpan:6, className:'px-3 py-6 text-center text-sm text-gray-400' },
-                    'ไม่พบสินค้าตามที่กรอง'))
+                ? h('tr', null, h('td', { colSpan:7, className:'px-3 py-6 text-center text-sm text-gray-400' },
+                    'ไม่พบสินค้าตามที่กรอง'
+                    + (!showOff ? ' (สินค้าที่ปิดใช้งานถูกซ่อนอยู่ — ติ๊ก "รวมที่ปิดใช้งาน" ถ้าหาไม่เจอ)' : '')))
                 : pg.shown.map(i => {
                     const dirty = changed.some(c => c.id === i.id);
                     return h('tr', { key:i.id, 'data-price-row':i.id,
@@ -70690,14 +70969,18 @@ function BulkPriceModal({ state, dispatch, onClose }){
                             tDraft[i.id] && tDraft[i.id] !== i.type && 'border-amber-500 bg-amber-50 font-medium')
                         }, types.map(t => h('option', { key:t.id, value:t.id }, `${t.icon||''} ${t.name}`)))
                       ),
-                      h('td', { className:'px-2 py-1 text-center text-xs text-gray-500' }, i.issueUnit || '-'),
+                      h('td', { className:'px-2 py-1 text-center text-xs text-gray-500' },
+                        // หน่วยที่บิลขายจะใช้จริง (unitsForPurpose 'sale' ตัวแรก) — ไม่ใช่หน่วยเบิก
+                        (((unitsForPurpose ? unitsForPurpose(i, 'sale') : [])[0] || {}).name) || i.issueUnit || '-'),
+                      h('td', { className:'px-2 py-1 text-right text-xs text-gray-500' }, fmtNum(totalStockOf(i))),
                       h('td', { className:'px-2 py-1 text-right text-xs text-gray-500' }, fmtCur(i.costPrice||0)),
                       h('td', { className:'px-2 py-1 text-right' },
                         h('input', {
-                          type:'number', min:'0', step:'0.01', inputMode:'decimal',
+                          type:'text', inputMode:'decimal',
                           'data-testid':'price-input-' + (i.code || i.id),
                           value: valOf(i),
                           onChange: e => setDraft(d => ({ ...d, [i.id]: e.target.value })),
+                          onWheel: e => e.currentTarget.blur(),
                           placeholder:'0.00',
                           className: cls('w-28 px-2 py-1 border rounded text-right text-sm',
                             dirty && 'border-amber-500 bg-white font-medium')
@@ -70711,15 +70994,295 @@ function BulkPriceModal({ state, dispatch, onClose }){
         h(Pager, { pg, label:'สินค้า' })
       ),
 
-      h('div', { className:'flex items-center gap-2 pt-3 border-t' },
+      tab === 'base' && h('div', { className:'flex items-center gap-2 pt-3 border-t' },
         h(Button, { variant:'primary', onClick:save, disabled:!changed.length, 'data-testid':'bulk-price-save' },
           changed.length ? `💾 บันทึก ${changed.length} รายการ` : '💾 บันทึก'),
-        h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'),
+        h(Button, { variant:'secondary', onClick:guardClose }, 'ปิด'),
         changed.length > 0 && h('span', { className:'text-xs text-amber-700' },
           `แก้ไว้ ${changed.length} รายการ` + (typeChanged ? ` (เปลี่ยนประเภท ${typeChanged})` : '') + ' — ยังไม่บันทึก')
       )
     )
   );
+}
+
+// 📐 ราคาตามหน่วยขาย / กลุ่มลูกค้า (item.priceBook) — เลือกสินค้าทีละตัวแล้วตั้งราคาแต่ละหน่วย/แต่ละกลุ่ม
+//   ปลีก(retail) = ราคาหน่วยฐานใช้ salePrice เดิม · หน่วยอื่น + กลุ่มอื่นเก็บใน priceBook
+//   ⚠️ ไม่คูณราคาให้อัตโนมัติ (ราคาลัง ≠ ราคาชิ้น × 12) — มีปุ่มเติมให้กดเอง เห็นตัวเลขก่อนบันทึก
+const PRICE_TIERS = [ { k:'retail', label:'ปลีก' }, { k:'wholesale', label:'ขายส่ง' }, { k:'vip', label:'VIP' } ];
+
+function ItemPriceBookPanel({ state, dispatch }){
+  const [q, setQ] = useState('');
+  const [selId, setSelId] = useState(null);
+  const [draft, setDraft] = useState(null);      // { salePrice, byUnit:{}, byTier:{} }
+
+  const list = useMemo(() => {
+    const base = (state.items||[]).filter(i => i.active !== false);
+    if(!q) return base.slice(0, 40);
+    const s2 = q.toLowerCase();
+    return base.filter(i => (i.name||'').toLowerCase().includes(s2) || (i.code||'').toLowerCase().includes(s2)).slice(0, 40);
+  }, [state.items, q]);
+
+  const item = (state.items||[]).find(i => i.id === selId) || null;
+  const baseUnit = item ? (getBaseUnit(item) || item.issueUnit || '') : '';
+  const units = useMemo(() => {
+    if(!item) return [];
+    const sale = (unitsForPurpose ? unitsForPurpose(item, 'sale') : (item.units||[])) || [];
+    const names = [];
+    if(baseUnit) names.push(baseUnit);
+    sale.forEach(u => { if(u && u.name && !names.includes(u.name)) names.push(u.name); });
+    (item.units||[]).forEach(u => { if(u && u.name && !names.includes(u.name)) names.push(u.name); });
+    return names;
+  }, [item, baseUnit]);
+
+  const pick = (i) => {
+    setSelId(i.id);
+    const pb = i.priceBook || {};
+    setDraft({ salePrice: i.salePrice || 0, byUnit: { ...(pb.byUnit||{}) },
+      byTier: JSON.parse(JSON.stringify(pb.byTier || {})) });
+  };
+
+  const cellVal = (tier, unit) => {
+    if(!draft) return '';
+    if(tier === 'retail'){
+      if(unit === baseUnit) return draft.salePrice === 0 ? '' : String(draft.salePrice);
+      const v = draft.byUnit[unit];
+      return (v === undefined || v === null) ? '' : String(v);
+    }
+    const t = draft.byTier[tier] || {};
+    const key = unit === baseUnit ? '_base' : unit;
+    const v = t[key];
+    return (v === undefined || v === null) ? '' : String(v);
+  };
+
+  const setCell = (tier, unit, raw) => {
+    const txt = String(raw).replace(/[, ฿]/g, '');
+    const num = txt === '' ? null : Math.max(0, Number(txt) || 0);
+    setDraft(d => {
+      const next = { ...d, byUnit:{ ...d.byUnit }, byTier: JSON.parse(JSON.stringify(d.byTier)) };
+      if(tier === 'retail'){
+        if(unit === baseUnit) next.salePrice = num === null ? 0 : num;
+        else if(num === null) delete next.byUnit[unit];
+        else next.byUnit[unit] = num;
+      } else {
+        const key = unit === baseUnit ? '_base' : unit;
+        next.byTier[tier] = { ...(next.byTier[tier] || {}) };
+        if(num === null) delete next.byTier[tier][key];
+        else next.byTier[tier][key] = num;
+        if(!Object.keys(next.byTier[tier]).length) delete next.byTier[tier];
+      }
+      return next;
+    });
+  };
+
+  // เติมราคาหน่วยใหญ่จาก "ราคาหน่วยฐาน × ตัวคูณหน่วย" (เฉพาะช่องที่ยังว่าง) — ให้คนดูตัวเลขก่อนบันทึก
+  const fillFromBase = (tier) => {
+    if(!item || !draft) return;
+    const baseP = tier === 'retail'
+      ? Number(draft.salePrice) || 0
+      : Number((draft.byTier[tier]||{})._base ?? draft.salePrice) || 0;
+    if(!(baseP > 0)) { _toastWarn('ตั้งราคาหน่วยฐานก่อน แล้วค่อยกดเติม'); return; }
+    let n = 0;
+    units.forEach(u => {
+      if(u === baseUnit) return;
+      if(cellVal(tier, u) !== '') return;
+      const mult = resolveToBase(item.units, u) || 1;
+      if(!(mult > 0)) return;
+      setCell(tier, u, String(Math.round(baseP * mult)));
+      n++;
+    });
+    if(n) _toastOk(`เติม ${n} หน่วย (ราคาหน่วยฐาน × ตัวคูณ) — ตรวจแล้วแก้ได้ก่อนบันทึก`);
+  };
+
+  const save = () => {
+    if(!item || !draft) return;
+    const byUnit = { ...draft.byUnit };
+    const byTier = JSON.parse(JSON.stringify(draft.byTier));
+    const empty = !Object.keys(byUnit).length && !Object.keys(byTier).length;
+    dispatch({ type:'SET_ITEM_PRICE_FIELDS', data:{ by: state.currentUser?.username || '',
+      rows: [{ id:item.id, salePrice: Number(draft.salePrice) || 0, priceBook: empty ? null : { byUnit, byTier } }] } });
+    _toastOk(`บันทึกราคาของ ${item.name} แล้ว`);
+  };
+
+  return h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
+    h('div', { className:'md:col-span-1 border rounded overflow-hidden' },
+      h('div', { className:'p-2 border-b bg-gray-50' },
+        h('input', { type:'search', value:q, onChange:e=>setQ(e.target.value),
+          'data-testid':'pb-search', placeholder:'ค้นหาสินค้า',
+          className:'w-full px-2 py-1 border rounded text-xs' })),
+      h('div', { className:'max-h-80 overflow-y-auto divide-y' },
+        list.length === 0
+          ? h('div', { className:'px-3 py-4 text-xs text-gray-400 text-center' }, 'ไม่พบสินค้า')
+          : list.map(i => h('button', { key:i.id, type:'button', onClick:()=>pick(i),
+              'data-testid':'pb-item-' + (i.code || i.id),
+              className: cls('w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50',
+                selId === i.id && 'bg-blue-100 font-medium') },
+              h('div', null, i.name),
+              h('div', { className:'text-[10px] text-gray-500 font-mono flex justify-between' },
+                h('span', null, i.code || ''),
+                i.priceBook && h('span', { className:'text-indigo-600' }, '📐 ตั้งไว้แล้ว'))))
+      )),
+
+    h('div', { className:'md:col-span-2' },
+      !item
+        ? h('div', { className:'h-full flex items-center justify-center text-sm text-gray-400 border rounded p-6' },
+            'เลือกสินค้าทางซ้ายเพื่อตั้งราคาตามหน่วย / กลุ่มลูกค้า')
+        : h('div', { className:'space-y-2' },
+            h('div', { className:'font-medium text-sm' }, item.name,
+              h('span', { className:'ml-2 text-xs text-gray-500 font-mono' }, item.code || '')),
+            h('div', { className:'text-xs text-gray-500' },
+              `หน่วยฐาน: ${baseUnit || '-'} · ช่องที่เว้นว่าง = ใช้ราคาหน่วยฐาน/ราคาปลีกแทน`),
+            h('div', { className:'border rounded overflow-x-auto' },
+              h('table', { className:'w-full text-sm' },
+                h('thead', { className:'bg-gray-50' },
+                  h('tr', null,
+                    h('th', { className:'px-2 py-1 text-left text-xs' }, 'หน่วยขาย'),
+                    PRICE_TIERS.map(t => h('th', { key:t.k, className:'px-2 py-1 text-right text-xs' }, t.label))
+                  )),
+                h('tbody', { className:'divide-y' },
+                  units.length === 0
+                    ? h('tr', null, h('td', { colSpan:4, className:'px-2 py-3 text-center text-xs text-gray-400' }, 'สินค้านี้ยังไม่มีหน่วย'))
+                    : units.map(u => h('tr', { key:u },
+                        h('td', { className:'px-2 py-1 text-xs' }, u,
+                          u === baseUnit && h('span', { className:'ml-1 text-[10px] text-gray-400' }, '(หน่วยฐาน)')),
+                        PRICE_TIERS.map(t => h('td', { key:t.k, className:'px-2 py-1 text-right' },
+                          h('input', { type:'text', inputMode:'decimal',
+                            'data-testid':'pb-' + t.k + '-' + u,
+                            value: cellVal(t.k, u),
+                            onChange: e => setCell(t.k, u, e.target.value),
+                            onWheel: e => e.currentTarget.blur(),
+                            placeholder: u === baseUnit && t.k !== 'retail' ? 'ใช้ราคาปลีก' : '—',
+                            className:'w-24 px-2 py-1 border rounded text-right text-sm' })))
+                      ))
+                ))),
+            h('div', { className:'flex flex-wrap gap-2 items-center' },
+              PRICE_TIERS.map(t => h(Button, { key:t.k, variant:'secondary', size:'sm',
+                onClick:()=>fillFromBase(t.k) }, `เติม${t.label}จากหน่วยฐาน × ตัวคูณ`))),
+            h('div', { className:'flex gap-2 items-center pt-2 border-t' },
+              h(Button, { variant:'primary', size:'sm', onClick:save, 'data-testid':'pb-save' }, '💾 บันทึกราคาสินค้านี้'),
+              h(Button, { variant:'secondary', size:'sm',
+                onClick:()=>{ if(confirm('ลบราคาตามหน่วย/กลุ่มของสินค้านี้ (กลับไปใช้ราคาขายอย่างเดียว)?')){
+                  dispatch({ type:'SET_ITEM_PRICE_FIELDS', data:{ by: state.currentUser?.username || '',
+                    rows:[{ id:item.id, priceBook:null }] } });
+                  setDraft(d => ({ ...d, byUnit:{}, byTier:{} }));
+                  _toastOk('ลบราคาตามหน่วย/กลุ่มแล้ว'); } } }, '🗑 ล้างราคาตามหน่วย/กลุ่ม'),
+              h('span', { className:'text-xs text-gray-500' }, 'กลุ่มราคาของลูกค้าตั้งที่ ตั้งค่า › คู่ค้า → ช่อง "ราคาระดับ"'))
+          ))
+  );
+}
+
+// ⏱️ ตั้งเครดิต (วัน) ให้คู่ค้าเป็นชุด — ลูกค้าที่ย้ายมา credit = 0 ทั้ง 1,404 ราย (วันครบกำหนด = วันออกบิล)
+function BulkCreditModal({ state, dispatch, onClose }){
+  const [side, setSide] = useState('CS');        // CS = ลูกค้า · SP = ผู้ขาย
+  const [q, setQ] = useState('');
+  const [onlyZero, setOnlyZero] = useState(true);
+  const [draft, setDraft] = useState({});
+  const [bulkDays, setBulkDays] = useState('30');
+
+  const src = side === 'CS' ? (state.customers||[]) : (state.suppliers||[]);
+  const list = useMemo(() => {
+    let l = src.filter(x => x.active !== false);
+    if(onlyZero) l = l.filter(x => !(Number(x.credit) > 0));
+    if(q){
+      const s2 = q.toLowerCase();
+      l = l.filter(x => (x.name||'').toLowerCase().includes(s2)
+        || (x.code||'').toLowerCase().includes(s2) || (x.extCode||'').toLowerCase().includes(s2));
+    }
+    return l.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  }, [src, q, onlyZero]);
+  const pg = usePaged(list, 50);
+
+  const changed = useMemo(() => {
+    const out = [];
+    src.forEach(x => {
+      if(!(x.id in draft)) return;
+      const v = Math.max(0, Math.round(Number(draft[x.id]) || 0));
+      if(v !== (Number(x.credit) || 0)) out.push({ id:x.id, kind: side === 'CS' ? 'customer' : 'supplier', credit:v, name:x.name });
+    });
+    return out;
+  }, [draft, src, side]);
+
+  const applyBulk = () => {
+    const v = Math.max(0, Math.round(Number(bulkDays) || 0));
+    if(!list.length) return;
+    if(!confirm(`ตั้งเครดิต ${v} วัน ให้ ${list.length} รายที่แสดงอยู่?\n\n(ยังไม่บันทึกจนกว่าจะกดปุ่มบันทึก)`)) return;
+    const next = { ...draft };
+    list.forEach(x => { next[x.id] = String(v); });
+    setDraft(next);
+  };
+
+  const save = () => {
+    if(!changed.length) return;
+    dispatch({ type:'SET_PARTY_CREDIT', data:{ by: state.currentUser?.username || '',
+      rows: changed.map(c => ({ id:c.id, kind:c.kind, credit:c.credit })) } });
+    _toastOk(`ตั้งเครดิต ${changed.length} ราย แล้ว`);
+    setDraft({});
+  };
+
+  const guardClose = () => {
+    if(changed.length && !confirm(`มี ${changed.length} รายที่ยังไม่บันทึก — ปิดทิ้งเลยไหม?`)) return;
+    onClose();
+  };
+
+  return h(Modal, { isOpen:true, title:'⏱️ ตั้งเครดิต (วัน) เป็นชุด', onClose:guardClose, size:'xl' },
+    h('div', { className:'space-y-3' },
+      h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-900' },
+        'เครดิต = จำนวนวันก่อนครบกำหนดชำระ · ถ้าเป็น 0 วันครบกำหนดจะเท่ากับวันออกบิล และรายงานลูกหนี้จะขึ้นว่าเลยกำหนดทันที'),
+      h('div', { className:'flex flex-wrap items-center gap-2' },
+        h('select', { value:side, onChange:e=>{ setSide(e.target.value); setDraft({}); },
+          'data-testid':'credit-side', className:'px-2 py-1 border rounded text-xs' },
+          h('option', { value:'CS' }, '🧾 ลูกค้า'),
+          h('option', { value:'SP' }, '🏭 ผู้ขาย')),
+        h('input', { type:'search', value:q, onChange:e=>setQ(e.target.value),
+          'data-testid':'credit-search', placeholder:'ค้นหาชื่อ/รหัส',
+          className:'px-3 py-1 border rounded text-xs w-52' }),
+        h('label', { className:'flex items-center gap-1 text-xs cursor-pointer' },
+          h('input', { type:'checkbox', checked:onlyZero, onChange:e=>setOnlyZero(e.target.checked) }),
+          'เฉพาะที่ยังเป็น 0 วัน'),
+        h('span', { className:'text-xs text-gray-500 ml-auto' }, `แสดง ${list.length} ราย`)),
+      h('div', { className:'flex flex-wrap items-center gap-2 bg-amber-50 border border-amber-200 rounded p-2' },
+        h('span', { className:'text-xs text-amber-900 font-medium' }, '⚡ ตั้งเครดิตให้ทุกรายที่แสดง:'),
+        h('input', { type:'text', inputMode:'numeric', value:bulkDays, onChange:e=>setBulkDays(e.target.value),
+          'data-testid':'credit-bulk-days', className:'w-20 px-2 py-1 border rounded text-sm text-right' }),
+        h('span', { className:'text-xs' }, 'วัน'),
+        h(Button, { variant:'warning', size:'sm', disabled:!list.length,
+          'data-testid':'credit-bulk-apply', onClick:applyBulk }, `ใช้กับ ${list.length} ราย`),
+        h('span', { className:'text-xs text-amber-800' }, 'กรองก่อน (เช่น ค้นชื่อโรงแรม) แล้วค่อยกด — จะได้ไม่โดนทั้งหมด')),
+      h('div', { className:'border rounded overflow-hidden' },
+        h('div', { className:'max-h-80 overflow-y-auto overflow-x-auto' },
+          h('table', { className:'w-full text-sm' },
+            h('thead', { className:'bg-gray-50 sticky top-0' },
+              h('tr', null,
+                h('th', { className:'px-2 py-1 text-left text-xs' }, 'รหัส'),
+                h('th', { className:'px-2 py-1 text-left text-xs' }, 'ชื่อ'),
+                h('th', { className:'px-2 py-1 text-left text-xs' }, 'กลุ่มราคา'),
+                h('th', { className:'px-2 py-1 text-right text-xs' }, 'เครดิต (วัน)'))),
+            h('tbody', { className:'divide-y' },
+              pg.shown.length === 0
+                ? h('tr', null, h('td', { colSpan:4, className:'px-3 py-6 text-center text-sm text-gray-400' }, 'ไม่พบคู่ค้าตามที่กรอง'))
+                : pg.shown.map(x => {
+                    const dirty = changed.some(c => c.id === x.id);
+                    return h('tr', { key:x.id, className: cls('hover:bg-gray-50', dirty && 'bg-amber-50') },
+                      h('td', { className:'px-2 py-1 font-mono text-xs' }, x.code || x.extCode || '—'),
+                      h('td', { className:'px-2 py-1' }, x.name),
+                      h('td', { className:'px-2 py-1 text-xs text-gray-500' },
+                        ({ retail:'ปลีก', wholesale:'ขายส่ง', vip:'VIP' })[x.priceTier] || '—'),
+                      h('td', { className:'px-2 py-1 text-right' },
+                        h('input', { type:'text', inputMode:'numeric',
+                          'data-testid':'credit-input-' + x.id,
+                          value: (x.id in draft) ? draft[x.id] : String(Number(x.credit) || 0),
+                          onChange: e => setDraft(d => ({ ...d, [x.id]: e.target.value })),
+                          onWheel: e => e.currentTarget.blur(),
+                          className: cls('w-20 px-2 py-1 border rounded text-right text-sm',
+                            dirty && 'border-amber-500 font-medium') })));
+                  }))))
+        ,
+        h(Pager, { pg, label:'คู่ค้า' })),
+      h('div', { className:'flex items-center gap-2 pt-3 border-t' },
+        h(Button, { variant:'primary', onClick:save, disabled:!changed.length, 'data-testid':'credit-save' },
+          changed.length ? `💾 บันทึกเครดิต ${changed.length} ราย` : '💾 บันทึกเครดิต'),
+        h(Button, { variant:'secondary', onClick:guardClose }, 'ปิด'),
+        changed.length > 0 && h('span', { className:'text-xs text-amber-700' }, `แก้ไว้ ${changed.length} ราย — ยังไม่บันทึก`))
+    ));
 }
 
 // purposeScope: 'purchase' | 'bom' | undefined — ไม่ส่งมา = derive จาก role ของ currentUser (ROLE_PURPOSE_SCOPE)
@@ -71508,10 +72071,13 @@ function EcountImportModal({ state, dispatch, onClose }){
     // 🆕 สินค้าที่ code ซ้ำ: ไฟล์นำเข้ามี costPrice/salePrice = 0 ทุกแถว → นำเข้าซ้ำรอบ 2 จะล้างราคาที่กรอกเอง
     //    ตัด 2 field นี้ทิ้งเมื่อค่าในไฟล์เป็น 0 (ของใหม่ยังได้ 0 ตามเดิม) · สต๊อก/หน่วยนับ reducer กันไว้แล้ว
     const _itemsToImport = chosen.map(it => {
-      if(!existing.has(String(it.code||'').toLowerCase())) return it;
-      const o = { ...it };
-      if(!(Number(o.costPrice) > 0)) delete o.costPrice;
-      if(!(Number(o.salePrice) > 0)) delete o.salePrice;
+      if(!existing.has(String(it.code||'').toLowerCase())) return it;   // ของใหม่ = เอาทั้งก้อนตามไฟล์
+      const o = _stripEmpty(it);                                        // ค่าว่างในไฟล์ห้ามทับของที่กรอกเอง
+      // ไฟล์ตั้งต้นมี 0 ทุกแถว → ถ้าไม่ตัด จะล้างของที่คนกรอกไว้แล้ว
+      ['costPrice','salePrice','minStock','maxStock','shelfLife'].forEach(k => { if(!(Number(o[k]) > 0)) delete o[k]; });
+      // ประเภท/สถานะ/หน่วย/แท็ก = คนในระบบตั้งเอง ไฟล์นำเข้าซ้ำห้ามทับ
+      delete o.type; delete o.active; delete o.units; delete o.issueUnit; delete o.stockByBranch;
+      if(Array.isArray(o.tags) && !o.tags.length) delete o.tags;
       return o;
     });
     if(_itemsToImport.length) dispatch({ type:'IMPORT_ITEMS', data: _itemsToImport });
@@ -71678,13 +72244,14 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         else { errs.push(`บรรทัด ${i+1}: ประเภท "${obj.type}" ไม่พบ — ใช้ 'material' แทน`); typeId = 'material'; }
       }
       // 🆕 ส่งเฉพาะคอลัมน์ที่ "มีอยู่จริงในไฟล์" — คอลัมน์ที่ไม่ใส่ = ของเดิมไม่ถูกแตะ
-      const hasCol = (k) => headers.some(hh => (hh||'').trim() === k);
+      // มีหัวคอลัมน์ "และ" เซลล์นั้นไม่ว่าง ถึงจะถือว่า "ส่งค่ามา" — เว้นว่าง = ไม่แก้ค่าเดิม
+      const hasCol = (k) => headers.some(hh => (hh||'').trim() === k) && String(obj[k] ?? '').trim() !== '';
       const csvTags = (obj.tags||'').split(/[,;]/).map(t=>t.trim()).filter(Boolean);
       const row = { code: obj.code || '' };
       if(obj.name) row.name = obj.name;
       if(hasCol('barcode')) row.barcode = obj.barcode || '';
-      if(hasCol('type')) row.type = typeId || 'material';
-      if(hasCol('issueUnit') && obj.issueUnit) row.issueUnit = obj.issueUnit;
+      if(hasCol('type') && typeId) row.type = typeId;   // เซลล์ว่าง = ไม่เปลี่ยนประเภทเดิม (ไม่ fallback เป็น material)
+      if(hasCol('issueUnit')) row.issueUnit = obj.issueUnit;
       if(hasCol('costPrice')) row.costPrice = csvNum(obj.costPrice);   // 🆕 A6: ตัด comma/฿ ก่อน parse
       if(hasCol('salePrice')) row.salePrice = csvNum(obj.salePrice);
       if(hasCol('minStock')) row.minStock = csvNum(obj.minStock);
@@ -71696,7 +72263,7 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         barcode: obj.barcode || '',
         type: typeId || 'material',
         issueUnit: obj.issueUnit || 'ชิ้น',
-        units: [{ name: obj.issueUnit||'ชิ้น', toBase:1 }],
+        units: [{ name: obj.issueUnit||'ชิ้น', toBase:1, isBase:true, purposes:['stock','bom','transfer','sale'] }],
         costPrice: csvNum(obj.costPrice),
         salePrice: csvNum(obj.salePrice),
         minStock: csvNum(obj.minStock),
@@ -71751,7 +72318,7 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         ),
         h('div', { className:'text-blue-900 text-xs mb-2 bg-white/70 border border-blue-200 rounded p-2' },
           h('div', { className:'font-medium mb-0.5' }, '✅ ใส่เฉพาะคอลัมน์ที่อยากแก้ก็ได้'),
-          h('div', null, 'ถ้า code ซ้ำกับสินค้าเดิม = อัปเดตทับ "เฉพาะคอลัมน์ที่มีในไฟล์" · คอลัมน์ที่ไม่ใส่คงค่าเดิม · สต๊อกคงเหลือและหน่วยนับ/ตัวแปลงหน่วยไม่ถูกแก้'),
+          h('div', null, 'ถ้า code ซ้ำกับสินค้าเดิม = อัปเดตทับ "เฉพาะช่องที่กรอกค่ามาจริง" · คอลัมน์ที่ไม่ใส่ หรือเว้นว่างไว้ = ไม่แก้ค่าเดิม · สต๊อกคงเหลือและหน่วยนับ/ตัวแปลงหน่วยไม่ถูกแก้'),
           h('div', { className:'mt-1 font-mono text-[11px] text-blue-700' }, 'เช่น อัปเดตราคาขายอย่างเดียว → code,salePrice')
         ),
         h('div', { className:'flex gap-2 flex-wrap' },
@@ -72257,6 +72824,7 @@ function PartiesSettings({ state, dispatch, type, setType }){
   const [modal, setModal] = useState(null);      // { type:'SP'|'CS', party:null|obj }
   const [newType, setNewType] = useState('SP');
   const [hiId, setHiId] = useState(null);
+  const [showCredit, setShowCredit] = useState(false);   // ⏱️ ตั้งเครดิตเป็นชุด
   // แถวรวม: ข้อมูลนำเข้าจาก Ecount ลงทั้ง suppliers และ customers ทุกราย (migration/convert_parties.py:88-89 · ~1,400 คู่) → ถือเป็น "แฝด" แสดงแถวเดียว
   //   ฝั่งหลัก = ฝั่งที่ตรงรหัสหน้า (SP… → ผู้ขาย · CS… → ลูกค้า · SU/BT/ตัวเลข → ผู้ขาย) · อีกฝั่งเก็บไว้ที่ _twin (แก้ได้จากเมนู ⋯ "แก้ฝั่ง…")
   //   คู่ค้าที่สร้างในระบบ (มี code / ไม่มี extCode) แสดงตามฝั่งของตัวเอง
@@ -72320,6 +72888,8 @@ function PartiesSettings({ state, dispatch, type, setType }){
       h('div', null,
         h('div', { className:'text-base font-semibold text-gray-800' }, '🤝 คู่ค้า ', h('span', { className:'text-sm font-normal text-gray-500' }, `${fmtNum(rows.length)} ราย · ผู้ขาย ${fmtNum(counts.SP)} · ลูกค้า ${fmtNum(counts.CS)}${counts.twins ? ` · มีทั้ง 2 ฝั่ง ${fmtNum(counts.twins)} (นำเข้าจาก Ecount)` : ''}`)),
         h('div', { className:'text-xs text-gray-500' }, 'บันทึกผู้ขายและลูกค้าที่หน้าเดียว — แยกด้วยรหัสหน้า SP (ผู้ขาย) / CS (ลูกค้า) · ระบบออกรหัสให้เองเมื่อเว้นว่าง')),
+      (can('CS','edit') || can('SP','edit')) && h(Button, { variant:'secondary', size:'sm',
+        onClick:()=>setShowCredit(true), 'data-testid':'party-bulk-credit' }, '⏱️ ตั้งเครดิต'),
       canCreateAny && h(Button, { variant:'primary', size:'sm', onClick: openNew, 'data-testid':'party-add' }, '+ เพิ่มคู่ค้า')),
     h(FilterBar, { search:{ value:q, onChange:setQ, placeholder:'ค้นหา รหัส / ชื่อ / เลขผู้เสียภาษี / เบอร์', found: filtered.length, total: rows.length },
       chips, active: type, onPick: setType, chipProps: (k) => ({ 'data-party-filter': k }), isDirty: type !== 'all' || !!q, onClear: () => { setType('all'); setQ(''); } }),
@@ -72338,7 +72908,8 @@ function PartiesSettings({ state, dispatch, type, setType }){
     // key 'new' คงที่ → สลับ SP↔CS ไม่ remount (ค่าที่พิมพ์ไว้ไม่หาย)
     modal && h(PartyEditModal, { key: modal.party ? modal.party.id : 'new', title: meta.title, party: modal.party, fields: meta.fields, dispatch,
       addAction: meta.add, updateAction: meta.upd, existing: state[meta.list] || [], onClose: () => setModal(null),
-      typeChoice: modal.party ? null : { value: modal.type, options: allowedNew, onChange: (v) => { if(!allowedNew.includes(v)){ _toastWarn(`ไม่มีสิทธิ์เพิ่ม${PARTY_TYPE_META[v].label}`); return; } setNewType(v); setModal({ type:v, party:null }); } } }));
+      typeChoice: modal.party ? null : { value: modal.type, options: allowedNew, onChange: (v) => { if(!allowedNew.includes(v)){ _toastWarn(`ไม่มีสิทธิ์เพิ่ม${PARTY_TYPE_META[v].label}`); return; } setNewType(v); setModal({ type:v, party:null }); } } }),
+    showCredit && h(BulkCreditModal, { state, dispatch, onClose:()=>setShowCredit(false) }));
 }
 
 // canCreate/canEdit: ไม่ส่งมา (ผู้เรียกภายนอกที่ gate เองแล้ว) = true
@@ -73216,21 +73787,37 @@ const IMPORT_TYPES = {
     fields:['code','name','type','tags','issueUnit','costPrice','salePrice','minStock','maxStock','barcode'],
     required:['code','name'],
     addAction:'ADD_ITEM',
-    transform: (row, state) => ({
-      id: 'i_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,5),
-      code: row.code, name: row.name,
-      type: row.type || (state.itemTypes||[])[0]?.id || '',
-      tags: row.tags ? row.tags.split('|').map(t => t.trim()).filter(Boolean) : [],
-      issueUnit: row.issueUnit || 'ชิ้น',
-      costPrice: Number(row.costPrice)||0,
-      salePrice: Number(row.salePrice ?? row.sellPrice)||0,  // 🆕 รองรับทั้ง 2 ชื่อ (สินค้าใช้ salePrice)
-      minStock: Number(row.minStock)||0,
-      maxStock: Number(row.maxStock)||0,
-      barcode: row.barcode || '',
-      stockByBranch: {},
-      units: [{ name: row.issueUnit||'ชิ้น', isBase:true, purposes:['stock','bom','transfer','sale','purchase'] }],
-      active: true,
-    }),
+    // 🆕 code ซ้ำ = อัปเดตของเดิม (ไม่สร้างซ้ำ) · ส่งเฉพาะช่องที่กรอกค่ามาจริง · __new = ค่าตั้งต้นตอนสร้างใหม่เท่านั้น
+    batchAction:'IMPORT_ITEMS',
+    transform: (row, state) => {
+      const has = (k) => String(row[k] ?? '').trim() !== '';
+      const tags = has('tags') ? row.tags.split('|').map(t => t.trim()).filter(Boolean) : [];
+      const typeId = has('type') ? row.type : '';
+      const out = { code: row.code, name: row.name };
+      if(has('barcode')) out.barcode = row.barcode;
+      if(typeId) out.type = typeId;
+      if(has('issueUnit')) out.issueUnit = row.issueUnit;
+      if(has('costPrice')) out.costPrice = Number(row.costPrice)||0;
+      if(has('salePrice') || has('sellPrice')) out.salePrice = Number(row.salePrice ?? row.sellPrice)||0;
+      if(has('minStock')) out.minStock = Number(row.minStock)||0;
+      if(has('maxStock')) out.maxStock = Number(row.maxStock)||0;
+      if(has('tags')) out.tags = tags;
+      out.__new = {
+        id: 'i_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,5),
+        type: typeId || (state.itemTypes||[])[0]?.id || '',
+        tags,
+        issueUnit: row.issueUnit || 'ชิ้น',
+        costPrice: Number(row.costPrice)||0,
+        salePrice: Number(row.salePrice ?? row.sellPrice)||0,
+        minStock: Number(row.minStock)||0,
+        maxStock: Number(row.maxStock)||0,
+        barcode: row.barcode || '',
+        stockByBranch: {},
+        units: [{ name: row.issueUnit||'ชิ้น', toBase:1, isBase:true, purposes:['stock','bom','transfer','sale','purchase'] }],
+        active: true,
+      };
+      return out;
+    },
   },
   suppliers: {
     label:'🏭 Suppliers',
@@ -80993,7 +81580,7 @@ C.registerGroup({
       show: (ctx) => ctx.can('stock') && stores(ctx).length > 0,
       nav: itemsNav,
       hint: (ctx, res) => (canEditItems(ctx)
-          ? hqPrefix(ctx) + 'ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า → แก้ → ใส่ "ราคาขาย"'
+          ? hqPrefix(ctx) + 'ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า → ปุ่ม 💲 ราคาขาย/ประเภท → ติ๊ก "เฉพาะที่ยังไม่ตั้งราคา" แล้วใส่ราคาหลายรายการในหน้าเดียว (กดบันทึกครั้งเดียว)'
           : 'บัญชีนี้แก้สินค้าเองไม่ได้ → แจ้ง HQ/แอดมินใส่ "ราคาขาย" ที่ ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า · ระหว่างนี้ตอนบันทึกขายให้พิมพ์ราคาในช่อง "ราคา" เอง')
         + (res.pos > 0 ? ` · ⚠️ ${fmtNum(res.pos)} รายการขายผ่านไฟล์ POS — ยอดขายสินค้านี้ลงบัญชีเป็น 0 บาททุกครั้งที่นำเข้า` : ''),
       run: (ctx) => { const l = sellable(ctx).filter(i => !(_n(i.salePrice) > 0));
