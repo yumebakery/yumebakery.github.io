@@ -1,4 +1,5 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script></head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="4c2f95fa54ef";</script>
+</head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
 // ==================== 00-CORE.JS ====================
@@ -4926,6 +4927,25 @@ Object.assign(global.ERP, {
   }
 
   // restore: ดึง snapshot → สำรองของปัจจุบันเป็น 'pre_restore' → เขียนกลับ (cloud-only: push ทับ company:latest · โหมดเก่า: เขียน localStorage) → caller reload
+  // 🆕 MW-0.6 (UAT M6/M7): สำรองข้อมูลปัจจุบันบน cloud ก่อน "ทับทั้งก้อน" (กู้คืน snapshot / JSON / รวมข้อมูล)
+  //   ล้ม → คืน token + งานค้างส่งเดิมทุกตัว (ไม่งั้น state บนจอเป็นของเก่าแต่ token เลื่อนแล้ว
+  //   → push ครั้งถัดไปผ่านโดยไม่ชน = ทับงานเครื่องอื่นแบบไม่เหลือร่องรอย)
+  //   สำเร็จ → token = รุ่นล่าสุด (ผู้เรียกตั้งใจทับ) · คืน { ok, snapId } | { ok:false, error }
+  async function backupBeforeOverwrite(byUser){
+    var tok0 = _tok, hasRow0 = _hasRow, loaded0 = _loaded;
+    try {
+      var cur = await loadCloudState();
+      if(cur && cur.state){
+        var bk = await pushSnapshot(cur.state, { kind:'pre_restore', byUser: byUser });
+        if(!bk || bk.ok === false) throw new Error((bk && bk.error) || 'สำรองไม่สำเร็จ');
+        return { ok:true, snapId: bk.id || null, cloudState: cur.state };   // merge ต้องรวมบนของล่าสุด ไม่ใช่ของในเครื่อง
+      }
+      return { ok:true, snapId:null };   // ยังไม่มีข้อมูลบน cloud — ไม่มีอะไรต้องสำรอง
+    } catch(e){
+      _tok = tok0; _hasRow = hasRow0; _loaded = loaded0;
+      return { ok:false, error: String(e && e.message || e) };
+    }
+  }
   async function restoreToLocal(snapshotId, opts){
     opts = opts || {};
     var sb = _sb(); if(!sb) return { ok:false, error:'ยังไม่ได้ตั้งค่า Supabase' };
@@ -4934,20 +4954,27 @@ Object.assign(global.ERP, {
     if(!res.data || !res.data.state) return { ok:false, error:'snapshot ว่าง' };
     // ☁️ cloud-only: "กู้คืน" = เอา snapshot ไปทับ company:latest (ผ่าน token check) — ไม่แตะ localStorage
     if(isCloudOnly()){
-      // 🔒 P1-4: ตัดคิว push ที่ค้างก่อนเริ่ม + ตั้ง flag ตั้งแต่ต้น — กัน debounce/retry เอา state เก่าทับ snapshot ที่เพิ่งกู้
+      // 🔒 P1-4: ตั้ง flag ตั้งแต่ต้น — กัน debounce/retry เอา state เก่าทับ snapshot ที่กำลังกู้
       try { global.__erpRestoring = true; } catch(e){}
       try { if(_pushTimer) clearTimeout(_pushTimer); if(_retryTimer) clearTimeout(_retryTimer); } catch(e){}
+      // 🆕 MW-0.6: สำรองก่อนกู้ "ต้องสำเร็จ" ถึงจะยอมทับ · 🆕 UAT M6: ล้างงานค้างส่ง "หลัง" สำรองสำเร็จ
+      //   ล้ม → คืน token/งานค้างเดิม + ส่งงานค้างต่อตามปกติ (เดิมล้างทิ้งตั้งแต่ต้น + token เลื่อนแล้ว)
+      var bkr = await backupBeforeOverwrite(opts.byUser);
+      if(!bkr.ok){
+        try { global.__erpRestoring = false; } catch(_r){}
+        if(_pendingState && _dirty){ try { _pushTimer = setTimeout(_flushCloudPush, 800); } catch(_t){} }
+        return { ok:false, error:'ยกเลิกการกู้คืน — สำรองข้อมูลปัจจุบันก่อนกู้ไม่สำเร็จ (' + bkr.error + ') · ข้อมูลเดิมยังอยู่ครบ ไม่ถูกทับ' };
+      }
       _pendingState = null; _dirty = false;
-      try {
-        var curCloud = await loadCloudState();   // sync token ล่าสุดก่อน + สำรองของเดิม
-        if(curCloud && curCloud.state) await pushSnapshot(curCloud.state, { kind:'pre_restore', byUser: opts.byUser });
-      } catch(e){ console.warn('[SBSync] pre-restore backup skip', e); }
       // 🆕 AUTH UAT: กู้สำเนาเก่าต้องไม่ปิดล็อกอินชั้นเดียว/คืนรหัส plaintext (auth downgrade) — คง cloudAuth flags จาก state ปัจจุบัน
       var restoreState = _preserveCloudAuth(res.data.state);
       var pr = await pushCloudState(restoreState, opts.byUser);
       if(!pr.ok){
+        // 🆕 verify M6: ถึงตรงนี้ token เลื่อนเป็นรุ่นล่าสุดแล้ว + state บนจอเป็นของเก่า → ถ้าปล่อยให้บันทึกต่อ
+        //   save ถัดไปจะผ่านโดยไม่ชน = ทับงานเครื่องอื่นเงียบ ๆ · latch ไว้ ผู้เรียกต้องโหลดหน้าใหม่
+        _conflict = true;
         try { global.__erpRestoring = false; } catch(e){}
-        return { ok:false, error: pr.conflict ? 'มีเครื่องอื่นกำลังบันทึก — reload แล้วลองใหม่' : pr.error };
+        return { ok:false, mustReload:true, error: pr.conflict ? 'มีเครื่องอื่นกำลังบันทึก — โหลดหน้าใหม่แล้วลองใหม่' : pr.error };
       }
       return { ok:true, saved_at: res.data.saved_at, app_version: res.data.app_version };
     }
@@ -5024,6 +5051,129 @@ Object.assign(global.ERP, {
     } catch(e){ return { changed:false }; }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🆕 MW-0 (แผนรองรับ 50-60 คน คลื่น 0): สมุดจดงาน + คิวงานค้าง
+  //   ปัญหาเดิม: ชนแล้วสำรอง state ทั้งก้อน 1.3MB+ ลง 'erp_v5__conflict_pending' แต่ "ไม่มีโค้ดไหนอ่านมันเลย"
+  //     + catch เปล่ากลืน QuotaExceededError + ล้าง _pendingState ก่อนเขียนสำรอง แล้ว reload ทันที
+  //     = ตาข่ายกันงานหายที่ไม่มีอยู่จริง · alert ยังสั่งผู้ใช้ "คีย์ซ้ำ" = ต้นตอเอกสารซ้ำ
+  //   ใหม่: จด "action" ที่ยังไม่ขึ้น cloud (ไม่ใช่ state ทั้งก้อน) → ชนแล้วย้ายเข้าคิว 'erp_v5__opq'
+  //     แยกรูป (data:…) ออกก่อน · อ่านกลับยืนยันว่าเขียนสำเร็จ · เขียนไม่ได้ = ห้าม reload
+  //     หน้า ⚙️ ตั้งค่า → 🧾 งานค้าง อ่านคิวนี้จริง พร้อมบอกว่าใบไหน "ขึ้นระบบแล้ว / ยังไม่ขึ้น"
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🆕 MW-0 (UAT M8/M9 + verify): โหลดหน้าใหม่แบบไม่ทำงานหาย — ใช้กับทุกปุ่ม "โหลดใหม่/อัปเดต" ที่ผู้ใช้กดเอง
+  //   บล็อก: งานกดบันทึกแล้วแต่ยังไม่ขึ้น (รอส่ง/กำลังส่ง/อยู่ในสมุด) · งานที่ "กำลังส่ง" ช่วงก่อน pushNow
+  //         (ใบเบิกด่วน/ผลชั่ง: refresh → คำนวณ → pushNow — ช่วงนี้ไม่มีธงไหนติด ฉลาก LOT พิมพ์ไปแล้ว)
+  //   ถาม:   มีหน้าต่างเปิด/ย่อค้าง · แท็บสถานีชั่งเปิดอยู่ (เครื่องชั่ง/เครื่องพิมพ์ BLE จะหลุด) · เพิ่งพิมพ์ใน 5 นาที
+  //   (เดิมดู document.activeElement ตอนกดปุ่ม ซึ่งเป็นปุ่มเสมอ = ไม่เคยถาม)
+  var _workInFlight = 0, _lastInputAt = 0;
+  try { global.document && global.document.addEventListener('input', function(){ _lastInputAt = Date.now(); }, true); } catch(_li){}
+  function beginWork(){ _workInFlight++; }
+  function endWork(){ _workInFlight = Math.max(0, _workInFlight - 1); }
+  function safeReload(){
+    var pend = (_dirty || _pushing || _journal.length > 0 || _workInFlight > 0);
+    if(pend){
+      try { alert('⏳ ยังมีงานที่กดบันทึกแล้วแต่ยังไม่ขึ้นระบบ\n\nรอจนมุมขวาบนขึ้น "☁️ บันทึกแล้ว" ก่อน แล้วค่อยโหลดใหม่ — ถ้าโหลดตอนนี้งานนั้นจะหาย'); } catch(_a){}
+      return false;
+    }
+    var why = [];
+    try {
+      if(document.querySelector('.fixed.inset-0.z-50') || (global.__MINIMIZED_MODALS || []).length) why.push('มีหน้าต่างเปิดอยู่');
+      if(document.querySelector('[data-weigh-tab] iframe')) why.push('สถานีชั่งเปิดอยู่ (เครื่องชั่ง/เครื่องพิมพ์จะหลุด ต้องต่อใหม่)');
+      if(_lastInputAt && Date.now() - _lastInputAt < 5 * 60 * 1000) why.push('เพิ่งกรอกข้อมูลไม่เกิน 5 นาที');
+    } catch(_q){}
+    if(why.length){
+      var yes = true;
+      try { yes = confirm('⚠️ ' + why.join(' · ') + '\n\nข้อมูลที่ยังไม่กดบันทึกจะหาย — โหลดใหม่เลย?'); } catch(_c){}
+      if(!yes) return false;
+    }
+    _doReload();
+    return true;
+  }
+  // ช่องให้เทสต์จำลองการชนได้ครบวงจร — Chrome ไม่ยอมให้แทนที่ location.reload
+  function _doReload(){
+    if(global.__ERP_NO_RELOAD){ global.__ERP_RELOADS = (global.__ERP_RELOADS||0) + 1; return; }
+    try { global.location.reload(); } catch(_r){}
+  }
+  var OPQ_KEY = 'erp_v5__opq';
+  var OPQ_MAX_BYTES = 1500000;           // cap ด้วยไบต์ ไม่ใช่จำนวนชิ้น (โควต้า localStorage ~5MB ร่วมกับของอื่น)
+  var _SESSION_ONLY = { LOGIN:1, LOGOUT:1, SET_BRANCH:1, IMPORT_STATE:1, ADD_AUDIT_LOG:1, APPEND_AUDIT_LOG:1 };
+  var _JOURNAL_CAP = 2000;
+  var _jSeq = 0, _journal = [], _pendingSeq = 0, _pushingSeq = 0;
+  var _journalTruncated = false;   // 🆕 UAT M5: สมุดเกินเพดาน = มีงานหลุด → ห้ามบอกว่า "เก็บไว้ครบ" แล้วโหลดทิ้ง
+
+  // แยกรูป/ไฟล์ base64 ขนาดใหญ่ออกจาก action ก่อนเข้าคิว (รูปใบเดียวหลายร้อย KB → action เดียวเกินโควต้าได้)
+  function _stripBig(v, flag){
+    if(typeof v === 'string'){
+      if(v.length > 2048 && v.slice(0, 5) === 'data:'){ flag.stripped = (flag.stripped||0) + 1; return '[ไฟล์แนบ — ต้องแนบใหม่]'; }
+      return v;
+    }
+    if(Array.isArray(v)) return v.map(function(x){ return _stripBig(x, flag); });
+    if(v && typeof v === 'object'){
+      var o = {};
+      for(var k in v){ if(Object.prototype.hasOwnProperty.call(v, k)) o[k] = _stripBig(v[k], flag); }
+      return o;
+    }
+    return v;
+  }
+  function journalAdd(action, by){
+    if(!action || !action.type || _SESSION_ONLY[action.type]) return;
+    // 🆕 UAT M4: action ที่ผู้เรียก pushNow ขึ้น cloud ไปแล้วก่อน dispatch (ใบเบิกด่วน · ผลชั่ง) ห้ามจดซ้ำ
+    if(action._committed) return;
+    _jSeq++;
+    _journal.push({ seq:_jSeq, t:Date.now(), type:action.type, data:action.data, by: by || null });
+    if(_journal.length > _JOURNAL_CAP){ _journal = _journal.slice(-_JOURNAL_CAP); _journalTruncated = true; }
+  }
+  function _journalAfterPush(seqPushed){
+    if(!seqPushed) return;
+    _journal = _journal.filter(function(e){ return e.seq > seqPushed; });
+    if(!_journal.length) _journalTruncated = false;   // ขึ้น cloud ครบแล้ว ของที่เคยหลุดจากสมุดก็อยู่บน cloud แล้ว
+  }
+  function readOpq(){
+    try { var raw = global.localStorage.getItem(OPQ_KEY); var a = raw ? JSON.parse(raw) : []; return Array.isArray(a) ? a : []; }
+    catch(e){ return []; }
+  }
+  function writeOpq(list){
+    try {
+      var json = JSON.stringify(list || []);
+      global.localStorage.setItem(OPQ_KEY, json);
+      var okW = global.localStorage.getItem(OPQ_KEY) === json;   // อ่านกลับยืนยัน — setItem บางเบราว์เซอร์เงียบเมื่อเต็ม
+      if(okW){ try { global.dispatchEvent(new Event('erp:opq')); } catch(_ev){} }   // แถบเตือนนับใหม่ทันที
+      return okW;
+    } catch(e){ return false; }
+  }
+  // ย้ายงานในสมุดจดเข้าคิวงานค้าง · คืน {ok, count, stripped}
+  function _stopPushTimers(){ try { if(_pushTimer){ clearTimeout(_pushTimer); _pushTimer = null; } if(_retryTimer){ clearTimeout(_retryTimer); _retryTimer = null; } } catch(_t){} }
+  function _spillJournalToOpq(by, reason){
+    var entries = _journal.slice();
+    // 🆕 verify M5: เคยล้นแล้ว = มีงานที่ไม่ได้อยู่ในคิว — ห้ามตอบ "ok" แม้สมุดจะว่าง (รอบแรกเทไปแล้ว)
+    if(!entries.length){
+      if(_journalTruncated){ _stopPushTimers(); return { ok:false, count:0, stripped:0, reason:'truncated' }; }
+      return { ok:true, count:0, stripped:0 };
+    }
+    var flag = {};
+    var actions = entries.map(function(e){ return { type:e.type, data:_stripBig(e.data, flag), t:e.t, by:e.by }; });
+    var op = { opId:'op_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+      ts:Date.now(), by: by || null, reason: reason || 'conflict', status:'pending',
+      actions: actions, imgStripped: flag.stripped || 0 };
+    var list = readOpq().concat([op]);
+    // cap ด้วยไบต์: ตัดได้เฉพาะชุดที่ "ปิดแล้ว" · 🆕 UAT M5: ห้ามลบชุดที่ยังค้าง (เดิมลบของเก่าสุดทิ้งเงียบ ๆ)
+    while(JSON.stringify(list).length > OPQ_MAX_BYTES){
+      var iDone = list.findIndex(function(x){ return x.status !== 'pending'; });
+      if(iDone < 0){ _stopPushTimers(); return { ok:false, count:actions.length, stripped: flag.stripped || 0, reason:'full' }; }
+      list.splice(iDone, 1);
+    }
+    var ok = writeOpq(list);
+    var wasTrunc = _journalTruncated;
+    if(ok) _journal = [];   // อยู่ในคิวแล้ว — ไม่ให้เทซ้ำรอบหน้า
+    // สมุดเคยล้นเพดาน = มีงานเก่ากว่าที่ไม่ได้อยู่ในคิว → ต้องไม่ reload (ให้คนจดงานจากจอก่อน)
+    if(ok && wasTrunc){ _stopPushTimers(); return { ok:false, count:actions.length, stripped: flag.stripped || 0, reason:'truncated' }; }
+    if(!ok) _stopPushTimers();
+    return { ok:ok, count:actions.length, stripped: flag.stripped || 0, reason: ok ? '' : 'write' };
+  }
+  // 🆕 MW-0.1: ปลด latch _conflict — เรียกได้เฉพาะหลัง "ดึงของใหม่จาก cloud มาแทน state ในเครื่องแล้ว"
+  //   (ถ้าปลดโดยไม่แทน state = push ของเก่าทับ cloud = ข้อมูลคนอื่นหาย)
+  function clearConflict(){ _conflict = false; _dirty = false; _pendingState = null; }
+
   // push state ขึ้น cloud พร้อม optimistic token check (saved_at) — {ok} | {ok:false, conflict:true} | {ok:false, error}
   async function pushCloudState(state, byUser){
     var sb = _sb(); if(!sb) return { ok:false, error:'Supabase ยังไม่พร้อม' };
@@ -5067,7 +5217,9 @@ Object.assign(global.ERP, {
       try {
         var lastDaily = global.localStorage.getItem('erp_v5__lastDailyDate') || '';
         if(lastDaily !== today){
-          await sb.from('erp_state_snapshots').upsert(Object.assign({ id: 'company:' + today, kind: 'daily' }, row), { onConflict:'id' });
+          // 🆕 verify: เดิม Object.assign({id, kind:'daily'}, row) → row.kind='latest' ทับ = สำเนารายวันทุกแถวเป็น kind 'latest'
+          //   (ตัวลบ/ตัวกรอง kind='daily' ไม่เคยเจออะไร) · ให้ id/kind มาทีหลังเสมอ
+          await sb.from('erp_state_snapshots').upsert(Object.assign({}, row, { id: 'company:' + today, kind: 'daily' }), { onConflict:'id' });
           try { global.localStorage.setItem('erp_v5__lastDailyDate', today); } catch(_d){}
           // 🆕 B5(ข): prune daily snapshot เก่ากว่า 60 วัน (กัน rows โตไม่จำกัด) — วันละครั้ง เงียบๆ พลาดได้
           //   ใช้ saved_at bound (robust — ไม่พึ่ง lexical prefix ของ id) + kind='daily' (กัน company:latest หลุด)
@@ -5087,6 +5239,7 @@ Object.assign(global.ERP, {
   // debounce + queue — เรียกจาก saveState ทุก dispatch (คีย์ถี่ๆ = push ก้อนเดียว)
   function scheduleCloudPush(state, byUser){
     _pendingState = state; _pendingUser = byUser || _pendingUser; _dirty = true;
+    _pendingSeq = _jSeq;   // 🆕 MW-0: ก้อนนี้ครอบ action ถึงลำดับนี้
     if(_pushTimer) clearTimeout(_pushTimer);
     _pushTimer = setTimeout(_flushCloudPush, 1500);
   }
@@ -5097,9 +5250,10 @@ Object.assign(global.ERP, {
     // ถ้ามีรอบก่อนค้างอยู่ รอให้จบก่อน (สูงสุด 20 วิ)
     for(var i=0; i<100 && _pushing; i++){ await new Promise(function(r){ setTimeout(r, 200); }); }
     _pushing = true;
+    var _seqNow = _jSeq;   // 🆕 MW-0: pushNow ส่ง state ล่าสุดที่ผู้เรียกถือ — ครอบ action ถึงตอนนี้
     try {
       var r = await pushCloudState(state, byUser);
-      if(r && r.ok){ _pendingState = null; _dirty = false; _lastCloudErr = null; }
+      if(r && r.ok){ _pendingState = null; _dirty = false; _lastCloudErr = null; _journalAfterPush(_seqNow); }
       return r;
     } catch(e){
       return { ok:false, error:(e && e.message) || String(e) };
@@ -5109,28 +5263,42 @@ Object.assign(global.ERP, {
   function _flushCloudPush(){
     try { if(global.__erpRestoring) return; } catch(e){}   // 🔒 P1-4: กำลังกู้คืน — ห้าม push ทับ
     if(_pushing){ _pushTimer = setTimeout(_flushCloudPush, 800); return; }   // รอรอบก่อนจบ
-    var st = _pendingState, u = _pendingUser;
+    var st = _pendingState, u = _pendingUser, seqSent = _pendingSeq;
     if(!st){ return; }
     _pushing = true;
     pushCloudState(st, u).then(function(r){
       _pushing = false;
       if(r.ok){
+        _journalAfterPush(seqSent);   // 🆕 MW-0: action ที่อยู่ในก้อนนี้ขึ้น cloud แล้ว
         if(_pendingState === st){ _pendingState = null; _dirty = false; }
         else { _pushTimer = setTimeout(_flushCloudPush, 200); }   // มีของใหม่ระหว่าง push → ตามอีกรอบ
       } else if(r.conflict){
+        // 🆕 MW-0.2: ย้ายงานที่ยังไม่ขึ้นเข้าคิวงานค้าง (อ่านจริงได้ที่ ⚙️ ตั้งค่า → 🧾 งานค้าง)
+        //   ต้องเขียนคิวให้สำเร็จก่อน ถึงจะยอมล้างของในเครื่อง/โหลดใหม่ได้
+        var sp = _spillJournalToOpq(u, 'conflict');
+        if(!sp.ok){
+          // เขียนคิวไม่ได้ (โควต้าเต็ม) / งานค้างเยอะเกินเก็บครบ → ห้าม reload · ของยังอยู่บนจอ ให้คนคัดลอกออกก่อน
+          try {
+            alert('⛔ มีเครื่องอื่นบันทึกข้อมูลไปก่อน และเครื่องนี้เก็บสำรองงานไม่ได้ครบ'
+              + (sp.reason === 'truncated' ? ' (งานค้างส่งสะสมเยอะเกินกว่าที่เก็บได้ — มักเกิดเมื่อเน็ตหลุดนาน)' : ' (พื้นที่ในเบราว์เซอร์เต็ม)') + '\n\n'
+              + '⚠️ อย่าเพิ่งปิดหรือรีเฟรชหน้านี้ — งานที่คีย์ยังอยู่บนจอ\n'
+              + 'จดเลขเอกสาร/รายการที่เพิ่งคีย์ไว้ก่อน แล้วค่อยกดรีเฟรช (F5)');
+          } catch(_a1){}
+          return;   // _conflict ค้างไว้ = กันไม่ให้ push ทับใคร
+        }
         _dirty = false; _pendingState = null;
-        // 🆕 สำรอง state ที่ยังไม่ทัน push ไว้ใน localStorage ก่อน reload — กันงานหายเงียบ (กู้ได้ที่ ตั้งค่า)
-        try {
-          global.localStorage.setItem('erp_v5__conflict_pending',
-            JSON.stringify({ ts: Date.now(), by: u || null, state: st }));
-        } catch(_bk){}
+        try { global.localStorage.setItem('erp_v5__opq_notice', String(sp.count)); } catch(_n){}
         try {
           alert('⛔ มีเครื่องอื่นบันทึกข้อมูลไปก่อน\n\n'
             + 'หน้านี้จะโหลดข้อมูลล่าสุดใหม่ (ไม่ต้องล็อกอินซ้ำ)\n'
-            + '⚠️ รายการที่เพิ่งกดบันทึกล่าสุดบนเครื่องนี้อาจยังไม่ขึ้น — ตรวจแล้วคีย์ซ้ำถ้าไม่เจอ\n\n'
-            + '💡 กันไม่ให้เกิดบ่อย: เมื่อขึ้นแถบ "มีข้อมูลใหม่" ด้านบน ให้กดอัปเดตก่อนคีย์งานต่อ');
+            + (sp.count
+                ? '📥 งานที่เพิ่งบันทึกบนเครื่องนี้ ' + sp.count + ' รายการ ถูกเก็บไว้ — กดแถบแดง "🧾 ดูงานค้าง" ด้านบนหลังโหลดเสร็จ\n'
+                  + '   ระบบจะเทียบให้ว่ารายการไหนขึ้นระบบแล้ว · ⚠️ อย่าคีย์ซ้ำก่อนเช็ก\n'
+                  + (sp.stripped ? '   (รูป/ไฟล์แนบ ' + sp.stripped + ' ชิ้น ต้องแนบใหม่)\n' : '')
+                : '')
+            + '\n💡 กันไม่ให้เกิดบ่อย: เมื่อขึ้นแถบ "มีข้อมูลใหม่" ด้านบน ให้กดอัปเดตก่อนคีย์งานต่อ');
         } catch(_a){}
-        try { global.location.reload(); } catch(_r){}
+        _doReload();
       } else {
         // network/อื่นๆ → เก็บของไว้ retry ทุก 10 วิ (ข้อมูลค้างใน memory — เตือนก่อนปิดด้วย beforeunload)
         if(_retryTimer) clearTimeout(_retryTimer);
@@ -5286,7 +5454,11 @@ Object.assign(global.ERP, {
     isCloudOnly: isCloudOnly, loadCloudState: loadCloudState,
     pushCloudState: pushCloudState, scheduleCloudPush: scheduleCloudPush, pushNow: pushNow,
     cloudSaveStatus: cloudSaveStatus, checkCloudChanged: checkCloudChanged,
-    _debug: { cfg: _cfg, client: _sb },
+    // 🆕 MW-0: สมุดจดงาน + คิวงานค้าง + ปลด latch
+    journalAdd: journalAdd, readOpq: readOpq, writeOpq: writeOpq, clearConflict: clearConflict,
+    backupBeforeOverwrite: backupBeforeOverwrite, safeReload: safeReload, beginWork: beginWork, endWork: endWork,
+    spillJournalToOpq: _spillJournalToOpq, journalSize: function(){ return _journal.length; },
+    _debug: { cfg: _cfg, client: _sb, tok: function(){ return _tok; } },
   };
 })(window);
 
@@ -12650,6 +12822,7 @@ mod('settings',    'ตั้งค่า',    { icon:'⚙️', group:'admin', h
   pg('approvals', 'กฎการอนุมัติ',   SY, { old:'🔒 Approval Rules', fullOnly:true, aliases:['approval rule','กฎอนุมัติ','วงเงิน'] });
   pg('backup',    'สำรอง/กู้คืน',    SY, { old:'💾 Backup / Restore', fullOnly:true, aliases:['backup','restore','สำรองข้อมูล','กู้คืน'] });
   pg('cloud',     'คลาวด์',         SY, { old:'☁️ Cloud', fullOnly:true, aliases:['cloud','sync','ซิงค์'] });
+  pg('opq',       'งานค้าง (บันทึกไม่ขึ้น)', SY, { old:'🧾 งานค้าง', fullOnly:true, aliases:['งานค้าง','บันทึกไม่ขึ้น','ชนกัน','conflict','กู้งาน','งานหาย','มีเครื่องอื่นบันทึก'] });   // 🆕 MW-0.2
   pg('import',    'นำเข้า CSV',     SY, { old:'📥 Import CSV', perm:SP('import'), aliases:['import','CSV','นำเข้า','อัปโหลด'] });
 }
 
@@ -13610,6 +13783,14 @@ function MainShell(){
       }
     } catch(_la){}
     _rawDispatch(action);
+    // 🆕 MW-0: จดลงสมุด "งานที่ยังไม่ขึ้น cloud" — ชนเมื่อไหร่ ย้ายเข้าคิว 🧾 งานค้าง ไม่หายเงียบ
+    try {
+      const SB2 = global.ERP.SBSync;
+      if(SB2 && SB2.journalAdd){
+        const cur2 = (global.ERP.__getState && global.ERP.__getState()) || {};
+        SB2.journalAdd(action, cur2.currentUser && cur2.currentUser.username);
+      }
+    } catch(_jr){}
   }, [_rawDispatch]);
 
   // Persist state (debounced) + expose state getter ให้ async helpers
@@ -13950,6 +14131,10 @@ function AppShell({ state, dispatch }){
       h(TopBar, { state, dispatch, user, currentBranch, setActiveTab, openPalette }),
       // 🆕 แจ้งเมื่อเครื่องอื่นบันทึกข้อมูลใหม่ (งานข้ามแผนก เช่น จัดซื้อเปิด PO → คลังเห็นรายการรอรับของ)
       h(CloudUpdateBanner, null),
+      // 🆕 MW-0.2: งานที่ชนแล้วไม่ขึ้น → ชี้ไปรายการที่ระบบเก็บไว้ (แทนสั่งให้คีย์ซ้ำ)
+      h(PendingOpsBanner, { state, dispatch }),
+      // 🆕 MW-0.5: เครื่องที่เปิดค้างรู้ตัวว่ามีแอปรุ่นใหม่ แล้วโหลดใหม่ตอนว่าง
+      h(AppUpdateBanner, null),
       // 🆕 UI-v2 breadcrumb (32px): กลุ่ม › โมดูล › หน้า (กดย้อนได้) + ☆ ปักโปรด + 🕓 เปิดล่าสุด + ?
       h(BreadcrumbBar, { state, user, activeTab, navPath, openPalette }),
       // 📱 เมนูหลักสำหรับจอแคบ (sidebar ซ่อนอยู่) — ค้างบนเหมือนกัน + แถว ⭐ ทางลัด (โปรด + ทางลัด role) ให้ถึงงานประจำวันได้โดยไม่มีเมนูซ้าย
@@ -15130,6 +15315,71 @@ function CloudSaveBadge(){
     h('span', { className: critical ? 'inline' : 'hidden sm:inline' }, text));
 }
 
+// 🆕 MW-0.5: มีแอปรุ่นใหม่ → แจ้งด้วยแถบ ให้ผู้ใช้กดโหลดใหม่เอง (ผ่าน safeReload)
+//   เดิมตัวบังคับโหลดใหม่ตัวเดียวคือ alert ตอนชน · เครื่องที่เปิดค้างทั้งวันใช้แอปรุ่นเก่าได้ไม่จำกัด
+//   (คลื่น 3 ต้องการให้ทุกเครื่องใช้รุ่นเดียวกัน ไม่งั้นเครื่องรุ่นเก่าเขียนทับงานคนอื่นเงียบ ๆ)
+//   ไม่โหลดใหม่อัตโนมัติ (UAT M8): มีช่วงที่ไม่มีธงไหนติด + เครื่องชั่ง/เครื่องพิมพ์ BLE หลุดกลางชุด
+function AppUpdateBanner(){
+  const mine = global.__ERP_BUILD_ID__ || '';
+  const [latest, setLatest] = useState(null);
+  useEffect(() => {
+    if(!mine || !/^https?:/.test(String(global.location && global.location.protocol))) return;
+    let alive = true;
+    const check = async () => {
+      try {
+        const r = await fetch('build.json?_=' + Date.now(), { cache:'no-store' });
+        if(!r.ok) return;
+        const j = await r.json();
+        if(alive && j && j.buildId && j.buildId !== mine) setLatest(j.buildId);
+      } catch(_e){}
+    };
+    const t0 = setTimeout(check, 15000);
+    const t = setInterval(check, 60000);
+    return () => { alive = false; clearTimeout(t0); clearInterval(t); };
+  }, []);
+  // 🆕 UAT M8: เลิกโหลดใหม่อัตโนมัติ — มีช่วงที่ไม่มีธงไหนติด (กำลังส่งใบเบิก/ผลชั่ง ก่อน pushNow)
+  //   + เครื่องชั่ง/เครื่องพิมพ์ BLE หลุดกลางชุด · เหลือแถบให้กดเอง ผ่าน safeReload (บล็อกเมื่อมีงานรอขึ้น)
+  if(!latest) return null;
+  const SB = global.ERP.SBSync;
+  return h('div', { className:'bg-indigo-50 border-b border-indigo-200 px-4 py-1.5 flex items-center justify-center gap-3 text-xs', 'data-testid':'app-update-banner' },
+    h('span', null, '✨ มีแอปรุ่นใหม่ — กดโหลดใหม่เมื่อทำงานชุดนี้เสร็จ (ไม่ได้อยู่ระหว่างชั่ง/กรอกฟอร์ม)'),
+    h('button', { onClick:() => { if(SB && SB.safeReload) SB.safeReload(); else { try { global.location.reload(); } catch(_r){} } },
+      className:'px-2 py-0.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-bold' }, 'โหลดใหม่'));
+}
+
+// 🆕 MW-0.2: แถบ "มีงานที่บันทึกไม่ขึ้น" — หลังชนแล้วโหลดใหม่ ชี้ไปหน้า 🧾 งานค้าง แทนสั่งให้คนคีย์ซ้ำ
+//   อ่านคิวจริง (ไม่ใช่แค่ธง) · ซ่อนเมื่อไม่มีชุดที่ยังค้าง
+function PendingOpsBanner({ state, dispatch }){
+  const SB = global.ERP.SBSync;
+  const [n, setN] = useState(0);
+  const [open, setOpen] = useState(false);
+  //   เปิดรายการในโมดัลตรงนี้เลย — คนที่ชนอาจเป็นพนักงานที่เข้าหน้า ⚙️ ตั้งค่า ไม่ได้ (HQ + สิทธิ์ settings)
+  useEffect(() => {
+    // 🆕 UAT M3: นับ "รายการที่ยังไม่ขึ้น" (หน่วยเดียวกับ alert) ไม่ใช่จำนวนชุด · ชุดที่ขึ้นครบแล้วไม่นับ
+    const count = () => { try {
+      const q = (SB && SB.readOpq) ? SB.readOpq() : [];
+      const cnt = global.ERP.opqOpenCount;
+      const st = global.ERP.__getState ? global.ERP.__getState() : null;
+      setN(cnt && st ? cnt(q, st) : q.filter(o => o && o.status === 'pending').length);
+    } catch(_e){} };
+    count();
+    const t = setInterval(count, 15000);
+    global.addEventListener('erp:opq', count);            // คิวเปลี่ยน (ชน/ส่งใหม่/ปิดรายการ) → นับใหม่ทันที
+    global.addEventListener('storage', count);            // แท็บอื่นของเครื่องเดียวกันเขียนคิว
+    return () => { clearInterval(t); global.removeEventListener('erp:opq', count); global.removeEventListener('storage', count); };
+  }, []);
+  const Tab = global.ERP.PendingOpsTab;
+  if(!n && !open) return null;
+  return h(R.Fragment, null,
+    n > 0 && h('div', { className:'bg-red-50 border-b-2 border-red-300 px-4 py-2 flex items-center justify-center gap-3 text-sm', 'data-testid':'opq-banner' },
+      h('span', null, `📥 มีงานที่บันทึกบนเครื่องนี้แต่อาจยังไม่ขึ้นระบบ ${n} รายการ (ชนกับเครื่องอื่น) — ⚠️ อย่าคีย์ซ้ำ เช็กก่อน`),
+      h('button', { onClick:() => setOpen(true), 'data-testid':'opq-open',
+        className:'px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded font-bold text-xs' }, '🧾 ดูงานค้าง')),
+    open && Tab && h(global.ERP.Modal, { isOpen:true, title:'🧾 งานค้าง — บันทึกบนเครื่องนี้แต่ไม่ขึ้นระบบ', size:'xl',
+        onClose:() => { setOpen(false); try { global.dispatchEvent(new Event('erp:opq')); } catch(_e){} } },   // นับใหม่ด้วยตัวนับเดียวกับตอน mount
+      h(Tab, { state, dispatch })));
+}
+
 // 🆕 แถบ "มีข้อมูลใหม่จากเครื่องอื่น" — cloud-only โหลด state แค่ตอนเปิดแอป → งานข้ามแผนกไม่ขึ้นจนกว่าจะ refresh
 //   (เช่น จัดซื้อเปิด PO แล้วคลังยังไม่เห็นรายการรอรับของ) · poll เบาๆ ทุก 20 วิ เทียบแค่ timestamp ไม่ดึงข้อมูลทั้งก้อน
 //   กดอัปเดต = โหลดหน้าใหม่ (session จำต่อเครื่องแล้ว → ไม่ต้องล็อกอินซ้ำ)
@@ -15160,7 +15410,9 @@ function CloudUpdateBanner(){
         // 🆕 ดึงข้อมูลในที่ ไม่ reload ทั้งหน้า → ไม่หลุด login และไม่ต้องรอโหลดแอปใหม่
         const fn = global.ERP.__refreshFromCloud;
         if(fn){ const ok = await fn({ force:true }); if(ok){ setInfo(null); return; } }
-        try { global.location.reload(); } catch(_r){}
+        // 🆕 UAT M9: ดึงในที่ไม่ได้ → โหลดทั้งหน้า ต้องไม่ทิ้งงานที่กดบันทึกแล้วแต่ยังไม่ขึ้น
+        const SB2 = global.ERP.SBSync;
+        if(SB2 && SB2.safeReload) SB2.safeReload(); else { try { global.location.reload(); } catch(_r){} }
       },
       className:'px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-bold text-xs' },
       '⬇️ อัปเดตข้อมูล'),
@@ -16314,7 +16566,7 @@ function EmbeddedQuickIssueTab({ state, dispatch, user }){
   if(status === 'error') return h('div', { className:'bg-red-50 border border-red-200 rounded p-4 text-sm text-red-800' },
     h('div', { className:'font-bold' }, '❌ เปิดหน้าเบิกวัตถุดิบไม่ได้'),
     h('div', { className:'mt-1' }, 'โหลดหน้าจอไม่สำเร็จ (อาจเป็นสัญญาณอินเทอร์เน็ต) — ลองรีเฟรชหน้าเว็บ ถ้ายังไม่ขึ้นแจ้ง admin'),
-    h('button', { type:'button', onClick:()=>{ try { location.reload(); } catch(_e){} },
+    h('button', { type:'button', onClick:()=>{ const SBr = global.ERP.SBSync; if(SBr && SBr.safeReload) SBr.safeReload(); else { try { location.reload(); } catch(_e){} } },   // 🆕 verify M9
       className:'mt-2 px-3 py-1.5 rounded bg-red-600 text-white text-sm min-h-[36px]' }, '🔄 รีเฟรชหน้าเว็บ'));
   const Comp = _quickIssueComp();
   if(!Comp) return h('div', { className:'bg-amber-50 border border-amber-200 rounded p-6 text-sm text-amber-800' },
@@ -33903,7 +34155,13 @@ function QuickIssueTabInner({ state, dispatch, user, branchId: branchIdProp }){
   //   · conflict ที่ (3): ยังไม่ได้ dispatch → เก็บ act ใน sessionStorage (erp_v5__qi_replay) → reload → mount แล้ว replay อัตโนมัติ (dedupe ด้วย issue.id)
   //   · เน็ตล่ม ที่ (3): dispatch ในเครื่อง + ให้ shell/scheduleCloudPush ลองใหม่อัตโนมัติ (retry ทุก 10 วิ) — เตือนห้ามปิดหน้า
   //   · โหมดไม่ใช่ cloud-only (harness/local) → dispatch ตรงเหมือนเดิม
+  // 🆕 verify M8/M9: นับเป็น "งานกำลังส่ง" ตั้งแต่กดจนจบ (ช่วงก่อน pushNow ไม่มีธงไหนติด)
   const submit = async () => {
+    const SBw = global.ERP.SBSync;
+    try { if(SBw && SBw.beginWork) SBw.beginWork(); return await submitInner(); }
+    finally { try { if(SBw && SBw.endWork) SBw.endWork(); } catch(_e){} }
+  };
+  const submitInner = async () => {
     if(saving) return;
     if(!canCreate){ alert('คุณไม่มีสิทธิ์เบิกวัตถุดิบ'); return; }
     const lines = buildLines();
@@ -33957,9 +34215,14 @@ function QuickIssueTabInner({ state, dispatch, user, branchId: branchIdProp }){
             _qiSaveReplay({ act, branchId, user: user.username, number, ts: Date.now() });
             _notify(`⚠️ ข้อมูลชนกับเครื่องอื่น — กำลังโหลดใหม่และบันทึกใบเบิก ${number || ''} ซ้ำให้อัตโนมัติ`, 'warning');
             const cs = SB.cloudSaveStatus ? SB.cloudSaveStatus() : {};
-            // มีงานอื่นค้างยังไม่ push → ให้ shared path สำรอง (erp_v5__conflict_pending) + โหลดใหม่เอง · ไม่มี → โหลดใหม่ตรง ๆ (ไม่มี beforeunload prompt)
+            // มีงานอื่นค้างยังไม่ push → ให้ shared path เทเข้าคิว 🧾 งานค้าง + โหลดใหม่เอง · ไม่มี → เทสมุด (ถ้ามี) แล้วโหลดใหม่
             if(cs.dirty && SB.scheduleCloudPush) SB.scheduleCloudPush(cur, user.username);
-            else setTimeout(() => { try { global.location.reload(); } catch(_e){} }, 800);
+            else {
+              // 🆕 verify M5: มีงานอื่นในสมุดที่ยังไม่ขึ้น → เทเข้าคิว 🧾 ก่อน · เทไม่ได้ครบ = ห้ามโหลดใหม่
+              const sp = SB.spillJournalToOpq ? SB.spillJournalToOpq(user.username, 'conflict') : { ok:true };
+              if(sp.ok) setTimeout(() => { try { global.location.reload(); } catch(_e){} }, 800);
+              else alert('⛔ ข้อมูลชนกับเครื่องอื่น และเครื่องนี้เก็บสำรองงานที่ยังไม่ขึ้นได้ไม่ครบ\n\n⚠️ อย่าเพิ่งปิดหรือรีเฟรช — จดรายการที่เพิ่งทำไว้ก่อน แล้วค่อยกด F5');
+            }
             return;   // saving คงไว้ = ปุ่มปิดจนกว่าจะโหลดใหม่
           }
           // เน็ต/อื่น ๆ → บันทึกในเครื่อง ให้ระบบลองส่งใหม่อัตโนมัติ (saveState → scheduleCloudPush retry 10 วิ)
@@ -33970,8 +34233,9 @@ function QuickIssueTabInner({ state, dispatch, user, branchId: branchIdProp }){
           return;
         }
       }
-      // (4) บันทึกในเครื่อง
-      dispatch(act);
+      // (4) บันทึกในเครื่อง · 🆕 MW-0 (UAT M4): ขึ้น cloud แล้ว → ติด _committed ไม่ให้สมุดจดซ้ำ
+      //   (ถ้าจด แล้ว push รอบตามหลังชน ใบนี้จะถูกเทเข้าคิวเป็น "ยังไม่ขึ้น" → คนเบิกซ้ำ ตัดสต๊อกสองรอบ)
+      dispatch(cloud ? { ...act, _committed:true } : act);
       setSaving(false);
       _notify(`เบิกแล้ว ${number || ''} (${lines.length} รายการ)`, 'success');
       clearForm();
@@ -34358,7 +34622,14 @@ const WEIGH_FORCED_SETTINGS = { minTolG:1, requireZero:true, lockDwellSec:2.5, z
 // ผลลัพธ์: 'cloud' = ขึ้น cloud แล้ว (หรือมีอยู่แล้ว) · 'local' = บันทึกในเครื่อง+เข้าคิว (เน็ตล่ม — ยังไม่ปลอดภัย) · 'pending' = เข้าคิว รอ replay · false = ระบบปฏิเสธ
 //   ผู้เรียกที่ต้องการ boolean เดิม: ok = r === 'cloud' || r === 'local'
 function _weighEmitStatus(detail){ try { global.dispatchEvent(new CustomEvent('erp:weigh-status', { detail })); } catch(_e){} }
+// 🆕 verify M8/M9: ช่วง refresh → คำนวณ → pushNow ไม่มีธงไหนติด (ฉลาก LOT พิมพ์ไปแล้ว) → นับเป็น "งานกำลังส่ง"
+//   ให้ safeReload บล็อกการโหลดใหม่ระหว่างนี้ (ไม่งั้นผลชั่งหายทั้งที่ติดฉลากแล้ว)
 async function _weighCommit(act, ctx){
+  const SB = global.ERP.SBSync;
+  try { if(SB && SB.beginWork) SB.beginWork(); return await _weighCommitInner(act, ctx); }
+  finally { try { if(SB && SB.endWork) SB.endWork(); } catch(_e){} }
+}
+async function _weighCommitInner(act, ctx){
   const { key, lot, branchId, user, dispatch, fallbackState, silent } = ctx;
   const SB = global.ERP.SBSync;
   const cloud = !!(SB && SB.isCloudOnly && SB.isCloudOnly() && SB.pushNow);
@@ -34401,7 +34672,12 @@ async function _weighCommit(act, ctx){
         emit('pending', { reason:'conflict' });
         const cs = SB.cloudSaveStatus ? SB.cloudSaveStatus() : {};
         if(cs.dirty && SB.scheduleCloudPush) SB.scheduleCloudPush(cur, user.username);
-        else setTimeout(() => { try { global.location.reload(); } catch(_e){} }, 800);
+        else {
+              // 🆕 verify M5: มีงานอื่นในสมุดที่ยังไม่ขึ้น → เทเข้าคิว 🧾 ก่อน · เทไม่ได้ครบ = ห้ามโหลดใหม่
+              const sp = SB.spillJournalToOpq ? SB.spillJournalToOpq(user.username, 'conflict') : { ok:true };
+              if(sp.ok) setTimeout(() => { try { global.location.reload(); } catch(_e){} }, 800);
+              else alert('⛔ ข้อมูลชนกับเครื่องอื่น และเครื่องนี้เก็บสำรองงานที่ยังไม่ขึ้นได้ไม่ครบ\n\n⚠️ อย่าเพิ่งปิดหรือรีเฟรช — จดรายการที่เพิ่งทำไว้ก่อน แล้วค่อยกด F5');
+            }
         return 'pending';
       }
       // เน็ต/อื่น ๆ → บันทึกในเครื่อง ให้ระบบลองส่งใหม่อัตโนมัติ · เข้าคิว replay ด้วย — ถ้าแท็บเล็ตดับ/ปิด Chrome ก่อนเน็ตกลับ (cloud-only ไม่มี state ในเครื่อง) รอบหน้าจะส่งซ้ำให้
@@ -34412,8 +34688,8 @@ async function _weighCommit(act, ctx){
       emit('local', { reason:'net', error: r && r.error });
       return 'local';
     }
-    // (4) บันทึกในเครื่อง (shell push ตามด้วย token ใหม่ = สำเร็จ)
-    dispatch(act);
+    // (4) บันทึกในเครื่อง (shell push ตามด้วย token ใหม่ = สำเร็จ) · 🆕 MW-0 (UAT M4): ขึ้น cloud แล้ว ห้ามจดซ้ำ
+    dispatch({ ...act, _committed:true });
     note(`✅ บันทึกผลชั่ง ${lot || ''} แล้ว`, 'success');
     emit('cloud');
     return 'cloud';
@@ -34443,7 +34719,12 @@ function _weighReplayPending(opts){
   _weighReplayBusy = _weighReplayRun(opts).catch(e => console.warn('weigh replay failed', e)).finally(() => { _weighReplayBusy = null; });
   return _weighReplayBusy;
 }
-async function _weighReplayRun({ branchId, user, dispatch, fallbackState, noCountTries, forceKeys, asOthers }){
+async function _weighReplayRun(opts){
+  const SB = global.ERP.SBSync;
+  try { if(SB && SB.beginWork) SB.beginWork(); return await _weighReplayRunInner(opts); }
+  finally { try { if(SB && SB.endWork) SB.endWork(); } catch(_e){} }
+}
+async function _weighReplayRunInner({ branchId, user, dispatch, fallbackState, noCountTries, forceKeys, asOthers }){
   const list = _weighLoadReplay();
   if(!list.length || !user) return;
   const force = new Set(forceKeys || []);
@@ -71561,6 +71842,7 @@ function SettingsModule({ state, dispatch }){
       { k:'approvals', label:'🔒 Approval Rules' },
       { k:'backup',    label:'💾 Backup / Restore' },
       { k:'cloud',     label:'☁️ Cloud' },
+      { k:'opq',       label:'🧾 งานค้าง (บันทึกไม่ขึ้น)' },
     ]},
     { k:'production', label:'🏭 การผลิต', subs:[
       { k:'lines',     label:'🏭 ไลน์ผลิต' },
@@ -71662,6 +71944,7 @@ function SettingsModule({ state, dispatch }){
     tab==='approvals' && h(ApprovalRulesSettings, { state, dispatch }),
     tab==='backup'    && h(BackupRestoreTab,  { state, dispatch }),
     tab==='cloud'     && h(CloudBackupTab,    { state, dispatch }),
+    tab==='opq'       && h(PendingOpsTab,     { state, dispatch }),
     tab==='users'     && h(UsersSettings,     { state, dispatch }),
     tab==='itemList'  && h(ItemsSettings,     { state, dispatch }),
     tab==='types'     && h(TypesSettings,     { state, dispatch }),
@@ -78900,9 +79183,9 @@ function BackupRestoreTab({ state, dispatch }){
     setRestoring(true);
     try {
       const demoState = buildComprehensiveDemoState();
-      dispatch({ type:'IMPORT_STATE', data: demoState });
-      alert(`✅ Demo data โหลดสำเร็จ!\n\nครอบคลุม:\n• 25 items (raw/wip/fg/asset/packaging)\n• 5 POs (mix สถานะ)\n• 3 GRs + 3 INVs (paid/unpaid/voided)\n• 1 Direct Expense INV\n• 4 Production Orders (Master+Sub chain)\n• 5 BOMs with operations + verification\n• 2 Assets (เครื่องจักร + คอมพิวเตอร์)\n• 1 Material Issue\n• 1 Scrap entry\n\nรีโหลดหน้า → เริ่มเทสได้เลย`);
-      setTimeout(() => location.reload(), 1500);
+      _overwriteCloud({ label:'demo', byUser:(state.currentUser && state.currentUser.username) || null,
+        doDispatch:(stamp) => dispatch({ type:'IMPORT_STATE', data: { ...demoState, __importStamp: stamp } }),
+        successMsg: `✅ Demo data โหลดสำเร็จ!\n\nครอบคลุม:\n• 25 items (raw/wip/fg/asset/packaging)\n• 5 POs (mix สถานะ)\n• 3 GRs + 3 INVs (paid/unpaid/voided)\n• 1 Direct Expense INV\n• 4 Production Orders (Master+Sub chain)\n• 5 BOMs with operations + verification\n• 2 Assets (เครื่องจักร + คอมพิวเตอร์)\n• 1 Material Issue\n• 1 Scrap entry\n\nรีโหลดหน้า → เริ่มเทสได้เลย`, onFail:() => setRestoring(false) });
     } catch(err){
       alert('Seed error: ' + err.message);
       setRestoring(false);
@@ -78956,14 +79239,14 @@ function BackupRestoreTab({ state, dispatch }){
       `version: ${parsed.version}`,
     ].join('\n  ');
 
-    if(!confirm(`⚠️ Restore จาก JSON?\n\nข้อมูลปัจจุบันทั้งหมดจะถูก ${'ทับ'}ทับ\n\nสรุปข้อมูลใน backup:\n  ${summary}\n\nยืนยัน restore?`)) return;
+    if(!confirm(`⚠️ Restore จาก JSON?\n\nข้อมูลปัจจุบันทั้งหมดจะถูกทับ\n\nสรุปข้อมูลใน backup:\n  ${summary}\n\nยืนยัน restore?`)) return;
     if(!confirm(`🚨 ยืนยันอีกครั้ง — restore แล้วย้อนกลับไม่ได้!\n\nกด "OK" เพื่อยืนยัน · "Cancel" เพื่อยกเลิก`)) return;
 
     setRestoring(true);
     try {
-      dispatch({ type:'IMPORT_STATE', data: parsed });
-      alert(`✅ Restore สำเร็จ — รีโหลดหน้าใหม่เพื่อ apply\n${summary}`);
-      setTimeout(() => location.reload(), 1500);
+      _overwriteCloud({ label:'restore-json', byUser:(state.currentUser && state.currentUser.username) || null,
+        doDispatch:(stamp) => dispatch({ type:'IMPORT_STATE', data: { ...parsed, __importStamp: stamp } }),
+        successMsg:`✅ Restore สำเร็จ\n${summary}`, onFail:() => setRestoring(false) });
     } catch(err){
       alert('Restore error: ' + err.message);
       setRestoring(false);
@@ -78984,9 +79267,10 @@ function BackupRestoreTab({ state, dispatch }){
     if(!confirm(`🔀 นำเข้าแบบรวม (Merge)\n\nจะ "แทนที่เฉพาะส่วน" เหล่านี้ · ส่วนอื่น (ผู้ใช้/สาขา/ตั้งค่า) ไม่แตะ:\n\n  ${summary}\n\nยืนยัน?`)) return;
     setRestoring(true);
     try {
-      dispatch({ type:'MERGE_IMPORT', data: parsed });
-      alert(`✅ นำเข้าสำเร็จ — รีโหลดหน้าใหม่\n  ${summary}`);
-      setTimeout(() => location.reload(), 1200);
+      _overwriteCloud({ label:'merge-import', byUser:(state.currentUser && state.currentUser.username) || null,
+        dispatch, rebaseOnCloud:true,
+        doDispatch:() => dispatch({ type:'MERGE_IMPORT', data: parsed }),
+        successMsg:`✅ นำเข้าสำเร็จ\n  ${summary}`, onFail:() => setRestoring(false) });
     } catch(err){
       alert('Merge error: ' + err.message);
       setRestoring(false);
@@ -79157,9 +79441,12 @@ function BackupRestoreTab({ state, dispatch }){
         h(Button, { variant:'warning', onClick:()=>{
           if(!confirm('⚠️ ล้าง transactions ทั้งหมด?\n\nจะลบ:\n• PO, GR, PI, PV, Deposit, CN/DN, RTV\n• JE, Payments, Movements, FIFO\n• Reset stock = 0, supplier credit = 0, bank balance = 0\n\nเก็บไว้:\n• Suppliers, Items, Branches, Users, COA\n• Bank master, Settings, Roles\n\nย้อนกลับไม่ได้ — Export backup ก่อน?')) return;
           if(!confirm('🚨 ยืนยันอีกครั้ง — กด OK เพื่อล้าง')) return;
-          dispatch({ type:'CLEAR_TRANSACTIONS' });
-          alert('✅ ล้าง transactions เรียบร้อย — รีโหลดหน้าใหม่');
-          setTimeout(() => location.reload(), 800);
+          // 🆕 verify M7: เดิม dispatch แล้ว reload 800ms (ก่อน push) + ไม่สำรองก่อนทับ cloud ทั้งบริษัท
+          //   ตอนนี้: ล้างบนข้อมูลล่าสุดจาก cloud (ไม่ทับงานเครื่องอื่นที่เข้ามาระหว่างนี้) · สำรองก่อน · ขึ้นจริงก่อนแจ้ง
+          _overwriteCloud({ label:'clear-transactions', byUser:(state.currentUser && state.currentUser.username) || null,
+            dispatch, rebaseOnCloud:true,
+            doDispatch:() => dispatch({ type:'CLEAR_TRANSACTIONS' }),
+            successMsg:'✅ ล้าง transactions เรียบร้อย' });
         }}, '🗑 ล้าง Transactions')
       ),
       h('div', { className:'text-[11px] text-amber-900 bg-amber-100 rounded px-2 py-1' },
@@ -79175,7 +79462,8 @@ function BackupRestoreTab({ state, dispatch }){
           h('div', { className:'text-xs text-red-700' },
             'ลบข้อมูลปัจจุบันทั้งหมด + โหลด demo data ครบทุก feature (POs, INVs, Production, BOMs, Assets, etc.) สำหรับเทสต์ระบบใหม่')
         ),
-        h(Button, { variant:'danger', onClick:resetAndSeed, disabled:restoring },
+        // 🆕 UAT M7: บน cloud ปุ่มนี้ = ทับข้อมูลทั้งบริษัทด้วยข้อมูลตัวอย่าง → ซ่อน (ใช้ได้เฉพาะโหมดเครื่องเดียว)
+        !(global.ERP.SBSync && global.ERP.SBSync.isCloudOnly && global.ERP.SBSync.isCloudOnly()) && h(Button, { variant:'danger', onClick:resetAndSeed, disabled:restoring },
           restoring ? '⏳ Loading...' : '🔥 Reset + Load Demo')
       ),
       h('div', { className:'text-[11px] text-red-800 bg-red-100 rounded px-2 py-1' },
@@ -79242,6 +79530,230 @@ function BackupRestoreTab({ state, dispatch }){
 // ☁️ CLOUD BACKUP (Supabase) — auth + manual push + snapshot list/restore
 // ใช้ global.ERP.SBSync (00-supabase.js) · ห้าม log/เก็บรหัสผ่าน — ใช้แล้วทิ้ง state
 // ================================================================
+// ════════════════════════════════════════════════════════════════════
+// 🧾 งานค้าง — งานที่บันทึกบนเครื่องนี้แล้วแต่ "ไม่ขึ้น cloud" เพราะชนกับเครื่องอื่น
+//   (แผนรองรับ 50-60 คน คลื่น 0.2) · อ่านคิว erp_v5__opq ที่ 00-supabase เขียนตอนชน
+//   บอกรายรายการว่า "ขึ้นระบบแล้ว / ยังไม่ขึ้น" โดยเทียบ id กับข้อมูลบริษัทชุดปัจจุบัน
+//   🆕 UAT M1: **ไม่มีปุ่มส่งใหม่ในคลื่นนี้** — งาน 1 ชิ้นมีหลาย action (ตั้งหนี้ = ADD_INV + UPDATE_GR + JE ·
+//     จ่ายเงิน = ADD_PAY + UPDATE_INV + UPDATE_BANK · ขายสาขา = บิล + ตัดสต๊อก + FIFO) ส่งใหม่ทีละ action
+//     = ตั้งหนี้ซ้ำ/จ่ายซ้ำ/สต๊อกเพี้ยน · ทางที่ถูกคือคีย์ใหม่ทั้งใบที่หน้าจอเดิม (ระบบลง JE/ตัดสต๊อกครบ)
+//     การรวม action เป็นชุดเดียว (commit layer) อยู่คลื่น 2
+// ════════════════════════════════════════════════════════════════════
+// เลขเอกสาร "ของใบนั้นเอง" ตาม action (ไม่นับเลขอ้างอิงของเอกสารแม่ เช่น poNumber ใน ADD_INV) — UAT M2
+const _OPQ_OWN_NUM = {
+  ADD_PO:'poNumber', ADD_INV:'invNumber', ADD_COMBINED_INV:'invNumber', ADD_TR:'trNumber', ADD_TO:'toNumber',
+  ADD_SALES_INV:'siNumber', ADD_SO:'qtNumber', ADD_SALES_BILLING:'bnNumber', ADD_SALES_LIGHT:'number',
+  ADD_RTV:'rtvNumber', ADD_DEPOSIT:'depositNumber', ADD_STOCK_COUNT_SESSION:'sessionNumber',
+  // ADD_PAY / ADD_QUICK_ISSUE: reducer ออกเลขเองตอนบันทึก — เลขในคิวไม่ใช่เลขจริง ห้ามเอามาเช็กชน
+};
+// id ชั้นใน — บาง action ห่อเอกสารไว้ใน data.gr / data.issue / data.log … (UAT M3)
+//   ('order' ออก — PROD_WORKFLOW_STEP ห่อ order เดิมที่มีอยู่แล้ว = ได้ "ขึ้นแล้ว" ผิดเสมอ · 'inv' เพิ่มให้ ADD_COMBINED_INV)
+const _OPQ_WRAP = ['gr','rtv','issue','log','scrap','posImport','movement','session','memo','deposit','payment','inv'];
+// 🆕 verify M1-M3: ตรวจ "มีในระบบแล้ว" ได้เฉพาะ action ที่สร้างเอกสารใหม่
+//   UPDATE_*/VOID_*/ADJUST_* มี id ของเอกสาร/สินค้าที่มีอยู่แล้ว → ถ้าตรวจแบบเดียวกันจะขึ้น "✅ ขึ้นแล้ว" กับงานแก้ไขที่หายจริง
+function _opqIsCreate(type){ return /^ADD_/.test(type || '') || type === 'RECEIVE_PO'; }
+function _opqDoc(a){
+  if(!a || !_opqIsCreate(a.type)) return null;
+  const d = a.data || {};
+  if(d && d.id) return d;
+  for(const k of _OPQ_WRAP){ if(d[k] && typeof d[k] === 'object' && d[k].id) return d[k]; }
+  return null;
+}
+function _opqFindId(state, id){
+  if(!id || !state) return null;
+  for(const k of Object.keys(state)){
+    const v = state[k];
+    if(Array.isArray(v) && v.some(x => x && x.id === id)) return k;
+  }
+  return null;
+}
+function _opqWeighPresent(state, log){
+  if(!log) return false;
+  const key = String(log.deviceId || '') + '|' + String(log.id);
+  return (state.weighLogs || []).some(w => w && (String(w.deviceId || '') + '|' + String(w.id)) === key);
+}
+function _opqNumberClash(state, type, doc){
+  const f = _OPQ_OWN_NUM[type]; if(!f || !doc || !doc[f]) return null;
+  for(const k of Object.keys(state)){
+    const v = state[k]; if(!Array.isArray(v)) continue;
+    const hit = v.find(x => x && x[f] === doc[f] && x.id !== doc.id);
+    if(hit) return { number: doc[f], other: hit };
+  }
+  return null;
+}
+function _opqHasStripped(v){
+  if(typeof v === 'string') return v === '[ไฟล์แนบ — ต้องแนบใหม่]';
+  if(Array.isArray(v)) return v.some(_opqHasStripped);
+  if(v && typeof v === 'object') return Object.keys(v).some(k => _opqHasStripped(v[k]));
+  return false;
+}
+function _opqStatus(state, a){
+  const doc = _opqDoc(a);
+  if(a && a.type === 'ADD_WEIGH_LOG'){
+    const log = (a.data && (a.data.log || a.data)) || null;
+    return _opqWeighPresent(state, log) ? { code:'done', text:'✅ ขึ้นระบบแล้ว' } : { code:'missing', text:'⏳ ยังไม่ขึ้น — ชั่งใหม่ที่สถานีชั่ง (ระบบชั่งมีคิวส่งซ้ำของตัวเองด้วย ดูที่ 📮 รอส่ง)' };
+  }
+  if(doc && doc.id){
+    if(_opqFindId(state, doc.id)) return { code:'done', text:'✅ ขึ้นระบบแล้ว' };
+    const clash = _opqNumberClash(state, a.type, doc);
+    if(clash){
+      const o = clash.other;
+      const pn = (id, arr) => { const x = id && (state[arr] || []).find(y => y && y.id === id); return x ? (x.name || x.code) : ''; };
+      const amt = o.netPayable != null ? o.netPayable : o.amount != null ? o.amount : o.total;
+      const who = [pn(o.supplierId, 'suppliers') || pn(o.customerId, 'customers'),
+        amt != null && !isNaN(Number(amt)) ? 'ยอด ' + Number(amt).toLocaleString('th-TH', { maximumFractionDigits:2 }) : '',
+        o.createdBy || '', o.createdAt ? new Date(o.createdAt).toLocaleString('th-TH', { dateStyle:'short', timeStyle:'short' }) : ''].filter(Boolean).join(' · ');
+      return { code:'clash', text:`⚠️ ยังไม่ขึ้น · เลข ${clash.number} มีใบอื่นใช้แล้ว${who ? ' (' + who + ')' : ''} — ตรวจก่อนว่าเป็นใบเดียวกันที่คีย์ใหม่ไปแล้วหรือเปล่า` };
+    }
+    if(a.type === 'ADD_JE' && doc.sourceId)
+      return { code:'missing', text:`⏳ ยังไม่ขึ้น — เป็นรายการบัญชีอัตโนมัติของ ${doc.sourceRef || doc.sourceId} · ห้ามคีย์ JE เอง ให้คีย์เอกสารต้นทางใหม่ ระบบลงบัญชีให้เอง` };
+    return { code:'missing', text: _opqHasStripped(a.data)
+      ? '⏳ ยังไม่ขึ้น — คีย์ใหม่ทั้งใบที่หน้าจอเดิม (มีรูป/ไฟล์ต้องแนบใหม่)'
+      : '⏳ ยังไม่ขึ้น — คีย์ใหม่ทั้งใบที่หน้าจอเดิม (ระบบจะลง JE/ตัดสต๊อกให้ครบ)' };
+  }
+  if(a && /STOCK|FIFO|MOVEMENT|DEDUCT|CONSUME|PAY|BANK|JE|INV|PETTY/.test(a.type || ''))
+    return { code:'manual', text:'✋ ตรวจอัตโนมัติไม่ได้ — ถ้าเอกสารต้นทางยังไม่ขึ้น ให้คีย์ใหม่ทั้งใบที่หน้าจอเดิม (ห้ามปรับสต๊อก/ลงบัญชีแยกเอง — ระบบทำให้ครบตอนคีย์ใบ)' };
+  return { code:'manual', text:'✋ ตรวจอัตโนมัติไม่ได้ — เปิดดูเอกสารนั้นว่ามีการเปลี่ยนแปลงนี้แล้วหรือยัง' };
+}
+// จำนวน "รายการที่ยังไม่ขึ้น/ต้องเช็ก" ในชุดที่ยังเปิด — ใช้ร่วมกับแถบแดงใน shell
+function opqOpenCount(list, state){
+  let n = 0;
+  (list || []).forEach(o => { if(o && o.status === 'pending') (o.actions || []).forEach(a => { if(_opqStatus(state, a).code !== 'done') n++; }); });
+  return n;
+}
+// สรุปข้อมูลสำคัญของรายการให้คนเทียบกับจอได้ (ผู้ขาย/ลูกค้า · ยอด · จำนวนบรรทัด · สินค้า)
+function _opqDetail(state, a){
+  const doc = _opqDoc(a) || (a && a.data) || {};
+  const parts = [];
+  const nm = (id, arr) => { const x = (state[arr] || []).find(y => y && y.id === id); return x ? (x.name || x.code || id) : id; };
+  if(doc.supplierId) parts.push('ผู้ขาย: ' + nm(doc.supplierId, 'suppliers'));
+  if(doc.customerId) parts.push('ลูกค้า: ' + nm(doc.customerId, 'customers'));
+  if(doc.itemId) parts.push('สินค้า: ' + nm(doc.itemId, 'items'));
+  const amt = doc.netPayable != null ? doc.netPayable : doc.amount != null ? doc.amount : doc.total;
+  if(amt != null && !isNaN(Number(amt))) parts.push('ยอด ' + Number(amt).toLocaleString('th-TH', { maximumFractionDigits:2 }));
+  if(Array.isArray(doc.lines)) parts.push(doc.lines.length + ' บรรทัด');
+  if(doc.qty != null) parts.push('จำนวน ' + doc.qty);
+  const own = _OPQ_OWN_NUM[a.type];
+  if(own && doc[own]) parts.unshift(doc[own]);
+  return parts.join(' · ');
+}
+function PendingOpsTab({ state, dispatch }){
+  const SB = global.ERP.SBSync;
+  const [list, setList] = useState(() => (SB && SB.readOpq ? SB.readOpq() : []));
+  const [openRow, setOpenRow] = useState(null);
+  const reload = () => setList(SB && SB.readOpq ? SB.readOpq() : []);
+  const save = (next) => { if(SB && SB.writeOpq && SB.writeOpq(next)) setList(next); else alert('บันทึกรายการงานค้างไม่สำเร็จ (พื้นที่ในเบราว์เซอร์เต็ม?)'); };
+  useEffect(() => { try { global.localStorage.removeItem('erp_v5__opq_notice'); } catch(_e){} }, []);
+  const describe = global.ERP.describeAction;
+  const openN = opqOpenCount(list, state);
+  const markDone = (op) => {
+    const left = (op.actions || []).filter(a => _opqStatus(state, a).code !== 'done').length;
+    if(left > 0 && !confirm(`ชุดนี้ยังมี ${left} รายการที่ยังไม่ขึ้นหรือยังไม่ได้เช็ก\n\nคีย์ใหม่/ตรวจครบแล้วใช่ไหม? (ปิดแล้วแถบแดงจะหาย)`)) return;
+    save(list.map(o => o.opId === op.opId ? { ...o, status:'closed', closedAt: Date.now() } : o));
+  };
+  const clearClosed = () => { if(confirm('ลบชุดที่ปิดแล้วออกจากรายการ?')) save(list.filter(o => o.status === 'pending')); };
+  const fmtT = (t) => { try { return new Date(t).toLocaleString('th-TH', { dateStyle:'short', timeStyle:'medium' }); } catch(_e){ return String(t); } };
+  return h('div', { className:'space-y-3', 'data-testid':'opq-tab' },
+    h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-900' },
+      h('div', { className:'font-bold mb-1' }, '🧾 งานที่บันทึกบนเครื่องนี้แต่อาจยังไม่ขึ้นระบบ'),
+      h('div', null, 'เกิดตอนมีเครื่องอื่นบันทึกข้อมูลไปก่อน — ระบบเทียบกับข้อมูลปัจจุบันให้ว่ารายการไหน ',
+        h('b', null, 'ขึ้นแล้ว'), ' · รายการที่ ', h('b', null, 'ยังไม่ขึ้น'), ' ให้ ', h('b', null, 'คีย์ใหม่ทั้งใบที่หน้าจอเดิม'),
+        ' (ระบบจะลงบัญชี/ตัดสต๊อกให้ครบ) · ⚠️ ดูก่อนว่าขึ้นแล้วหรือยัง จะได้ไม่ซ้ำ'),
+      h('div', { className:'text-xs text-blue-700 mt-1' }, 'เก็บเฉพาะในเบราว์เซอร์เครื่องนี้ · เครื่องอื่นมองไม่เห็นรายการของเครื่องนี้')),
+    h('div', { className:'flex items-center gap-2' },
+      h('span', { className:'text-sm text-gray-700' }, `ยังไม่ขึ้น/ต้องเช็ก ${openN} รายการ · ทั้งหมด ${list.length} ชุด`),
+      h(Button, { variant:'secondary', size:'sm', onClick:reload }, '🔄 เช็กใหม่'),
+      list.some(o => o.status !== 'pending') && h(Button, { variant:'secondary', size:'sm', onClick:clearClosed }, '🧹 ลบชุดที่ปิดแล้ว')),
+    list.length === 0
+      ? h('div', { className:'bg-white rounded shadow p-6 text-center text-gray-500' }, '✅ ไม่มีงานค้าง')
+      : list.slice().reverse().map(op => {
+          const rows = (op.actions||[]).map((a, i) => {
+            const st = _opqStatus(state, a);
+            const lab = describe ? (describe(a, state) || {}) : {};
+            const det = _opqDetail(state, a);
+            const rk = op.opId + ':' + i;
+            return [
+              h('tr', { key:rk, className:'border-t', 'data-opq-row': st.code },
+                h('td', { className:'px-2 py-1 text-xs text-gray-500 whitespace-nowrap' }, fmtT(a.t)),
+                h('td', { className:'px-2 py-1 text-sm' }, lab.label || a.type,
+                  lab.ref && h('span', { className:'ml-1 font-mono text-xs text-gray-600' }, lab.ref),
+                  det && h('div', { className:'text-[11px] text-gray-500' }, det)),
+                h('td', { className: cls('px-2 py-1 text-xs', st.code === 'done' ? 'text-green-700' : st.code === 'manual' ? 'text-gray-600' : st.code === 'clash' ? 'text-orange-700' : 'text-amber-700') }, st.text),
+                h('td', { className:'px-2 py-1 text-right' },
+                  h('button', { type:'button', className:'text-xs text-blue-700 underline', onClick:() => setOpenRow(openRow === rk ? null : rk) },
+                    openRow === rk ? 'ซ่อน' : 'รายละเอียด'))),
+              openRow === rk && h('tr', { key:rk + ':d' }, h('td', { colSpan:4, className:'px-2 pb-2' },
+                h('pre', { className:'bg-gray-50 border rounded p-2 text-[11px] whitespace-pre-wrap break-all max-h-60 overflow-auto' },
+                  JSON.stringify(a.data, null, 2)))),
+            ];
+          });
+          const nDone = (op.actions||[]).filter(a => _opqStatus(state, a).code === 'done').length;
+          return h('div', { key:op.opId, className: cls('bg-white rounded shadow p-3', op.status !== 'pending' && 'opacity-60') },
+            h('div', { className:'flex flex-wrap items-center justify-between gap-2 mb-2' },
+              h('div', { className:'text-sm' },
+                h('b', null, fmtT(op.ts)), ' · ', op.by || '-', ' · ', (op.actions||[]).length, ' รายการ',
+                ' · ขึ้นแล้ว ', h('b', null, nDone), '/', (op.actions||[]).length,
+                op.imgStripped > 0 && h('span', { className:'ml-2 text-xs text-orange-700' }, `📎 ไฟล์แนบ ${op.imgStripped} ชิ้นต้องแนบใหม่`)),
+              op.status === 'pending'
+                ? h(Button, { variant:'secondary', size:'sm', onClick:() => markDone(op) }, '✓ คีย์ใหม่/ตรวจครบแล้ว')
+                : h('span', { className:'text-xs text-gray-500' }, 'ปิดแล้ว')),
+            h('table', { className:'w-full text-left' }, h('tbody', null, rows)));
+        }));
+}
+
+// 🆕 MW-0.6 (UAT M7): ทับข้อมูลทั้งบริษัท (กู้คืน JSON / รวมข้อมูล / demo) — ลำดับที่ปลอดภัย
+//   (1) ตั้ง __erpRestoring กันระบบบันทึกอัตโนมัติ push ของใหม่ก่อนสำรอง
+//   (2) สำรองข้อมูลปัจจุบันบน cloud เป็น pre_restore — ล้ม = ยกเลิกทั้งหมด ยังไม่แตะอะไร
+//   (3) ค่อย dispatch → รอ React commit → pushNow → "ขึ้น cloud จริง" แล้วค่อยบอกสำเร็จ + โหลดใหม่
+//   เดิม: dispatch ก่อน + setTimeout(reload) 1.2-1.5 วิ ชนกับ debounce 1.5 วิ → โหลดของเก่ากลับมาทับ
+//         (จอบอกสำเร็จแต่ไม่มีผล) และไม่มีสำเนาก่อนทับเลย
+//   rebaseOnCloud: งานที่ "แก้บางส่วน" (merge / ล้าง transactions) ต้องทำบนข้อมูลล่าสุดจาก cloud
+//     ไม่งั้นรวมลงของเก่าในเครื่องแล้วทับขึ้นไป = งานเครื่องอื่นที่เข้ามาหลังเราโหลดหน้า หายเงียบ (verify M7)
+async function _overwriteCloud({ label, byUser, doDispatch, successMsg, onFail, dispatch, rebaseOnCloud }){
+  const SB = global.ERP.SBSync;
+  if(!(SB && SB.pushNow && SB.isCloudOnly && SB.isCloudOnly())){
+    doDispatch(null); if(successMsg) alert(successMsg); setTimeout(() => location.reload(), 1500); return { ok:true };
+  }
+  try { global.__erpRestoring = true; } catch(_e){}
+  const bk = SB.backupBeforeOverwrite ? await SB.backupBeforeOverwrite(byUser) : { ok:false, error:'ไม่พร้อม' };
+  if(!bk.ok){
+    try { global.__erpRestoring = false; } catch(_e){}
+    alert('⛔ ยกเลิก — สำรองข้อมูลปัจจุบันก่อนทับไม่สำเร็จ (' + bk.error + ')\n\nข้อมูลเดิมยังอยู่ครบ ไม่ถูกเปลี่ยน · ลองใหม่เมื่อเน็ตปกติ');
+    if(onFail) onFail(); return bk;
+  }
+  const stamp = label + '_' + Date.now();
+  if(rebaseOnCloud){
+    if(!bk.cloudState || !dispatch){
+      try { global.__erpRestoring = false; } catch(_e){}
+      alert('⛔ ยกเลิก — อ่านข้อมูลล่าสุดจากระบบไม่ได้ (ต้องใช้เป็นฐานก่อนแก้) · ข้อมูลเดิมไม่ถูกเปลี่ยน');
+      if(onFail) onFail(); return { ok:false };
+    }
+    const mig = global.ERP.migrateState;
+    const base = mig ? mig(bk.cloudState) : bk.cloudState;
+    // ทั้งสอง action อยู่ใน batch เดียวกัน · MERGE/CLEAR คง key ที่ไม่แตะไว้ → เห็น stamp = ทั้งคู่ลงแล้ว
+    dispatch({ type:'IMPORT_STATE', data:{ ...base, __importStamp: stamp } });
+  }
+  doDispatch(stamp);
+  let st = null;
+  for(let i = 0; i < 20; i++){
+    await new Promise(r => setTimeout(r, 150));
+    st = (global.ERP.__getState && global.ERP.__getState()) || null;
+    if(st && st.__importStamp === stamp) break;
+  }
+  let clean = st;
+  if(st && st.__importStamp){ const { __importStamp, ...rest } = st; clean = rest; }
+  const r = clean ? await SB.pushNow(clean, byUser || label) : { ok:false, error:'อ่านข้อมูลไม่ได้' };   // by_user = คนกด (เดิมบันทึกเป็นชื่องาน)
+  if(r && r.ok){
+    alert((successMsg || '✅ สำเร็จ') + '\n\n☁️ ขึ้นระบบแล้ว · มีสำเนาข้อมูลก่อนทับเก็บไว้ (pre_restore) · กำลังโหลดหน้าใหม่');
+    setTimeout(() => location.reload(), 300); return r;
+  }
+  // ขึ้นไม่สำเร็จ — ข้อมูลบน cloud ยังเป็นของเดิม · ของที่ทับในเครื่องต้องทิ้ง (โหลดใหม่) ห้ามปล่อยให้บันทึกอัตโนมัติส่งขึ้นทีหลัง
+  alert('⚠️ ยังไม่ได้ทับข้อมูล — ' + (r && r.conflict ? 'มีเครื่องอื่นบันทึกไปก่อน' : (r && r.error) || 'ไม่ทราบสาเหตุ')
+    + '\n\nข้อมูลบนระบบยังเป็นของเดิม · จะโหลดหน้าใหม่ แล้วลองทำรายการนี้อีกครั้ง');
+  setTimeout(() => location.reload(), 300);
+  return r;
+}
+
 function CloudBackupTab({ state, dispatch }){
   const SB = global.ERP.SBSync;
   const configured = !!(SB && SB.isConfigured && SB.isConfigured());
@@ -79358,12 +79870,22 @@ function CloudBackupTab({ state, dispatch }){
         window.location.reload();
         return;
       }
-      alert('❌ กู้คืนไม่สำเร็จ: ' + ((r && r.error) || 'ไม่ทราบสาเหตุ'));
+      alert('❌ กู้คืนไม่สำเร็จ: ' + ((r && r.error) || 'ไม่ทราบสาเหตุ')
+        + (r && r.mustReload ? '\n\nข้อมูลบนระบบไม่ถูกทับ · จะโหลดหน้าใหม่ให้ข้อมูลตรงกับระบบ (กันบันทึกทับงานเครื่องอื่น)' : ''));
+      if(r && r.mustReload){ window.location.reload(); return; }   // 🆕 verify M6: state บนจอเก่ากว่า token แล้ว
     } catch(err){ alert('❌ กู้คืนไม่สำเร็จ: ' + ((err && err.message) || err)); }
     setRestoreBusyId(null);
   };
 
   return h('div', { className:'space-y-4' },
+    // 🆕 MW-0.6: ตัวลบสำเนาเก่าอัตโนมัติใช้ไม่ได้แล้ว (ปิดสิทธิ์ DELETE ที่ฐานข้อมูล 24 ก.ย. — กันพนักงานลบข้อมูลบริษัท)
+    //   เดิม prune อยู่ใน catch เปล่า = หยุดทำงานเงียบ ๆ · ตารางจะโตเรื่อย ๆ → บอกให้เห็น + ให้ SQL ไปรันเอง
+    h('div', { className:'bg-amber-50 border border-amber-300 rounded p-3 text-xs text-amber-900', 'data-testid':'cloud-prune-note' },
+      h('div', { className:'font-bold mb-1' }, '🧹 สำเนาเก่าไม่ถูกลบอัตโนมัติแล้ว — ลบเองเดือนละครั้ง'),
+      h('div', null, 'ตั้งแต่ปิดสิทธิ์ลบที่ฐานข้อมูล (กันพนักงานลบข้อมูลบริษัท) แอปลบสำเนารายวันที่เก่าเกิน 60 วันเองไม่ได้ · ',
+        'เปิด Supabase → SQL Editor แล้วรัน (ไม่แตะข้อมูลปัจจุบัน company:latest):'),
+      h('pre', { className:'mt-1 bg-white border rounded p-2 font-mono text-[11px] overflow-x-auto select-all' },
+        "delete from public.erp_state_snapshots\nwhere id ~ '^company:[0-9]{4}-[0-9]{2}-[0-9]{2}$'\n  and saved_at < now() - interval '60 days';")),
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800' },
       '☁️ Cloud Backup (Supabase) — สำรองข้อมูลทั้งระบบขึ้น cloud + กู้คืนได้แม้เครื่องพัง/เปลี่ยนเครื่อง',
       h('div', { className:'mt-1 text-xs' },
@@ -79496,6 +80018,8 @@ global.ERP.CUSTOMER_FIELDS = CUSTOMER_FIELDS;
 // 🆕 ฟอร์มสินค้า — ให้ mod-purchase (PO quick-add, purposeScope:'purchase') / mod-production (BOM, purposeScope:'bom') เรียก quick-edit ได้
 //    props: { item|null, state, dispatch, onClose, purposeScope?, onSaved?(data) }
 global.ERP.ItemEditModal = ItemEditModal;
+global.ERP.PendingOpsTab = PendingOpsTab;
+global.ERP.opqOpenCount = opqOpenCount;   // 🆕 UAT M3: แถบแดงนับรายการที่ยังไม่ขึ้นจริง   // 🆕 MW-0.2: แถบเตือนใน shell เปิดรายการได้โดยไม่ต้องเข้าหน้าตั้งค่า
 
 })(window);
 
