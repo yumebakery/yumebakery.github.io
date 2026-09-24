@@ -3390,15 +3390,30 @@ async function readUploadFile(file, opts){
     const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error('อ่านไฟล์ไม่ได้')); r.onload = () => res(String(r.result)); r.readAsDataURL(file); });
     return { name:file.name, size:file.size, type:file.type, dataUrl, uploadedAt:Date.now(), resized:false };
   }
+  // 🆕 IMG-FIX: เพดานรูปแยกจาก PDF — รูปทุกใบอยู่ในก้อนข้อมูลบริษัทที่ถูกส่งขึ้น cloud ทุกครั้งที่ใครบันทึกอะไรก็ตาม
+  //   เดิมใช้ 800KB ร่วมกับ PDF · ตอนนี้รูป 400KB (ยังเริ่มที่ 1280px เพื่อให้ใบกำกับอ่านออก ลดเฉพาะเมื่อจำเป็น) · PDF คง 800KB
+  const imgMaxKB = o.imageMaxKB || Math.min(maxKB, 400);
   const steps = [[o.imageMaxDim || 1280, o.imageQuality || 0.72], [1024, 0.6], [800, 0.5]];
   let last = null;
   for(const [dim, q] of steps){
     try { last = await resizeImageToBase64(file, dim, q); } catch(e){ throw new Error(`${file.name}: เปิดรูปไม่ได้ (${file.type || 'ไม่ทราบชนิด'}) — ถ้าเป็น HEIC ให้ตั้งกล้องเป็น "เข้ากันได้มากที่สุด" (JPEG) หรือส่งเป็น JPG`); }
-    if(last.sizeKB <= maxKB) break;
+    if(last.sizeKB <= imgMaxKB) break;
   }
-  if(!last || last.sizeKB > maxKB) throw new Error(`${file.name} ย่อแล้วยังใหญ่เกิน ${maxKB}KB`);
+  if(!last || last.sizeKB > imgMaxKB) throw new Error(`${file.name} ย่อแล้วยังใหญ่เกิน ${imgMaxKB}KB`);
   const bytes = Math.round(last.dataUrl.length * 0.75);
   return { name: file.name.replace(/\.[^.]+$/, '') + (last.dataUrl.startsWith('data:image/jpeg') ? '.jpg' : ''), size: bytes, type:'image/jpeg', dataUrl: last.dataUrl, uploadedAt:Date.now(), resized:true, w:last.w, h:last.h, origSize:file.size };
+}
+// 🆕 IMG-FIX: รูปที่เก็บไว้ในเอกสาร → src ที่แสดงได้จริง
+//   ตัวอัปโหลดรูปส่ง/รับโอน (mod-transfer.js · mod-stock.js) เคยเรียก resizeImageToBase64(f, {maxWidth,maxKB})
+//   ผิดลายเซ็น → ไม่ย่อรูป + ได้ object {dataUrl,sizeKB,w,h} ทั้งก้อนไปเก็บในช่อง dataUrl
+//   → <img src> ได้ "[object Object]" · helper นี้อ่านได้ทั้งของเก่าที่เสียและของใหม่
+function photoSrc(p){
+  if(!p) return '';
+  if(typeof p === 'string') return p;
+  const d = p.dataUrl;
+  if(typeof d === 'string') return d;
+  if(d && typeof d.dataUrl === 'string') return d.dataUrl;
+  return typeof p.url === 'string' ? p.url : '';
 }
 function resizeImageToBase64(file, maxDim, quality){
   maxDim = maxDim || 1200;
@@ -4422,7 +4437,7 @@ Object.assign(global.ERP, {
   fixedColGroup, TABLE_FIXED_CLS,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,
   bomWeighOnly, bomOnWeighPage, bomWeighLines,
-  metricAutoUnits,
+  metricAutoUnits, photoSrc,
   getStockUnitsRanked, getAllUnitsRanked, formatQtyMulti, multiUnitsToBase,
   resolveDisplayUnit,
   qcTemplateAppliesTo,
@@ -17906,7 +17921,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         photos.length > 0 && h('div', { className:'grid grid-cols-3 md:grid-cols-6 gap-2' },
           photos.map((p,i) =>
             h('div', { key:i, className:'relative group' },
-              h('img', { src:p.dataUrl, alt:p.name,
+              h('img', { src:global.ERP.photoSrc(p), alt:p.name,
                 className:'w-full h-20 object-cover rounded border' }),
               h('button', { type:'button', onClick:()=>removePhoto(i),
                 className:'absolute top-0 right-0 bg-red-500 text-white rounded-full w-5 h-5 text-xs leading-none' }, '×'),
@@ -17984,8 +17999,10 @@ function ReceiveFromTOModal({ to, state, dispatch, user, onClose }){
     const out = [];
     for(const f of files){
       try {
-        const dataUrl = await resizeImageToBase64(f, { maxWidth: 1200, maxKB: 700 });
-        out.push({ name: f.name, dataUrl });
+        // 🆕 IMG-FIX: ลายเซ็นจริง resizeImageToBase64(file, maxDim, quality) → คืน {dataUrl,sizeKB,w,h}
+        //   เดิมส่ง object เป็น maxDim = ไม่ย่อเลย + เก็บ object ทั้งก้อน = จอขึ้น [object Object]
+        const r = await resizeImageToBase64(f, 1200, 0.7);
+        out.push({ name: f.name, dataUrl: r.dataUrl });
       } catch(err){ console.error(err); }
     }
     setRecvPhotos(p => [...p, ...out]);
@@ -18242,8 +18259,8 @@ function ReceiveFromTOModal({ to, state, dispatch, user, onClose }){
           '📸 รูปตอนส่งจากต้นทาง (', (to.shipPhotos||[]).length, ' รูป)'),
         h('div', { className:'flex gap-2 flex-wrap' },
           (to.shipPhotos||[]).map((p,i) =>
-            h('a', { key:i, href:p.dataUrl, target:'_blank', rel:'noreferrer', title:p.name },
-              h('img', { src:p.dataUrl, alt:p.name,
+            h('a', { key:i, href:global.ERP.photoSrc(p), target:'_blank', rel:'noreferrer', title:p.name },
+              h('img', { src:global.ERP.photoSrc(p), alt:p.name,
                 className:'w-16 h-16 object-cover rounded border hover:scale-150 transition' }))))),
 
       // 📱 GO-LIVE (จอแคบ <768): แถวละบรรทัด ชื่อ · รับตอนนี้ · หน่วย (LineRow จาก core) — ตาราง 7 คอลัมน์เดิมทำให้ช่องกรอกเหลือ ~30px ใช้ไม่ได้บนมือถือ
@@ -18396,7 +18413,7 @@ function ReceiveFromTOModal({ to, state, dispatch, user, onClose }){
         recvPhotos.length > 0 && h('div', { className:'mt-2 flex gap-2 flex-wrap' },
           recvPhotos.map((p,i) =>
             h('div', { key:i, className:'relative' },
-              h('img', { src:p.dataUrl, alt:p.name,
+              h('img', { src:global.ERP.photoSrc(p), alt:p.name,
                 className:'w-20 h-20 object-cover rounded border' }),
               h('button', { type:'button', onClick:()=>removeRecvPhoto(i),
                 className:'absolute -top-1 -right-1 bg-red-500 text-white rounded-full w-5 h-5 text-xs leading-none' }, '×'))))),
@@ -20251,8 +20268,8 @@ function GRViewModal({ gr, state, onClose }){
         h('div', { className:'text-xs font-bold mb-2' }, `📷 รูปถ่ายรับของ (${gr.photos.length})`),
         h('div', { className:'grid grid-cols-3 md:grid-cols-5 gap-2' },
           gr.photos.map((p,i) =>
-            h('a', { key:i, href:p.dataUrl, target:'_blank', title:p.name },
-              h('img', { src:p.dataUrl, alt:p.name,
+            h('a', { key:i, href:global.ERP.photoSrc(p), target:'_blank', title:p.name },
+              h('img', { src:global.ERP.photoSrc(p), alt:p.name,
                 className:'w-full h-24 object-cover rounded border hover:shadow-lg' })
             )
           )
@@ -21589,7 +21606,7 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
           '📸 ถ่ายรูป / เลือกรูป'
         ),
         photos.length > 0 && h('div', { className:'grid grid-cols-4 md:grid-cols-6 gap-2 mt-2' },
-          photos.map((p,i) => h('img', { key:i, src:p.dataUrl,
+          photos.map((p,i) => h('img', { key:i, src:global.ERP.photoSrc(p),
             className:'w-full h-20 object-cover rounded border' }))
         )
       ),
@@ -22952,7 +22969,7 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose }){
         note: m.note,
       })),
       totalLoss,
-      photos: photos.map(p => p.dataUrl),
+      photos: photos.map(p => global.ERP.photoSrc(p)),
       by: user.username,
       status: 'approved',  // direct approve for now
       createdAt: Date.now(),
@@ -23049,7 +23066,7 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose }){
           onChange:onPhoto, disabled:uploading,
           className:'w-full text-xs px-2 py-1.5 border rounded' }),
         photos.length > 0 && h('div', { className:'mt-2 flex gap-2 flex-wrap' },
-          photos.map((p,i) => h('img', { key:i, src:p.dataUrl,
+          photos.map((p,i) => h('img', { key:i, src:global.ERP.photoSrc(p),
             className:'h-16 w-16 object-cover border rounded' })))),
 
       h('div', { className:'flex gap-2 pt-3 border-t' },
@@ -24149,8 +24166,10 @@ function PushTransferModal({ state, dispatch, user, onClose }){
     const out = [];
     for(const f of files){
       try {
-        const dataUrl = await resizeImageToBase64(f, { maxWidth: 1200, maxKB: 700 });
-        out.push({ name: f.name, dataUrl });
+        // 🆕 IMG-FIX: ลายเซ็นจริง resizeImageToBase64(file, maxDim, quality) → คืน {dataUrl,sizeKB,w,h}
+        //   เดิมส่ง object เป็น maxDim = ไม่ย่อเลย + เก็บ object ทั้งก้อน = จอขึ้น [object Object]
+        const r = await resizeImageToBase64(f, 1200, 0.7);
+        out.push({ name: f.name, dataUrl: r.dataUrl });
       } catch(err){ console.error(err); }
     }
     setShipPhotos(p => [...p, ...out]);
@@ -24483,7 +24502,7 @@ function PushTransferModal({ state, dispatch, user, onClose }){
         shipPhotos.length > 0 && h('div', { className:'mt-2 flex gap-2 flex-wrap' },
           shipPhotos.map((p,i) =>
             h('div', { key:i, className:'relative' },
-              h('img', { src:p.dataUrl, alt:p.name,
+              h('img', { src:global.ERP.photoSrc(p), alt:p.name,
                 className:'w-20 h-20 object-cover rounded border' }),
               h('button', { type:'button', onClick:()=>removeShipPhoto(i),
                 className:'absolute -top-1 -right-1 bg-red-500 text-white rounded-full w-5 h-5 text-xs leading-none' }, '×'))))),
@@ -25329,14 +25348,14 @@ function TRDetailModal({ tr: trProp, state, dispatch, user, onClose }){
             h('div', { className:'text-xs font-medium text-amber-900 mb-1' },
               '📸 รูปตอนส่ง (', ship.length, ')'),
             h('div', { className:'flex gap-1.5 flex-wrap' },
-              ship.map((p,i) => h('a', { key:i, href:p.dataUrl, target:'_blank', rel:'noreferrer', title:`${p.ref} · ${p.name}` },
-                h('img', { src:p.dataUrl, alt:p.name, className:'w-16 h-16 object-cover rounded border hover:scale-150 transition origin-top-left' }))))),
+              ship.map((p,i) => h('a', { key:i, href:global.ERP.photoSrc(p), target:'_blank', rel:'noreferrer', title:`${p.ref} · ${p.name}` },
+                h('img', { src:global.ERP.photoSrc(p), alt:p.name, className:'w-16 h-16 object-cover rounded border hover:scale-150 transition origin-top-left' }))))),
           recv.length > 0 && h('div', { className:'bg-green-50 border border-green-200 rounded p-2' },
             h('div', { className:'text-xs font-medium text-green-900 mb-1' },
               '📷 รูปตอนรับ (', recv.length, ')'),
             h('div', { className:'flex gap-1.5 flex-wrap' },
-              recv.map((p,i) => h('a', { key:i, href:p.dataUrl, target:'_blank', rel:'noreferrer', title:`${p.ref} · ${p.name}` },
-                h('img', { src:p.dataUrl, alt:p.name, className:'w-16 h-16 object-cover rounded border hover:scale-150 transition origin-top-left' }))))));
+              recv.map((p,i) => h('a', { key:i, href:global.ERP.photoSrc(p), target:'_blank', rel:'noreferrer', title:`${p.ref} · ${p.name}` },
+                h('img', { src:global.ERP.photoSrc(p), alt:p.name, className:'w-16 h-16 object-cover rounded border hover:scale-150 transition origin-top-left' }))))));
       })(),
 
       // Action buttons
@@ -25822,8 +25841,8 @@ function TODetailModal({ to, state, dispatch, user, onClose }){
           '📸 รูปตอนส่ง (', (to.shipPhotos||[]).length, ' รูป)'),
         h('div', { className:'flex gap-2 flex-wrap' },
           (to.shipPhotos||[]).map((p,i) =>
-            h('a', { key:i, href:p.dataUrl, target:'_blank', rel:'noreferrer', title:p.name },
-              h('img', { src:p.dataUrl, alt:p.name,
+            h('a', { key:i, href:global.ERP.photoSrc(p), target:'_blank', rel:'noreferrer', title:p.name },
+              h('img', { src:global.ERP.photoSrc(p), alt:p.name,
                 className:'w-20 h-20 object-cover rounded border hover:scale-150 transition origin-top-left' }))))),
 
       // 🆕 รูปตอนรับ (รวมจากทุก GR ของ TO นี้)
@@ -25837,9 +25856,9 @@ function TODetailModal({ to, state, dispatch, user, onClose }){
             '📷 รูปตอนรับ (', recvPhotos.length, ' รูป)'),
           h('div', { className:'flex gap-2 flex-wrap' },
             recvPhotos.map((p,i) =>
-              h('a', { key:i, href:p.dataUrl, target:'_blank', rel:'noreferrer',
+              h('a', { key:i, href:global.ERP.photoSrc(p), target:'_blank', rel:'noreferrer',
                 title: `${p.grNumber} · ${p.name}` },
-                h('img', { src:p.dataUrl, alt:p.name,
+                h('img', { src:global.ERP.photoSrc(p), alt:p.name,
                   className:'w-20 h-20 object-cover rounded border hover:scale-150 transition origin-top-left' })))));
       })(),
 
@@ -47304,9 +47323,9 @@ function CreditDebitMemoModal({ presetPo, presetInv, presetType, state, dispatch
   const onMemoImage = (e) => {
     const f = e.target.files?.[0];
     if(!f) return;
-    const r = new FileReader();
-    r.onload = (ev) => setSupMemoImage({ name: f.name, dataUrl: ev.target.result });
-    r.readAsDataURL(f);
+    // 🆕 IMG-FIX: ย่อรูปก่อนเก็บ (เดิมอ่านไฟล์ดิบเต็มขนาด 3-8MB จากกล้องมือถือ ยัดเข้าก้อนข้อมูลบริษัท)
+    global.ERP.readUploadFile(f).then(u => setSupMemoImage({ name: u.name, dataUrl: u.dataUrl }))
+      .catch(err => alert(err && err.message ? err.message : String(err)));
   };
 
   // หา COA — chartOfAccounts (canonical state key)
@@ -54334,9 +54353,9 @@ function DepositModal({ state, dispatch, user, onClose, presetPO }){
   const [supTaxInvLater, setSupTaxInvLater] = useState(false);
   const onTaxInvImage = (e) => {
     const f = e.target.files?.[0]; if(!f) return;
-    const r = new FileReader();
-    r.onload = (ev) => setSupTaxInvImage({ name:f.name, dataUrl:ev.target.result });
-    r.readAsDataURL(f);
+    // 🆕 IMG-FIX: ย่อรูปก่อนเก็บ (เดิมอ่านไฟล์ดิบเต็มขนาด 3-8MB จากกล้องมือถือ ยัดเข้าก้อนข้อมูลบริษัท)
+    global.ERP.readUploadFile(f).then(u => setSupTaxInvImage({ name: u.name, dataUrl: u.dataUrl }))
+      .catch(err => alert(err && err.message ? err.message : String(err)));
   };
   // คำนวณ VAT split
   const amtBase = hasBill ? Number(amount) / (1 + Number(vatRate)/100) : Number(amount);
@@ -54885,9 +54904,9 @@ function CreateDepositPIModal({ deposit, state, dispatch, user, onClose, onDone 
   const [note, setNote] = useState(deposit.note||'');
   const onFile = (e) => {
     const f = e.target.files?.[0]; if(!f) return;
-    const r = new FileReader();
-    r.onload = (ev) => setSupTaxInvImage({ name:f.name, dataUrl:ev.target.result });
-    r.readAsDataURL(f);
+    // 🆕 IMG-FIX: ย่อรูปก่อนเก็บ (เดิมอ่านไฟล์ดิบเต็มขนาด 3-8MB จากกล้องมือถือ ยัดเข้าก้อนข้อมูลบริษัท)
+    global.ERP.readUploadFile(f).then(u => setSupTaxInvImage({ name: u.name, dataUrl: u.dataUrl }))
+      .catch(err => alert(err && err.message ? err.message : String(err)));
   };
 
   const amtBase = hasBill ? Number(amount) / (1 + Number(vatRate)/100) : Number(amount);
@@ -66588,9 +66607,9 @@ function WrongTransferModal({ state, dispatch, user, onClose }){
 
   const onFile = (e) => {
     const f = e.target.files?.[0]; if(!f) return;
-    const r = new FileReader();
-    r.onload = (ev) => setSlipImage({ name:f.name, dataUrl:ev.target.result });
-    r.readAsDataURL(f);
+    // 🆕 IMG-FIX: ย่อรูปก่อนเก็บ (เดิมอ่านไฟล์ดิบเต็มขนาด 3-8MB จากกล้องมือถือ ยัดเข้าก้อนข้อมูลบริษัท)
+    global.ERP.readUploadFile(f).then(u => setSlipImage({ name: u.name, dataUrl: u.dataUrl }))
+      .catch(err => alert(err && err.message ? err.message : String(err)));
   };
 
   const submit = () => {
@@ -66743,9 +66762,9 @@ function ReceiveCNDocModal({ memo, state, dispatch, user, onClose }){
   const onFile = (e) => {
     const f = e.target.files?.[0];
     if(!f) return;
-    const r = new FileReader();
-    r.onload = (ev) => setSupCnImage({ name:f.name, dataUrl:ev.target.result });
-    r.readAsDataURL(f);
+    // 🆕 IMG-FIX: ย่อรูปก่อนเก็บ (เดิมอ่านไฟล์ดิบเต็มขนาด 3-8MB จากกล้องมือถือ ยัดเข้าก้อนข้อมูลบริษัท)
+    global.ERP.readUploadFile(f).then(u => setSupCnImage({ name: u.name, dataUrl: u.dataUrl }))
+      .catch(err => alert(err && err.message ? err.message : String(err)));
   };
   const submit = () => {
     if(!supCnNumber.trim()){ alert('ใส่เลขใบลดหนี้'); return; }
