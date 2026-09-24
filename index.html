@@ -177,13 +177,48 @@ function cls(...args){
 // ==================== UNIT CONVERSION (chain) ====================
 // units[]: [{ name, isBase?, equalTo?:{unit, qty}, toBase?, purposes:[] }]
 // 1 ของหน่วยนี้ = ? ของ base unit
+// 🆕 METRIC-AUTO (user 2026-09-24: "ตั้งหน่วยเป็น กก. แล้ว กรัมไม่ต้องตั้งก็ได้ ระบบแปลงปกติอยู่แล้ว")
+//   หน่วยเมตริกมาตรฐานไม่ควรต้องจดทุกตัว — มี กก. แล้วต้องใช้ กรัม ได้เลย · มี ลิตร แล้วใช้ มล. ได้เลย
+//   แปลงข้าม "ตระกูล" ไม่ได้ (น้ำหนัก ↔ ปริมาตร) เพราะ 1 มล. ≠ 1 ก. สำหรับน้ำมัน/น้ำผึ้ง
+const _METRIC_W = { 'กรัม':1, 'g':1, 'gram':1, 'กก.':1000, 'กก':1000, 'กิโลกรัม':1000, 'kg':1000 };
+const _METRIC_V = { 'มล.':1, 'มล':1, 'มิลลิลิตร':1, 'ml':1, 'ซีซี':1, 'cc':1, 'ลิตร':1000, 'l':1000, 'L':1000 };
+function _metricFam(name){
+  const k = String(name||'').trim(); const low = k.toLowerCase();
+  if(_METRIC_W[k] != null || _METRIC_W[low] != null) return { fam:'w', v: _METRIC_W[k] != null ? _METRIC_W[k] : _METRIC_W[low] };
+  if(_METRIC_V[k] != null || _METRIC_V[low] != null) return { fam:'v', v: _METRIC_V[k] != null ? _METRIC_V[k] : _METRIC_V[low] };
+  return null;
+}
+// หน่วยเมตริกที่ "ใช้ได้เพิ่ม" จากที่สินค้าจดไว้ — ไม่ต้องจดซ้ำ
+function metricAutoUnits(item){
+  const units = (item && item.units) || [];
+  const fams = new Set();
+  for(const u of units){ const m = _metricFam(u && u.name); if(m) fams.add(m.fam); }
+  const out = [];
+  if(fams.has('w')) out.push('กรัม', 'กก.');
+  if(fams.has('v')) out.push('มล.', 'ลิตร');
+  return out.filter(n => !units.some(u => u && u.name === n));
+}
+
 function resolveToBase(units, unitName, _seen){
   if(!units || !unitName) return 1;
   _seen = _seen || new Set();
   if(_seen.has(unitName)) return 1; // cycle guard
   _seen.add(unitName);
   const u = units.find(x => x.name === unitName);
-  if(!u) return 1;
+  // 🆕 METRIC-AUTO: หน่วยที่สินค้าไม่ได้จดไว้ แต่เป็นเมตริกตระกูลเดียวกับที่จดไว้ → คิดตัวคูณให้เอง
+  //   เดิม return 1 เงียบ ๆ = ใส่ "40 กรัม" บนสินค้าฐาน "ถุง" แล้วตัดสต๊อก 40 ถุง
+  if(!u){
+    const want = _metricFam(unitName);
+    if(want){
+      for(const x of units){
+        const have = _metricFam(x && x.name);
+        if(!have || have.fam !== want.fam) continue;
+        const f = resolveToBase(units, x.name, new Set(_seen));
+        if(f && isFinite(f) && f > 0) return (want.v / have.v) * f;
+      }
+    }
+    return 1;
+  }
   if(u.isBase) return 1;
   if(u.equalTo && u.equalTo.unit) {
     return (Number(u.equalTo.qty)||1) * resolveToBase(units, u.equalTo.unit, _seen);
@@ -211,9 +246,16 @@ function toBaseQty(item, qty, unitName){
 function unitsForPurpose(item, purpose){
   if(!item || !item.units) return [];
   if(purpose === 'sell') purpose = 'sale';   // หน้าขายเคยเรียก 'sell' แต่ editor เก็บ 'sale' → ช่อง "ขาย" ไม่มีผล
-  return (item.units||[]).filter(u =>
+  const list = (item.units||[]).filter(u =>
     !u.purposes || u.purposes.length===0 || u.purposes.includes(purpose) || u.isBase
   );
+  // 🆕 METRIC-AUTO: สูตร BOM เสนอหน่วยเมตริกตระกูลเดียวกันให้ด้วย โดยไม่ต้องจดซ้ำในทะเบียนสินค้า
+  //   (มี กก. → ใช้ กรัม ได้ · มี ลิตร → ใช้ มล. ได้) · resolveToBase คิดตัวคูณให้เองแล้ว
+  //   เฉพาะ purpose 'bom' — ไม่ไปกวนหน้าซื้อ/ขาย/โอน ที่หน่วยผูกกับบรรจุภัณฑ์จริง
+  if(purpose === 'bom' && list.length){
+    for(const n of metricAutoUnits(item)) list.push({ name:n, _auto:true, purposes:['bom'] });
+  }
+  return list;
 }
 // 🆕 GO-LIVE UAT: หน่วยสำหรับ "ใบเบิกวัตถุดิบ" = union ของ stock ∪ transfer ∪ bom (คงลำดับ units เดิม)
 //   คลังตั้งหน่วยไว้ที่คอลัมน์ "โอน" (ถุง/ลัง) ส่วนสูตรใช้ "bom" (กรัม) — หน้าเบิกต้องเสนอทั้งสองชุด ไม่งั้นเหลือแต่หน่วยฐาน
@@ -4355,6 +4397,7 @@ Object.assign(global.ERP, {
   resolvePrice, isPhysicalItem, groupKitForPrint,
   fixedColGroup, TABLE_FIXED_CLS,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,
+  metricAutoUnits,
   getStockUnitsRanked, getAllUnitsRanked, formatQtyMulti, multiUnitsToBase,
   resolveDisplayUnit,
   qcTemplateAppliesTo,
@@ -28798,8 +28841,14 @@ function NewOrderModal({ boms, state, dispatch, user, branchId, onClose }){
   const explosion = useMemo(() => bom ? explodeBomMaterials(bom, scale, state, branchId) : null,
     [bom, scale, state.fifoLayers, state.items, branchId]);
 
+  // 🆕 BATCHCAP: เพดานจำนวน batch ต่อใบ — เดิม hard-code 50 ในช่อง input มาตั้งแต่ baseline
+  //   ไม่มีเหตุผลบันทึกไว้ที่ไหน (git log -S / memory / docs ไม่มีเลย) และไม่ใช่ข้อจำกัดของข้อมูล
+  //   ข้อจำกัดจริงคือหน้าจอ (1 batch = 1 การ์ด) → ขยายเพดาน + เตือนเมื่อไม่ตรงสูตร
+  //   เคสจริง (user 2026-09-24): BOM 1 batch = 1 ชิ้น · สั่ง 100 ชิ้น → ตามสูตรคือ 100 batch แต่ใส่ไม่ได้
   // 🆕 batchCount — ผู้ใช้กำหนดจำนวน batch ที่จะแบ่งผลิต
   // default = ceil(scale) (ถ้า scale > 1 → แบ่งเป็น scale batches)
+  const BATCH_COUNT_MAX = 500;
+  const baseYield = Number(bom?.yieldQty) || 1;
   const suggestedBatchCount = Math.max(1, Math.ceil(scale));
   const [batchCount, setBatchCount] = useState(1);
   // sync เมื่อ scale เปลี่ยน — auto-set ตามที่แนะนำ
@@ -29069,23 +29118,36 @@ function NewOrderModal({ boms, state, dispatch, user, branchId, onClose }){
                     className:'px-2 py-1 bg-purple-200 hover:bg-purple-300 text-purple-900 rounded font-medium' },
                     `💡 แนะนำ ${suggestedBatchCount} batch`)),
                 h('div', { className:'flex items-center gap-2 flex-wrap' },
-                  h('input', { type:'number', min:1, max:50, value:batchCount,
-                    onChange:e=>setBatchCount(Math.max(1, Number(e.target.value)||1)),
+                  h('input', { type:'number', min:1, max: BATCH_COUNT_MAX, value:batchCount,
+                    onChange:e=>setBatchCount(Math.min(BATCH_COUNT_MAX, Math.max(1, Number(e.target.value)||1))),
                     className:'w-24 px-3 py-2 border-2 rounded text-center font-bold text-lg' }),
                   h('span', { className:'text-sm text-gray-700' }, 'batch'),
                   h('span', { className:'text-gray-400' }, '·'),
                   h('span', { className:'text-sm' }, '~', h('b', null, fmtNum(qtyPerBatch)),
                     ' ', primaryOutput?.unit||'', ' / batch'),
-                  h('div', { className:'flex gap-1 ml-auto' },
-                    [1, 2, 4, 5, 10].filter(n => n <= 50).map(n =>
+                  // 🆕 BATCHCAP: ปุ่มลัดตัวแรก = ค่าที่สูตรคำนวณให้เสมอ (ขนาด batch อยู่ใน BOM แล้ว ไม่ควรต้องคิดเอง)
+                  h('div', { className:'flex gap-1 ml-auto flex-wrap' },
+                    [...new Set([suggestedBatchCount, 1, 2, 4, 5, 10])].filter(n => n >= 1 && n <= BATCH_COUNT_MAX).map(n =>
                       h('button', { key:n, type:'button', onClick:()=>setBatchCount(n),
+                        title: n === suggestedBatchCount ? 'ตามขนาด batch ที่ตั้งไว้ในสูตร' : '',
                         className: cls('px-2 py-1 rounded text-xs font-medium border',
                           batchCount === n ? 'bg-purple-600 text-white border-purple-700' : 'bg-white border-gray-300 hover:border-purple-400') },
-                        n)))),
+                        n === suggestedBatchCount ? `💡 ${n}` : n)))),
                 h('div', { className:'text-[11px] text-purple-800' },
                   batchCount === 1
                     ? '⚠️ 1 batch = ชั่งวัตถุดิบรวมทีเดียว ' + fmtNum(desiredQty) + ' ' + (primaryOutput?.unit||'') + ' · เหมาะกับเครื่องผสมใหญ่'
-                    : `✅ ${batchCount} batches = ชั่ง ${batchCount} รอบ (รอบละ ~${fmtNum(qtyPerBatch)} ${primaryOutput?.unit||''})`)),
+                    : `✅ ${batchCount} batches = ชั่ง ${batchCount} รอบ (รอบละ ~${fmtNum(qtyPerBatch)} ${primaryOutput?.unit||''})`),
+                // 🆕 BATCHCAP: เตือนเมื่อขนาดที่จะผลิตจริงต่างจากที่สูตรกำหนด — เดิมปล่อยผ่านเงียบ
+                //   เคสจริง: BOM 1 batch = 1 ชิ้น · สั่ง 100 ชิ้น · ปล่อย batch = 1 → ชั่งรวม 4,000 ก. ทีเดียว
+                batchCount !== suggestedBatchCount && suggestedBatchCount > 1 && h('div',
+                  { className:'text-[11px] mt-1 bg-amber-50 border border-amber-300 rounded p-1.5 text-amber-900' },
+                  '⚠️ สูตรกำหนด 1 batch = ', h('b', null, fmtNum(baseYield), ' ', primaryOutput?.unit||''),
+                  ' → ตามสูตรควรเป็น ', h('b', null, suggestedBatchCount, ' batch'),
+                  ' · ที่ตั้งไว้ตอนนี้ก้อนละ ', h('b', null, fmtNum(qtyPerBatch), ' ', primaryOutput?.unit||''),
+                  ` (${fmtNum(qtyPerBatch / (baseYield || 1))} เท่าของสูตร)`),
+                suggestedBatchCount > BATCH_COUNT_MAX && h('div',
+                  { className:'text-[11px] mt-1 text-orange-800' },
+                  `ℹ️ ตามสูตรต้องใช้ ${suggestedBatchCount} batch แต่ระบบรับสูงสุด ${BATCH_COUNT_MAX} ต่อใบ — แบ่งเป็นหลายใบสั่งผลิต`)),
 
               // ============ PROFILE MODE ============
               batchMode === 'profile' && bomProfiles.length > 0 && h('div', { className:'space-y-2' },
@@ -31969,12 +32031,21 @@ function BomWeighModal({ op, opState, order, state, user, bom, onClose, onPass, 
     } else {
       tolerance = Math.max(0.5, expected * 0.02);
     }
+    // 🆕 WEIGH-G: แกนกรัม — เครื่องชั่งส่งค่ามาเป็นกรัมเสมอ แต่ expected/tolerance อยู่ในหน่วยของสูตร
+    //   เดิมเทียบ liveWeight(g) กับ expected(หน่วยสูตร) ตรง ๆ → สูตรหน่วย กก. เพี้ยน 1,000 เท่า
+    //   เกจแดงตลอด ล็อกอัตโนมัติไม่ทำงาน พนักงานต้องพิมพ์มือทั้งไลน์
+    //   gPerUnit = null → วัตถุดิบนี้ชั่งเป็นกรัมไม่ได้ (นับชิ้น/ฟอง) → ใช้โหมดกรอกมือ
+    const gPerUnit = it ? gramsOfMaterial(it, 1, resolved.unit || m.unit) : null;
+    const expectedG = gPerUnit ? expected * gPerUnit : null;
+    // พื้นเกณฑ์ 0.5 ก. — ต่ำกว่านี้เครื่องชั่งครัวอ่านไม่ไหว (user 2026-09-24: "อย่างน้อย ๆ คือ 0.5 กรัม")
+    const toleranceG = gPerUnit ? Math.max(0.5, tolerance * gPerUnit) : null;
     // 🆕 Resolve weighMode: BOM override > Item setting > 'either' default
     const weighMode = m.weighMode || it?.weighMode || 'either';
     return {
       itemId: resolved.itemId, name: it?.name || resolved.itemId,
       expected, unit: resolved.unit || it?.issueUnit || '',
       tolerance,
+      expectedG, toleranceG, gPerUnit,   // 🆕 WEIGH-G
       weighDefault: m.weighRequired !== false,
       // 🆕 weigh source mode
       weighMode,
@@ -32055,8 +32126,11 @@ function BomWeighModal({ op, opState, order, state, user, bom, onClose, onPass, 
     if(!e.zeroOk){ dwellRef.current = null; return; }
     // ต้องไม่ใช่ 0 (ไม่งั้นจะล็อก 0 ตอนยังไม่เริ่มเท)
     if(isReadingZero(it.zeroTolerance)){ dwellRef.current = null; return; }
-    const v = Number(scaleConn.liveWeight);
-    const inRange = Math.abs(v - it.expected) <= it.tolerance;
+    const v = Number(scaleConn.liveWeight);              // กรัมเสมอ (จากเครื่องชั่ง)
+    // 🆕 WEIGH-G: เทียบในหน่วยกรัมทั้งคู่ · ชั่งเป็นกรัมไม่ได้ → ไม่ล็อกอัตโนมัติ (ใช้กรอกมือ)
+    if(it.expectedG == null){ dwellRef.current = null; return; }
+    const tgtG = it.expectedG, tolG = it.toleranceG || 0.5;
+    const inRange = Math.abs(v - tgtG) <= tolG;
     // ยังไม่นิ่ง หรือ ยังไม่เข้าเกณฑ์ → operator กำลังเทเพิ่ม → รีเซ็ตตัวจับเวลา
     if(!scaleConn.stable || !inRange){ dwellRef.current = null; return; }
     // นิ่ง + เข้าเกณฑ์ → เริ่ม/นับ "นิ่งค้าง" · ถ้าค่าขยับ >3 หน่วย (เทเพิ่ม) ให้เริ่มจับใหม่
@@ -32067,15 +32141,20 @@ function BomWeighModal({ op, opState, order, state, user, bom, onClose, onPass, 
       return;
     }
     // ค่าล่าสุดเข้าใกล้ target กว่าเดิม → เก็บค่าที่ดีที่สุดไว้ล็อก
-    if(Math.abs(v - it.expected) < Math.abs(d.value - it.expected)) d.value = v;
+    if(Math.abs(v - tgtG) < Math.abs(d.value - tgtG)) d.value = v;
     if(now - d.since >= LOCK_DWELL_MS){
-      const finalV = d.value;
+      const finalV = d.value;                              // กรัม
       dwellRef.current = null;
       setEntries(prev => {
         const pe = prev[activeWeighItemId] || {};
         if(pe.locked) return prev;
+        // 🆕 WEIGH-G: เก็บกลับเป็นหน่วยของสูตร (ตัดสต๊อก/ต้นทุนใช้หน่วยนี้) + เก็บกรัมดิบไว้ตรวจย้อน
+        const perU = it.gPerUnit || 1;
+        const inUnit = finalV / perU;
+        const dec = perU >= 1000 ? 6 : perU >= 1 ? 3 : 2;
         return { ...prev, [activeWeighItemId]: {
-          ...pe, value: String(finalV), source: 'scale', locked: true } };
+          ...pe, value: String(Number(inUnit.toFixed(dec))), valueG: finalV,
+          source: 'scale', locked: true } };
       });
     }
   }, [scaleConn.stable, scaleConn.liveWeight, activeWeighItemId, scaleTick]);
@@ -32419,7 +32498,13 @@ ${sz.isA4
         const canManual = !mustScale;
         const manualOn = !e.skipped && (mustManual || (canManual && !!manualIds[it.itemId]) || (!scaleConn.connected && !mustScale));
         const liveNum = scaleConn.liveWeight != null ? Number(scaleConn.liveWeight) : null;
-        const tgt = it.expected, tolv = it.tolerance || 1;
+        // 🆕 WEIGH-G: โหมดเกจ (อ่านจากเครื่องชั่ง) ทำงานในหน่วยกรัมล้วน — liveWeight เป็นกรัมเสมอ
+        //   โหมดอื่น (กรอกมือ / ล็อกแล้ว) ใช้หน่วยของสูตรตามเดิม เพราะ e.value เก็บเป็นหน่วยสูตร
+        const gaugeG = scaleConn.connected && it.expectedG != null && !isLockedFromScale
+                       && !e.skipped && !manualOn;
+        const tgt = gaugeG ? it.expectedG : it.expected;
+        const tolv = (gaugeG ? it.toleranceG : it.tolerance) || 1;
+        const uTxt = gaugeG ? 'g' : (it.unit || '');
         const gMax = Math.max(1, tgt + tolv*2);
         const Pg = x => Math.max(0, Math.min(100, (x/gMax)*100));
         const lowP=Pg(tgt-tolv), highP=Pg(tgt+tolv), tgtP=Pg(tgt);
@@ -35798,8 +35883,10 @@ function MaterialRow({ m, i, it, bomUnits, baseQty, profiles, state, updateMater
       ),
       h('td', { className:'px-2 py-1' },
         h('select', { value:m.unit||'', onChange:e=>updateMaterial(i,'unit',e.target.value),
+          title:'หน่วยเมตริกตระกูลเดียวกันใช้ได้เลย ไม่ต้องจดซ้ำในทะเบียนสินค้า',
           className:'w-full px-1 py-0.5 border rounded text-xs' },
-          bomUnits.map(u => h('option', { key:u.name, value:u.name }, u.name))
+          // 🆕 METRIC-AUTO: หน่วยที่ระบบแปลงให้เอง ติดดาวไว้ให้รู้ว่าไม่ได้จดในทะเบียน
+          bomUnits.map(u => h('option', { key:u.name, value:u.name }, u._auto ? u.name + ' ✳️' : u.name))
         )
       ),
       h('td', { className:'px-2 py-1 text-right text-xs text-blue-700' },
