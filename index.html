@@ -3333,20 +3333,44 @@ function weighRecipeFromBom(state, bom){
     out.push({ name, itemId: m.itemId || null, target, unit: isVolume ? 'ml' : 'g', tol, srcQty: Number(m.qty)||0, srcUnit: m.unit || '', isVolume, fixed: m.scaleType === 'fixed' });
   }
   const rawCode = String(bom.weighCode || bom.code || (bom.productName||bom.name||'').replace(/[^A-Za-z0-9]/g,'') || ('B' + String(bom.id||'').replace(/[^A-Za-z0-9]/g,'').slice(-5))).toUpperCase().slice(0,8) || 'BOM';
-  return { id:'bom:' + bom.id, bomId: bom.id, code: rawCode, name: bom.name || bom.productName || bom.id, lineId: bom.lineId || null, items: out, skipped };
+  return { id:'bom:' + bom.id, bomId: bom.id, code: rawCode, name: bom.name || bom.productName || bom.id, lineId: bom.lineId || null,
+    weighLineIds: bomWeighLines(bom),   // 🆕 WEIGH-PAGE: หน้าชั่งของไลน์ไหนบ้าง (sub-line)
+    items: out, skipped };
 }
 // BOM ที่สถานีชั่งของผู้ใช้เห็น: มีขั้นชั่ง · active · ใช้ในสาขานี้ · ไลน์ตรงกับที่ user ถูกมอบหมาย (superuser/manager/production_manager เห็นทุกไลน์ของสาขา)
 //   จำกัดรายคนได้ด้วย user.weighBomIds[] (ไม่ว่าง = เห็นเฉพาะรายการนี้)
+// 🆕 WEIGH-PAGE (user 2026-09-24): "กำหนดตอนตั้ง BOM เลย — Sub line ชั่งวัดตวงในไลน์ขนมปัง ถ้าติ๊กอันนี้
+//   ก็ไปเข้าหน้าชั่งวัดตวงไลน์ขนมปัง หรือไลน์อื่น ๆ ตามที่กำหนด · อันไหนเป็น Flow ก็ตั้งค่าเหมือนเดิม"
+//   bom.weighPage   = true → สูตรนี้ขึ้นในหน้า ⚖️ ชั่ง (งานชั่งเตรียม) · false → ชั่งได้เฉพาะในออเดอร์ผลิต (Flow)
+//   bom.weighLineIds = หน้าชั่งของไลน์ไหนบ้าง (sub-line) · ว่าง = ไลน์ผลิตของสูตรเอง (bom.lineId)
+//   สูตรเก่าที่ยังไม่เคยตั้ง (undefined) → เดาจากขั้นตอน: มีแต่ขั้นชั่งอย่างเดียว = งานชั่งเตรียม
+//     (สูตรที่ชั่งแล้วมีขั้นอื่นต่อ เช่น ชั่ง → ผสม → อบ = Flow ไม่ควรชั่งเดี่ยวจากแท็บ — ชั่งแล้วไม่ผูกออเดอร์ ของหายจากระบบ)
+function bomWeighOnly(b){
+  const ops = ((b && b.operations) || []).filter(Boolean);
+  return ops.length > 0 && ops.every(op => op.stationType === 'weigh');
+}
+function bomOnWeighPage(b){
+  if(!b) return false;
+  if(b.weighPage === true) return true;
+  if(b.weighPage === false) return false;
+  return bomHasWeighStep(b) && bomWeighOnly(b);
+}
+function bomWeighLines(b){
+  const ids = ((b && b.weighLineIds) || []).filter(Boolean);
+  return ids.length ? ids : ((b && b.lineId) ? [b.lineId] : []);
+}
 function bomsForWeigh(state, user, branchId){
-  const all = (state.boms||[]).filter(b => b && b.active !== false && bomHasWeighStep(b)
+  const all = (state.boms||[]).filter(b => b && b.active !== false && bomOnWeighPage(b)
     && (!branchId || b.createdBranch === branchId || (b.availableIn||[]).includes(branchId)));
   if(!user) return all;
   const own = Array.isArray(user.weighBomIds) ? user.weighBomIds.filter(Boolean) : [];
   if(own.length) return all.filter(b => own.includes(b.id));
   if(isSuperUser(user) || ['manager','production_manager'].includes(user.role)) return all;
   const lines = getUserAssignedLines(user) || [];
-  if(!lines.length) return all.filter(b => !b.lineId);   // ไม่ได้มอบหมายไลน์ → เห็นเฉพาะ BOM ที่ไม่ผูกไลน์
-  return all.filter(b => !b.lineId || lines.includes(b.lineId));
+  // ไม่ได้มอบหมายไลน์ → เห็นเฉพาะ BOM ที่ไม่ผูกไลน์
+  if(!lines.length) return all.filter(b => !bomWeighLines(b).length);
+  // 🆕 WEIGH-PAGE: เทียบกับหน้าชั่งของไลน์ (weighLineIds) ไม่ใช่ไลน์ผลิตอย่างเดียว
+  return all.filter(b => { const wl = bomWeighLines(b); return !wl.length || wl.some(id => lines.includes(id)); });
 }
 
 // ==================== IMAGE HELPERS (Phase 2A — QC photos) ====================
@@ -4397,6 +4421,7 @@ Object.assign(global.ERP, {
   resolvePrice, isPhysicalItem, groupKitForPrint,
   fixedColGroup, TABLE_FIXED_CLS,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,
+  bomWeighOnly, bomOnWeighPage, bomWeighLines,
   metricAutoUnits,
   getStockUnitsRanked, getAllUnitsRanked, formatQtyMulti, multiUnitsToBase,
   resolveDisplayUnit,
@@ -34443,7 +34468,21 @@ function WeighStationTab({ state, dispatch, user, branchId }){
 
   // สูตรที่คนนี้เห็น — คำนวณใหม่เมื่อ BOM/สินค้า/คน/สาขา เปลี่ยน
   const recipes = useMemo(() => weighRecipesFor(state, user, branchId), [state.boms, state.items, user, branchId]);
-  const recipesSig = useMemo(() => weighRecipesSig(recipes), [recipes]);
+  // 🆕 WEIGH-PAGE: sub-line — หน้าชั่งแยกตามไลน์ (ไลน์ขนมปัง / ชั่งกลาง / …) ตามที่ตั้งใน BOM (weighLineIds)
+  //   ไลน์ที่มีสูตรจริง ∩ ไลน์ที่คนนี้เห็น · มีไลน์เดียว = ไม่ต้องโชว์ตัวสลับ
+  const subLineKey = 'erp_v5__weighSubLine:' + (user?.id || '') + ':' + branchId;
+  const subLines = useMemo(() => {
+    const ids = new Set();
+    recipes.forEach(r => (r.weighLineIds || []).forEach(id => ids.add(id)));
+    return lines.filter(l => ids.has(l.id) && (seesAll || myLineIds.includes(l.id)));
+  }, [recipes, lines, seesAll, myLineIds.join(',')]);
+  const [subLine, setSubLineRaw] = useState(() => { try { return global.localStorage.getItem(subLineKey) || '__all__'; } catch(_e){ return '__all__'; } });
+  const setSubLine = (v) => { setSubLineRaw(v); try { global.localStorage.setItem(subLineKey, v); } catch(_e){} };
+  const subLineOk = subLine === '__all__' || subLines.some(l => l.id === subLine);
+  const activeSub = subLineOk ? subLine : '__all__';
+  const recipesShown = useMemo(() => activeSub === '__all__' ? recipes
+    : recipes.filter(r => { const wl = r.weighLineIds || []; return !wl.length || wl.includes(activeSub); }), [recipes, activeSub]);
+  const recipesSig = useMemo(() => weighRecipesSig(recipesShown), [recipesShown]);
   const skippedHints = recipes.filter(r => (r.skipped||[]).length);
 
   // ---- iframe (mount ครั้งเดียวต่อ src · ไม่ remount ทุก render) ----
@@ -34491,7 +34530,7 @@ function WeighStationTab({ state, dispatch, user, branchId }){
   const featuresRef = useRef([]);               // ความสามารถของระบบชั่งรุ่นที่โหลด (จาก ready.features) เช่น 'print-label'
   // ค่าล่าสุดสำหรับ handler ที่ผูกครั้งเดียว (listener 'message')
   const latest = useRef({});
-  latest.current = { user, branchId, recipes, dispatch, state, weighLogs: state.weighLogs || [] };
+  latest.current = { user, branchId, recipes, recipesShown, dispatch, state, weighLogs: state.weighLogs || [] };
 
   const postToWeigh = (msg) => {
     const fr = iframeRef.current;
@@ -34499,7 +34538,7 @@ function WeighStationTab({ state, dispatch, user, branchId }){
     try { fr.contentWindow.postMessage({ target:'weigh-system', ...msg }, '*'); return true; } catch(_e){ return false; }
   };
   const sendConfig = () => {
-    const { user:u, branchId:b, recipes:rs } = latest.current;
+    const { user:u, branchId:b, recipesShown:rs } = latest.current;
     if(!u) return;
     postToWeigh({ type:'config',
       operator: u.name || u.username || '',
@@ -34605,6 +34644,14 @@ function WeighStationTab({ state, dispatch, user, branchId }){
   const myLineNames = myLineIds.map(id => { const l = lines.find(x => x.id === id); return l ? `${l.icon||''} ${l.name}`.trim() : id; });
 
   return h('div', { className:'space-y-3', 'data-weigh-tab':'1' },
+    // 🆕 WEIGH-PAGE: ตัวสลับ sub-line (เห็นเมื่อมีสูตรมากกว่า 1 ไลน์)
+    subLines.length > 1 && h('div', { className:'flex flex-wrap items-center gap-1 bg-white rounded-lg shadow px-3 py-2', 'data-weigh-sublines':'1' },
+      h('span', { className:'text-xs text-gray-600 mr-1' }, 'หน้าชั่งของ:'),
+      [{ id:'__all__', name:'ทุกไลน์', icon:'' }, ...subLines].map(l => h('button', { key:l.id, type:'button', 'data-weigh-subline': l.id,
+        onClick: () => setSubLine(l.id),
+        className: cls('px-3 py-1 rounded-full border text-sm',
+          activeSub === l.id ? 'bg-indigo-600 text-white border-indigo-700 font-medium' : 'bg-white border-gray-300 hover:border-indigo-400') },
+        (l.icon ? l.icon + ' ' : '') + l.name))),
     // หัว: ไลน์ที่มอบหมาย · จำนวนสูตร · วัตถุดิบที่ชั่งไม่ได้
     h('div', { className:'bg-white rounded-lg shadow p-3 text-sm' },
       h('div', { className:'flex flex-wrap items-center justify-between gap-2' },
@@ -34612,7 +34659,8 @@ function WeighStationTab({ state, dispatch, user, branchId }){
           h('span', { className:'font-bold text-gray-800' }, '⚖️ สถานีชั่ง'),
           h('span', { className:'text-gray-600' },
             seesAll ? 'ทุกไลน์ของสาขา' : (myLineNames.length ? 'ไลน์ที่มอบหมาย: ' + myLineNames.join(', ') : 'ยังไม่ได้มอบหมายไลน์ (เห็นเฉพาะสูตรที่ไม่ผูกไลน์)')),
-          h('span', { className:'px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 text-xs font-medium' }, `${recipes.length} สูตร`),
+          h('span', { className:'px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 text-xs font-medium' },
+            activeSub === '__all__' ? `${recipes.length} สูตร` : `${recipesShown.length} / ${recipes.length} สูตร`),
           ready && h('span', { className:'text-xs text-green-700' }, `● พร้อม${weighVersion ? ' v' + weighVersion : ''}`),
           busyLot && h('span', { className:'text-xs text-amber-700 animate-pulse' }, `⏳ กำลังส่ง ${busyLot}…`),
           scaleInfo && h('span', { className: cls('text-xs', scaleInfo.connected ? 'text-green-700' : 'text-gray-500') },
@@ -36847,6 +36895,12 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
   const [notes, setNotes] = useState(bom?.notes || '');
   // 🆕 WEIGH UAT: รหัสชั่ง = คำนำหน้าเลข LOT/บาร์โค้ด (A-Z 0-9 ≤ 8 ตัว) — เดิมตั้งได้เฉพาะตอนนำเข้าไฟล์ · ว่าง = ระบบเดา (ชื่ออังกฤษ 8 ตัวแรก → ซ้ำกันได้)
   const [weighCode, setWeighCode] = useState(bom?.weighCode || '');
+  // 🆕 WEIGH-PAGE: ส่งสูตรนี้เข้าหน้า ⚖️ ชั่ง (งานชั่งเตรียม) หรือเป็น Flow ในออเดอร์อย่างเดียว — กำหนดเองตอนตั้ง BOM
+  //   สูตรเก่าที่ยังไม่เคยตั้ง → ค่าเริ่มต้นตามเดิม (มีแต่ขั้นชั่ง = ส่งเข้าหน้าชั่ง) ให้เห็นก่อนกดบันทึก
+  //   null = ยังไม่เคยตั้งเอง → ใช้ค่าอัตโนมัติ (มีแต่ขั้นชั่ง = ขึ้นหน้าชั่ง) ตามขั้นตอน ณ ตอนนี้
+  //   กดช่องติ๊กเมื่อไหร่ = ตั้งเองชัดเจน · คนที่ไม่รู้จักช่องนี้ กด "⚖️ เพิ่มขั้นชั่ง" แบบเดิมยังได้ผลแบบเดิม
+  const [weighPageExplicit, setWeighPageExplicit] = useState(() => (bom && typeof bom.weighPage === 'boolean') ? bom.weighPage : null);
+  const [weighLineIds, setWeighLineIds] = useState(() => (bom && Array.isArray(bom.weighLineIds)) ? bom.weighLineIds.filter(Boolean) : []);
   const weighCodeDup = weighCode && (state.boms||[]).some(b => b && b.id !== bom?.id && b.active !== false && String(b.weighCode||'').toUpperCase() === weighCode.toUpperCase());
   const [itemSearch, setItemSearch] = useState('');
   const [availableIn, setAvailableIn] = useState(
@@ -36897,6 +36951,16 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
     const op = weighOpFromTemplate(state, operations.length);
     setOperations([op, ...operations].map((o,i) => ({ ...o, seq: i+1 })));
   };
+  const _opsNow = operations.filter(Boolean);
+  const weighPageAuto = _opsNow.length > 0 && _opsNow.every(o => o.stationType === 'weigh');
+  const weighPage = weighPageExplicit != null ? weighPageExplicit : weighPageAuto;
+  const toggleWeighPage = (on) => {
+    setWeighPageExplicit(on);
+    if(on && !hasWeighOp) addWeighOperation();   // หน้าชั่งอ่านเป้าหมายจากขั้นชั่ง — ติ๊กแล้วเพิ่มขั้นให้เลย
+  };
+  const toggleWeighLine = (id) => setWeighLineIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  // ไลน์ที่หน้าชั่งจะแสดงจริง: เลือกไว้ → ตามนั้น · ไม่เลือก → ไลน์ผลิตของสูตรเอง
+  const effWeighLines = weighLineIds.length ? weighLineIds : (lineId ? [lineId] : []);
 
   // 📥 Apply Operation Template — pull params + paramSource + mustHandoff from template
   const opTemplates = state.operationTemplates || [];
@@ -37052,6 +37116,9 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
       // 🆕 WEIGH: คงค่าที่ฟอร์มนี้ไม่ได้แก้ — weighCode (รหัส LOT/กันนำเข้าซ้ำ) · active · ผู้สร้าง (เดิมหายทุกครั้งที่กดบันทึก)
       ...(isEdit ? { active: bom.active, createdBy: bom.createdBy, createdAt: bom.createdAt } : { createdAt: Date.now() }),
       weighCode: weighCode ? weighCode.toUpperCase() : undefined,
+      // 🆕 WEIGH-PAGE: บันทึกเป็นค่าชัดเจนเสมอ (เลิกเดาจากขั้นตอนหลังผู้ใช้เปิดฟอร์มนี้แล้ว)
+      weighPage: weighPageExplicit == null ? undefined : !!weighPageExplicit,
+      weighLineIds: weighPage ? weighLineIds.filter(Boolean) : [],
     };
     if(weighCodeDup) return alert(`รหัสชั่ง "${weighCode.toUpperCase()}" ซ้ำกับ BOM อื่น — เลข LOT จะชนกัน ตั้งรหัสอื่น`);
     // 🆕 WEIGH FIX: BOM ที่มีขั้นชั่งแต่ชั่งไม่ได้สักตัว จะถูก weighRecipesFor ตัดทิ้งทั้งใบแบบเงียบ ๆ
@@ -37196,13 +37263,44 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
           h('div', { className:'flex gap-1 flex-wrap justify-end' },
             // 🆕 WEIGH: เพิ่มขั้นชั่งคลิกเดียว → BOM นี้โผล่ในแท็บ ⚖️ ชั่ง ของไลน์
             h('button', { type:'button', onClick:addWeighOperation, disabled: hasWeighOp || operations.length >= 5,
-              title: hasWeighOp ? 'มีขั้นชั่งแล้ว' : 'เพิ่มขั้น "ชั่งตามสูตร" (สถานีชั่ง) — สูตรนี้จะเห็นในแท็บ ⚖️ ชั่ง ของไลน์ · ขั้นอื่นยังไม่ต้องใส่ก็ได้',
+              title: hasWeighOp ? 'มีขั้นชั่งแล้ว' : 'เพิ่มขั้น "ชั่งตามสูตร" — ถ้าสูตรมีแต่ขั้นชั่ง จะขึ้นในแท็บ ⚖️ ชั่ง ให้อัตโนมัติ · ตั้งเองได้ที่ช่อง 📍 ส่งเข้าหน้าชั่งวัดตวง',
               className:'px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs rounded disabled:opacity-50' },
               hasWeighOp ? '⚖️ มีขั้นชั่งแล้ว' : '⚖️ เพิ่มขั้นชั่ง (สถานีชั่ง)'),
             h('button', { type:'button', onClick:addOperation, disabled:operations.length >= 5,
               className:'px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs rounded disabled:opacity-50' },
               `+ เพิ่มขั้น (${operations.length}/5)`))
         ),
+        // 🆕 WEIGH-PAGE: sub-line ชั่งวัดตวง — ส่งสูตรนี้เข้าหน้า ⚖️ ชั่ง ของไลน์ไหน
+        h('div', { className: cls('mb-2 text-xs rounded p-2 border', weighPage ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-gray-200'), 'data-weigh-page':'1' },
+          h('label', { className:'flex items-start gap-2 cursor-pointer' },
+            h('input', { type:'checkbox', checked: weighPage, 'data-testid':'bom-weigh-page',
+              onChange: e => toggleWeighPage(e.target.checked), className:'mt-0.5 w-4 h-4' }),
+            h('div', null,
+              h('div', { className:'font-bold text-indigo-900' }, '📍 ส่งเข้าหน้าชั่งวัดตวง (งานชั่งเตรียม)',
+                weighPageExplicit == null && h('span', { className:'ml-1 font-normal text-[10px] text-gray-500 bg-gray-100 rounded px-1' },
+                  'อัตโนมัติ: ' + (weighPageAuto ? 'มีแต่ขั้นชั่ง' : 'มีขั้นอื่นต่อ = Flow'))),
+              h('div', { className:'text-gray-600 mt-0.5' }, weighPage
+                ? 'สูตรนี้จะขึ้นในแท็บ ⚖️ ชั่ง ของไลน์ที่เลือกด้านล่าง — ชั่งเตรียมไว้ใช้ภายหลัง'
+                : 'ไม่ติ๊ก = ชั่งได้เฉพาะในออเดอร์ผลิต (Flow ตามขั้นตอนด้านล่าง) · ไม่ขึ้นในแท็บ ⚖️ ชั่ง'))),
+          weighPage && h('div', { className:'mt-2 pl-6' },
+            h('div', { className:'text-gray-700 mb-1' }, 'หน้าชั่งของไลน์:'),
+            h('div', { className:'flex flex-wrap gap-1' },
+              lines.map(l => {
+                const on = effWeighLines.includes(l.id);
+                return h('button', { key:l.id, type:'button', 'data-weigh-line': l.id,
+                  onClick: () => {
+                    // ยังไม่เคยเลือกเอง (ใช้ค่าเริ่มต้น = ไลน์ผลิต) → กดครั้งแรกให้เริ่มจากค่าเริ่มต้นก่อน
+                    if(!weighLineIds.length) setWeighLineIds(on ? effWeighLines.filter(x => x !== l.id) : [...effWeighLines, l.id]);
+                    else toggleWeighLine(l.id);
+                  },
+                  className: cls('px-2 py-1 rounded-full border text-xs',
+                    on ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white border-gray-300 hover:border-indigo-400') },
+                  (on ? '✓ ' : '') + (l.icon ? l.icon + ' ' : '') + l.name);
+              })),
+            !weighLineIds.length && h('div', { className:'text-[11px] text-gray-500 mt-1' },
+              'ยังไม่ได้เลือก = ใช้ไลน์ผลิตของสูตรนี้'),
+            effWeighLines.length === 0 && h('div', { className:'text-[11px] text-red-600 mt-1' },
+              '⚠️ ยังไม่มีไลน์ — พนักงานจะไม่เห็นสูตรนี้ (ผู้จัดการ/GM ยังเห็น)'))),
         // 🆕 WEIGH UAT: รหัสชั่ง (คำนำหน้า LOT) — แสดงเมื่อมีขั้นชั่ง
         hasWeighOp && h('div', { className:'flex flex-wrap items-center gap-2 mb-2 text-xs bg-white border border-indigo-200 rounded p-2', 'data-weigh-code':'1' },
           h('span', { className:'font-bold text-indigo-900' }, '⚖️ รหัสชั่ง (ขึ้นต้นเลข LOT):'),
@@ -82392,6 +82490,7 @@ const {
   hasUnitForPurpose, productRequiresQC, qcTemplateAppliesTo,
   getUserAssignedLines, getUserAssignedStations, getStationsForLine, canSeeOrder, userCanQC, canSeeBranch, isHQ,
   hasPerm, isSuperUser, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,   // 🆕 WEIGH: helpers สถานีชั่ง (00-core.js ⚖️ WEIGH STATION)
+  bomOnWeighPage, bomWeighOnly,   // 🆕 WEIGH-PAGE: สูตรไหนอยู่หน้าชั่ง (ตั้งใน BOM) · สูตรชั่งอย่างเดียว
 } = global.ERP;
 
 // ---------- shared helpers (pure) ----------
@@ -82659,8 +82758,10 @@ function branchShortage(ctx){
 const WEIGH_NAV = { tab:'production', subs:{ production:'weigh' } };
 const weighVisible = (ctx) => ctx.can('production') && ctx.perm('production','weigh','view');
 // BOM ที่มีขั้นชั่ง ในขอบเขตผู้ใช้ (active · scopedBoms) — ใช้ร่วมกันทั้ง 3 check
-const weighBoms = (ctx) => ctx.memo('prod_weighBoms', () => scopedBoms(ctx).filter(b => b.active !== false && bomHasWeighStep(b)));
-const weighOnly = (b) => { const ops = (b.operations||[]).filter(Boolean); return ops.length > 0 && ops.every(op => op.stationType === 'weigh'); };
+// 🆕 WEIGH-PAGE: สูตรที่ "อยู่หน้าชั่ง" (bom.weighPage) — สูตร Flow ที่มีขั้นชั่งเป็นขั้นแรกไม่ใช่งานของสถานีชั่งอีกต่อไป
+//   ใช้ helper กลาง (00-core bomOnWeighPage) ให้กติกาเดียวกับ bomsForWeigh ที่แท็บ ⚖️ ชั่ง ใช้จริง
+const weighBoms = (ctx) => ctx.memo('prod_weighBoms', () => scopedBoms(ctx).filter(b => b.active !== false && bomOnWeighPage(b)));
+const weighOnly = (b) => bomWeighOnly(b);
 const MGR_TIER = (u) => isSuperUser(u) || ['manager','production_manager'].includes(u.role);   // bomsForWeigh คืนทุก BOM → ไม่ใช่ "คนประจำสถานีชั่ง"
 const userLabel = (u) => u.name || u.username || u.id;
 // GO-LIVE: settings.productionLive=false (01-state.js v34 migrate · เปิดคืนที่ ตั้งค่า → บริษัท) = ยังไม่ใช้ใบสั่งผลิต/BOM/QC/แผน กับพนักงาน
@@ -83550,9 +83651,9 @@ C.registerGroup({
     { key:'prod_weigh_no_bom_for_line', label:'คนใช้สถานีชั่ง แต่ไลน์ที่สังกัดยังไม่มีสูตรชั่ง', severity:'info', goLive:true,
       show: (ctx) => weighVisible(ctx) && (ctx.role === 'production_manager' || ctx.isSuper),
       nav: BOM_NAV,
-      hint: bomHint('คนเหล่านี้เปิด ⚖️ สถานีชั่ง แล้วจะไม่มีสูตรให้เลือก · สร้างสูตรชั่งให้ไลน์นั้น: 🧪 สูตร BOM → ➕ สูตรใหม่ (ระบุ "ไลน์ที่ผลิต" = ไลน์นั้น) → ⚙️ ขั้นตอนการผลิต → เพิ่มขั้น "⚖️ ชั่งตามสูตร" · หรือถ้าคนนั้นไม่ได้ชั่งจริง → แจ้ง admin/gm ปรับ "ไลน์ที่สังกัด" / ถอดสิทธิ์ สถานีชั่ง ที่ ตั้งค่า → 👥 ผู้ใช้ + สิทธิ์'),
+      hint: bomHint('คนเหล่านี้เปิด ⚖️ สถานีชั่ง แล้วจะไม่มีสูตรให้เลือก · สร้างสูตรชั่งให้ไลน์นั้น: 🧪 สูตร BOM → ➕ สูตรใหม่ (ระบุ "ไลน์ที่ผลิต" = ไลน์นั้น) → ⚙️ ขั้นตอนการผลิต → ติ๊ก "📍 ส่งเข้าหน้าชั่งวัดตวง" แล้วเลือกไลน์นั้น · หรือถ้าคนนั้นไม่ได้ชั่งจริง → แจ้ง admin/gm ปรับ "ไลน์ที่สังกัด" / ถอดสิทธิ์ สถานีชั่ง ที่ ตั้งค่า → 👥 ผู้ใช้ + สิทธิ์'),
       run: (ctx) => {
-        if(!(ctx.state.boms||[]).some(b => b && b.active !== false && bomHasWeighStep(b))) return 0;   // ยังไม่มีสูตรชั่งเลย → ยังไม่เริ่มใช้
+        if(!(ctx.state.boms||[]).some(b => b && b.active !== false && bomOnWeighPage(b))) return 0;   // ยังไม่มีสูตรหน้าชั่งเลย → ยังไม่เริ่มใช้
         const idx = lineIndex(ctx);
         const out = [];
         for(const u of (ctx.state.users||[])){
