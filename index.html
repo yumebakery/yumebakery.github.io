@@ -8083,6 +8083,34 @@ function reducer(s, a){
       return { ...s, invoices:s.invoices.map(i => i.id===a.data.id ? _newInv : i) };
     }
 
+    // 🆕 PATCH_INV: รวม field ลงใบที่อยู่ใน state ตอนนี้ (ไม่แทนทั้ง record เหมือน UPDATE_INV)
+    //   ใช้กับ dispatch ต่อเนื่องหลัง ADD_INV — ผู้เรียกถือ object ที่สร้างไว้ "ก่อน" action อื่นจะแก้ใบ
+    //   เคสจริง: ตั้งหนี้จาก GR → APPLY_CN_AUTO_ON_PI หัก netPayable แล้ว → UPDATE_INV ด้วย invData เก่า
+    //   ทับกลับเป็นยอดก่อนหัก CN = โอนเกิน + ทะเบียนเจ้าหนี้ไม่ตรง GL (ทั้ง supplierSnapshot/creditApplied หายด้วย)
+    //   a.data: { id, fields:{...} }
+    //   a.data: { id, fields:{ทับตรง ๆ}, add:{บวกจากค่าปัจจุบัน}, recalcStatus:bool }
+    //   ⚠️ ต้องคิดใน reducer เท่านั้น — ผู้เรียกอ่าน state หลัง dispatch ไม่ได้ (React batch ยังไม่ commit)
+    case 'PATCH_INV': {
+      const _pid = a.data && a.data.id;
+      if(!_pid) return s;
+      const _cur = (s.invoices||[]).find(i => i.id === _pid);
+      if(!_cur) return s;
+      const _pf = (a.data && a.data.fields) || {};
+      const _add = (a.data && a.data.add) || {};
+      const _next = { ..._cur, ..._pf };
+      for(const k of Object.keys(_add)){
+        const inc = Number(_add[k]) || 0;
+        if(!inc) continue;
+        _next[k] = Number(((Number(_next[k]) || 0) + inc).toFixed(2));
+      }
+      if(a.data.recalcStatus && !_next.voided){
+        const _np = Number(_next.netPayable) || 0;
+        const _paid = Number(_next.paidAmount) || 0;
+        _next.paymentStatus = _paid >= _np - 0.01 ? 'paid' : (_paid > 0 ? 'partial' : 'unpaid');
+      }
+      return { ...s, invoices: s.invoices.map(i => i.id === _pid ? _next : i) };
+    }
+
     // 🆕 CAP: ตัด supplier credit แบบ clamp ในตรรกะหลัก (กันเครดิต creditDue ติดลบ/หาย)
     //   a.data: { plan:[{invId, newCreditDue}] }  — newCreditDue ถูก clamp ≥0 ซ้ำในนี้ (defense-in-depth)
     case 'CONSUME_SUPPLIER_CREDIT': {
@@ -48115,11 +48143,11 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
     } else {
       // โหมด 2: เปิด INV เต็ม + RTV กลายเป็น creditDue รอใช้ INV รอบหน้า
       // เก็บ creditDue ใน INV เสมือนเป็น credit ที่ยังไม่ใช้
-      dispatch({ type:'UPDATE_INV', data:{
-        ...invData,
-        creditDue: (invData.creditDue||0) + rtvDeduct,  // credit ค้างจาก RTV ก่อน INV
-        _rtvAsCredit: true,  // flag ข้อมูล
-      }});
+      // 🔒 PATCH_INV: merge ลงใบใน state — ห้าม spread invData (ถ่ายไว้ก่อน APPLY_CN_AUTO_ON_PI/หักมัดจำ
+      //   จะทับ netPayable/creditApplied/supplierSnapshot กลับเป็นยอดก่อนหัก = โอนเกินจริง)
+      dispatch({ type:'PATCH_INV', data:{ id: invData.id,
+        fields:{ _rtvAsCredit: true },          // flag ข้อมูล
+        add:{ creditDue: rtvDeduct } }});       // credit ค้างจาก RTV ก่อน INV (บวกจากค่าล่าสุด)
       for(const rtv of rtvsBeforeINV){
         dispatch({ type:'UPDATE_RTV', data:{
           ...rtv,
@@ -48157,12 +48185,12 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
         remain -= take;
       }
       if(applied > 0.01){
-        const np = invData.netPayable || 0;
-        const newPaid = (invData.paidAmount||0) + applied;
-        const ps = newPaid >= np - 0.01 ? 'paid' : (newPaid > 0 ? 'partial' : 'unpaid');
-        dispatch({ type:'UPDATE_INV', data:{ ...invData,
-          creditDue: (invData.creditDue||0) + (rtvMode==='fullCredit' ? rtvDeduct : 0),
-          paidAmount:newPaid, paymentStatus:ps, depositUsed:applied } });
+        // 🔒 PATCH_INV: ยอดจ่าย/เครดิต บวกจากใบล่าสุดใน reducer (CN/RTV หัก netPayable ไปแล้วใน dispatch ก่อนหน้า)
+        //   คิดในคอมโพเนนต์ไม่ได้ — dispatch ยังไม่ commit ตอน handler ทำงาน (React batch)
+        dispatch({ type:'PATCH_INV', data:{ id: invData.id,
+          fields:{ depositUsed: applied },
+          add:{ paidAmount: applied, creditDue: (rtvMode==='fullCredit' ? rtvDeduct : 0) },
+          recalcStatus: true }});
       }
     }
 
