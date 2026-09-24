@@ -3239,11 +3239,32 @@ function gramsOfMaterial(item, qty, unit){
   if(direct != null) return q * direct;
   if(!item) return null;
   // 2) แปลงเป็นหน่วยฐานของสินค้า (units[].isBase) แล้วดูว่าฐานเป็นน้ำหนัก/ปริมาตร
-  const base = getBaseUnit(item);
-  const gBase = gramsPerUnitName(base);
-  if(gBase == null) return null;
   const factor = resolveToBase(item.units, unit);
   if(!factor || !isFinite(factor)) return null;
+  const base = getBaseUnit(item);
+  let gBase = gramsPerUnitName(base);
+  // 3) 🆕 WEIGH FIX: ฐานไม่ใช่หน่วยน้ำหนัก (เช่น "ถุง"/"ชิ้น") แต่ในลูกโซ่หน่วยมีหน่วยน้ำหนักอยู่
+  //    → อนุมาน "กรัมต่อ 1 หน่วยฐาน" จากหน่วยนั้น แทนที่จะยอมแพ้
+  //    เคสจริง: ไส้เผือก ฐาน=ถุง · 1 กก. = 1 ถุง · 1 กรัม = 0.001 กก.
+  //      → กรัม: g=1, toBase=0.001 → 1/0.001 = 1,000 ก. ต่อ 1 ถุง → 1 ถุง = 1000 ก. ✅
+  //    เดิมคืน null ทั้งที่ข้อมูลครบ → weighRecipeFromBom ข้ามวัตถุดิบ → items ว่าง
+  //      → weighRecipesFor (mod-production.js) .filter(items.length) ตัดสูตรทิ้งทั้งใบแบบเงียบ ๆ
+  //    เลือกหน่วยที่ละเอียดสุดก่อน (กรัม/มล. = 1) เพื่อความแม่นยำ · ลูกโซ่ที่สอดคล้องกันให้ผลเท่ากันอยู่แล้ว
+  if(gBase == null){
+    const cands = [];
+    for(const u of (item.units || [])){
+      const g = gramsPerUnitName(u && u.name);
+      if(g == null) continue;
+      const f = resolveToBase(item.units, u.name);
+      if(!f || !isFinite(f) || f <= 0) continue;
+      cands.push({ g, perBase: g / f });
+    }
+    if(cands.length){
+      cands.sort((a, b) => a.g - b.g);
+      gBase = cands[0].perBase;
+    }
+  }
+  if(gBase == null || !isFinite(gBase) || gBase <= 0) return null;
   return q * factor * gBase;
 }
 // เกณฑ์ ± มาตรฐานของระบบชั่ง (กรัม) — ตารางเดียวกับใน weigh-system
@@ -19227,15 +19248,21 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
     const next = { ...c }; delete next[itemId]; return next;
   });
 
+  // 🔒 COUNT-LOC FIX: ยอดตั้งต้นต้องเป็นชุดเดียวกับที่แถวบนจอใช้ (:3273-3276)
+  //   เดิมอ่าน stockByBranch ทั้งสาขาเสมอ ไม่สน branchLocFilter → เลือกนับเฉพาะคลัง
+  //   แล้วกรอกยอดที่ตรงกับคลังนั้น จะได้ delta = (ยอดคลัง − ยอดทั้งสาขา) = ติดลบก้อนใหญ่
+  //   แถวขึ้น "ตรง" แต่กดบันทึกแล้วตัดของหายจริงจาก FIFO ของคลังนั้น (:3346 ปรับเฉพาะ locId)
   const enteredItems = useMemo(() => Object.entries(counts).map(([itemId, entries]) => {
     const it = (state.items||[]).find(i => i.id === itemId);
     if(!it) return null;
     const newBase = multiUnitsToBase(it, entries.filter(Boolean));
     const cur = it.stockByBranch?.[branchId];
-    const curQty = (typeof cur === 'number') ? cur : Number(cur?._total||0);
+    const curQty = branchLocFilter === '__all__'
+      ? ((typeof cur === 'number') ? cur : Number(cur?._total||0))
+      : (stockAtBranchLoc?.[itemId] || 0);
     const delta = newBase - curQty;
     return { item:it, entries, newBase, curQty, delta };
-  }).filter(Boolean), [counts, state.items, branchId]);
+  }).filter(Boolean), [counts, state.items, branchId, branchLocFilter, stockAtBranchLoc]);
 
   const totalEntered = enteredItems.length;
   const totalDeltaPositive = enteredItems.filter(e => e.delta > 0).length;
@@ -36912,6 +36939,30 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
       weighCode: weighCode ? weighCode.toUpperCase() : undefined,
     };
     if(weighCodeDup) return alert(`รหัสชั่ง "${weighCode.toUpperCase()}" ซ้ำกับ BOM อื่น — เลข LOT จะชนกัน ตั้งรหัสอื่น`);
+    // 🆕 WEIGH FIX: BOM ที่มีขั้นชั่งแต่ชั่งไม่ได้สักตัว จะถูก weighRecipesFor ตัดทิ้งทั้งใบแบบเงียบ ๆ
+    //   (mod-production.js weighRecipesFor: .filter(r => r.items.length)) → สถานีชั่งว่างเปล่าโดยไม่มีใครรู้สาเหตุ
+    //   เตือนตอนบันทึกพร้อมบอกว่าตัวไหนชั่งไม่ได้ + ต้องทำอะไร (ไม่บล็อก — บาง BOM ตั้งขั้นชั่งไว้ล่วงหน้า)
+    if(hasWeighOp){
+      const _gm = global.ERP.gramsOfMaterial;
+      const _mats = data.materials || [];
+      const _bad = [];
+      let _okCount = 0;
+      for(const m of _mats){
+        if(!m || m.weighRequired === false) continue;
+        const _it = (state.items||[]).find(x => x.id === m.itemId);
+        const _g = (typeof _gm === 'function') ? _gm(_it, m.qty, m.unit) : null;
+        if(_g == null) _bad.push(`${(_it && _it.name) || m.itemId} (ใส่ไว้ ${m.qty} ${m.unit || '-'})`);
+        else _okCount++;
+      }
+      if(_okCount === 0){
+        return alert('⚠️ สูตรนี้มีขั้นชั่ง แต่ยังไม่มีวัตถุดิบตัวไหนที่ชั่งเป็นกรัมได้เลย\n'
+          + '→ บันทึกได้ แต่จะ "ไม่โผล่" ในแท็บ ⚖️ ชั่ง เลย\n\n'
+          + 'ชั่งไม่ได้:\n• ' + _bad.join('\n• ')
+          + '\n\nวิธีแก้: เปลี่ยนหน่วยในแถววัตถุดิบเป็น กรัม/กก./มล./ลิตร\n'
+          + 'หรือไปที่ ตั้งค่า → สินค้า → เพิ่มหน่วยน้ำหนักให้สินค้านั้น (เช่น 1 ถุง = 1,000 กรัม) แล้วติ๊กช่อง BOM');
+      }
+      if(_bad.length) _notify(`⚠️ ชั่งได้ ${_okCount} ตัว · ข้าม ${_bad.length} ตัวที่แปลงเป็นกรัมไม่ได้: ${_bad.join(', ')}`);
+    }
     dispatch({ type: isEdit ? 'UPDATE_BOM' : 'ADD_BOM', data });
     onClose();
   };
