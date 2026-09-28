@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="98e82d13fbd8";window.__ERP_BUILT_AT__="2026-09-28T14:09:30";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="0e572e3a462b";window.__ERP_BUILT_AT__="2026-09-28T14:56:20";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -231,6 +231,122 @@ function resolveToBase(units, unitName, _seen){
   return Number(u.toBase) || 1;
 }
 
+// §U U2 (owner 2026-09-28): หน่วยนี้ถูกเอกสาร "ที่ยังเปิดอยู่" ใช้ไหม — เอกสารพวกนี้แปลงเป็นหน่วยฐานด้วยตัวคูณ "ปัจจุบัน"
+//   (แก้ตัวคูณ/ชื่อทีหลัง = รับของ/ส่งของ/ตัดสูตร/ยกเลิกคืน ผิดจำนวน) · ของที่ลงบัญชี/สต๊อกไปแล้วไม่กระทบ
+//   เกณฑ์ "เปิด" (ฟิลด์สถานะที่ใช้):
+//   · PO  — po.status ไม่ใช่ cancelled/received/completed (PO_STATUS mod-purchase.js) และบรรทัดนั้น receivedQty < qty
+//           (ร่าง/รออนุมัตินับด้วย แยกป้าย "PO ร่าง/รออนุมัติ" — อนุมัติแล้วรับของตามตัวคูณปัจจุบัน)
+//           ข้าม PO นำเข้า Ecount (_migrated / createdBy 'migration' = isLegacyPO mod-checklist.js) — UAT M1
+//   · ใบสั่งผลิต — status ไม่ใช่ completed/cancelled · ผลผลิต outputs[].unit (หรือ yieldUnit ถ้าไม่มี outputs) — UAT S2
+//   · TR  — tr.status ว่าง/pending = ยังไม่ส่ง · approved ที่ยังไม่มี toId (verify: SHIP_TR/ApproveTRModal ตั้ง approved+toId ตอนส่งจริง
+//           และบรรทัด TO เป็นหน่วยฐานแล้ว → TR ที่ส่งแล้วไม่ล็อก)
+//   · BOM — bom.active !== false (soft-delete = active:false) · บรรทัด materials[].unit + ผลผลิต outputs[].unit/yieldUnit (UAT S2)
+//   · RTV — rtvStatus ไม่อยู่ในชุดปิดเคส (_RTV_TERMINAL 01-state.js · ว่าง = pending) และบรรทัดยังไม่มี baseQty
+//           (RTV ที่เก็บ baseQty แล้วยกเลิกด้วยตัวเลขที่เก็บ ไม่แปลงซ้ำ)
+//   · ชุดสินค้า (kit) — item.type 'kit' ที่ active !== false · kit.components[].unit (verify)
+//   · ใบเสนอราคา — salesOrders ที่ไม่ rejected · ยังแปลงไม่ครบ · ไม่หมดอายุ (กติกา quoteStatus) · บรรทัด/kitComponents (verify)
+//   · สูตร verify: นับ override ของ batch profile (byProfile) · ใบสั่งผลิตค้างที่ชี้สูตรถูกลบ (active:false) นับวัตถุดิบด้วย
+//   คืน { openPO(=poDraft+poOpen), poDraft, poOpen, openTR, openOrder, bom, bomNames, openRTV, kit, kitNames, openQT, total, docs:[ป้ายเอกสาร],
+//         summary:'PO ค้างรับ 2 · สูตร 1' } · pure (ไม่แตะ state)
+const _UU_PO_CLOSED = ['cancelled','received','completed'];
+const _UU_PO_DRAFT = ['draft','pending'];       // ยังไม่อนุมัติ — ยกเลิกใบร่างที่ค้างได้ก็ปลดล็อก
+const _UU_TR_OPEN = ['pending'];   // + approved ที่ยังไม่มี toId (ดู _uuTrOpen)
+const _uuTrOpen = (tr) => _UU_TR_OPEN.includes(tr.status || 'pending') || (tr.status === 'approved' && !tr.toId);
+const _UU_ORD_CLOSED = ['completed','cancelled'];
+const _UU_RTV_TERMINAL = ['closed','cancelled','replacement_received','credit_received','refund_received'];   // = _RTV_TERMINAL 01-state.js
+function unitUsage(state, itemId, unitName){
+  const out = { openPO:0, poDraft:0, poOpen:0, openTR:0, openOrder:0, bom:0, openRTV:0, kit:0, openQT:0, total:0, docs:[], bomNames:[], kitNames:[], summary:'' };
+  if(!state || !itemId || !unitName) return out;
+  const U = String(unitName);
+  const hit = (l) => l && l.itemId === itemId && String(l.unit || '') === U;
+  for(const po of (state.pos || [])){
+    // UAT M1: PO นำเข้าจาก Ecount (approved · receivedQty 0 ตลอด เพราะ GR นำเข้า poId:'') = ประวัติ ไม่ใช่งานค้าง — กติกาเดียวกับ isLegacyPO (mod-checklist.js)
+    if(!po || _UU_PO_CLOSED.includes(po.status) || po._migrated === true || po.createdBy === 'migration') continue;
+    if((po.lines || []).some(l => hit(l) && (Number(l.receivedQty) || 0) < (Number(l.qty) || 0) - 1e-9)){
+      out.openPO++;
+      if(_UU_PO_DRAFT.includes(po.status)){ out.poDraft++; out.docs.push('PO ' + (po.poNumber || po.id) + ' (ร่าง/รออนุมัติ)'); }
+      else { out.poOpen++; out.docs.push('PO ' + (po.poNumber || po.id)); }
+    }
+  }
+  for(const tr of (state.transferRequests || [])){
+    if(!tr || !_uuTrOpen(tr)) continue;
+    if((tr.lines || []).some(hit)){ out.openTR++; out.docs.push('TR ' + (tr.trNumber || tr.id)); }
+  }
+  // UAT S2: ผลผลิตแปลงเป็นหน่วยฐานตอนรับด้วยตัวคูณปัจจุบัน (orderOutputLines) → ใบสั่งผลิตค้าง + ผลผลิตของสูตรใช้งาน ต้องนับ
+  const outHit = (x) => {
+    const pid = x.itemId || x.productId || null;
+    if(Array.isArray(x.outputs) && x.outputs.length) return x.outputs.some(o => o && o.productId === itemId && String(o.unit || '') === U);
+    return pid === itemId && String(x.yieldUnit || '') === U;
+  };
+  // verify: วัตถุดิบ + override ของ batch profile (S/M/L) — resolveMaterialForProfile ใช้ ov.itemId และ ov.unit (เมื่อ ov.qty > 0)
+  const matHit = (m) => m && (hit(m) || Object.values(m.byProfile || {}).some(ov => ov &&
+    hit({ itemId: ov.itemId || m.itemId, unit: (Number(ov.qty) > 0 && ov.unit) || m.unit })));
+  const bomById = new Map((state.boms || []).filter(Boolean).map(b => [b.id, b]));
+  for(const o of (state.productionOrders || [])){
+    if(!o || _UU_ORD_CLOSED.includes(o.status) || o._migrated === true) continue;
+    // verify: back-flush อ่านสูตรตาม order.bomId โดยไม่ดู active → สูตรที่ลบ (active:false) แต่ใบยังเปิด ต้องนับที่ใบนี้
+    //   (สูตรที่ยังใช้งานนับในลูป BOM แล้ว — แก้สูตรก็ปลดทั้งคู่ เพราะ back-flush อ่านสูตรปัจจุบัน)
+    const ob = bomById.get(o.bomId);
+    if(outHit(o) || (ob && ob.active === false && (ob.materials || []).some(matHit))){
+      out.openOrder++; out.docs.push('ใบสั่งผลิต ' + (o.orderNumber || o.id));
+    }
+  }
+  for(const b of (state.boms || [])){
+    if(!b || b.active === false) continue;
+    if((b.materials || []).some(matHit) || outHit(b)){
+      const nm = b.name || b.code || b.id; out.bom++; out.bomNames.push(nm); out.docs.push('สูตร ' + nm);
+    }
+  }
+  for(const r of (state.returns || [])){
+    if(!r || _UU_RTV_TERMINAL.includes(r.rtvStatus || 'pending')) continue;
+    if((r.lines || []).some(l => hit(l) && !(Number(l.baseQty) > 0))){ out.openRTV++; out.docs.push('RTV ' + (r.rtvNumber || r.id)); }
+  }
+  // verify: ชุดสินค้า (kit) — ส่วนประกอบ kit.components[].unit แปลงเป็นหน่วยฐานตอนออกใบกำกับ (mod-sales-full) = นิยามแบบสูตร
+  const kitHit = (c) => c && c.itemId === itemId && String(c.unit || '') === U;
+  for(const k of (state.items || [])){
+    if(!k || k.type !== 'kit' || k.active === false) continue;
+    if(((k.kit && k.kit.components) || []).some(kitHit)){ out.kit++; out.kitNames.push(k.name || k.code || k.id); out.docs.push('ชุด ' + (k.name || k.code || k.id)); }
+  }
+  // verify: ใบเสนอราคาที่ยังแปลงเป็นใบกำกับไม่ครบ (สถานะเหมือน quoteStatus mod-sales-full: ไม่ rejected · ไม่ครบ · ไม่หมดอายุ)
+  const today = getToday();
+  for(const q of (state.salesOrders || [])){
+    if(!q || q.status === 'rejected' || q._migrated === true) continue;
+    const top = (q.lines || []).filter(l => l && l.lineKind !== 'kit_child');
+    const used = top.reduce((n, l) => n + (Number(l.usedQty) || 0), 0);
+    const tot = top.reduce((n, l) => n + (Number(l.qty) || 0), 0);
+    if(tot > 0 && used >= tot - 1e-9) continue;
+    if(!used && q.status !== 'accepted' && q.validUntil && String(q.validUntil) < String(today)) continue;
+    if(top.some(l => (Number(l.qty) || 0) - (Number(l.usedQty) || 0) > 1e-9 && (hit(l) || (l.kitComponents || []).some(kitHit)))){
+      out.openQT++; out.docs.push('ใบเสนอราคา ' + (q.qtNumber || q.id));
+    }
+  }
+  out.total = out.openPO + out.openTR + out.openOrder + out.bom + out.openRTV + out.kit + out.openQT;
+  out.summary = [out.poDraft && `PO ร่าง/รออนุมัติ ${out.poDraft}`, out.poOpen && `PO ค้างรับ ${out.poOpen}`,
+    out.openTR && `TR ยังไม่ส่ง ${out.openTR}`, out.openOrder && `ใบสั่งผลิตค้าง ${out.openOrder}`,
+    out.bom && `สูตร ${out.bom}`, out.openRTV && `ใบคืนค้าง ${out.openRTV}`,
+    out.kit && `ชุดสินค้า ${out.kit}`, out.openQT && `ใบเสนอราคาค้าง ${out.openQT}`].filter(Boolean).join(' · ');
+  return out;
+}
+// UAT S4: ข้อความแนะนำทางออก (ใช้ทั้งกล่องล็อกในฟอร์ม + alert ตอนบันทึก)
+function unitUsageAdvice(r, unitName){
+  if(!r || !r.total) return '';
+  const tips = [];
+  const names = (arr) => arr.slice(0, 3).join(', ') + (arr.length > 3 ? ` (+${arr.length - 3})` : '');
+  if(r.bom) tips.push('แก้หน่วยในสูตร ' + names(r.bomNames) + ' ก่อน');
+  if(r.kit) tips.push('แก้หน่วยในชุด ' + names(r.kitNames || []) + ' ก่อน');
+  // verify: บอกทางปลดตามชนิดเอกสาร
+  if(r.poDraft) tips.push('ยกเลิก/แก้ PO ร่างที่ค้าง');
+  if(r.poOpen) tips.push('รับของให้ครบหรือปิด PO');
+  if(r.openTR) tips.push('ส่งหรือยกเลิก TR');
+  if(r.openOrder) tips.push('ปิดใบสั่งผลิต');
+  if(r.openRTV) tips.push('ปิดเคสใบคืน');
+  if(r.openQT) tips.push('ออกใบกำกับให้ครบหรือปิดใบเสนอราคา');
+  const nm = unitName ? String(unitName) : 'หน่วยนี้';
+  // สูตร/ชุด อย่างเดียว → ต้องแก้ที่นิยามก่อน (หน่วยใหม่ไม่ช่วย เพราะนิยามยังชี้หน่วยเก่า)
+  if(r.total > r.bom + (r.kit || 0)) tips.push((tips.length ? 'หรือ' : '') + 'เพิ่มหน่วยใหม่แทน เช่น ' + nm + ' (ขนาดใหม่) แล้วเอาติ๊กหน่วยเก่าออก');
+  return tips.join(' · ');
+}
+
 function getBaseUnit(item){
   if(!item || !item.units) return item?.issueUnit || '';
   const b = item.units.find(u => u.isBase);
@@ -246,6 +362,26 @@ function findItemUnit(item, unitName){
 function toBaseQty(item, qty, unitName){
   if(!item) return Number(qty)||0;
   return (Number(qty)||0) * resolveToBase(item.units, unitName);
+}
+
+// 🆕 §U U3: หน่วยฐานของ RTV — ไม่ขึ้นกับตัวคูณหน่วยที่แก้ทีหลัง
+//   ตอนคืน: สัดส่วนจากบรรทัด GR ที่รับจริง (baseQty/qty) · GR เก่าไม่มี baseQty / หน่วยฐานเปลี่ยน → แปลงตามตัวคูณปัจจุบัน
+function rtvReturnBaseQty(item, grLine, returnQty){
+  const l = grLine || {}, gq = Number(l.qty) || 0, gb = Number(l.baseQty) || 0;
+  if(gq > 0 && gb > 0 && (!l.baseUnit || l.baseUnit === getBaseUnit(item))) return (Number(returnQty) || 0) * gb / gq;
+  return toBaseQty(item, returnQty, l.unit);
+}
+//   ตอนรับของชดเชย (verify): สัดส่วนที่ตรึงบนบรรทัด RTV (baseQty/qty) · RTV เก่าไม่มี / หน่วยฐานเปลี่ยน → ตัวคูณปัจจุบัน
+function rtvReplaceBaseQty(item, rtvLine, recvQty){
+  const l = rtvLine || {}, q = Number(l.qty) || 0, b = Number(l.baseQty) || 0;
+  if(q > 0 && b > 0 && (!l.baseUnit || l.baseUnit === getBaseUnit(item))) return (Number(recvQty) || 0) * b / q;
+  return toBaseQty(item, recvQty, l.unit);
+}
+//   ตอนยกเลิก: ใช้ baseQty ที่ตรึงบนบรรทัด RTV · RTV เก่าไม่มี → แปลงตามตัวคูณปัจจุบัน
+function rtvLineBaseQty(state, l){
+  if(l && Number(l.baseQty) > 0) return Number(l.baseQty);
+  const it = ((state && state.items) || []).find(x => x && l && x.id === l.itemId);
+  return toBaseQty(it, l && l.qty, l && l.unit);
 }
 
 function unitsForPurpose(item, purpose){
@@ -2527,6 +2663,307 @@ function getItemAvgFifoCost(state, itemId){
     totVal += (l.remaining||0) * (l.unitCost||0);
   }
   return totQty > 0 ? totVal / totQty : 0;
+}
+
+// ===== 🆕 ITEM-FORM (ITEM_FORM_CONTRACT B2) — ต้นทุน/ผู้ขาย/รหัส เติมเองจากประวัติซื้อจริง =====
+//   เจ้าของ 2026-09-28: "ตัดพวกที่ต้องใส่ราคาออก" + ผู้ขาย "ให้ระบบเติมเองจากประวัติการซื้อ"
+//   กติกา R5: บริสุทธิ์ (ไม่อ่าน Date.now · ไม่ mutate state) · cache ด้วย WeakMap ซ้อนตาม identity ของ "ทุก" array ที่อ่าน
+//   รับ item เป็น object หรือ id ก็ได้ — หา state.items เองเสมอ (ได้ units/suppliers จริง แม้ผู้เรียกส่ง item ปลอม)
+const _IF_EMPTY = Object.freeze([]);
+const _ifPad = (n) => String(Number(n) || 0).padStart(15, '0');
+function _ifItem(state, item){
+  const obj = (item && typeof item === 'object') ? item : null;
+  const id = obj ? obj.id : item;
+  if(!id) return obj;
+  return (((state && state.items) || _IF_EMPTY).find(i => i && i.id === id)) || obj;
+}
+function _ifPickBest(slot, cand){ return (!slot || cand.key > slot.key) ? cand : slot; }
+
+// index ต้นทุนต่อสินค้า: fifoLayers → grs → Map(itemId → { lastGr, lineGr, avg })
+//   lastGr = layer ใบรับของผู้ขายล่าสุด (1a) · lineGr = บรรทัด GR สำรอง (1b) · avg = เฉลี่ยของคงเหลือ (2)
+const _refCostIdx = new WeakMap();
+function _ifRefCostIndex(state){
+  const layers = (state && state.fifoLayers) || _IF_EMPTY;
+  const grs = (state && state.grs) || _IF_EMPTY;
+  let inner = _refCostIdx.get(layers);
+  if(!inner){ inner = new WeakMap(); _refCostIdx.set(layers, inner); }
+  let idx = inner.get(grs);
+  if(idx) return idx;
+  idx = new Map();
+  const ent = (id) => { let e = idx.get(id); if(!e){ e = { lastGr:{ byBranch:{}, all:null }, lineGr:{ byBranch:{}, all:null }, avg:{ byBranch:{}, all:{ q:0, v:0 } } }; idx.set(id, e); } return e; };
+  const put = (grp, b, cand) => { grp.byBranch[b] = _ifPickBest(grp.byBranch[b], cand); grp.all = _ifPickBest(grp.all, cand); };
+  const grByNo = new Map();
+  for(const g of grs){ if(g && g.grNumber && !grByNo.has(g.grNumber)) grByNo.set(g.grNumber, g); }
+  for(const l of layers){
+    if(!l || !l.itemId) continue;
+    const uc = Number(l.unitCost) || 0, b = l.branch || '';
+    const rem = Number(l.remaining) || 0;
+    if(rem > 0 && !l.isNegative && uc > 0){
+      const e = ent(l.itemId); const a = e.avg.byBranch[b] || (e.avg.byBranch[b] = { q:0, v:0 });
+      a.q += rem; a.v += rem * uc; e.avg.all.q += rem; e.avg.all.v += rem * uc;
+    }
+    // 1a: layer จากใบรับของผู้ขาย (นับ remaining 0 ด้วย) · ข้ามของแถม/ติดลบ/VOID-/CANCEL-/OPENING/ชดเชย RTV (ไม่มี sourcePO)
+    const ref = String(l.grRef || '');
+    if(!l.sourcePO || !ref || l.isFreebie || l.isNegative || !(Number(l.qty) > 0) || !(uc > 0)) continue;
+    if(ref === 'OPENING' || ref.indexOf('VOID-') === 0 || ref.indexOf('CANCEL-') === 0) continue;
+    const g = grByNo.get(ref);
+    put(ent(l.itemId).lastGr, b, { key: String(l.date || '') + '|' + _ifPad(g && g.createdAt) + '|' + ref + '|' + String(l.id || ''),
+      unitCost: uc, ref, date: l.date || (g && g.grDate) || null, supplierId: (g && g.supplierId) || null, branch: l.branch || null,
+      priceMode: (g && g.priceMode) || 'exclusive' });
+  }
+  // 1b: สำรองจากบรรทัด GR (GR line ไม่มีช่องส่วนลด) — ใช้เมื่อสินค้านั้นไม่มี layer ซื้อเลย
+  for(const g of grs){
+    if(!g || g.voided || g.isReplacement || !g.poId) continue;
+    const gk = String(g.grDate || '') + '|' + _ifPad(g.createdAt) + '|' + String(g.grNumber || '');
+    (g.lines || _IF_EMPTY).forEach((ln, i) => {
+      if(!ln || !ln.itemId || ln.isFreebie) return;
+      const bq = Number(ln.baseQty) || 0, up = Number(ln.unitPrice) || 0, q = Number(ln.qty) || 0;
+      if(!(bq > 0) || !(up > 0) || !(q > 0)) return;
+      put(ent(ln.itemId).lineGr, g.branch || '', { key: gk + '|' + String(i).padStart(5, '0'), unitCost: up * q / bq,
+        ref: g.grNumber || null, date: g.grDate || null, supplierId: g.supplierId || null, branch: g.branch || null,
+        priceMode: g.priceMode || 'exclusive' });
+    });
+  }
+  inner.set(grs, idx);
+  return idx;
+}
+
+// ต้นทุนอ้างอิง (บาทต่อหน่วยฐาน) → { unitCost, source, ref, date, supplierId, branch, priceMode }
+//   ลำดับ: gr (รับของล่าสุด) → fifo (เฉลี่ยคงเหลือ) → legacy (costPrice เดิม) → bom (ต้นทุนสูตร) → none
+//   opts.branch = สาขานั้นก่อน · opts.prefer:'fifo' = สลับ gr↔fifo (ของลดใน S8)
+//   ⚠️ ห้ามเอา unitCost ไปเติมเป็นราคาซื้อใน PO (หักส่วนลด/เกลี่ยของแถม/อาจรวม VAT) — ใช้ itemPurchaseHistory + lastUnitPriceEx
+function itemRefCost(state, item, opts){
+  opts = opts || {};
+  const none = { unitCost:0, source:'none', ref:null, date:null, supplierId:null, branch:null, priceMode:null };
+  const it = _ifItem(state, item);
+  if(!it || !it.id) return none;
+  const e = _ifRefCostIndex(state).get(it.id);
+  const br = opts.branch || '';
+  const pick = (grp) => grp ? ((br && grp.byBranch[br]) || grp.all) : null;
+  const hit = e ? (pick(e.lastGr) || pick(e.lineGr)) : null;
+  const fromGr = hit ? { unitCost: hit.unitCost, source:'gr', ref: hit.ref, date: hit.date, supplierId: hit.supplierId,
+    branch: hit.branch, priceMode: hit.priceMode } : null;
+  let fromFifo = null;
+  if(e){
+    const ab = br ? e.avg.byBranch[br] : null;
+    const a = (ab && ab.q > 0 && ab.v > 0) ? ab : e.avg.all;
+    if(a && a.q > 0 && a.v > 0) fromFifo = { unitCost: a.v / a.q, source:'fifo', ref:null, date:null, supplierId:null,
+      branch: a === ab ? br : null, priceMode:null };
+  }
+  const first = opts.prefer === 'fifo' ? (fromFifo || fromGr) : (fromGr || fromFifo);
+  if(first) return first;
+  const cp = Number(it.costPrice) || 0;
+  if(cp > 0) return { ...none, unitCost: cp, source:'legacy' };
+  // ของผลิตเองที่ใช้หมดแล้ว → ต้นทุนสูตร ÷ ผลผลิต (ขั้นเดียวกับ negUnitCost) · ไม่ cache
+  try {
+    const bom = findBomForOutput(state || {}, it.id, opts.branch);
+    if(bom){
+      const share = (calcBomCost(bom, state, opts.branch).perOutput || []).find(p => p.productId === it.id);
+      const baseYield = yieldQtyForOutput(state, bom, it.id);
+      if(share && baseYield > 0 && Number(share.shareCost) > 0) return { ...none, unitCost: Number(share.shareCost) / baseYield, source:'bom' };
+    }
+  } catch(_e){ /* สูตรเสีย → ไม่มีต้นทุน */ }
+  return none;
+}
+
+// index ประวัติซื้อ (ทุกสินค้า รอบเดียว): grs → pos → fifoLayers → Map(itemId → { gr: Map(supId→raw), po: Map(supId→raw) })
+//   ส่วนที่ขึ้นกับ item.units (ด่านหน่วย/lastBaseCost) คำนวณตอนอ่าน ไม่เก็บใน cache
+const _purchHistIdx = new WeakMap();
+function _ifPurchHistIndex(state){
+  const grs = (state && state.grs) || _IF_EMPTY;
+  const pos = (state && state.pos) || _IF_EMPTY;
+  const layers = (state && state.fifoLayers) || _IF_EMPTY;
+  let m1 = _purchHistIdx.get(grs); if(!m1){ m1 = new WeakMap(); _purchHistIdx.set(grs, m1); }
+  let m2 = m1.get(pos); if(!m2){ m2 = new WeakMap(); m1.set(pos, m2); }
+  let idx = m2.get(layers);
+  if(idx) return idx;
+  idx = new Map();
+  const ent = (id) => { let e = idx.get(id); if(!e){ e = { gr:new Map(), po:new Map() }; idx.set(id, e); } return e; };
+  // ต้นทุน layer ต่อ (GR, สินค้า) — เลือก layer ที่ไม่ใช่ของแถม id มากสุด (ผลไม่ขึ้นกับลำดับอาร์เรย์)
+  const layerCost = new Map();
+  for(const l of layers){
+    if(!l || !l.grRef || !l.itemId || l.isNegative || !(Number(l.unitCost) > 0)) continue;
+    const k = l.grRef + '|' + l.itemId, cur = layerCost.get(k);
+    const rank = (l.isFreebie ? '0' : '1') + '|' + String(l.id || '');
+    if(!cur || rank > cur.rank) layerCost.set(k, { rank, unitCost: Number(l.unitCost) });
+  }
+  const addRow = (map, supId, key, row) => {
+    const cur = map.get(supId);
+    if(!cur){ map.set(supId, { ...row, key, count:1 }); return; }
+    cur.count += 1;
+    if(key > cur.key) map.set(supId, { ...row, key, count: cur.count });
+  };
+  for(const g of grs){
+    // 🆕 §U U3 (UAT S2): นับเฉพาะใบรับของจริง — ข้าม GR ยกเลิก/ของชดเชย/รับโอน/ไม่มี PO
+    //   ยกเว้น GR นำเข้า Ecount (gr_mig_* · poId:'' · _migrated:true) = รับจริง เป็นประวัติซื้อส่วนใหญ่ (UAT ชุด 1 S1)
+    if(!g || g.voided || g.isReplacement || !g.supplierId || (!g.poId && !g._migrated) || g.source === 'transfer') continue;
+    const gk = String(g.grDate || '') + '|' + _ifPad(g.createdAt) + '|' + String(g.grNumber || '');
+    const perItem = new Map();   // สินค้าเดียวกันหลายบรรทัดในใบเดียว = นับ 1 ใบ · ใช้บรรทัดท้ายสุด
+    (g.lines || _IF_EMPTY).forEach(ln => { if(ln && ln.itemId && !ln.isFreebie) perItem.set(ln.itemId, ln); });
+    for(const [itemId, ln] of perItem){
+      const lc = layerCost.get(String(g.grNumber || '') + '|' + itemId);
+      addRow(ent(itemId).gr, g.supplierId, gk, { supplierId: g.supplierId, lastDate: g.grDate || null,
+        lastUnitPrice: Number(ln.unitPrice) || 0, lastUnit: ln.unit || '', qty: Number(ln.qty) || 0, baseQty: Number(ln.baseQty) || 0,
+        lastPriceMode: g.priceMode || 'exclusive', lastVatRate: ln.vatRate != null && ln.vatRate !== '' ? Number(ln.vatRate) : 7,
+        layerCost: lc ? lc.unitCost : null, lastRef: g.grNumber || null, source:'gr' });
+    }
+  }
+  // แหล่งรอง: PO ที่อนุมัติแล้วขึ้นไปเท่านั้น (🆕 UAT S2: เดิมนับ 'pending' ด้วย → PO ที่ยังไม่มีใครอนุมัติชี้ ⭐ ผู้ขายตั้งต้น/ราคาอ้างอิงได้)
+  //   getLastPrice ยังใช้กติกาเดิม (ไม่ใช่ draft/cancelled) — ไม่เปลี่ยน
+  for(const po of pos){
+    if(!po || !po.supplierId || !_IF_PO_OK.has(po.status)) continue;
+    const pk = String(po.poDate || '') + '|' + _ifPad(po.createdAt) + '|' + String(po.poNumber || '');
+    const perItem = new Map();
+    (po.lines || _IF_EMPTY).forEach(ln => { if(ln && ln.itemId && !ln.isFreebie) perItem.set(ln.itemId, ln); });
+    for(const [itemId, ln] of perItem){
+      addRow(ent(itemId).po, po.supplierId, pk, { supplierId: po.supplierId, lastDate: po.poDate || null,
+        lastUnitPrice: Number(ln.unitPrice) || 0, lastUnit: ln.unit || '', qty: Number(ln.qty) || 0, baseQty: 0,
+        lastPriceMode: po.priceMode || 'exclusive', lastVatRate: ln.vatRate != null && ln.vatRate !== '' ? Number(ln.vatRate) : 7,
+        layerCost: null, lastRef: po.poNumber || null, source:'po' });
+    }
+  }
+  m2.set(layers, idx);
+  return idx;
+}
+
+// ด่านหน่วย: หน่วยนี้ "แปลงเป็นหน่วยฐานได้จริง" ไหม (อยู่ใน units / เป็นหน่วยฐาน / เมตริกตระกูลเดียวกับที่มี)
+//   ไม่พึ่ง resolveToBase ตรง ๆ เพราะหน่วยไม่รู้จักคืน 1 เงียบ ๆ (PO นำเข้า "กระสอบ" บนสินค้าที่มีแค่ กก. → 1,150 บาท/กก.)
+const _IF_PO_OK = new Set(['approved', 'partial', 'received', 'completed', 'closed']);
+function _ifUnitConvertible(item, unit){
+  if(!unit) return false;
+  const units = (item && item.units) || _IF_EMPTY;
+  if(units.some(u => u && u.name === unit)) return true;
+  if(unit === getBaseUnit(item)) return true;
+  const want = _metricFam(unit);
+  return !!want && units.some(u => { const m = _metricFam(u && u.name); return !!m && m.fam === want.fam; });
+}
+
+// ประวัติซื้อของสินค้า แยกตามผู้ขาย เรียงล่าสุดก่อน
+//   Row = { supplierId, lastDate, lastUnitPrice, lastUnit, lastPriceMode, lastVatRate, lastBaseCost, lastRef, count, source }
+//   lastUnitPrice = ราคาต่อหน่วยที่ซื้อจริง (เช่น 1,150 บาท/กระสอบ) · lastBaseCost = บาท/หน่วยฐาน หรือ null ถ้าหน่วยแปลงไม่ได้
+function itemPurchaseHistory(state, itemId){
+  const it = _ifItem(state, itemId);
+  const id = it ? it.id : itemId;
+  if(!id) return [];
+  const e = _ifPurchHistIndex(state).get(id);
+  if(!e) return [];
+  const units = (it && it.units) || _IF_EMPTY;
+  const mk = (r) => {
+    const conv = _ifUnitConvertible(it, r.lastUnit);
+    let base = null;
+    if(conv){
+      if(r.source === 'gr') base = r.layerCost != null ? r.layerCost : (r.baseQty > 0 ? r.lastUnitPrice * r.qty / r.baseQty : null);
+      else { const f = resolveToBase(units, r.lastUnit); base = f > 0 ? r.lastUnitPrice / f : null; }
+    }
+    return { supplierId: r.supplierId, lastDate: r.lastDate, lastUnitPrice: r.lastUnitPrice, lastUnit: r.lastUnit,
+      lastPriceMode: r.lastPriceMode, lastVatRate: r.lastVatRate, lastBaseCost: base, lastRef: r.lastRef,
+      count: r.count, source: r.source, _key: r.key };
+  };
+  const rows = [];
+  for(const r of e.gr.values()) rows.push(mk(r));
+  for(const r of e.po.values()) if(!e.gr.has(r.supplierId)) rows.push(mk(r));
+  rows.sort((a, b) => a._key < b._key ? 1 : a._key > b._key ? -1 : (a.supplierId < b.supplierId ? -1 : a.supplierId > b.supplierId ? 1 : 0));
+  rows.forEach(r => { delete r._key; });
+  return rows;
+}
+
+// ราคาต่อ lastUnit แบบไม่รวม VAT (ใช้เติมราคา PO — อ่านอย่างเดียว ไม่แตะโค้ด VAT)
+function lastUnitPriceEx(row){
+  if(!row) return 0;
+  const p = Number(row.lastUnitPrice) || 0;
+  const r = Number(row.lastVatRate) || 0;
+  const v = row.lastPriceMode === 'inclusive' ? p / (1 + r / 100) : p;
+  return Math.round(v * 1e6) / 1e6;
+}
+
+// ผู้ขายตั้งต้น = "เจ้าที่ซื้อล่าสุด" (เจ้าของเลือก) → defaultSupplierId เดิม → ⭐ ในรายการเดิม → ตัวแรกในรายการเดิม → ''
+//   ข้ามผู้ขายที่ถูกลบ/ปิดใช้ · เปลี่ยนกติกา (เช่น "บ่อยสุดใน 90 วัน") ได้ที่ฟังก์ชันนี้ที่เดียว
+function itemDefaultSupplierId(state, item){
+  const it = _ifItem(state, item);
+  if(!it || !it.id) return '';
+  const sups = (state && state.suppliers) || _IF_EMPTY;
+  const alive = (sid) => !!sid && sups.some(s => s && s.id === sid && s.active !== false);
+  for(const r of itemPurchaseHistory(state, it.id)) if(alive(r.supplierId)) return r.supplierId;
+  if(alive(it.defaultSupplierId)) return it.defaultSupplierId;
+  const legacy = Array.isArray(it.suppliers) ? it.suppliers : _IF_EMPTY;
+  const pref = legacy.find(s => s && s.isPreferred && alive(s.supplierId)) || legacy.find(s => s && alive(s.supplierId));
+  return pref ? pref.supplierId : '';
+}
+
+// เห็นราคาในกล่อง "🏪 ซื้อจาก" ของฟอร์มสินค้า = เห็นมูลค่าสต๊อก หรือเป็นฝ่ายจัดซื้อ (B2.3b)
+function canSeePurchasePrice(user, state){
+  return canSeeStockValue(user, state) || !!(user && user.role === 'purchasing');
+}
+
+// รหัสอัตโนมัติ: คำนำหน้าตามประเภท + เลขวิ่ง 4 หลัก (A6 Q2 · เปลี่ยนได้ที่นี่) · ประเภทเพิ่มเอง → IT
+const ITEM_CODE_PREFIX = Object.freeze({ material:'RM', packaging:'PK', finished:'FG', wip:'WIP', semi_fg:'SFG', kit:'KIT' });
+const _ifNormCode = (c) => String(c == null ? '' : c).trim().toLowerCase();
+// สินค้าตัวแรกที่รหัสชน (ไม่สนตัวพิมพ์/ช่องว่างหัวท้าย · ไม่นับ exceptId · รหัสว่างไม่ถือว่าซ้ำ) หรือ null
+function findItemCodeDup(state, code, exceptId){
+  const k = _ifNormCode(code);
+  if(!k) return null;
+  return (((state && state.items) || _IF_EMPTY).find(i => i && i.id !== exceptId && _ifNormCode(i.code) === k)) || null;
+}
+// รหัสถัดไป = เลขมากสุดของคำนำหน้านั้น (ทุกสินค้า รวมที่ปิดใช้) + 1 · ชนโดยบังเอิญ → ขยับเลขต่อ
+//   รหัสนอกรูปแบบ (Ecount CH-RAW-M00002, P00038) ไม่นับ · RM-004 ตรงรูปแบบ → นับเป็น 4
+function nextItemCode(state, typeId){
+  const prefix = ITEM_CODE_PREFIX[typeId] || 'IT';
+  const re = new RegExp('^' + prefix + '-(\\d+)$', 'i');
+  let max = 0;
+  for(const i of ((state && state.items) || _IF_EMPTY)){
+    const m = i && re.exec(String(i.code == null ? '' : i.code).trim());
+    if(m){ const n = parseInt(m[1], 10); if(n > max) max = n; }
+  }
+  let n = max + 1, code;
+  do { code = prefix + '-' + String(n).padStart(4, '0'); n++; } while(findItemCodeDup(state, code, null) && n < max + 100000);
+  return code;
+}
+// ชื่อซ้ำ (ใช้เตือนเท่านั้น): ตัดหัวท้าย ยุบช่องว่าง ไม่สนตัวพิมพ์ · เทียบเฉพาะสินค้าที่เปิดใช้
+function findItemNameDup(state, name, exceptId){
+  const norm = (s) => String(s == null ? '' : s).trim().replace(/\s+/g, ' ').toLowerCase();
+  const k = norm(name);
+  if(!k) return null;
+  return (((state && state.items) || _IF_EMPTY).find(i => i && i.id !== exceptId && i.active !== false && norm(i.name) === k)) || null;
+}
+
+// แม่แบบหน่วยกดครั้งเดียวตามประเภท (B2.6) · ทิศ equalTo เดียวกับ STANDARD_CONVERSIONS ใน UnitEditor (กรัม = 0.001 กก.)
+//   qty:'' = ให้ผู้ใช้กรอกเอง (ตัวตรวจ qty > 0 ของฟอร์มบล็อกถ้าลืม)
+//   inv (§U) = แสดงทิศธรรมชาติ "1 กก. = 1000 กรัม" (equalToInput แสดงผลอย่างเดียว · ตัวคูณยังอยู่ที่ equalTo)
+const _U = (name, purposes, eq, inv) => Object.freeze(eq ? { name, purposes, equalTo: eq, ...(inv ? { equalToInput:{ dir:'inv', qty:inv } } : {}) } : { name, isBase:true, purposes });
+const _BUYBASE = ['stock','purchase','transfer','bom'];
+const ITEM_UNIT_TEMPLATES = Object.freeze([
+  { id:'kg_g',        type:'material',  label:'กก. + กรัม', units:[ _U('กก.', _BUYBASE), _U('กรัม', ['bom'], { unit:'กก.', qty:0.001 }, 1000) ] },
+  // 🆕 UAT S4: กระสอบแต่ละเจ้าไม่เท่ากัน (20/22.5/25 กก.) → ไม่เติม 25 ให้ ต้องกรอกเอง (ตัวตรวจ qty > 0 บังคับ) กันรับเป็นกระสอบแล้วสต๊อกเกินเงียบ ๆ
+  { id:'kg_bag_sack', type:'material',  label:'กก. + ถุง 1 กก. + กระสอบ ×N', units:[ _U('กก.', _BUYBASE),
+      _U('ถุง', ['purchase','transfer'], { unit:'กก.', qty:1 }), _U('กระสอบ', ['purchase'], { unit:'กก.', qty:'' }) ] },
+  { id:'l_ml',        type:'material',  label:'ลิตร + มล.', units:[ _U('ลิตร', _BUYBASE), _U('ml', ['bom'], { unit:'ลิตร', qty:0.001 }, 1000) ] },
+  { id:'egg_tray',    type:'material',  label:'ฟอง + แผง 30', units:[ _U('ฟอง', _BUYBASE), _U('แผง', ['purchase','transfer'], { unit:'ฟอง', qty:30 }) ] },
+  { id:'pc_pack_case',type:'packaging', label:'ชิ้น + แพ็ค + ลัง×N', units:[ _U('ชิ้น', _BUYBASE),
+      _U('แพ็ค', ['purchase','transfer'], { unit:'ชิ้น', qty:'' }), _U('ลัง', ['purchase'], { unit:'แพ็ค', qty:'' }) ] },
+  { id:'pc_fg',       type:'finished',  label:'ชิ้น', units:[ _U('ชิ้น', ['stock','sale','transfer']) ] },
+  { id:'pc_sfg',      type:'semi_fg',   label:'ชิ้น', units:[ _U('ชิ้น', ['stock','bom','transfer','sale']) ] },
+  { id:'pc_wip',      type:'wip',       label:'ชิ้น', units:[ _U('ชิ้น', ['stock','bom','transfer']) ] },
+  { id:'box_kit',     type:'kit',       label:'กล่อง', units:[ _U('กล่อง', ['sale']) ] },
+  { id:'pc_any',      type:'*',         label:'ชิ้น', units:[ _U('ชิ้น', ['stock','purchase','transfer','sale','bom']) ] },
+].map(t => Object.freeze({ ...t, units: Object.freeze(t.units) })));
+// แม่แบบของประเภทนี้ (ตัวแรก = ใส่ให้อัตโนมัติ) · ประเภทเพิ่มเอง → pc_any
+function unitTemplatesForType(typeId){
+  const own = ITEM_UNIT_TEMPLATES.filter(t => t.type === typeId);
+  return own.length ? own : ITEM_UNIT_TEMPLATES.filter(t => t.type === '*');
+}
+// แม่แบบ → units ชุดใหม่ (สำเนาลึก) · ใช้ "มล." แทน "ml" เมื่อ unitPresets มี มล. แต่ไม่มี ml
+function applyUnitTemplate(tpl, unitPresets){
+  const t = typeof tpl === 'string' ? ITEM_UNIT_TEMPLATES.find(x => x.id === tpl) : tpl;
+  if(!t) return [];
+  const names = new Set(((unitPresets || _IF_EMPTY)).map(p => p && p.name));
+  const ren = (n) => (n === 'ml' && names.has('มล.') && !names.has('ml')) ? 'มล.' : n;
+  return t.units.map(u => {
+    const o = { name: ren(u.name), purposes: [...u.purposes] };
+    if(u.isBase) o.isBase = true;
+    if(u.equalTo) o.equalTo = { unit: ren(u.equalTo.unit), qty: u.equalTo.qty };
+    if(u.equalToInput) o.equalToInput = { ...u.equalToInput };
+    return o;
+  });
 }
 
 // 🆕 getStockValueByBranch() — แยก breakdown ต่อ branch (สำหรับ reports)
@@ -6656,7 +7093,7 @@ Object.assign(global.ERP, {
   // Helpers
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines, readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
-  resolveToBase, getBaseUnit, findItemUnit, toBaseQty, unitsForPurpose, unitsForIssue, hasUnitForPurpose, isReversalPair,
+  resolveToBase, unitUsage, unitUsageAdvice, getBaseUnit, findItemUnit, toBaseQty, rtvReturnBaseQty, rtvLineBaseQty, rtvReplaceBaseQty, unitsForPurpose, unitsForIssue, hasUnitForPurpose, isReversalPair,
   resolvePrice, isPhysicalItem, isSellableItem, groupKitForPrint,
   fixedColGroup, TABLE_FIXED_CLS,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh,
@@ -6705,6 +7142,10 @@ Object.assign(global.ERP, {
   getStockValue,
   getStockValueByBranch,
   getItemAvgFifoCost,
+  // 🆕 ITEM-FORM (ITEM_FORM_CONTRACT B2) — ต้นทุน/ผู้ขาย/รหัส จากประวัติซื้อจริง
+  itemRefCost, itemPurchaseHistory, lastUnitPriceEx, itemDefaultSupplierId, canSeePurchasePrice,
+  ITEM_CODE_PREFIX, nextItemCode, findItemCodeDup, findItemNameDup,
+  ITEM_UNIT_TEMPLATES, unitTemplatesForType, applyUnitTemplate,
   getMemoState,
   toast, ToastContainer,
   // 🆕 GO-LIVE
@@ -26940,7 +27381,10 @@ function StockListTab({ state, user }){
                               ? `${fmtNum(r2((r.minStock||0) / duFactor))} ${resolved}`
                               : formatQtyMulti(r, r.minStock||0, { maxLevels:1 }))
                         : '—'),
-                    showValue && h('td', { className:'px-3 py-2 text-right text-gray-700' }, fmtCur(r.costPrice||0)),
+                    // 🆕 ITEM-FORM S5: ต้นทุนอ้างอิงจากรับของจริง (gr → fifo → costPrice เดิม) แทนช่องกรอกมือ
+                    showValue && (() => { const rc = global.ERP.itemRefCost ? global.ERP.itemRefCost(state, r) : { unitCost: r.costPrice||0, source:'legacy' };
+                      return h('td', { className:'px-3 py-2 text-right text-gray-700', title: rc.ref ? ('จาก ' + rc.ref) : (rc.source === 'fifo' ? 'เฉลี่ยของคงเหลือ' : '') },
+                        fmtCur(rc.unitCost||0)); })(),
                     showValue && h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(r.value)),
                     h('td', { className:'px-3 py-2 text-center' },
                       neg ? h('span', { className:'text-xs text-red-600 font-bold' }, '⚠️ ติดลบ') :
@@ -27577,6 +28021,17 @@ const ADJUST_REASONS = [
 // ================================================================
 // 🆕 CT: ตอนเรียกจาก CountSheetModal จะส่ง pickedItemIds (Set) มา
 //   → filter items เฉพาะที่ pick + ซ่อน search/filter bar (รายการ pre-selected แล้ว)
+// 🆕 ITEM-FORM UAT M2: ฟอร์มสินค้าไม่มีช่องต้นทุนแล้ว → สินค้าใหม่ costPrice = 0 · จุดนับ/ปรับยอด/ของเสีย ยังตีมูลค่าจาก costPrice
+//   (เปลี่ยนเป็นต้นทุนจริงในขั้น S8a→S8b หลังเจ้าของยอมรับ A7) → ระหว่างนี้เตือนเมื่อมีรายการที่ต้นทุนเดิม 0 แต่มีต้นทุนจากการรับของจริง
+function CostPendingBanner({ state, items }){
+  const _rc = global.ERP.itemRefCost;
+  const bad = (items || []).filter(it => it && !(Number(it.costPrice) > 0) && _rc && _rc(state, it).unitCost > 0);
+  if(!bad.length) return null;
+  const names = bad.slice(0, 3).map(it => it.name).join(', ') + (bad.length > 3 ? ` +${bad.length - 3}` : '');
+  return h('div', { 'data-testid':'cost-pending-banner', className:'mb-2 px-3 py-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-900' },
+    `⚠️ มูลค่าคิดจากต้นทุนเดิม (0) — ${bad.length} รายการ (${names}) ยังไม่มีต้นทุนในทะเบียน · มูลค่า/ยอดอนุมัติ/บัญชีส่วนต่างของรายการนี้จะเป็น 0 จนกว่าระบบจะคิดจากต้นทุนรับของจริง (รอ S8)`);
+}
+
 function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, presetLocId, onDone }){
   const allowedBranches = getAllowedBranches(user, state);
   const canAdjust = hasPerm(user, 'stock','list','adjust');
@@ -27845,6 +28300,7 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
   ];
 
   return h('div', { className:'space-y-3' },
+    h(CostPendingBanner, { state, items: enteredItems.filter(e => e && e.delta !== 0).map(e => e.item) }),   // 🆕 ITEM-FORM UAT M2
     !isPickedMode && h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800' },
       '📋 ', h('b', null, 'Check Stock'),' — กรอกผลนับเป็นตาราง · กรอกได้ 2 ช่อง (หน่วยใหญ่+เล็ก) · ระบบเทียบกับสต๊อกระบบให้อัตโนมัติ · บันทึกทีเดียวทั้งหมด'),
 
@@ -28119,6 +28575,7 @@ function AdjustTab({ state, dispatch, user }){
   };
 
   return h('div', { className:'space-y-4' },
+    h(CostPendingBanner, { state, items: rows.map(r => (state.items||[]).find(x => x.id === r.itemId)) }),   // 🆕 ITEM-FORM UAT M2
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800' },
       '💡 ปรับสต๊อกหลายรายการพร้อมกัน — เลือกประเภท/ค้นหา → กดเพิ่มเข้าตาราง → ใส่จำนวน → บันทึกทีเดียว'),
 
@@ -29077,13 +29534,16 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
     if(!reason.trim()) return alert('ใส่เหตุผล');
     const returning = lines.filter(l => l.returnQty > 0);
     if(returning.length === 0) return alert('ใส่จำนวนคืน');
+    // 🆕 §U U3: หน่วยฐานที่คืน = สัดส่วนจากที่ GR รับจริง (baseQty/qty ของบรรทัด GR) — ไม่ใช้ตัวคูณหน่วยปัจจุบัน
+    //    (ถ้าแก้ตัวคูณหน่วยหลังรับของ ต้องคืนตามที่รับเข้าจริง) · กติกาอยู่ที่ ERP.rtvReturnBaseQty (00-core)
+    const _rtvBase = (l) => global.ERP.rtvReturnBaseQty(state.items.find(i => i.id === l.itemId), l, l.returnQty);
     // 🆕 UAT (จัดซื้อ): สาขาแยกคลัง — RTV ตัดจากคลังกลางเท่านั้น · ของที่ย้ายไปคลังไลน์แล้วต้องคืนเข้าคลังกลางก่อน (ไม่งั้นคลังกลางติดลบ ล็อตเสียค้างที่ไลน์)
     {
       const _E = global.ERP, _main = _E.getMainStorage ? _E.getMainStorage(state, gr.branch) : null;
       const _bo = getBranch(state, gr.branch);
       if(_main && _bo && _bo.warehouseMode !== 'simple' && _E.getLocStockFIFO){
         const _need = {};
-        returning.forEach(l => { const it = state.items.find(i => i.id === l.itemId); _need[l.itemId] = (_need[l.itemId] || 0) + toBaseQty(it, l.returnQty, l.unit); });
+        returning.forEach(l => { const it = state.items.find(i => i.id === l.itemId); _need[l.itemId] = (_need[l.itemId] || 0) + _rtvBase(l); });
         const _atLine = [], _short = [];
         Object.keys(_need).forEach(iid => {
           const it = state.items.find(i => i.id === iid) || {};
@@ -29114,14 +29574,13 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
     // คำนวณ stock deduct (เป็น base unit)
     const stockUpdates = returning.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
-      const baseQty = toBaseQty(item, l.returnQty, l.unit);
+      const baseQty = _rtvBase(l);
       return { itemId:l.itemId, branch: gr.branch, qty:baseQty, unit:getBaseUnit(item) };
     });
 
     // Movements
     const movements = returning.map(l => {
-      const item = state.items.find(i => i.id === l.itemId);
-      const baseQty = toBaseQty(item, l.returnQty, l.unit);
+      const baseQty = _rtvBase(l);
       return {
         id: genId('mv'), type:'rtv_out',
         itemId: l.itemId, qty: -baseQty,
@@ -29142,6 +29601,8 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
       branch: gr.branch,
       lines: returning.map(l => ({
         itemId: l.itemId, qty: l.returnQty, unit: l.unit,
+        // 🆕 §U U3: ตรึงหน่วยฐานตอนคืน — ยกเลิก RTV คืนสต๊อกตามนี้ (ไม่แปลงใหม่ด้วยตัวคูณปัจจุบัน)
+        baseQty: _rtvBase(l), baseUnit: getBaseUnit(state.items.find(i => i.id === l.itemId)),
         unitPrice: l.unitPrice,
         lineTotal: l.unitPrice * l.returnQty,
       })),
@@ -29749,6 +30210,9 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
   const totalValue = repLines.reduce((s,l) => s + (l.unitPrice||0) * (l.receiveNow||0), 0);
   const hasAny = repLines.some(l => l.receiveNow > 0);
 
+  // §U verify: บรรทัด RTV ที่ตรึง baseQty แล้ว (U3) → แปลงของชดเชยด้วยอัตราตอนคืน (baseQty/qty) ไม่ใช่ตัวคูณปัจจุบัน
+  //   (หน่วยปลดล็อกได้เมื่อ RTV ตรึง baseQty → ถ้าแก้ตัวคูณลังภายหลัง ของชดเชยต้องยังเท่ากับที่คืนไป)
+  const repBase = (item, l) => global.ERP.rtvReplaceBaseQty(item, l, l.receiveNow);
   const submit = () => {
     const receiving = repLines.filter(l => l.receiveNow > 0);
     if(receiving.length === 0) return alert('ใส่จำนวนรับชดเชย');
@@ -29759,14 +30223,14 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
     // stock + FIFO
     const stockUpdates = receiving.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
-      const baseQty = toBaseQty(item, l.receiveNow, l.unit);
+      const baseQty = repBase(item, l);
       return { itemId:l.itemId, branch, qty:baseQty };
     });
 
     // 🆕 U12/U13: ของชดเชยมีมูลค่าเสมอ (ตามราคา RTV) → FIFO cost ปกติ + เข้าคิว GR→PI
     const fifoLayers = receiving.map((l,idx) => {
       const item = state.items.find(i => i.id === l.itemId);
-      const baseQty = toBaseQty(item, l.receiveNow, l.unit);
+      const baseQty = repBase(item, l);
       const costPerBase = baseQty > 0 ? ((l.unitPrice||0) * l.receiveNow) / baseQty : (l.unitPrice||0);
       return {
         id: genId('fl'),
@@ -29782,7 +30246,7 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
 
     const movements = receiving.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
-      const baseQty = toBaseQty(item, l.receiveNow, l.unit);
+      const baseQty = repBase(item, l);
       return {
         id: genId('mv'), type:'gr_in',
         itemId: l.itemId, qty: baseQty,
@@ -29806,7 +30270,7 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
       supplierId: rtv.supplierId, branch,
       lines: receiving.map(l => {
         const item = state.items.find(i => i.id === l.itemId);
-        const baseQty = toBaseQty(item, l.receiveNow, l.unit);
+        const baseQty = repBase(item, l);
         const poLine = (state.pos||[]).find(p => p.id === rtv.poId)?.lines?.find(pl => pl.itemId === l.itemId);
         return {
           itemId: l.itemId, qty: l.receiveNow, unit: l.unit,
@@ -30916,7 +31380,9 @@ function OutgoingReportTab({ state, user }){
       const qty = Math.abs(m.qty||0);
       // 🆕 GO-LIVE UAT: ใช้ต้นทุน FIFO ที่ตัดจริงบน movement (m.cost — ใบเบิกแบบบันทึก/ปรับสต๊อก) ให้ตรงกับใบเบิกและมูลค่าสต๊อกที่ลดจริง
       //   movement ที่ไม่มี m.cost (production_out จาก mod-production, transfer/sale/rtv) → fallback qty × costPrice เหมือนเดิม
-      const value = (m.cost != null && isFinite(Number(m.cost))) ? Math.abs(Number(m.cost)) : qty * (it?.costPrice||0);
+      //   🆕 ITEM-FORM S5: fallback = ต้นทุนอ้างอิงของสาขานั้น (itemRefCost) แทน costPrice ที่กรอกมือ
+      const _rc = (it && global.ERP.itemRefCost) ? global.ERP.itemRefCost(state, it, { branch: m.branch }).unitCost : (it?.costPrice||0);
+      const value = (m.cost != null && isFinite(Number(m.cost))) ? Math.abs(Number(m.cost)) : qty * (_rc||0);
       rowsByItem[m.itemId].dests[colKey].qty += qty;
       rowsByItem[m.itemId].dests[colKey].value += value;
       rowsByItem[m.itemId].totalQty += qty;
@@ -31400,6 +31866,7 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose, initialItems,
 
   return h(Modal, { isOpen:true, title:'🔻 บันทึกของเสีย', onClose, size:'lg' },
     h('div', { className:'space-y-3' },
+      h(CostPendingBanner, { state, items: enriched.map(e => e.item) }),   // 🆕 ITEM-FORM UAT M2
       h('div', { className:'grid grid-cols-2 gap-2' },
         h('div', null,
           h('label', { className:'block text-xs font-medium mb-1' }, 'วันที่'),
@@ -39378,6 +39845,9 @@ function OrderDetailModal({ order: _orderSnap, state, dispatch, user, onClose })
         }
       }
       // 1) Reverse material consumption — loop ทุก state group (order หรือ batches) · เฉพาะขั้นที่ตัดแบบเดิม (ไม่มีบันทึก consumptions)
+      // 🆕 ITEM-FORM verify: คืน @ ต้นทุนที่ตัดจริงของใบนี้ (order.actualMaterialLots ที่ reducer ทางเดิมสะสมไว้ = เฉลี่ยถ่วงต่อสินค้า)
+      //    ไม่มีบันทึก (ใบเก่ามาก) → ต้นทุนอ้างอิงของสาขา (GR ล่าสุด → FIFO → costPrice เดิม → สูตร)
+      const _retUc = cancelReturnUnitCost(state, order);
       for(const g of allStateGroups){
         for(const st of g.states){
           if(!st.verification || _ro(st) || !_consumed(st)) continue;
@@ -39391,7 +39861,8 @@ function OrderDetailModal({ order: _orderSnap, state, dispatch, user, onClose })
             dispatch({ type:'PRODUCE_FG_TO_LOCATION', data:{
               branch: order.branchId, locId: lineLoc?.id || null,
               fgItemId: r.itemId, qty: Number(r.value)||0,
-              unitCost: Number(item?.costPrice)||0,
+              // 🆕 ITEM-FORM verify: ต้นทุนที่ตัดจริงของใบ → ไม่มี = ต้นทุนอ้างอิงของสาขา (สินค้าใหม่ไม่มี costPrice)
+              unitCost: _retUc(r.itemId, item),
               lot: 'REVERSE-' + order.orderNumber + batchSuffix,
               movement: {
                 id: genId('mv'), type:'production_in',
@@ -47288,7 +47759,19 @@ function MaterialRow({ m, i, it, bomUnits, baseQty, profiles, state, updateMater
               placeholder: g != null ? '±' + weighDefaultTolG(g) : '±',
               title: g != null ? `เกณฑ์ ± กรัม (ว่าง = มาตรฐาน ±${weighDefaultTolG(g)} g สำหรับ ${fmtNum(g)} g)` : 'เกณฑ์ ± กรัม — หน่วยนี้แปลงเป็นกรัมไม่ได้ สถานีชั่งจะข้าม',
               className: cls('w-14 px-1 py-0.5 border rounded text-right text-[11px]', g == null && 'border-amber-300 bg-amber-50') }),
-            weighOn && g == null && h('span', { className:'text-[10px] text-amber-700', title:'หน่วยแปลงเป็นกรัมไม่ได้ (นับชิ้น) — สถานีชั่งข้าม' }, '⚠️'));
+            weighOn && g == null && h('span', { className:'text-[10px] text-amber-700', title:'หน่วยแปลงเป็นกรัมไม่ได้ (นับชิ้น) — สถานีชั่งข้าม' }, '⚠️'),
+            // 🆕 ITEM-FORM S7: โหมดชั่งตั้งที่สูตร (ฟอร์มสินค้าไม่มีช่องนี้แล้ว) · ว่าง = ตามทะเบียนสินค้า (ของเก่า)
+            weighOn && (() => {
+              const _wmL = { either:'เลือกได้', scale:'ต้องชั่ง', manual:'กรอกมือ' };
+              return h('select', { 'data-testid':'bom-weigh-mode-' + i, value: m.weighMode || '',
+                onChange:e=>updateMaterial(i,'weighMode', e.target.value || undefined),
+                title:'โหมดชั่งของวัตถุดิบนี้ในสูตรนี้ — ต้องชั่ง = ต้องอ่านจากเครื่องชั่งจริง · กรอกมือ = พิมพ์ตัวเลขเอง',
+                className: cls('px-0.5 py-0.5 border rounded text-[10px]', m.weighMode === 'scale' && 'border-purple-400 bg-purple-50') },
+                h('option', { value:'' }, 'ตามสินค้า: ' + (_wmL[it?.weighMode] || 'เลือกได้')),
+                h('option', { value:'either' }, 'เลือกได้'),
+                h('option', { value:'scale' }, 'ต้องชั่ง'),
+                h('option', { value:'manual' }, 'กรอกมือ'));
+            })());
         })()
       ),
       h('td', { className:'px-2 py-1' },
@@ -48672,7 +49155,9 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
   const estMaterial = materials.reduce((s,m) => {
     const it = state.items.find(i => i.id === m.itemId);
     const baseQty = toBaseQty(it, m.qty, m.unit);
-    return s + (it?.costPrice||0) * baseQty;
+    // 🆕 ITEM-FORM S5: ต้นทุนวัตถุดิบโดยประมาณ = ต้นทุนอ้างอิงจากรับของจริงของสาขานี้ (แทน costPrice กรอกมือ)
+    const uc = (it && global.ERP.itemRefCost) ? global.ERP.itemRefCost(state, it, { branch: branchId }).unitCost : (it?.costPrice||0);
+    return s + (uc||0) * baseQty;
   }, 0);
   const totalCost = estMaterial + Number(laborCost||0) + Number(overheadCost||0);
 
@@ -53440,9 +53925,11 @@ function MaterialsUsedReport({ state, branchId, inRange }){
   }
   const rows = Object.entries(byItem).map(([itemId, v]) => {
     const it = (state.items||[]).find(x => x.id === itemId);
-    return { itemId, item:it, qty:v.qty, count:v.count };
+    // 🆕 ITEM-FORM S5: uc = ต้นทุนอ้างอิง (itemRefCost ของสาขา) แทน costPrice กรอกมือ
+    const uc = (it && global.ERP.itemRefCost) ? global.ERP.itemRefCost(state, it, { branch: branchId }).unitCost : (it?.costPrice||0);
+    return { itemId, item:it, qty:v.qty, count:v.count, uc: uc||0 };
   }).sort((a,b) => b.qty - a.qty);
-  const totalCost = rows.reduce((s,r) => s + r.qty * (r.item?.costPrice||0), 0);
+  const totalCost = rows.reduce((s,r) => s + r.qty * r.uc, 0);
 
   // 📄 แบ่งหน้า — มูลค่ารวมด้านบนคิดจาก rows ทั้งชุด
   const pg = usePaged(rows, 50);
@@ -53467,7 +53954,7 @@ function MaterialsUsedReport({ state, branchId, inRange }){
               h('td', { className:'px-3 py-2 text-right font-medium' },
                 fmtNum(r.qty), ' ', r.item?.issueUnit||''),
               h('td', { className:'px-3 py-2 text-right text-xs' }, r.count),
-              h('td', { className:'px-3 py-2 text-right' }, fmtCur(r.qty * (r.item?.costPrice||0))))))),
+              h('td', { className:'px-3 py-2 text-right' }, fmtCur(r.qty * r.uc)))))),
     rows.length > 0 && h(Pager, { pg, label:'วัตถุดิบ' }));
 }
 
@@ -53576,11 +54063,13 @@ function CountLossReport({ state, branchId, inRange }){
   }
   const rows = Object.entries(byItem).map(([itemId, v]) => {
     const it = (state.items||[]).find(x => x.id === itemId);
-    return { itemId, item:it, ...v, net: v.gain - v.loss };
+    // 🆕 ITEM-FORM S5: uc = ต้นทุนอ้างอิง (itemRefCost ของสาขา) แทน costPrice กรอกมือ
+    const uc = (it && global.ERP.itemRefCost) ? global.ERP.itemRefCost(state, it, { branch: branchId }).unitCost : (it?.costPrice||0);
+    return { itemId, item:it, ...v, net: v.gain - v.loss, uc: uc||0 };
   }).sort((a,b) => Math.abs(b.net) - Math.abs(a.net));
   const totalLoss = rows.reduce((s,r) => s + r.loss, 0);
   const totalGain = rows.reduce((s,r) => s + r.gain, 0);
-  const totalLossValue = rows.reduce((s,r) => s + r.loss * (r.item?.costPrice||0), 0);
+  const totalLossValue = rows.reduce((s,r) => s + r.loss * r.uc, 0);
 
   // 📄 แบ่งหน้า — ยอดขาด/เกิน/มูลค่าของหาย คิดจาก rows ทั้งชุด
   const pg = usePaged(rows, 50);
@@ -53613,7 +54102,7 @@ function CountLossReport({ state, branchId, inRange }){
                   style:{ color: r.net < 0 ? '#dc2626' : r.net > 0 ? '#16a34a' : '#999' } },
                   r.net > 0 ? '+' : '', fmtNum(r.net)),
                 h('td', { className:'px-3 py-2 text-right text-red-700 font-medium' },
-                  r.loss > 0 ? fmtCur(r.loss * (r.item?.costPrice||0)) : '-'))))),
+                  r.loss > 0 ? fmtCur(r.loss * r.uc) : '-'))))),
             h(Pager, { pg, label:'รายการสินค้า' })));
 }
 
@@ -53957,6 +54446,24 @@ function VarianceReportTab({ state, dispatch, user, branchId }){
 
 // ==================== REGISTER ====================
 global.ERP.registerModule('production', { main: ProductionModule, QuickIssueTab, IssueDetailModal, WeighStationTab });   // 🆕 GO-LIVE: stock module ฝัง QuickIssueTab ได้ · 🆕 WEIGH: WeighStationTab ฝังที่อื่นได้
+// 🆕 ITEM-FORM verify: ต้นทุนคืนวัตถุดิบตอนยกเลิกใบสั่งผลิต (ทางเดิม ไม่มี consumptions) → (itemId, item) => บาท/หน่วยฐาน
+//   ① ต้นทุนที่ตัดจริงของใบนี้ = เฉลี่ยถ่วง order.actualMaterialLots ต่อสินค้า (reducer CONSUME_PRODUCTION_MATERIALS ทางเดิมสะสมไว้)
+//   ② ไม่มีบันทึก (ใบเก่ามาก) → itemRefCost ของสาขา (GR ล่าสุด → FIFO → costPrice เดิม → สูตร) · ไม่มี helper → costPrice
+function cancelReturnUnitCost(state, order){
+  const act = new Map();
+  ((order && order.actualMaterialLots) || []).forEach(l => {
+    const q = Number(l && l.qty) || 0; if(!(q > 0)) return;
+    const cur = act.get(l.itemId) || { q:0, v:0 };
+    cur.q += q; cur.v += (l.subtotal != null ? Number(l.subtotal) : q * (Number(l.unitCost) || 0)) || 0;
+    act.set(l.itemId, cur);
+  });
+  return (itemId, item) => {
+    const a = act.get(itemId);
+    if(a && a.q > 0 && a.v > 0) return a.v / a.q;
+    return (item && global.ERP.itemRefCost) ? (Number(global.ERP.itemRefCost(state, item, { branch: order && order.branchId }).unitCost) || 0) : (Number(item && item.costPrice) || 0);
+  };
+}
+global.ERP._cancelReturnUnitCost = cancelReturnUnitCost;   // ให้เทสต์เรียก (item_form_verify_e2e.py)
 global.ERP._pushFailMsg = _pushFailMsg;   // UAT คลื่น 3: ให้เทสต์เรียกข้อความตอนส่งไม่สำเร็จ (fatal/inDoubt/busy/เน็ต)
 global.ERP.canQuickIssue = canQuickIssue;   // 🆕 UAT (cut-over): predicate เดียวกันให้โมดูลคลัง (คลัง → ส่งออก → เบิกวัตถุดิบ) ซ่อนปุ่ม/แท็บหลังเปิดระบบผลิต
 global.ERP._postOrderOutput = postOrderOutput;   // 🆕 S/M/L H3: ให้เทสต์สร้าง action รับผลผลิตจากทางจริง (profile_auto_order_e2e.py)
@@ -55820,6 +56327,30 @@ const _DEP_UNPAID_LBL = { pending_inv:'รอตั้งหนี้ DP', inv_c
 
 // ==================== HELPERS ====================
 // หาราคาล่าสุดของ item จาก PO ที่ผ่านมา
+// 🆕 ITEM-FORM B7 ข้อ 3: ราคาอ้างอิงจากประวัติซื้อ (ผู้ขายใดก็ได้ · แถวล่าสุดที่หน่วยแปลงได้)
+//   คืน { price, unit, row } หรือ null · ราคาถอด VAT ด้วย lastUnitPriceEx แล้วใส่ VAT กลับเมื่อใบใหม่เป็น inclusive
+//   units = หน่วยที่บรรทัดใช้ได้ (หน่วยซื้อ) · lastUnit อยู่ในนั้น → ใช้เลย · ไม่งั้นแปลงไปหน่วยแรกด้วย factor
+//   ห้ามใช้ itemRefCost (ต้นทุน layer หักส่วนลด/เกลี่ยของแถม → ราคาซื้อเพี้ยน · changelog #1)
+function _histPurchasePrice(state, item, units, priceMode){
+  const E = global.ERP;
+  if(!item || !E.itemPurchaseHistory || !E.lastUnitPriceEx) return null;
+  const all = (item.units || []);
+  const row = E.itemPurchaseHistory(state, item.id).find(r => r.lastBaseCost != null && Number(r.lastUnitPrice) > 0);
+  if(!row) return null;
+  let price = E.lastUnitPriceEx(row);
+  let unit = row.lastUnit;
+  const names = (units || []).map(u => u.name);
+  if(names.length && names.indexOf(unit) < 0){
+    const tgt = names[0];
+    const fT = resolveToBase(all, tgt), fL = resolveToBase(all, unit);
+    if(!(fT > 0) || !(fL > 0)) return null;
+    price = price * fT / fL;
+    unit = tgt;
+  }
+  if(priceMode === 'inclusive') price = price * (1 + (Number(row.lastVatRate) || 0) / 100);
+  return { price: Math.round(price * 10000) / 10000, unit, row };
+}
+
 function getLastPrice(state, itemId, supplierId){
   const entries = [];
   for(const po of (state.pos||[])){
@@ -57027,20 +57558,26 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
     // อนุญาต duplicate — สำหรับสั่งล่วงหน้าหลายรอบ/ต่อราคา คนละวันส่ง
     const purchaseUnits = unitsForPurpose(item, 'purchase');
 
-    // 🆕 PR5: ลำดับ priority ราคา: item.suppliers[supplierId].unitPrice → lastPrice → item.costPrice
+    // 🆕 ITEM-FORM B7: ลำดับราคา = (1) PO ครั้งก่อนของผู้ขายนี้ → (2) ราคาผูกเดิม item.suppliers (legacy)
+    //   → (3) ประวัติซื้อผู้ขายใดก็ได้ (หน่วยแปลงได้ · ถอด/ใส่ VAT ตามใบ) → (4) 0 · ไม่ใช้ costPrice อีกแล้ว
+    //   ข้อ 1-2 สลับจากเดิมโดยตั้งใจ (PO ครั้งก่อนใหม่กว่าราคาที่เคยผูก · ข้อมูลจริงผูกราคา 0%)
     const linkedSup = supplierId
       ? (item.suppliers||[]).find(s => s.supplierId === supplierId)
       : null;
     const lastPrice = getLastPrice(state, item.id, supplierId);
-    const fromLinkedSup = !!(linkedSup && linkedSup.unitPrice > 0);
-    const resolvedPrice = fromLinkedSup
-      ? linkedSup.unitPrice
-      : (lastPrice?.price || item.costPrice || 0);
+    const fromLastPrice = !!(lastPrice && lastPrice.price > 0);
+    const fromLinkedSup = !fromLastPrice && !!(linkedSup && linkedSup.unitPrice > 0);
+    const hist = (!fromLastPrice && !fromLinkedSup) ? _histPurchasePrice(state, item, purchaseUnits, priceMode) : null;
+    const resolvedPrice = fromLastPrice ? lastPrice.price
+      : fromLinkedSup ? linkedSup.unitPrice
+      : hist ? hist.price : 0;
     // 🆕 UNIT-LP: ราคาล่าสุดผูกกับหน่วยที่ซื้อครั้งก่อน — ถ้าใช้ราคานั้น ให้หน่วย default ตามด้วย (ถ้าหน่วยนั้นเป็นหน่วยซื้อของสินค้า)
     //   เดิม: หน่วย default = หน่วยแรก (มักเป็นฐาน เช่น กรัม) แต่ราคา = ต่อกระสอบ → ยอด PO เพี้ยนเงียบ ๆ
-    const lpUnitOk = !fromLinkedSup && !!lastPrice?.price && !!lastPrice.unit
+    const lpUnitOk = fromLastPrice && !!lastPrice.unit
       && purchaseUnits.some(u => u.name === lastPrice.unit);
-    const defaultUnit = lpUnitOk ? lastPrice.unit : (purchaseUnits[0]?.name || item.issueUnit);
+    const defaultUnit = lpUnitOk ? lastPrice.unit
+      : hist ? hist.unit
+      : (purchaseUnits[0]?.name || item.issueUnit);
     // 🆕 VAT-FIX R15: อัตรา VAT default = ที่ใบกำกับยืนยันล่าสุด (GR line หลังบัญชีปรับ → PO ล่าสุด) → ไม่มีประวัติ = 7
     const cv = getLastConfirmedVatRate(state, item.id, supplierId);
 
@@ -57051,8 +57588,11 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
       vatRate: cv ? cv.vatRate : 7,        // default จากประวัติ · แก้เป็น 0/7 ได้
       expectedDeliveryDate: dueDate,       // default ใช้ dueDate ของ PO
       isFreebie: false,                    // 🆕 PE-2: ของแถม flag
-      _fromLastPrice: !!lastPrice && !linkedSup,
-      _fromLinkedSup: !!(linkedSup && linkedSup.unitPrice > 0),  // 🆕 ราคาจาก item.suppliers
+      _fromLastPrice: fromLastPrice,
+      _fromLinkedSup: fromLinkedSup,       // 🆕 ราคาจาก item.suppliers (legacy)
+      _fromHistory: !!hist,                // 🆕 ITEM-FORM B7-3: ราคาอ้างอิงจากประวัติซื้อ (UI only)
+      _histRef: hist ? (hist.row.lastRef || '') : '',
+      _histSup: hist ? (hist.row.supplierId || '') : '',
       _vatFrom: cv ? cv.source : null,     // 🆕 R15: 'gr' = จากใบกำกับล่าสุด · 'po' = จาก PO ล่าสุด (UI only — ไม่บันทึกลง PO)
       _vatRef: cv ? cv.ref : '',
     }]);
@@ -57060,7 +57600,8 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
   };
 
   // เปลี่ยนอัตรา VAT เอง → เลิกโชว์ hint "อัตราจากใบกำกับล่าสุด"
-  const updateLine = (idx, k, v) => setLines(lines.map((l,i) => i===idx ? {...l, [k]:v, ...(k === 'vatRate' ? { _vatFrom:null } : {})} : l));
+  const updateLine = (idx, k, v) => setLines(lines.map((l,i) => i===idx ? {...l, [k]:v, ...(k === 'vatRate' ? { _vatFrom:null } : {}),
+    ...((k === 'unitPrice' || k === 'unit') ? { _fromHistory:false } : {})} : l));   // แก้ราคา/หน่วยเอง → เลิกโชว์ "ราคาอ้างอิงจาก"
   const removeLine = (idx) => setLines(lines.filter((_,i) => i !== idx));
 
   // 🆕 PO-DATES-2: เปลี่ยน "วันส่งมาตรฐาน" หลังเพิ่มรายการแล้ว → บรรทัดที่ยังเท่ากับค่าเดิม (ไม่ได้แก้เอง / ไม่มีแบ่งงวด) เลื่อนตาม
@@ -57400,7 +57941,10 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
                 h('span', { className:'ml-2' }, i.name)
               ),
               h('span', { className:'text-xs flex gap-2 items-center' },
-                h('span', { className:'text-gray-400' }, `ต้นทุน ${fmtCur(i.costPrice||0)}`),
+                // 🆕 ITEM-FORM S5: ต้นทุนอ้างอิงจากรับของจริง (บาท/หน่วยฐาน) แทน costPrice ที่กรอกมือ
+                (() => { const rc = global.ERP.itemRefCost ? global.ERP.itemRefCost(state, i) : { unitCost: i.costPrice||0 };
+                  return h('span', { className:'text-gray-400', title: rc.ref ? ('จาก ' + rc.ref) : '' },
+                    rc.unitCost > 0 ? `ต้นทุน ${fmtCur(rc.unitCost)}/${getBaseUnit(i) || ''}` : 'ต้นทุน —'); })(),
                 lp && h('span', { className:'text-green-700 font-medium bg-green-50 px-1.5 py-0.5 rounded' },
                   `💰 ล่าสุด ${fmtCur(lp.price)}/${lp.unit}`)
               )
@@ -57513,14 +58057,24 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
                         h('input', { type:'number', value:l.unitPrice, step:'0.01', min:0,
                           onChange:e=>updateLine(i,'unitPrice',Number(e.target.value)||0),
                           disabled: l.isFreebie,
+                          'data-testid':'po-line-price-'+i,
+                          title: (!l.isFreebie && l._fromHistory && supplierId && l._histSup && l._histSup !== supplierId) ? 'ราคานี้เติมจากประวัติซื้อของผู้ขายอื่น — ตรวจกับผู้ขายใบนี้ก่อน' : undefined,
                           className: cls('w-full px-2 py-1 border rounded text-sm text-right',
-                            l.isFreebie && 'bg-pink-100 text-pink-700 cursor-not-allowed') }),
+                            l.isFreebie && 'bg-pink-100 text-pink-700 cursor-not-allowed',
+                            // 🆕 ITEM-FORM UAT2 S6: ราคาเติมจากผู้ขายอื่น (ไม่ใช่ผู้ขายของ PO นี้) → กรอบส้มเด่น
+                            !l.isFreebie && l._fromHistory && supplierId && l._histSup && l._histSup !== supplierId && 'border-2 border-amber-500 bg-amber-50') }),
                         l.isFreebie && h('div', { className:'text-[10px] text-pink-700 text-right font-bold' }, '🎁 ฟรี'),
+                        !l.isFreebie && l._fromHistory && supplierId && l._histSup && l._histSup !== supplierId && h('div', { 'data-testid':'po-line-othersup-'+i,
+                          className:'text-[11px] text-amber-700 text-right font-bold leading-tight' }, '⚠️ ราคาของผู้ขายอื่น'),
                         // 🆕 UNIT-LP: ราคาล่าสุดเป็นคนละหน่วยกับที่เลือก → เตือนให้ตรวจ (ราคา/หน่วยไม่ตรงกัน)
                         !l.isFreebie && lp && lp.unit && lp.unit !== l.unit && h('div', {
                           className:'text-[10px] text-amber-700 text-right leading-tight',
                           title:'ราคาซื้อล่าสุดของสินค้านี้เป็นราคาต่อหน่วยอื่น — ตรวจว่าราคาที่กรอกเป็นราคาต่อหน่วยที่เลือก' },
                           `⚠️ ราคาล่าสุด ${fmtCur(lp.price)} บาท/${lp.unit}`),
+                        // 🆕 ITEM-FORM B7-3: ราคาเติมจากประวัติซื้อ (ผู้ขายอื่นได้) — บอกที่มาให้ตรวจ
+                        !l.isFreebie && l._fromHistory && h('div', { 'data-testid':'po-line-hist-'+i,
+                          className:'text-[10px] text-indigo-600 text-right leading-tight' },
+                          `ราคาอ้างอิงจาก ${l._histRef || 'ประวัติซื้อ'}${l._histSup ? ' · ' + ((state.suppliers||[]).find(s => s.id === l._histSup)?.name || '') : ''}`),
                         priceMode === 'inclusive' && !l.isFreebie && c.unitExVat !== l.unitPrice && h('div', { className:'text-[10px] text-gray-500 text-right' },
                           `ex: ${fmtCur(c.unitExVat)}`)
                       ),
@@ -58882,12 +59436,13 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
     const pu = it ? unitsForPurpose(it, 'purchase') : [];
     const lp = it ? getLastPrice(state, it.id, supplierId) : null;
     const lpUnitOk = !!(lp?.price && lp.unit && pu.some(u => u.name === lp.unit));
+    const hist = (it && !(lp?.price > 0)) ? _histPurchasePrice(state, it, pu, priceMode) : null;
     // 🆕 VAT-FIX R15: อัตรา VAT default = ที่ใบกำกับยืนยันล่าสุด (GR line หลังบัญชีปรับ → PO ล่าสุด) → ไม่มีประวัติ = 7
     const cv = it ? getLastConfirmedVatRate(state, it.id, supplierId) : null;
     setLines(ls => ls.map((x,i) => i===idx ? { ...x, itemId,
       itemName: it?.name || '',
-      unit: lpUnitOk ? lp.unit : (pu[0]?.name || it?.issueUnit || ''),
-      unitPrice: x.isFreebie ? 0 : (lp?.price || it?.costPrice || 0),
+      unit: lpUnitOk ? lp.unit : (hist ? hist.unit : (pu[0]?.name || it?.issueUnit || '')),
+      unitPrice: x.isFreebie ? 0 : (lp?.price || (hist ? hist.price : 0)),   // 🆕 ITEM-FORM B7: → ประวัติซื้อ → 0 (แทน costPrice)
       vatRate: x.isFreebie ? 0 : (cv ? cv.vatRate : 7),
       _vatFrom: (!x.isFreebie && cv) ? cv.source : null,
       _vatRef: cv ? cv.ref : '',
@@ -68529,15 +69084,6 @@ function LowStockTab({ state, user, dispatch }){
   const _covered = (li) => li.totalInTransit > 0 && li.branches.every(a => (Number(a.current) || 0) + (Number(a.inTransitIn) || 0) >= (Number(a.min) || 0));
   const lowItems = hideCovered ? lowAll.filter(li => !_covered(li)) : lowAll;
 
-  // Recent supplier (จาก PO/INV ล่าสุดของ item นี้)
-  const lastSupplier = (itemId) => {
-    const recentPO = (state.pos||[])
-      .filter(p => (p.lines||[]).some(l => l.itemId === itemId))
-      .sort((a,b) => (b.poDate||'').localeCompare(a.poDate||''))[0];
-    if(!recentPO) return null;
-    return state.suppliers.find(s => s.id === recentPO.supplierId);
-  };
-
   // suggested order qty = max − totalCurrent (อย่างน้อย = totalShort)
   const suggestedQty = (li) => {
     const max = li.item.maxStock || 0, tr = Number(li.totalInTransit) || 0;   // 🆕 UAT: หักของที่กำลังมา
@@ -68556,26 +69102,53 @@ function LowStockTab({ state, user, dispatch }){
     return (Number.isFinite(f) && f > 0) ? f : 1;
   };
 
-  // suppliers ที่ผูกกับ item (item.suppliers[]) — fallback = last supplier
-  const itemSuppliers = (item) => {
-    const linked = (item.suppliers||[]).map(s => {
-      const sup = state.suppliers.find(x => x.id === s.supplierId);
-      return sup ? { ...s, supplier: sup } : null;
-    }).filter(Boolean);
-    if(linked.length > 0) return linked;
-    const last = lastSupplier(item.id);
-    return last ? [{ supplierId: last.id, unitPrice: 0, isPreferred: true, supplier: last }] : [];
+  // 🆕 ITEM-FORM B7: ผู้ขายของสินค้า = 3 กลุ่ม (ไม่ซ้ำ) — (ก) เคยซื้อจริง (GR/PO) · (ข) ที่เคยผูกไว้ใน item (legacy) · (ค) ผู้ขาย active อื่นทั้งหมด
+  //   unitPrice = ราคาต่อ issueUnit (หน่วยบรรทัด PO อัตโนมัติ) แบบไม่รวม VAT (PO อัตโนมัติ = exclusive)
+  //   รับ item หรือ id (setPlan ส่ง item ปลอม) → หา item จริงเอง · ⭐ = itemDefaultSupplierId (เจ้าที่ซื้อล่าสุด)
+  const itemSuppliers = (itemOrId) => {
+    const id = (itemOrId && typeof itemOrId === 'object') ? itemOrId.id : itemOrId;
+    const item = (state.items||[]).find(x => x.id === id) || ((itemOrId && typeof itemOrId === 'object') ? itemOrId : { id });
+    const E = global.ERP;
+    const activeSup = (sid) => (state.suppliers||[]).find(x => x.id === sid && x.active !== false);
+    const defId = E.itemDefaultSupplierId ? E.itemDefaultSupplierId(state, item) : '';
+    const units = item.units || [];
+    const issue = item.issueUnit || getBaseUnit(item);
+    const seen = new Set(), out = [];
+    (E.itemPurchaseHistory ? E.itemPurchaseHistory(state, item.id) : []).forEach(r => {
+      const sup = activeSup(r.supplierId);
+      if(!sup || seen.has(r.supplierId)) return;
+      seen.add(r.supplierId);
+      let unitPrice = 0, needCheck = true;
+      if(r.lastBaseCost != null && issue){
+        const fI = Number(resolveToBase(units, issue)), fL = Number(resolveToBase(units, r.lastUnit));
+        if(fI > 0 && fL > 0){ unitPrice = Math.round(E.lastUnitPriceEx(r) * fI / fL * 10000) / 10000; needCheck = false; }
+      }
+      out.push({ supplierId: r.supplierId, supplier: sup, unitPrice, group:'history', isPreferred: r.supplierId === defId,
+        lastDate: r.lastDate, lastRef: r.lastRef, lastUnit: r.lastUnit, needCheck });
+    });
+    (item.suppliers||[]).forEach(s => {
+      const sup = s && activeSup(s.supplierId);
+      if(!sup || seen.has(s.supplierId)) return;
+      seen.add(s.supplierId);
+      out.push({ ...s, supplier: sup, unitPrice: Number(s.unitPrice) || 0, group:'legacy', isPreferred: s.supplierId === defId });
+    });
+    (state.suppliers||[]).forEach(sup => {
+      if(!sup || sup.active === false || seen.has(sup.id)) return;
+      seen.add(sup.id);
+      out.push({ supplierId: sup.id, supplier: sup, unitPrice: 0, group:'other', isPreferred: sup.id === defId });
+    });
+    return out;
   };
 
-  // เริ่มต้น plan สำหรับ item (lazy init เมื่อ user ติ๊ก)
+  // เริ่มต้น plan สำหรับ item (lazy init เมื่อ user ติ๊ก) — ผู้ขายตั้งต้น = เจ้าที่ซื้อล่าสุด (itemDefaultSupplierId)
   const getPlan = (li) => {
     if(planMap[li.item.id]) return planMap[li.item.id];
-    const sups = itemSuppliers(li.item);
-    const pref = sups.find(s => s.isPreferred) || sups[0];
-    return { checked: false, orderQty: suggestedQty(li), supplierId: pref?.supplierId || '' };
+    const defId = global.ERP.itemDefaultSupplierId ? global.ERP.itemDefaultSupplierId(state, li.item.id) : '';
+    return { checked: false, orderQty: suggestedQty(li), supplierId: defId || '' };
   };
+  // 🆕 ITEM-FORM: ใช้แถวจริงจาก lowAll (เดิมส่งแถวปลอม maxStock 0 → ติ๊กแล้วจำนวนสั่งตั้งต้น = 0 → ไม่สร้าง PO)
   const setPlan = (itemId, patch) =>
-    setPlanMap(p => ({ ...p, [itemId]: { ...getPlan({item: {id:itemId, maxStock:0}, totalCurrent:0, totalShort:0}), ...p[itemId], ...patch } }));
+    setPlanMap(p => ({ ...p, [itemId]: { ...getPlan(lowAll.find(x => x.item.id === itemId) || {item: {id:itemId, maxStock:0}, totalCurrent:0, totalShort:0}), ...p[itemId], ...patch } }));
 
   // checked items grouped by supplier (สำหรับสร้าง PO)
   const checkedBySupplier = useMemo(() => {
@@ -68594,9 +69167,20 @@ function LowStockTab({ state, user, dispatch }){
   const checkedCount = Object.values(checkedBySupplier).reduce((s,arr) => s + arr.length, 0);
   const supplierCount = Object.keys(checkedBySupplier).length;
 
+  // 🆕 ITEM-FORM UAT S1: ติ๊กแล้วแต่ยังไม่เลือกผู้ขาย → เดิมหลุดเงียบ (ยืนยันขึ้นน้อยกว่าที่ติ๊ก) → กันไว้ + ขอบแดงที่แถว
+  const checkedNoSup = lowItems.filter(li => { const p = getPlan(li); return p.checked && !p.supplierId; });
   const createPOs = () => {
+    if(checkedNoSup.length > 0){
+      return alert(`⛔ ${checkedNoSup.length} รายการยังไม่เลือกผู้ขาย — เลือกผู้ขายก่อน (แถวขอบแดง) หรือเอาติ๊กออก\n` +
+        checkedNoSup.slice(0, 10).map(li => '• ' + (li.item.code ? li.item.code + ' ' : '') + li.item.name).join('\n') +
+        (checkedNoSup.length > 10 ? `\n… อีก ${checkedNoSup.length - 10} รายการ` : ''));
+    }
     if(checkedCount === 0) return alert('ยังไม่ได้ติ๊กสินค้าที่จะสั่ง');
-    if(!confirm(`สร้าง PO ${supplierCount} ใบ (${checkedCount} รายการ) ในสถานะ Draft?\nจัดซื้อต้องไปอนุมัติเองภายหลัง`)) return;
+    // 🆕 ITEM-FORM UAT S1: บรรทัดราคา 0 (เจ้าอื่น/ตรวจราคา) → แจ้งในยืนยันเหมือนหน้า PO ปกติ
+    const zeroLines = Object.values(checkedBySupplier).flat().filter(x => !(Number(x.unitPrice) > 0));
+    const zeroMsg = zeroLines.length ? `\n\n⚠️ ${zeroLines.length} บรรทัดราคา 0.00 (ไม่มีประวัติซื้อจากผู้ขายนี้ — ต้องใส่ราคาตอนอนุมัติ PO):\n` +
+      zeroLines.slice(0, 10).map(x => '• ' + x.li.item.name).join('\n') + (zeroLines.length > 10 ? `\n… อีก ${zeroLines.length - 10} บรรทัด` : '') : '';
+    if(!confirm(`สร้าง PO ${supplierCount} ใบ (${checkedCount} รายการ) ในสถานะ Draft?\nจัดซื้อต้องไปอนุมัติเองภายหลัง` + zeroMsg)) return;
     let ok = 0;
     Object.entries(checkedBySupplier).forEach(([supId, lines]) => {
       const sup = state.suppliers.find(s => s.id === supId);
@@ -68665,10 +69249,13 @@ function LowStockTab({ state, user, dispatch }){
       ? h('div', { className:'bg-green-50 border border-green-200 rounded p-8 text-center text-green-700' },
           '✅ ไม่มีสินค้าต่ำกว่าขั้นต่ำ')
       : h('div', null,
-          checkedCount > 0 && h('div', { className:'bg-blue-50 border border-blue-300 rounded p-3 mb-3 flex justify-between items-center' },
+          (checkedCount > 0 || checkedNoSup.length > 0) && h('div', { className:'bg-blue-50 border border-blue-300 rounded p-3 mb-3 flex justify-between items-center' },
             h('div', { className:'text-sm' },
               '📋 จะสร้าง PO ', h('b', null, supplierCount), ' ใบ · ติ๊กไว้ ',
-              h('b', { className:'text-blue-700' }, checkedCount), ' รายการ'),
+              h('b', { className:'text-blue-700' }, checkedCount), ' รายการ',
+              // 🆕 UAT S1: บอกจำนวนที่ติ๊กแต่ยังไม่เลือกผู้ขาย (ไม่เข้า PO)
+              checkedNoSup.length > 0 && h('span', { 'data-lowstock-nosup-count':checkedNoSup.length, className:'ml-2 text-red-700 font-medium' },
+                `· ⚠️ ${checkedNoSup.length} รายการยังไม่เลือกผู้ขาย`)),
             h('button', { type:'button', onClick:createPOs,
               className:'bg-blue-600 text-white hover:bg-blue-700 px-4 py-2 rounded font-medium text-sm' },
               '✅ สร้าง PO ตามที่ติ๊ก')),
@@ -68696,15 +69283,15 @@ function LowStockTab({ state, user, dispatch }){
                   return h('tr', { key:li.item.id, className: cls('hover:bg-gray-50', plan.checked && 'bg-blue-50') },
                     h('td', { className:'px-2 py-2 text-center' },
                       h('input', { type:'checkbox', checked:plan.checked,
-                        disabled: sups.length === 0,
-                        title: sups.length === 0 ? 'ต้องผูก supplier ใน Item ก่อน' : '',
+                        disabled: sups.length === 0,   // 🆕 ITEM-FORM: ว่างเฉพาะเมื่อไม่มีผู้ขาย active เลย
+                        title: sups.length === 0 ? 'ยังไม่มีผู้ขายในระบบ' : '',
                         onChange:e=>setPlan(li.item.id, { checked:e.target.checked }),
                         className:'w-4 h-4' })),
                     h('td', { className:'px-2 py-2 font-mono text-xs' }, li.item.code),
                     h('td', { className:'px-2 py-2' },
                       h('div', { className:'font-medium' }, li.item.name),
                       driftTag(li.item.id),
-                      sups.length === 0 && h('div', { className:'text-[10px] text-red-600' }, '⚠️ ยังไม่ผูก supplier')),
+                      !sups.some(s => s.group === 'history') && h('div', { className:'text-[10px] text-amber-700', 'data-lowstock-nohist':li.item.id }, 'ยังไม่เคยซื้อ')),
                     h('td', { className:'px-2 py-2 text-right text-xs' },
                       h('div', { className:'text-red-600 font-medium' }, fmtNum(li.totalCurrent), ' ', bu),
                       h('div', { className:'flex items-center justify-end gap-1 mt-0.5' },
@@ -68737,13 +69324,22 @@ function LowStockTab({ state, user, dispatch }){
                         className:'w-full px-2 py-1 border rounded text-sm text-right' })),
                     h('td', { className:'px-2 py-2' },
                       sups.length === 0
-                        ? h('span', { className:'text-xs text-gray-400 italic' }, '— ผูก supplier ใน item —')
-                        : h('select', { value:plan.supplierId, disabled:!plan.checked,
-                            onChange:e=>setPlan(li.item.id, { supplierId:e.target.value }),
-                            className:'w-full px-2 py-1 border rounded text-sm' },
-                            sups.map(s => h('option', { key:s.supplierId, value:s.supplierId },
-                              `${s.isPreferred ? '⭐ ' : ''}${global.ERP.partyOptionText ? global.ERP.partyOptionText(s.supplier) : s.supplier.name}`)))),   // 🆕 PARTY-BRANCH
-                    h('td', { className:'px-2 py-2 text-right text-xs' }, fmtCur(selectedSup?.unitPrice||0)),
+                        ? h('span', { className:'text-xs text-gray-400 italic' }, '— ยังไม่มีผู้ขาย —')
+                        : (() => {
+                            // 🆕 ITEM-FORM B7: optgroup "เคยซื้อ" (history + legacy) / "เจ้าอื่น" (ผู้ขาย active ที่เหลือ)
+                            const opt = (s) => h('option', { key:s.supplierId, value:s.supplierId },
+                              `${s.isPreferred ? '⭐ ' : ''}${global.ERP.partyOptionText ? global.ERP.partyOptionText(s.supplier) : s.supplier.name}`);   // 🆕 PARTY-BRANCH
+                            const known = sups.filter(s => s.group !== 'other'), other = sups.filter(s => s.group === 'other');
+                            return h('select', { value:plan.supplierId, disabled:!plan.checked, 'data-lowstock-sup':li.item.id,
+                              onChange:e=>setPlan(li.item.id, { supplierId:e.target.value }),
+                              className: cls('w-full px-2 py-1 border rounded text-sm', plan.checked && !plan.supplierId && 'border-2 border-red-500 bg-red-50') },
+                              !plan.supplierId && h('option', { value:'' }, '— เลือกผู้ขาย —'),
+                              known.length > 0 && h('optgroup', { label:'เคยซื้อ' }, known.map(opt)),
+                              other.length > 0 && h('optgroup', { label:'เจ้าอื่น' }, other.map(opt)));
+                          })()),
+                    h('td', { className:'px-2 py-2 text-right text-xs', 'data-lowstock-price':li.item.id },
+                      fmtCur(selectedSup?.unitPrice||0),
+                      selectedSup && selectedSup.needCheck && h('div', { className:'text-[10px] text-amber-700' }, 'ตรวจราคา')),
                     h('td', { className:'px-2 py-2 text-right font-medium' },
                       plan.checked ? fmtCur(lineTotal) : '-'));
                 })
@@ -70103,6 +70699,7 @@ global.ERP.registerModule('purchase', {
   getINVPaySummary,             // 🆕 ACCT-V2 G: สรุปวันจ่ายของ INV ใบเดียว (shape เดียวกับ getPOPaymentSummary → ใช้กับ PayDateTag)
   PayDateTag,
   postNonDeductibleReclassJE,
+  _histPurchasePrice,           // 🆕 ITEM-FORM B7-3: ราคาอ้างอิงจากประวัติซื้อ (export ไว้ให้เทสต์)
 });
 
 })(window);
@@ -78614,7 +79211,8 @@ function RTVManageTab({ state, dispatch, user }){
     const stockUpdates = [], fifoLayers = [], movements = [];
     (r.lines||[]).forEach((l, idx) => {
       const item = (state.items||[]).find(x => x.id === l.itemId);
-      const baseQty = toBaseQty ? toBaseQty(item, l.qty, l.unit) : (l.qty||0);
+      // §U U3: ใช้ baseQty ที่ตรึงไว้ตอนคืน · RTV เก่าไม่มี → แปลงตามตัวคูณปัจจุบัน
+      const baseQty = global.ERP.rtvLineBaseQty ? global.ERP.rtvLineBaseQty(state, l) : (toBaseQty ? toBaseQty(item, l.qty, l.unit) : (l.qty||0));
       stockUpdates.push({ itemId:l.itemId, branch:r.branch, qty:baseQty });
       const costPerBase = baseQty > 0 ? ((l.unitPrice||0)*l.qty)/baseQty : (l.unitPrice||0);
       fifoLayers.push({ id:genId('fl'), itemId:l.itemId, branch:r.branch,
@@ -83970,6 +84568,14 @@ const _scrollRowIntoView = (attr, id) => {
 //   (เพื่อเข้าแท็บเฉพาะ สินค้า/supplier) — ถ้าใช้ proxy นั้นจะเห็น Users/Backup/Cloud/Approval + ลบ/นำเข้าสินค้าได้ (สิทธิ์รั่ว)
 //   user ที่ admin ตั้ง custom perms ไว้ (แม้ role manager) → ไม่ full — เช็ค leaf settings.<tab>.<action> ทีละจุด
 const FULL_SETTINGS_ROLES = ['gm','admin','manager'];
+// UAT S3: หน่วยฐานน้ำหนัก/ปริมาตร → ตัวคูณเป็น กก./ลิตร · หน่วยนับ/หน่วยบรรจุ สำหรับเตือนกรอกกลับทิศ
+const _IF_WV_BASE = { 'กก.':1, 'กิโลกรัม':1, 'kg':1, 'กรัม':0.001, 'ก.':0.001, 'g':0.001, 'ลิตร':1, 'L':1, 'มล.':0.001, 'ml':0.001, 'ซีซี':0.001 };
+const _IF_COUNT_U = ['ใบ','ชิ้น','ลูก','ฟอง','อัน','แผ่น','ก้อน','ตัว','ถ้วย','ซอง','เม็ด','ดวง'];
+const _IF_PACK_U = ['ลัง','กระสอบ'];          // < 1 หน่วยฐาน = น่าจะกลับทิศ
+// verify: ถุง/แพ็ค < 1 กก. เป็นเรื่องปกติในเบเกอรี่ (น้ำตาล 500 ก. · เนย 227 ก.) → เตือนเฉพาะเล็กผิดปกติ (< 20 ก./มล.)
+const _IF_SMALLPACK_U = ['ถุง','แพ็ค','แพค'];
+const _IF_SMALLPACK_MIN = 0.02;
+
 function isFullSettings(user){
   if(!user) return false;
   if(isSuperUser(user)) return true;
@@ -84371,6 +84977,9 @@ function SystemPolicyToggles({ state, dispatch }){
 // 🏷️ purposeScope ตาม role — แผนกไหนตั้งคอลัมน์หน่วยได้บ้าง (undefined = ตั้งได้ทุกคอลัมน์)
 //   purchasing → 'purchase' (ซื้อ) · production_manager → 'bom' · gm/admin/manager → ทั้งหมด
 const ROLE_PURPOSE_SCOPE = { purchasing:'purchase', production_manager:'bom' };
+// 🆕 ITEM-FORM (A6 Q1): สินค้าใหม่ต้องกดเลือกประเภทเองก่อน · false = กลับไปใช้ประเภทแรกเป็นค่าเริ่มต้นแบบเดิม
+const ITEM_FORM_FORCE_TYPE = true;
+const _itemFormType0 = (types) => ITEM_FORM_FORCE_TYPE ? '' : ((types||[])[0]?.id || 'material');
 const PURPOSE_LABEL = { purchase:'ซื้อ', transfer:'โอน', sale:'ขาย', bom:'BOM' };
 const PURPOSE_OWNER = { purchase:'จัดซื้อ', transfer:'คลัง', sale:'ฝ่ายขาย', bom:'ฝ่ายผลิต' };
 
@@ -85797,6 +86406,7 @@ function ItemsSettings({ state, dispatch }){
   const [showImport, setShowImport] = useState(false);
   const [showEcount, setShowEcount] = useState(false);   // 📦 (ชั่วคราว) ชุดนำเข้า Ecount ฝังใน build
   const [showPrices, setShowPrices] = useState(false);   // 💲 ตั้งราคาขายหลายรายการรวดเดียว
+  const [priceSearch, setPriceSearch] = useState('');    // 🆕 ITEM-FORM: ค้นสินค้าไว้ให้เมื่อเปิดจากฟอร์มสินค้า
   const [edit, setEdit] = useState(null);
   const [typeFilter, setTypeFilter] = useState('all');
   const [tagFilter, setTagFilter] = useState('');
@@ -85939,7 +86549,7 @@ function ItemsSettings({ state, dispatch }){
                       'ยังไม่ตั้งหน่วย' + missing.map(p => PURPOSE_LABEL[p]).join('/'));
                   })()
                 ),
-                h('td', { className:'px-3 py-2 text-right' }, fmtCur(i.costPrice||0)),
+                h('td', { className:'px-3 py-2 text-right' }, _refCostCell(_itemRefCostOf(state, i))),
                 h('td', { className:'px-3 py-2 text-right' }, i.salePrice ? fmtCur(i.salePrice) : '-'),
                 h('td', { className:'px-3 py-2 text-right font-medium' }, fmtNum(totalStock)),
                 h('td', { className:'px-3 py-2 text-center' },
@@ -85963,20 +86573,37 @@ function ItemsSettings({ state, dispatch }){
     ),
 
     // key ตาม id — กัน React reuse instance (useState init จาก item) เมื่อย่อ A แล้วเปิด B
-    showModal && h(ItemEditModal, { key: edit ? edit.id : 'new', item:edit, state, dispatch, onClose:()=>setShowModal(false) }),
+    showModal && h(ItemEditModal, { key: edit ? edit.id : 'new', item:edit, state, dispatch, onClose:()=>setShowModal(false),
+      // 🆕 ITEM-FORM: ปุ่ม 💲 ตั้งราคาขาย ในฟอร์ม → ปิดฟอร์มแล้วเปิดหน้าตั้งราคา ค้นสินค้านี้ไว้
+      onOpenPrices: canEdit ? (it) => { setShowModal(false); setPriceSearch((it && (it.code || it.name)) || ''); setShowPrices(true); } : undefined }),
     showImport && h(ItemImportModal, { state, dispatch, onClose:()=>setShowImport(false) }),
     showEcount && h(EcountImportModal, { state, dispatch, onClose:()=>setShowEcount(false) }),
-    showPrices && h(BulkPriceModal, { state, dispatch, onClose:()=>setShowPrices(false) })
+    showPrices && h(BulkPriceModal, { state, dispatch, initialSearch: priceSearch, onClose:()=>{ setShowPrices(false); setPriceSearch(''); } })
   );
+}
+
+// 🆕 ITEM-FORM verify (B4.1 U): ต้นทุนอ้างอิงต่อหน่วยฐาน — แทน item.costPrice ที่ไม่มีคนกรอกแล้ว (สินค้าใหม่ = 0 เสมอ)
+//   ลำดับ gr → fifo → legacy(costPrice เดิม) → bom → none · ไม่มี helper (build เก่า) → costPrice เดิม
+function _itemRefCostOf(state, i){
+  const E = global.ERP || {};
+  if(E.itemRefCost) return E.itemRefCost(state, i);
+  const cp = Number(i && i.costPrice) || 0;
+  return { unitCost: cp, source: cp > 0 ? 'legacy' : 'none' };
+}
+// ตัวเลขต้นทุน + ไอคอนเทาเมื่อไม่ได้มาจากใบรับของจริง (fifo/legacy/bom)
+function _refCostCell(rc){
+  const src = { fifo:'ต้นทุนเฉลี่ยของคงเหลือ', legacy:'ต้นทุนที่ตั้งไว้เดิม', bom:'ต้นทุนตามสูตร' }[rc.source];
+  return h('span', { title: rc.source === 'gr' ? ('จาก ' + (rc.ref || 'ใบรับของ')) : (src || 'ยังไม่มีต้นทุน') },
+    fmtCur(rc.unitCost || 0), src ? h('span', { className:'ml-1 text-gray-400' }, 'ⓘ') : null);
 }
 
 // 💲 ตั้งราคาขายหลายรายการรวดเดียว — ราคาที่ตั้งไว้จะเด้งเองตอนเลือกสินค้าในบิลขาย (SI ใช้ item.salePrice)
 //    แตะเฉพาะ salePrice ไม่ยุ่งกับต้นทุน/สต๊อก/หน่วยนับ
-function BulkPriceModal({ state, dispatch, onClose }){
+function BulkPriceModal({ state, dispatch, onClose, initialSearch }){   // 🆕 ITEM-FORM: initialSearch = เปิดจากปุ่ม 💲 ในฟอร์มสินค้า (ค้นสินค้านั้นไว้ให้)
   const types = state.itemTypes || [];
   // default = ทุกประเภท (ข้อมูลที่ย้ายมาจากระบบเก่าเป็น 'material' ทั้งหมด — ถ้า default เป็น finished จะเปิดมาเจอหน้าว่าง)
   const [typeFilter, setTypeFilter] = useState('all');
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(initialSearch || '');
   const [onlyBlank, setOnlyBlank] = useState(false);
   const [draft, setDraft] = useState({});          // { [itemId]: 'ข้อความในช่อง' }
   const [tDraft, setTDraft] = useState({});        // { [itemId]: ประเภทใหม่ }
@@ -86078,8 +86705,8 @@ function BulkPriceModal({ state, dispatch, onClose }){
     const next = { ...draft };
     let n = 0;
     list.forEach(i => {
-      const cost = Number(i.costPrice) || 0;
-      if(!(cost > 0)) return;                       // ไม่มีต้นทุน = เติมไม่ได้ (ข้อมูลที่ย้ายมา costPrice = 0)
+      const cost = Number(_itemRefCostOf(state, i).unitCost) || 0;   // ต้นทุนจากการซื้อจริง (ไม่ใช่ costPrice กรอกมือ)
+      if(!(cost > 0)) return;                       // ไม่มีต้นทุน = เติมไม่ได้ (ยังไม่เคยรับของ/ไม่มีสูตร)
       next[i.id] = String(Math.round(cost * (1 + m/100)));
       n++;
     });
@@ -86241,7 +86868,7 @@ function BulkPriceModal({ state, dispatch, onClose }){
                         // หน่วยที่บิลขายจะใช้จริง (unitsForPurpose 'sale' ตัวแรก) — ไม่ใช่หน่วยเบิก
                         (((unitsForPurpose ? unitsForPurpose(i, 'sale') : [])[0] || {}).name) || i.issueUnit || '-'),
                       h('td', { className:'px-2 py-1 text-right text-xs text-gray-500' }, fmtNum(totalStockOf(i))),
-                      h('td', { className:'px-2 py-1 text-right text-xs text-gray-500' }, fmtCur(i.costPrice||0)),
+                      h('td', { className:'px-2 py-1 text-right text-xs text-gray-500' }, _refCostCell(_itemRefCostOf(state, i))),
                       h('td', { className:'px-2 py-1 text-right' },
                         h('input', {
                           type:'text', inputMode:'decimal',
@@ -86555,9 +87182,56 @@ function BulkCreditModal({ state, dispatch, onClose }){
     ));
 }
 
+// 🆕 ITEM-FORM S2b: กล่องข้อมูลที่ระบบเติมเอง (อ่านอย่างเดียว · เห็นตอนแก้สินค้า)
+//   ต้นทุนล่าสุด (itemRefCost) · ราคาขาย (resolvePrice + ปุ่ม 💲) · ซื้อจาก (itemPurchaseHistory 5 แถว ⭐ = ผู้ขายตั้งต้น)
+function ItemInfoPanel({ item, state, onOpenPrices }){
+  const E = global.ERP;
+  const user = state.currentUser;
+  const baseU = ((item.units || []).find(u => u.isBase) || {}).name || item.issueUnit || '';
+  const seeCost = E.canSeeStockValue ? E.canSeeStockValue(user, state) : true;
+  const seeBuy = E.canSeePurchasePrice ? E.canSeePurchasePrice(user, state) : seeCost;
+  const rc = E.itemRefCost ? E.itemRefCost(state, item) : { unitCost:0, source:'none' };
+  const hist = E.itemPurchaseHistory ? E.itemPurchaseHistory(state, item.id) : [];
+  const defSup = E.itemDefaultSupplierId ? E.itemDefaultSupplierId(state, item) : '';
+  const supName = (sid) => { const s = (state.suppliers || []).find(x => x.id === sid); return s ? (E.partyOptionText ? E.partyOptionText(s) : s.name) : sid; };
+  const dt = (d) => d ? (E.fmtDateBE ? E.fmtDateBE(String(d).slice(0, 10), { short:true }) : String(d).slice(0, 10)) : '';
+  const srcText = rc.source === 'gr' ? `จาก ${rc.ref || 'ใบรับของ'}${rc.date ? ' (' + dt(rc.date) + ')' : ''}`
+    : rc.source === 'fifo' ? 'ต้นทุนเฉลี่ยของคงเหลือ' : rc.source === 'legacy' ? 'ต้นทุนที่ตั้งไว้เดิม'
+    : rc.source === 'bom' ? 'ต้นทุนตามสูตร' : '';
+  const sale = resolvePrice ? (Number((resolvePrice(item, baseU) || {}).price) || 0) : (Number(item.salePrice) || 0);
+  //   ซ่อนเมื่อ: ยังไม่มีราคา + ไม่ได้ติ๊ก "ขายหน้าร้านได้" + เป็นวัตถุดิบ/บรรจุภัณฑ์/WIP (หรือ isSellableItem บอกขายไม่ได้ ยกเว้น semi_fg ที่ต้องตั้งราคาก่อนถึงขายได้)
+  const _rawLike = item.type === 'material' || item.type === 'packaging' || item.type === 'wip';
+  const _showSale = (Number(sale) || 0) > 0 || item.sellable === true
+    || (!_rawLike && (item.type === 'semi_fg' || !E.isSellableItem || E.isSellableItem(item)));
+  const row = (icon, body, extra) => h('div', { className:'flex flex-wrap items-center gap-2 text-sm' }, h('span', null, icon), body, extra || null);
+  return h('div', { className:'bg-slate-50 border border-slate-200 rounded p-3 space-y-2', 'data-testid':'item-info-panel' },
+    h('div', { className:'text-xs text-slate-600' }, 'ℹ️ ข้อมูลที่ระบบเติมเองจากการซื้อ/ขายจริง (แก้ในฟอร์มนี้ไม่ได้)'),
+    h('div', { 'data-testid':'item-ref-cost' }, row('💰',
+      rc.source === 'none' ? h('span', { className:'text-gray-600' }, 'ต้นทุน: ยังไม่มี — จะเติมเองเมื่อรับของครั้งแรก')
+      : h('span', null, rc.source === 'gr' ? 'ต้นทุนล่าสุด ' : 'ต้นทุนอ้างอิง ',   // "ล่าสุด" เฉพาะที่มาจากใบรับของจริง
+          h('b', null, seeCost ? `${fmtCur(rc.unitCost)} บาท/${baseU}` : '•••'),
+          ' · ', h('span', { className:'text-gray-600' }, srcText),
+          rc.priceMode === 'inclusive' ? h('span', { className:'text-gray-500' }, ' (รวม VAT)') : null))),
+    // วัตถุดิบ/บรรจุภัณฑ์ที่ขายไม่ได้และยังไม่มีราคา → ไม่โชว์แถวราคาขาย (ไม่ชวนตั้งราคาขายให้แป้ง)
+    (_showSale) && h('div', { 'data-testid':'item-sale-price' }, row('🏷️',
+      h('span', null, (Number(sale) || 0) > 0 ? h('span', null, 'ราคาขาย ', h('b', null, `${fmtCur(sale)} บาท/${baseU}`)) : h('span', { className:'text-gray-600' }, 'ยังไม่ตั้งราคาขาย')),
+      typeof onOpenPrices === 'function' ? h('button', { type:'button', 'data-testid':'item-goto-price', onClick:() => onOpenPrices(item),
+        className:'text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-1 rounded' }, '💲 ตั้งราคาขาย') : null)),
+    h('div', { 'data-testid':'item-purchase-history' },
+      row('🏪', h('span', null, hist.length ? 'ซื้อจาก:' : h('span', { className:'text-gray-600' }, 'ซื้อจาก: ยังไม่เคยซื้อ'))),
+      hist.length > 0 && h('div', { className:'mt-1 space-y-1' },
+        hist.slice(0, 5).map(r => h('div', { key:r.supplierId, 'data-testid':'item-ph-row', className:'flex flex-wrap gap-x-2 text-xs bg-white border rounded px-2 py-1' },
+          h('span', { className:'font-medium' }, supName(r.supplierId), r.supplierId === defSup ? ' ⭐' : ''),
+          h('span', { className:'text-gray-600' }, 'ล่าสุด ' + dt(r.lastDate)),
+          seeBuy && h('span', null, `${fmtCur(r.lastUnitPrice)} บาท/${r.lastUnit || baseU}`),
+          h('span', { className:'text-gray-500' }, r.source === 'po' ? '(มีแต่ใบสั่งซื้อ)' : `${r.count || 0} ครั้ง`))),
+        defSup && h('div', { className:'text-[11px] text-gray-500' }, '⭐ = เจ้าที่ใช้เป็นค่าเริ่มต้นตอนเปิดใบสั่งซื้อ/Min-Max (เจ้าที่ซื้อล่าสุด)'))));
+}
+
 // purposeScope: 'purchase' | 'bom' | undefined — ไม่ส่งมา = derive จาก role ของ currentUser (ROLE_PURPOSE_SCOPE)
 // onSaved(data): callback หลัง dispatch (quick-add จาก PO/BOM เลือกต่อได้ทันที — แบบเดียวกับ PartyEditModal)
-function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }){
+// onOpenPrices(item): 🆕 ITEM-FORM ปุ่ม 💲 ตั้งราคาขาย (ส่งมาเฉพาะผู้มีสิทธิ์แก้สินค้า) — ฟอร์มไม่มีช่องราคาแล้ว
+function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved, onOpenPrices }){
   const isEdit = !!item;
   const types = state.itemTypes || [];
   const scope = purposeScope !== undefined ? purposeScope : ROLE_PURPOSE_SCOPE[state.currentUser?.role];
@@ -86576,29 +87250,54 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
     if(boms) parts.push(`ใช้ใน BOM ${boms} สูตร`);
     return parts.join(' · ');
   }, [isEdit, item, state.fifoLayers, state.boms]);
+  // 🔒 §U U2: หน่วยที่เอกสารเปิดอยู่ใช้ (PO ค้าง/TR ยังไม่ส่ง/สูตรที่ใช้งาน/ใบคืนค้าง) → ล็อกตัวคูณ/หน่วยเทียบ/ชื่อ/ลบ
+  //   คิดจากชื่อหน่วย "เดิม" ของสินค้า (แถวล็อกเปลี่ยนชื่อไม่ได้อยู่แล้ว) · หน่วยฐานไม่ต้องล็อก (ตัวคูณ = 1 เสมอ)
+  const unitUsageMap = useMemo(() => {
+    const m = {};
+    if(!isEdit || !global.ERP.unitUsage) return m;
+    for(const u of (item.units || [])){
+      if(!u || !u.name || u.isBase) continue;
+      const r = global.ERP.unitUsage(state, item.id, u.name);
+      if(r.total > 0) m[u.name] = r;
+    }
+    return m;
+  }, [isEdit, item, state.pos, state.transferRequests, state.boms, state.returns, state.productionOrders, state.salesOrders, state.items]);   // verify: ครบทุกคอลเลกชันที่ unitUsage อ่าน
+  // ผู้ปลดล็อกได้ = สิทธิ์ตั้งค่าเต็ม (gm/admin/manager ที่ใช้สิทธิ์ตั้งต้น หรือ superuser) — ต้องพิมพ์เหตุผล · ลง auditLog ตอนบันทึก
+  const canUnlockUnits = isFullSettings(state.currentUser);
+  const [unitOverrides, setUnitOverrides] = useState({});   // { ชื่อหน่วย: เหตุผล }
   const [code, setCode] = useState(item?.code || '');
   const [name, setName] = useState(item?.name || '');
   const [barcode, setBarcode] = useState(item?.barcode || '');
-  const [type, setType] = useState(item?.type || types[0]?.id || 'material');
+  // 🆕 ITEM-FORM Q1: สินค้าใหม่ยังไม่มีประเภทจนกว่าจะกดปุ่ม (ITEM_FORM_FORCE_TYPE) — ส่วนอื่นของฟอร์มซ่อนไว้ก่อน
+  const [type, setType] = useState(item?.type || (ITEM_FORM_FORCE_TYPE ? '' : (types[0]?.id || 'material')));
   const [groupId, setGroupId] = useState(item?.groupId || '');
   const [issueUnit, setIssueUnit] = useState(item?.issueUnit || 'กก.');
+  const _tplFor = (tid) => (global.ERP.unitTemplatesForType ? global.ERP.unitTemplatesForType(tid) : []);
+  const _applyTpl = (t) => (global.ERP.applyUnitTemplate ? global.ERP.applyUnitTemplate(t, state.unitPresets || []) : []);
   const [units, setUnits] = useState(() => {
     const existing = item?.units;
     if(existing && existing.length) return existing;
-    // default: 1 base unit
-    return [{ name:item?.issueUnit || 'กก.', isBase:true, purposes:['stock','bom','transfer','sale'] }];
+    // 🆕 ITEM-FORM: สินค้าใหม่ = แม่แบบแรกของประเภท (ยังไม่เลือกประเภท = ว่าง)
+    const t0 = !item && _itemFormType0(types) ? _tplFor(_itemFormType0(types))[0] : null;
+    return t0 ? _applyTpl(t0) : (item ? [{ name:item.issueUnit || 'กก.', isBase:true, purposes:['stock','bom','transfer','sale'] }] : []);
   });
-  const [minStock, setMinStock] = useState(item?.minStock || 0);
-  const [maxStock, setMaxStock] = useState(item?.maxStock || 0);
-  const [costPrice, setCostPrice] = useState(item?.costPrice || 0);
-  const [salePrice, setSalePrice] = useState(item?.salePrice || 0);
+  const [unitTpl, setUnitTpl] = useState(() => { const t = item ? '' : _itemFormType0(types); const t0 = t ? _tplFor(t)[0] : null; return t0 ? t0.id : ''; });
+  const [unitsTouched, setUnitsTouched] = useState(false);   // ผู้ใช้แก้หน่วยเองแล้ว → กดแม่แบบ/เปลี่ยนประเภทต้องถามก่อน
+  // 🆕 ITEM-FORM: ขั้นต่ำ/สูงสุด กรอกเป็นหน่วย minMaxUnit (ค่าที่เก็บ = หน่วยฐานเสมอ) · ไม่แตะช่อง = เขียนค่าฐานเดิมกลับตรง ๆ
+  const [mmUnit, setMmUnit] = useState(item?.minMaxUnit || '');
+  const _mmFactor = (uu, mu) => { if(!mu || !(uu||[]).some(u => u.name === mu && !u.isBase)) return 1; const f = resolveToBase(uu, mu); return f > 0 ? f : 1; };
+  const _mmShow = (v) => { const f = _mmFactor(item?.units, item?.minMaxUnit); const n = (Number(v)||0) / f; return Math.round(n * 1e6) / 1e6; };
+  const [minStock, setMinStock] = useState(() => _mmShow(item?.minStock));
+  const [maxStock, setMaxStock] = useState(() => _mmShow(item?.maxStock));
+  const [mmDirty, setMmDirty] = useState(false);
   // 🛒 PRODLIVE-W2 D1: ขายหน้าร้านได้ — 'default' (ตามประเภท/ราคา · isSellableItem) | 'yes' | 'no' → sellable undefined|true|false
   const [sellableMode, setSellableMode] = useState(item?.sellable === true ? 'yes' : item?.sellable === false ? 'no' : 'default');
   const [shelfLife, setShelfLife] = useState(item?.shelfLife || 0);
   const [shelf, setShelf] = useState(item?.shelf || '');
-  const [defaultSupplierId, setDefaultSupplierId] = useState(item?.defaultSupplierId || '');
   const [tags, setTags] = useState(item?.tags || []);
   const [active, setActive] = useState(item?.active !== false);
+  const [advOpen, setAdvOpen] = useState(false);            // ▸ ขั้นสูง (พับไว้ก่อน)
+  const [clearLegacyDU, setClearLegacyDU] = useState(false); // กด "ล้างค่าเก่า" หน่วยแยกแผนก/ประเภทคลัง
   // 🎁 SALES-W2: ตั้งค่าชุดสินค้า (Snack Box) — ของข้างในเลือกต่อใบตอนขาย ที่นี่ตั้งแค่ "ของที่ติดมาทุกกล่อง" + กติกา
   const [kitComponents, setKitComponents] = useState(() => (item?.kit?.components || []).map(c => ({ ...c })));
   const [kitAllowCustomize, setKitAllowCustomize] = useState(item?.kit?.allowCustomize !== false);
@@ -86609,21 +87308,21 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
   // 🥡 trayConfig — สำหรับขั้นบ่ม/อบ (จำนวนที่วางต่อถาด)
   const [unitsPerTray, setUnitsPerTray] = useState(item?.trayConfig?.unitsPerTray || 0);
   const [trayName, setTrayName] = useState(item?.trayConfig?.trayName || 'ถาด');
-  // 🆕 ⚖️ Weigh mode — กำหนดว่า material นี้บังคับชั่งจากเครื่องชั่ง / กรอกเอง / เลือกได้
-  //   'scale'  = ต้องเอาค่าจากเครื่องชั่ง (block manual)
-  //   'manual' = กรอกเอง (เช่น ไข่ 6 ฟอง — นับ ไม่ต้องชั่ง)
-  //   'either' = เลือกได้ตามสะดวก (default)
-  const [weighMode, setWeighMode] = useState(item?.weighMode || 'either');
-  const [zeroTolerance, setZeroTolerance] = useState(item?.zeroTolerance ?? 0);
-  const [stableSeconds, setStableSeconds] = useState(item?.stableSeconds ?? 1);
   // 🆕 หน่วยที่แสดงในรายการสต๊อก ('' = อัตโนมัติตาม multi-unit)
   const [displayUnit, setDisplayUnit] = useState(item?.displayUnit || '');
-  // 🆕 DU: per-department + per-locType override (resolver chain: locType > dept > displayUnit > auto)
-  const [displayUnitByDept,    setDisplayUnitByDept]    = useState(() => ({ ...(item?.displayUnitByDept || {}) }));
-  const [displayUnitByLocType, setDisplayUnitByLocType] = useState(() => ({ ...(item?.displayUnitByLocType || {}) }));
-  // 🆕 PR5: รายการ supplier ที่ผูกกับ item นี้ (สำหรับ Min-Max purchase workflow)
-  //   [{ supplierId, unitPrice, isPreferred }]
-  const [itemSuppliers, setItemSuppliers] = useState(() => (item?.suppliers || []).map(s => ({...s})));
+  // 🆕 ITEM-FORM verify: ภาพรวมค่าที่กรอก — ใช้เช็ก "แก้แล้วยังไม่บันทึก" ก่อนกด 💲 ตั้งราคาขาย (ปุ่มนั้นปิดฟอร์ม)
+  const _formSnap = () => JSON.stringify([code, name, barcode, type, groupId, issueUnit, units, mmUnit, minStock, maxStock,
+    sellableMode, shelfLife, shelf, tags, active, kitComponents, kitAllowCustomize, kitMin, kitMax, kitPrintMode,
+    unitsPerTray, trayName, displayUnit]);
+  const [_snap0] = useState(_formSnap);
+  const openPricesGuarded = typeof onOpenPrices === 'function' ? (it) => {
+    if(_formSnap() !== _snap0 && !confirm('ข้อมูลที่แก้ยังไม่บันทึก — ไปหน้าตั้งราคาเลย? (ที่แก้ไว้จะหาย)')) return;
+    onOpenPrices(it);
+  } : undefined;
+  // 🆕 ITEM-FORM: ตัดช่อง ต้นทุน/ราคาขาย/ผู้ขาย/หน่วยแยกแผนก+คลัง/การชั่ง ออกจากฟอร์ม
+  //   ค่าเดิมของสินค้าเดิมคงอยู่ผ่าน spread ใน save (R1) · ต้นทุน/ผู้ขายระบบเติมเองจากประวัติรับของ (กล่องข้อมูล)
+  const legacyDU = isEdit ? (Object.values(item.displayUnitByDept || {}).filter(Boolean).length
+    + Object.values(item.displayUnitByLocType || {}).filter(Boolean).length) : 0;
 
   const save = () => {
     // 🔒 ช่องบังคับ: ชื่อ + ประเภท + หน่วยหลัก (กันสินค้าข้อมูลไม่ครบ → สต๊อก/รายงานพัง)
@@ -86676,14 +87375,20 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
       });
       if(!hasPack && !confirm('ชุดนี้ยังไม่ได้ใส่กล่อง/บรรจุภัณฑ์เป็นของที่ติดมาทุกกล่อง\n\nสต๊อกและต้นทุนบรรจุภัณฑ์จะไม่ถูกตัดตอนขาย — บันทึกต่อไหม?')) return;
     }
+    // 🆕 ITEM-FORM Q2: รหัสว่าง → RM-/PK-/FG-… + เลขวิ่ง 4 หลัก (nextItemCode บน state สด) · รหัสซ้ำ = บล็อก
+    //   ตอนแก้สินค้าเดิม เช็กซ้ำเฉพาะเมื่อรหัสถูกเปลี่ยน (ข้อมูลเดิมอาจซ้ำอยู่แล้ว ห้ามบล็อกการแก้เรื่องอื่น)
     let finalCode = code.trim();
     if(!finalCode){
-      const t = types.find(tt => tt.id === type);
-      const prefix = (t?.name||'IT').slice(0,2).toUpperCase();
-      const existing = state.items.filter(i => (i.code||'').startsWith(prefix+'-'));
-      const nextNum = String(existing.length + 1).padStart(3,'0');
-      finalCode = `${prefix}-${nextNum}`;
+      finalCode = global.ERP.nextItemCode ? global.ERP.nextItemCode(state, type) : ('IT-' + Date.now());
     }
+    if(finalCode && (!isEdit || finalCode.toLowerCase() !== String(item.code || '').trim().toLowerCase())){
+      const dupC = global.ERP.findItemCodeDup ? global.ERP.findItemCodeDup(state, finalCode, item?.id) : null;
+      if(dupC){ setAdvOpen(true); return alert(`รหัส "${finalCode}" ซ้ำกับ ${dupC.name} — เปลี่ยนรหัสในส่วน ▸ ขั้นสูง`); }
+    }
+    // เตือนชื่อซ้ำ (บันทึกต่อได้)
+    const dupN = global.ERP.findItemNameDup ? global.ERP.findItemNameDup(state, name, item?.id) : null;
+    if(dupN && (!isEdit || name.trim() !== String(item.name || '').trim())
+      && !confirm(`มีสินค้าชื่อนี้แล้ว: ${dupN.name} (${dupN.code || '-'})\n\nบันทึกเป็นสินค้าใหม่อีกตัวต่อไหม?`)) return;
     // ใช้ยอดสต๊อกสดจาก state (ไม่ใช่ snapshot ตอนเปิดหน้าต่าง) — หน้าต่างย่อค้าง/cloud refresh แล้วกดบันทึกต้องไม่ทับยอดที่เพิ่งเปลี่ยน
     const _liveItem = item?.id ? ((state.items||[]).find(x => x.id === item.id) || item) : item;
     const stockByBranch = { ...(_liveItem?.stockByBranch || {}) };
@@ -86692,6 +87397,22 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
     // add new tags to global pool
     tags.forEach(t => { if(!(state.itemTags||[]).includes(t)) dispatch({ type:'ADD_ITEM_TAG', data:t }); });
 
+    // ขั้นต่ำ/สูงสุด: ช่องกรอกเป็นหน่วย minMaxUnit → เก็บหน่วยฐาน · สินค้าเดิมที่ไม่แตะช่อง = ค่าฐานเดิมตรง ๆ (กันทศนิยมเพี้ยน)
+    const _mmU = isEdit ? (item.minMaxUnit || '') : mmUnit;
+    // 🆕 ITEM-FORM UAT2 N4: หน่วยขั้นต่ำ/สูงสุด (minMaxUnit) ถูกลบออกจากตารางหน่วยระหว่างแก้ → ตัวคูณจะกลายเป็น 1 (หน่วยฐาน) → เตือนก่อนบันทึก
+    const _mmLost = !!_mmU && !units.some(u => u.name === _mmU);
+    if(_mmLost && (Number(minStock) || Number(maxStock))){
+      const _bn = (units.find(u => u.isBase) || {}).name || issueUnit || 'หน่วยฐาน';
+      const _msg = mmDirty
+        ? `หน่วยขั้นต่ำ/สูงสุด "${_mmU}" ถูกลบออกจากตารางหน่วยแล้ว\n\nตัวเลขขั้นต่ำ ${minStock} / สูงสุด ${maxStock} จะถูกเก็บเป็นหน่วยฐาน (${_bn}) — ไม่คูณ ${_mmU} แล้ว\n\nตรวจตัวเลขให้เป็นหน่วย ${_bn} ก่อน · บันทึกต่อไหม?`
+        : `หน่วยขั้นต่ำ/สูงสุด "${_mmU}" ถูกลบออกจากตารางหน่วยแล้ว\n\nค่าขั้นต่ำ/สูงสุดเดิมคงไว้ แต่จะแสดงเป็นหน่วยฐาน (${_bn}) แทน · บันทึกต่อไหม?`;
+      if(!confirm(_msg)) return;
+    }
+    const _mmSave = (v, key) => {
+      if(isEdit && !mmDirty) return Number((_liveItem || item)[key]) || 0;
+      const f = _mmFactor(units, _mmU);
+      return Math.round((Number(v) || 0) * f * 1e6) / 1e6;
+    };
     const data = {
       // 🔒 ITEM-KEEP: คงฟิลด์ที่ฟอร์มนี้ไม่ได้แก้ไว้ก่อนเสมอ แล้วค่อยทับด้วยค่าจากฟอร์ม
       //   UPDATE_ITEM แทนที่ทั้ง record (01-state.js:990) → เดิมกดบันทึกครั้งเดียว
@@ -86708,11 +87429,10 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
         u.isBase ||
         (u.toBase && u.toBase > 0) ||
         (u.equalTo && u.equalTo.unit && (Number(u.equalTo.qty)||0) > 0)
-      )),
-      minStock: Number(minStock)||0, maxStock: Number(maxStock)||0,
-      costPrice: Number(costPrice)||0, salePrice: Number(salePrice)||0,
+      )).map(unitCleanEqInput),   // §U เก็บ equalToInput เฉพาะทิศกลับที่ยังตรงกับ equalTo (แสดงผลอย่างเดียว)
+      minStock: _mmSave(minStock, 'minStock'), maxStock: _mmSave(maxStock, 'maxStock'),
       shelfLife: Number(shelfLife)||0, shelf: shelf.trim(),
-      defaultSupplierId, tags, active, stockByBranch,
+      tags, active, stockByBranch,
       // 🎁 ชุดสินค้า — เก็บเฉพาะตอน type = 'kit' (ประเภทอื่นเคลียร์ทิ้ง กันข้อมูลค้าง)
       kit: type === 'kit' ? {
         components: kitComponents.filter(c => c.itemId && (Number(c.qty)||0) > 0)
@@ -86727,200 +87447,189 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
         unitsPerTray: Number(unitsPerTray)||0,
         trayName: trayName.trim() || 'ถาด',
       } : null,
-      // 🆕 ⚖️ Weighing config
-      weighMode,
-      zeroTolerance: Number(zeroTolerance) || 0,
-      stableSeconds: Number(stableSeconds) || 1,
       // 🆕 หน่วยที่แสดง (รายการสต๊อก) — '' = อัตโนมัติ
       displayUnit: displayUnit || '',
-      // 🆕 DU: per-dept + per-locType (strip ค่าว่าง)
-      displayUnitByDept: Object.fromEntries(
-        Object.entries(displayUnitByDept || {}).filter(([_,v]) => v)),
-      displayUnitByLocType: Object.fromEntries(
-        Object.entries(displayUnitByLocType || {}).filter(([_,v]) => v)),
-      // 🆕 PR5: รายการ supplier ผูกกับ item (กรอง row ที่ไม่ได้เลือก supplier)
-      suppliers: itemSuppliers
-        .filter(sp => sp.supplierId)
-        .map(sp => ({
-          supplierId: sp.supplierId,
-          unitPrice: Number(sp.unitPrice)||0,
-          isPreferred: !!sp.isPreferred,
-        })),
+      // 🆕 ITEM-FORM R2: สินค้าใหม่เขียนค่ากลางของช่องที่ตัดออก (shape เดิม) · สินค้าเดิม = ไม่เขียน → ค่าเดิมมาจาก spread (R1)
+      ...(isEdit ? {} : { costPrice:0, salePrice:0, suppliers:[], defaultSupplierId:'',
+        displayUnitByDept:{}, displayUnitByLocType:{}, weighMode:'either', zeroTolerance:0, stableSeconds:1 }),
     };
+    // 🆕 ITEM-FORM: "ล้างค่าเก่า" หน่วยแยกแผนก/ประเภทคลัง (ผู้ใช้กดเอง)
+    if(isEdit && clearLegacyDU){ data.displayUnitByDept = {}; data.displayUnitByLocType = {}; }
+    // หน่วยขั้นต่ำ/สูงสุด: เขียนเฉพาะสินค้าใหม่ที่คัดลอกมา (สินค้าเดิมคงค่าเดิมผ่าน spread)
+    if(!isEdit && mmUnit && data.units.some(u => u.name === mmUnit)) data.minMaxUnit = mmUnit;
+    // N4: หน่วย minMaxUnit ถูกลบ → ล้างค่าหน่วยค้าง (ค่าเก็บเป็นหน่วยฐานอยู่แล้ว · ป้ายจะได้ตรงกับตัวเลข)
+    if(isEdit && _mmLost) delete data.minMaxUnit;
     // 🛒 ขายได้ tri-state: ค่าเริ่มต้น = ลบ key (อ่านตามประเภท/ราคา)
     if(sellableMode === 'yes') data.sellable = true;
     else if(sellableMode === 'no') data.sellable = false;
     else delete data.sellable;
+    // ⚠️ UAT S3: กรอกกลับทิศ (เช่น พิมพ์ 200 ในแถว "1 ใบ = ? กก." ทั้งที่หมายถึง 1 กก. = 200 ใบ) → สต๊อกเพี้ยน 100 เท่าขึ้นไป
+    //   เตือนแบบถามยืนยัน (ไม่บล็อก) เฉพาะหน่วยที่เพิ่มใหม่/แก้ตัวคูณ · หน่วยฐานต้องเป็นน้ำหนัก/ปริมาตร
+    {
+      const _bu = (data.units.find(u => u.isBase) || {}).name || '';
+      const _toKg = _IF_WV_BASE[_bu];
+      if(_toKg){
+        const _warn = [];
+        for(const u of data.units){
+          if(u.isBase || !u.name || !u.equalTo) continue;
+          const f = resolveToBase(data.units, u.name);
+          const f0 = isEdit && (item.units || []).some(x => x.name === u.name) ? resolveToBase(item.units, u.name) : null;
+          if(!(f > 0) || (f0 != null && Math.abs(f - f0) <= Math.abs(f0) * 1e-9)) continue;
+          const odd = (_IF_COUNT_U.includes(u.name) && f * _toKg > 50) ? `${u.name} หนักเกิน ${fmtUnitQty(50 / _toKg)} ${_bu}`
+                    : (_IF_PACK_U.includes(u.name) && f * _toKg < 1) ? `${u.name} น้อยกว่า ${fmtUnitQty(1 / _toKg)} ${_bu}`
+                    : (_IF_SMALLPACK_U.includes(u.name) && f * _toKg < _IF_SMALLPACK_MIN) ? `${u.name} น้อยกว่า ${fmtUnitQty(_IF_SMALLPACK_MIN / _toKg)} ${_bu}` : '';
+          if(odd) _warn.push(`• ${odd}\n   1 ${u.name} = ${fmtUnitQty(f)} ${_bu} · 1 ${_bu} = ${fmtUnitQty(1 / f)} ${u.name}`);
+        }
+        if(_warn.length && !confirm(`⚠️ ตัวคูณหน่วยดูกลับทิศหรือเปล่า?\n\n${_warn.join('\n')}\n\nถ้ากลับทิศ กด "ยกเลิก" → กด ⇄ สลับทิศ ในแถวนั้น แล้วพิมพ์เลขเดิมใหม่ในช่อง (⇄ สลับแค่การแสดง ไม่กลับเลขให้) · ถูกแล้ว กด "ตกลง" เพื่อบันทึก`)) return;
+      }
+    }
+    // 🔒 §U U2: ด่านชั้นสอง — หน่วยที่เอกสารเปิดอยู่ใช้ ต้องยังมีชื่อเดิม + ตัวคูณถึงหน่วยฐานเท่าเดิม (รวมลูกโซ่ เช่น ลัง→ถุง→กรัม)
+    //   ยกเว้นหน่วยที่ผู้จัดการปลดล็อกพร้อมเหตุผล · เปลี่ยนหน่วยฐาน (⭐) มี confirm แยกอยู่แล้ว → ไม่ตรวจซ้ำ
+    const _unitAudit = [];
+    if(isEdit){
+      const _oldU = item.units || [];
+      const _sameBase = ((_oldU.find(u => u.isBase) || {}).name || '') === ((data.units.find(u => u.isBase) || {}).name || '');
+      for(const nm of Object.keys(unitUsageMap)){
+        const _has = data.units.some(u => u.name === nm);
+        const f0 = resolveToBase(_oldU, nm), f1 = _has ? resolveToBase(data.units, nm) : null;
+        const changed = !_has || (_sameBase && Math.abs(f1 - f0) > Math.abs(f0) * 1e-9);
+        if(!changed) continue;
+        if(!unitOverrides[nm]){
+          const _uu = unitUsageMap[nm], _dd = _uu.docs.slice(0, 3).join(', ') + (_uu.docs.length > 3 ? ` และอีก ${_uu.docs.length - 3}` : '');
+          alert(`⛔ หน่วย "${nm}" ใช้อยู่ใน ${_uu.summary} (${_dd}) — ${_has ? 'แก้ตัวคูณ' : 'ลบ/เปลี่ยนชื่อ'}ไม่ได้\n\n→ ${global.ERP.unitUsageAdvice ? global.ERP.unitUsageAdvice(_uu, nm) : 'เพิ่มหน่วยใหม่แทน แล้วเอาติ๊กหน่วยเก่าออก'}${canUnlockUnits ? '\n→ หรือกด 🔓 ปลดล็อก ที่แถวหน่วยนี้ พร้อมพิมพ์เหตุผล' : '\n→ หรือให้ผู้จัดการ/GM กด 🔓 ปลดล็อก'}`);
+          return;
+        }
+        _unitAudit.push({ unit:nm, reason:unitOverrides[nm], before:f0, after:_has ? f1 : null, docs:unitUsageMap[nm].docs.slice(0, 20) });
+      }
+    }
+    if(_unitAudit.length){
+      const _cu = state.currentUser || {};
+      const _ts = Date.now();
+      dispatch({ type:'ADD_AUDIT_LOG', data:{ id:'al_uov_' + _ts.toString(36) + '_' + String(item.id), ts:_ts, type:'unit_lock_override',
+        by:_cu.username || _cu.id || '', entityId:item.id, entityRef:item.code || '', changes:_unitAudit,
+        reason:_unitAudit.map(c => `${c.unit}: ${c.reason}`).join(' | '),
+        summary:`ปลดล็อกหน่วยที่เอกสารค้างใช้ ${item.code || ''} ${item.name || ''}: ` + _unitAudit.map(c => `${c.unit} ${fmtUnitQty(c.before)}→${c.after == null ? 'ลบ' : fmtUnitQty(c.after)}`).join(', ') } });
+      data.lastUnitOverride = { ts:_ts, by:_cu.username || _cu.id || '', units:_unitAudit.map(c => c.unit), reason:_unitAudit.map(c => c.reason).join(' | ') };
+    }
     dispatch({ type: isEdit ? 'UPDATE_ITEM' : 'ADD_ITEM', data });
     if(typeof onSaved === 'function') onSaved(data);   // 🆕 quick-add จาก PO/BOM เลือกต่อได้ทันที
+    // 🆕 ITEM-FORM UAT S3: ฟอร์มไม่มีช่องราคาขายแล้ว → สินค้าใหม่ประเภทขายได้ (FG/SEMI_FG/ชุด) เตือนให้ไปตั้งราคาที่หน้าตั้งราคา
+    if(!isEdit && data.sellable !== false && ['finished','semi_fg','kit'].includes(data.type) && !(Number(data.salePrice) > 0) && !data.priceBook){
+      const _msg = `ยังไม่ตั้งราคาขาย — ${data.name}` + (data.type === 'semi_fg' ? ' (SEMI_FG จะขายได้เมื่อมีราคา)' : '');
+      if(toast) toast(_msg, 'warning', typeof onOpenPrices === 'function'
+        ? { duration:10000, actionLabel:'💲 ไปตั้งราคา', onAction:() => onOpenPrices(data) } : { duration:8000 });
+    }
     onClose();
   };
 
   // (helper หน่วยทั้งหมดอยู่ใน UnitEditor — ตรงนี้ไม่ต้องมี copy ซ้ำ)
 
+  // 🆕 ITEM-FORM S3a: เลือกประเภท → สินค้าใหม่ได้แม่แบบหน่วยแรกของประเภทนั้น (ถ้ายังไม่แก้หน่วยเอง)
+  const ready = isEdit || !!type;   // สินค้าเดิมที่ไม่มีประเภท (ข้อมูลเก่า) ยังเห็นฟอร์มครบ — บันทึกจะเตือนให้กดประเภท
+  const isFgLike = type === 'finished' || type === 'semi_fg' || type === 'wip';
+  const pickType = (tid) => {
+    if(tid === type) return;
+    setType(tid);
+    if(isEdit || (unitsTouched && units.some(u => u.name))) return;
+    const t0 = _tplFor(tid)[0];
+    if(t0){ setUnits(_applyTpl(t0)); setUnitTpl(t0.id); setUnitsTouched(false); }
+  };
+  const applyTemplate = (t) => {
+    if(unitsTouched && units.some(u => u.name) && !confirm(`แทนที่หน่วยที่ตั้งไว้ทั้งชุดด้วยแม่แบบ "${t.label}"?`)) return;
+    setUnits(_applyTpl(t)); setUnitTpl(t.id); setUnitsTouched(false);
+  };
+  const setUnitsUser = (v) => { setUnitsTouched(true); setUnitTpl(''); setUnits(v); };
+  // 📋 คัดลอกจากสินค้าเดิม (สินค้าใหม่เท่านั้น) — ไม่คัดลอก รหัส/บาร์โค้ด/ราคา/ผู้ขาย/สต๊อก/ค่าเก่าที่ตัดออกจากฟอร์ม
+  const copyFrom = (srcId) => {
+    const src = (state.items || []).find(x => x.id === srcId);
+    if(!src) return;
+    setType(src.type || type);
+    setUnits(JSON.parse(JSON.stringify(src.units || []))); setUnitTpl(''); setUnitsTouched(true);
+    setIssueUnit(src.issueUnit || ((src.units || []).find(u => u.isBase) || {}).name || 'กก.');
+    setGroupId(src.groupId || ''); setTags([...(src.tags || [])]); setShelf(src.shelf || ''); setDisplayUnit(src.displayUnit || '');
+    const f = _mmFactor(src.units, src.minMaxUnit);
+    setMmUnit(src.minMaxUnit || '');
+    setMinStock(Math.round((Number(src.minStock) || 0) / f * 1e6) / 1e6);
+    setMaxStock(Math.round((Number(src.maxStock) || 0) / f * 1e6) / 1e6);
+    setShelfLife(src.shelfLife || 0);
+    setUnitsPerTray(src.trayConfig?.unitsPerTray || 0); setTrayName(src.trayConfig?.trayName || 'ถาด');
+    setSellableMode(src.sellable === true ? 'yes' : src.sellable === false ? 'no' : 'default');
+    if(src.type === 'kit' && src.kit){
+      setKitComponents((src.kit.components || []).map(c => ({ ...c })));
+      setKitAllowCustomize(src.kit.allowCustomize !== false);
+      setKitMin(src.kit.minItems || 0); setKitMax(src.kit.maxItems || 0); setKitPrintMode(src.kit.printMode || 'single');
+    }
+    setName(src.name || '');
+  };
+  // ⚠️ เตือนชื่อซ้ำสด (เตือนอย่างเดียว)
+  const nameDup = useMemo(() => (global.ERP.findItemNameDup ? global.ERP.findItemNameDup(state, name, item?.id) : null), [name, state.items]);
+  const showDup = !!nameDup && (!isEdit || name.trim() !== String(item.name || '').trim());
+  const curBase = (units.find(u => u.isBase) || {}).name || issueUnit || '';
+  const mmLabelU = (() => { const mu = isEdit ? (item.minMaxUnit || '') : mmUnit; return (mu && units.some(u => u.name === mu)) ? mu : curBase; })();
+  const codePh = type && global.ERP.nextItemCode ? 'อัตโนมัติ: ' + global.ERP.nextItemCode(state, type) : 'ว่างไว้ = สร้างอัตโนมัติ';
+  const _liveForInfo = isEdit ? ((state.items || []).find(x => x.id === item.id) || item) : null;
+
   // 🆕 docKey 'item:'+id — เปิดสินค้าเดิมซ้ำขณะย่ออยู่ (จากตาราง / Command palette) = เด้งอันเดิม · เพิ่มใหม่ไม่มี key
   return h(Modal, { isOpen:true, title: isEdit ? `แก้ไข: ${item.name}` : 'เพิ่มสินค้า/วัตถุดิบ', onClose, size:'xl', docKey: isEdit ? 'item:' + item.id : undefined },
     h('div', { className:'space-y-4' },
-      // 1. Basic
-      h('div', null,
-        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' }, '📋 ข้อมูลพื้นฐาน'),
-        h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
-          h(Field, { label:'รหัสสินค้า', hint:'ว่างไว้ = สร้างอัตโนมัติ' },
-            h('input', { type:'text', value:code, onChange:e=>setCode(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm font-mono' })
-          ),
-          h(Field, { label:'บาร์โค้ด' },
-            h('input', { type:'text', value:barcode, onChange:e=>setBarcode(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm font-mono' })
-          ),
-          h(Field, { label:'ประเภท *' },
-            h('select', { value:type, onChange:e=>setType(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm' },
-              types.map(t => h('option', { key:t.id, value:t.id }, `${t.icon||''} ${t.name}`))
-            )
-          ),
-        ),
+      // ① ประเภท — สินค้าใหม่ปุ่มใหญ่ (บังคับกดก่อน) · แก้สินค้าเดิมเป็นปุ่มแถวเล็ก เปลี่ยนได้เหมือนเดิม
+      h('div', { 'data-testid':'item-type-picker' },
+        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' }, isEdit ? 'ประเภท' : '① เลือกประเภทสินค้า *'),
+        h('div', { className:'flex flex-wrap gap-2' },
+          types.map(t => h('button', { key:t.id, type:'button', 'data-testid':'item-type-' + t.id, onClick:() => pickType(t.id),
+            className: cls('rounded-lg border-2 font-medium', isEdit ? 'px-3 py-1.5 text-sm' : 'px-4 py-3 text-base min-w-[9rem]',
+              type === t.id ? 'bg-blue-600 text-white border-blue-700' : 'bg-white border-gray-300 hover:border-blue-400') },
+            `${t.icon || ''} ${t.name}`))),
+        !ready && h('div', { className:'text-xs text-amber-700 mt-2' }, 'กดเลือกประเภทก่อน แล้วช่องที่เหลือจะแสดง (กันลืมเปลี่ยนประเภทจนขนมสำเร็จกลายเป็นวัตถุดิบ)')),
+      // 📋 คัดลอกจากสินค้าเดิม
+      !isEdit && h('div', { className:'bg-gray-50 border rounded p-2', 'data-testid':'item-copy-from' },
+        h('div', { className:'text-xs text-gray-700 mb-1' }, '📋 คัดลอกจากสินค้าเดิม — ได้ประเภท หน่วย กลุ่ม Tags ตำแหน่ง ขั้นต่ำ/สูงสุด อายุ ถาด มาให้ แล้วแก้แค่ชื่อ'),
+        h(Combobox, { value:'', onChange:(v) => { if(v) copyFrom(v); }, placeholder:'🔍 ค้นหาสินค้าต้นแบบ…',
+          options:(state.items || []).filter(i => i && i.active !== false),
+          getKey:(i) => i.id, getLabel:(i) => `${i.name} (${i.code || '-'})`,
+          getSearchText:(i) => `${i.name || ''} ${i.code || ''}` })),
+      // ② ส่วนหลัก
+      ready && h('div', { className:'space-y-3', 'data-testid':'item-main' },
         h(Field, { label:'ชื่อสินค้า *' },
-          h('input', { type:'text', value:name, onChange:e=>setName(e.target.value),
-            className:'w-full px-3 py-2 border-2 rounded text-sm' })
-        ),
-        h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
-          h(Field, { label:'กลุ่มสินค้า' },
-            h('select', { value:groupId, onChange:e=>setGroupId(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm' },
-              h('option', { value:'' }, '— ไม่ระบุ —'),
-              (state.itemGroups||[]).map(g => h('option', { key:g.id, value:g.id }, g.name))
-            )
-          ),
-          h(Field, { label:'ตำแหน่งคลัง', hint:'เลือกจาก master list — เพิ่ม/แก้ไขที่ Settings → ตำแหน่งคลัง' },
-            h(StorageLocationPicker, { value:shelf, onChange:setShelf,
-              options: state.storageLocations || [], dispatch })
-          ),
-        ),
-      ),
-
-      // 2. Tags (multi-select from list)
-      h('div', null,
-        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' }, '🏷️ Tags (ตัวกรอง/ค้นหา)'),
-        h(TagPicker, { value:tags, onChange:setTags, allTags:state.itemTags || [], dispatch })
-      ),
-
-      // 3. Units (multi-unit with chain + purposes)
-      h(UnitEditor, {
-        units, setUnits,
-        issueUnit, setIssueUnit,
-        unitPresets: state.unitPresets || [],
-        dispatch,
-        purposeScope: scope,           // 🏷️ แผนกนี้ติ๊กได้เฉพาะคอลัมน์ตัวเอง
-        baseChangeWarning,             // ⭐ confirm ก่อนเปลี่ยน base ถ้ามีสต๊อก/FIFO/BOM
-      }),
-
-      // 3.5 หน่วยที่แสดงในรายการสต๊อก (override auto multi-unit) — 4-tier resolver
-      h('div', null,
-        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' },
-          '👁️ หน่วยที่แสดงในรายการสต๊อก'),
-        h('div', { className:'text-xs text-gray-600 mb-2' },
-          '🔍 Resolver: ', h('b', null, 'คลัง'), ' > ', h('b', null, 'แผนก'),
-          ' > ', h('b', null, 'ทั่วไป (default)'), ' > 🤖 auto'),
-        // (3) default ทั่วไป — base case
-        h(Field, { label:'หน่วย default (ทั่วไป)',
-          hint:'ว่าง = อัตโนมัติ (auto multi-unit) · เลือกหน่วยเพื่อใช้เป็น default' },
-          h('select', { value:displayUnit, onChange:e=>setDisplayUnit(e.target.value),
-            className:'w-full px-3 py-2 border-2 rounded text-sm' },
-            h('option', { value:'' }, '🤖 อัตโนมัติ (auto multi-unit)'),
-            units.filter(u => u.name).map(u =>
-              h('option', { key:u.name, value:u.name }, `${u.name}${u.isBase ? ' (base)' : ''}`))
-          )
-        ),
-        // (2) per-department
-        h('div', { className:'mt-3' },
-          h('div', { className:'text-xs font-medium text-gray-700 mb-1' },
-            '🏢 หน่วยตามแผนก ', h('span', { className:'text-gray-500' }, '(user login แผนกนี้ → เห็นเป็นหน่วยนี้)')),
-          h('div', { className:'grid grid-cols-2 md:grid-cols-3 gap-2 bg-gray-50 p-2 rounded' },
-            (state.departments||[]).map(dept => h('div', { key:dept.id, className:'flex items-center gap-2' },
-              h('span', { className:'text-xs w-20 truncate', title:dept.name }, dept.name),
-              h('select', { value: displayUnitByDept[dept.id] || '',
-                onChange:e=>setDisplayUnitByDept({...displayUnitByDept, [dept.id]:e.target.value}),
-                className:'flex-1 px-2 py-1 border rounded text-xs bg-white' },
-                h('option', { value:'' }, '— default —'),
-                units.filter(u => u.name).map(u =>
-                  h('option', { key:u.name, value:u.name }, u.name))
-              )
-            ))
-          )
-        ),
-        // (1) per-locType (สูงสุด)
-        h('div', { className:'mt-3' },
-          h('div', { className:'text-xs font-medium text-gray-700 mb-1' },
-            '📦 หน่วยตามประเภทคลัง ', h('span', { className:'text-gray-500' }, '(ตอนดู "ตามคลัง" — ทับทั้ง 2 ข้อบน)')),
-          h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-2 bg-gray-50 p-2 rounded' },
-            [
-              { v:'raw',  label:'📦 raw (วัตถุดิบ)' },
-              { v:'wip',  label:'🏭 wip (ระหว่างผลิต)' },
-              { v:'fg',   label:'🎂 fg (สำเร็จ)' },
-              { v:'line', label:'⚙️ line (ไลน์ผลิต)' },
-            ].map(lt => h('div', { key:lt.v, className:'flex items-center gap-2' },
-              h('span', { className:'text-xs w-24 truncate', title:lt.label }, lt.label),
-              h('select', { value: displayUnitByLocType[lt.v] || '',
-                onChange:e=>setDisplayUnitByLocType({...displayUnitByLocType, [lt.v]:e.target.value}),
-                className:'flex-1 px-2 py-1 border rounded text-xs bg-white' },
-                h('option', { value:'' }, '— ตามแผนก/default —'),
-                units.filter(u => u.name).map(u =>
-                  h('option', { key:u.name, value:u.name }, u.name))
-              )
-            ))
-          )
-        )
-      ),
-
-      // 3.7 PR5: Suppliers — ผูกกับ supplier หลายเจ้า + ราคาต่อหน่วย + preferred
-      h('div', null,
-        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' },
-          '🏪 Suppliers (สำหรับเปิด PO อัตโนมัติเมื่อของใกล้หมด)'),
-        h('div', { className:'text-xs text-gray-600 mb-2' },
-          'ผูก item กับ supplier ที่ซื้อได้ · ราคาจะถูกใช้เป็น default ใน PO · ติ๊ก preferred 1 เจ้าเป็น default'),
-        h('div', { className:'space-y-2' },
-          (itemSuppliers||[]).map((sp,i) => h('div', { key:i, className:'flex gap-2 items-center bg-gray-50 p-2 rounded' },
-            h('select', { value:sp.supplierId||'', onChange:e=>{
-                const next = [...itemSuppliers];
-                next[i] = { ...next[i], supplierId: e.target.value };
-                setItemSuppliers(next);
-              },
-              className:'flex-1 px-2 py-1 border rounded text-sm' },
-              h('option', { value:'' }, '— เลือก supplier —'),
-              (state.suppliers||[]).map(sup => h('option', { key:sup.id, value:sup.id }, global.ERP.partyOptionText ? global.ERP.partyOptionText(sup) : sup.name))   // 🆕 PARTY-BRANCH: ชื่อ · สาขา
-            ),
-            h('input', { type:'number', step:'0.01', value:sp.unitPrice||0,
-              placeholder:'ราคา/หน่วย',
-              onChange:e=>{
-                const next = [...itemSuppliers];
-                next[i] = { ...next[i], unitPrice: Number(e.target.value)||0 };
-                setItemSuppliers(next);
-              },
-              className:'w-28 px-2 py-1 border rounded text-sm text-right' }),
-            h('label', { className:'flex items-center gap-1 text-xs cursor-pointer whitespace-nowrap' },
-              h('input', { type:'radio', name:'sup-preferred',
-                checked:!!sp.isPreferred,
-                onChange:()=>{
-                  // เลือก 1 ตัวเป็น preferred (radio behavior — แก้ทั้ง array)
-                  setItemSuppliers(itemSuppliers.map((x,j) => ({...x, isPreferred: j === i})));
-                } }),
-              '⭐ Preferred'),
-            h('button', { type:'button', onClick:()=>setItemSuppliers(itemSuppliers.filter((_,j) => j !== i)),
-              className:'text-red-500 hover:bg-red-50 px-2 py-1 rounded text-sm' }, '×')
-          )),
-          h('button', { type:'button', onClick:()=>setItemSuppliers([...itemSuppliers, { supplierId:'', unitPrice:0, isPreferred: itemSuppliers.length === 0 }]),
-            className:'text-sm bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 px-3 py-1.5 rounded' },
-            '+ เพิ่ม Supplier')
-        )
-      ),
+          h('input', { type:'text', value:name, onChange:e=>setName(e.target.value), 'data-testid':'item-name',
+            className:'w-full px-3 py-2 border-2 rounded text-sm' })),
+        showDup && h('div', { 'data-testid':'item-name-dup', className:'bg-amber-50 border border-amber-300 rounded px-3 py-2 text-xs text-amber-900' },
+          `⚠️ มีสินค้าชื่อนี้แล้ว: ${nameDup.name} (${nameDup.code || '-'}) — บันทึกได้ แต่ระบบจะถามยืนยันก่อน`),
+        h(UnitEditor, {
+          units, setUnits: setUnitsUser,
+          issueUnit, setIssueUnit,
+          unitPresets: state.unitPresets || [],
+          dispatch,
+          // 🏷️ แผนกนี้ติ๊กได้เฉพาะคอลัมน์ตัวเอง — เฉพาะตอนแก้สินค้าเดิม
+          //    สินค้าใหม่ยังไม่มีแผนกไหนเป็นเจ้าของแถว + แถวจากแม่แบบ (เช่น แพ็ค ซื้อ+โอน qty ว่าง) ต้องกรอกได้ ไม่งั้นบันทึกไม่ได้
+          purposeScope: isEdit ? scope : undefined,
+          baseChangeWarning,             // ⭐ confirm ก่อนเปลี่ยน base ถ้ามีสต๊อก/FIFO/BOM
+          templates: isEdit ? undefined : _tplFor(type),   // ⚡ แม่แบบหน่วย — สินค้าใหม่เท่านั้น
+          onApplyTemplate: applyTemplate, activeTemplate: unitTpl,
+          // 🔒 §U U2: หน่วยที่เอกสารเปิดอยู่ใช้ + ปลดล็อก (ผู้จัดการ/admin พิมพ์เหตุผล)
+          usageMap: unitUsageMap, canUnlock: canUnlockUnits, overrides: unitOverrides,
+          onOverride: (nm, reason) => setUnitOverrides(o => ({ ...o, [nm]: reason })),
+        }),
+        isFgLike && h('div', { className:'grid grid-cols-1 sm:grid-cols-3 gap-3' },
+          h(Field, { label:'อายุ (วัน)', hint:'0 = ไม่มีวันหมดอายุ' },
+            h('input', { type:'number', value:shelfLife, onChange:e=>setShelfLife(e.target.value), 'data-testid':'item-shelf-life',
+              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
+          h(Field, { label:'จำนวนต่อถาด', hint:'ใช้ในแผนถาดขั้นบ่ม/อบ · 0 = ไม่ใช้ถาด' },
+            h('input', { type:'number', min:0, value:unitsPerTray, onChange:e=>setUnitsPerTray(e.target.value), 'data-testid':'item-units-per-tray',
+              placeholder:'เช่น 12', className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
+          h(Field, { label:'หน่วยถาด' },
+            h('input', { type:'text', value:trayName, onChange:e=>setTrayName(e.target.value),
+              placeholder:'ถาด/แผง/ถ้วย', className:'w-full px-3 py-2 border-2 rounded text-sm' })))),
+      // ℹ️ ข้อมูลที่ระบบเติมเอง (แก้สินค้าเท่านั้น)
+      isEdit && h(ItemInfoPanel, { item:_liveForInfo, state, onOpenPrices: openPricesGuarded }),
 
       // 🎁 SALES-W2: ตั้งค่าชุดสินค้า (แสดงเฉพาะ type = kit)
       type === 'kit' && h('div', { className:'bg-pink-50 border-2 border-pink-200 rounded p-3', 'data-testid':'kit-config' },
         h('h4', { className:'font-bold text-sm mb-1' }, '🎁 ตั้งค่าชุดสินค้า (Snack Box)'),
         h('div', { className:'text-xs text-pink-900 mb-2' },
           'ของข้างในกล่อง "เลือกตอนขาย" ทุกใบ — ที่นี่ตั้งเฉพาะของที่ติดมาทุกกล่อง (เช่น กล่องกระดาษ ริบบิ้น) และกติกาของชุด · '
-          + 'ตั้งราคาต่อกล่องที่ช่อง "ราคาขาย" ด้านล่าง'),
+          + (isEdit ? 'ตั้งราคาต่อกล่องที่ 💲 ราคาขาย/ประเภท (ปุ่มในกล่องข้อมูลด้านบน หรือหน้ารายการสินค้า)'
+            : 'ตั้งราคาต่อกล่องหลังบันทึก ที่ 💲 ราคาขาย/ประเภท (ระบบจะเตือนพร้อมปุ่มลัด)')),
         h('div', { className:'space-y-1 mb-2' },
           kitComponents.length === 0
             ? h('div', { className:'text-xs text-gray-500' }, 'ยังไม่มีของที่ติดมาทุกกล่อง')
@@ -86975,105 +87684,68 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved }
         h('div', { className:'text-xs text-pink-800 mt-1' },
           '💡 ชื่อชุดควรบอกชนิด/ปริมาณ เช่น "Snack Box S (ขนม 3 ชิ้น + เครื่องดื่ม)" — ชื่อลอย ๆ ที่ราคาต่างกันทุกใบเสี่ยงถูกสรรพากรทัก')),
 
-      // 4. Pricing + stock
-      h('div', null,
-        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' },
-          type === 'kit' ? '💰 ราคาต่อกล่อง' : '💰 ราคา + สต๊อก'),
-        h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3' },
-          // 🎁 ชุดสินค้า: ต้นทุน/ขั้นต่ำ/สูงสุด ไม่มีความหมาย (ต้นทุนมาจากของข้างในตาม FIFO · ไม่มีสต๊อกของตัวเอง)
-          type !== 'kit' && h(Field, { label:'ต้นทุน' },
-            h('input', { type:'number', step:'0.01', value:costPrice, onChange:e=>setCostPrice(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
-          ),
-          h(Field, { label: type === 'kit' ? 'ราคาขายต่อกล่อง' : 'ราคาขาย' },
-            h('input', { type:'number', step:'0.01', value:salePrice, onChange:e=>setSalePrice(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
-          ),
-          (() => {
-            const _isS = global.ERP.isSellableItem;
-            const _def = _isS ? _isS({ type, salePrice:Number(salePrice)||0, priceBook:item?.priceBook }) : (type !== 'material');
-            return h(Field, { label:'🛒 ขายหน้าร้านได้', hint:'ค่าเริ่มต้นตอนนี้ = ' + (_def ? 'ขายได้' : 'ไม่ขาย') },
-              h('select', { value:sellableMode, onChange:e=>setSellableMode(e.target.value), 'data-testid':'item-sellable',
-                className:'w-full px-3 py-2 border-2 rounded text-sm' },
-                h('option', { value:'default' }, 'ค่าเริ่มต้น (' + (_def ? 'ขายได้' : 'ไม่ขาย') + ')'),
-                h('option', { value:'yes' }, 'ขายได้'),
-                h('option', { value:'no' }, 'ไม่ขาย')));
-          })(),
-          type !== 'kit' && h(Field, { label:'ขั้นต่ำ' },
-            h('input', { type:'number', value:minStock, onChange:e=>setMinStock(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
-          ),
-          type !== 'kit' && h(Field, { label:'สูงสุด' },
-            h('input', { type:'number', value:maxStock, onChange:e=>setMaxStock(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
-          ),
-        ),
-        h('div', { className:'grid grid-cols-2 gap-3' },
-          type !== 'kit' && h(Field, { label:'อายุ (วัน)', hint:'0 = ไม่มี expiry' },
-            h('input', { type:'number', value:shelfLife, onChange:e=>setShelfLife(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
-          ),
-          h(Field, { label:'Supplier default' },
-            h('select', { value:defaultSupplierId, onChange:e=>setDefaultSupplierId(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm' },
-              h('option', { value:'' }, '— ไม่ระบุ —'),
-              (state.suppliers||[]).map(sup => h('option', { key:sup.id, value:sup.id }, global.ERP.partyOptionText ? global.ERP.partyOptionText(sup) : sup.name))   // 🆕 PARTY-BRANCH: ชื่อ · สาขา
-            )
-          ),
-        ),
-      ),
-
-      // 🆕 ⚖️ Weighing Config — สำหรับ material ที่ใช้ใน BOM (วัตถุดิบ/บรรจุภัณฑ์)
-      // 🆕 PRODLIVE w2 C2: แสดงด้วยเมื่อสินค้าเป็นวัตถุดิบของสูตรใดก็ได้ (เช่น WIP/กึ่งสำเร็จที่ใส่ในสูตรอื่น)
-      (type === 'material' || type === 'packaging' || (!!item && (state.boms||[]).some(b => b && (b.materials||[]).some(m => m.itemId === item.id)))) && h('div', { 'data-weigh-box':'1' },
-        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' }, '⚖️ การชั่งวัตถุดิบ (ตอน BOM weigh)'),
-        h('div', { className:'text-xs text-gray-600 mb-2' },
-          'กำหนดวิธีรับค่าน้ำหนัก — เช่น แป้ง/น้ำตาล "ต้องชั่ง" · ไข่/แพ็คเกจ "พิมพ์เอง"'),
-        h('div', { className:'grid grid-cols-3 gap-2' },
-          [
-            { v:'either', label:'⚖️ เลือกได้',  hint:'พิมพ์เอง หรือ ใช้เครื่องชั่ง', color:'gray' },
-            { v:'scale',  label:'⚖️ ต้องชั่ง',   hint:'บังคับใช้เครื่องชั่ง — กันคนพิมพ์มั่ว', color:'blue' },
-            { v:'manual', label:'✍️ พิมพ์เอง',   hint:'นับชิ้น/ฟอง — ไม่ต้องชั่ง', color:'amber' },
-          ].map(o => h('button', { key:o.v, type:'button',
-            onClick:()=>setWeighMode(o.v),
-            className: cls('px-3 py-2 rounded border-2 text-sm font-medium text-left',
-              weighMode === o.v
-                ? (o.color === 'blue' ? 'bg-blue-600 text-white border-blue-700' :
-                   o.color === 'amber' ? 'bg-amber-500 text-white border-amber-600' :
-                   'bg-gray-600 text-white border-gray-700')
-                : 'bg-white border-gray-300 hover:border-blue-400') },
-            h('div', null, o.label),
-            h('div', { className:'text-[10px] font-normal opacity-90' }, o.hint)))),
-        weighMode === 'scale' && h('div', { className:'mt-2 grid grid-cols-2 gap-2' },
-          h(Field, { label:'Zero tolerance (g) — ก่อนเริ่มชั่ง', hint:'0 = บังคับเป็น 0 เป๊ะ · 0.5 = ผ่อนผันเล็กน้อย' },
-            h('input', { type:'number', step:'0.1', min:0, value:zeroTolerance,
-              onChange:e=>setZeroTolerance(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
-          h(Field, { label:'Stable seconds — รอนิ่ง (วิ)', hint:'1-3 วิ · เครื่องชั่งราคาถูกอาจต้องรอนานกว่า' },
-            h('input', { type:'number', step:'1', min:0, max:10, value:stableSeconds,
-              onChange:e=>setStableSeconds(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' }))),
-      ),
-
-      // 🥡 Tray Config (สำหรับการผลิต — ขั้นบ่ม/อบ)
-      (type === 'finished' || type === 'wip' || type === 'semi_fg') && h('div', null,
-        h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' }, '🥡 การวางถาด (ตอนผลิต)'),
-        h('div', { className:'text-xs text-gray-600 mb-2' },
-          'ใช้ใน "แผนถาด" ของขั้นบ่ม/อบ — ระบบจะคำนวณว่าจำนวนผลิตจะใช้กี่ถาด · 0 = ไม่ใช้ถาด'),
-        h('div', { className:'grid grid-cols-2 gap-3' },
-          h(Field, { label:'จำนวนต่อถาด' },
-            h('input', { type:'number', min:0, value:unitsPerTray, onChange:e=>setUnitsPerTray(e.target.value),
-              placeholder:'เช่น 12', className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
-          h(Field, { label:'หน่วยถาด' },
-            h('input', { type:'text', value:trayName, onChange:e=>setTrayName(e.target.value),
-              placeholder:'ถาด/แผง/ถ้วย', className:'w-full px-3 py-2 border-2 rounded text-sm' })),
-        ),
-      ),
-
-      h('label', { className:'flex items-center gap-2 text-sm' },
-        h('input', { type:'checkbox', checked:active, onChange:e=>setActive(e.target.checked) }),
-        h('span', null, 'เปิดใช้งาน (uncheck = ซ่อนจาก dropdown)')
-      ),
+      // ▸ ขั้นสูง (พับไว้ก่อน · เปิดเองเมื่อบันทึกแล้วเจอรหัสซ้ำ)
+      ready && h('div', { className:'border rounded' },
+        h('button', { type:'button', 'data-testid':'item-advanced-toggle', onClick:() => setAdvOpen(o => !o),
+          className:'w-full text-left px-3 py-2 font-bold text-sm bg-gray-50 hover:bg-gray-100 rounded' },
+          (advOpen ? '▾ ' : '▸ ') + 'ขั้นสูง',
+          h('span', { className:'ml-2 text-xs font-normal text-gray-500', 'data-testid':'item-advanced-hint' },
+            // สร้างจากช่องที่โชว์จริง — วัตถุดิบ/บรรจุภัณฑ์มี "อายุ" ในนี้ · ชุดสินค้าไม่มี ขั้นต่ำ/สูงสุด
+            ['รหัส', 'บาร์โค้ด', 'กลุ่ม', 'Tags', 'ตำแหน่งคลัง', 'หน่วยที่แสดง',
+              type !== 'kit' ? 'ขั้นต่ำ/สูงสุด' : null,
+              (type !== 'kit' && !isFgLike) ? 'อายุ (วัน)' : null,
+              'ขายหน้าร้าน', 'เปิดใช้งาน'].filter(Boolean).join(' · '))),
+        advOpen && h('div', { className:'p-3 space-y-3', 'data-testid':'item-advanced' },
+          h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-3' },
+            h(Field, { label:'รหัสสินค้า', hint:'ว่างไว้ = สร้างอัตโนมัติ · รหัสซ้ำบันทึกไม่ได้' },
+              h('input', { type:'text', value:code, onChange:e=>setCode(e.target.value), placeholder:codePh, 'data-testid':'item-code',
+                className:'w-full px-3 py-2 border-2 rounded text-sm font-mono' })),
+            h(Field, { label:'บาร์โค้ด' },
+              h('input', { type:'text', value:barcode, onChange:e=>setBarcode(e.target.value),
+                className:'w-full px-3 py-2 border-2 rounded text-sm font-mono' })),
+            h(Field, { label:'กลุ่มสินค้า' },
+              h('select', { value:groupId, onChange:e=>setGroupId(e.target.value), className:'w-full px-3 py-2 border-2 rounded text-sm' },
+                h('option', { value:'' }, '— ไม่ระบุ —'),
+                (state.itemGroups || []).map(g => h('option', { key:g.id, value:g.id }, g.name))))),
+          h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
+            h(Field, { label:'ตำแหน่งคลัง', hint:'เลือกจาก master list — เพิ่ม/แก้ไขที่ Settings → ตำแหน่งคลัง' },
+              h(StorageLocationPicker, { value:shelf, onChange:setShelf, options: state.storageLocations || [], dispatch })),
+            h(Field, { label:'หน่วยที่แสดงในรายการสต๊อก (ทั่วไป)', hint:'ว่าง = อัตโนมัติ (auto multi-unit)' },
+              h('select', { value:displayUnit, onChange:e=>setDisplayUnit(e.target.value), className:'w-full px-3 py-2 border-2 rounded text-sm' },
+                h('option', { value:'' }, '🤖 อัตโนมัติ (auto multi-unit)'),
+                units.filter(u => u.name).map(u => h('option', { key:u.name, value:u.name }, `${u.name}${u.isBase ? ' (base)' : ''}`))))),
+          legacyDU > 0 && h('div', { 'data-testid':'item-legacy-du', className:'text-xs text-gray-500 flex flex-wrap items-center gap-2' },
+            clearLegacyDU ? 'จะล้างหน่วยแยกแผนก/ประเภทคลังเดิมเมื่อกดบันทึก'
+              : `มีหน่วยแยกแผนก/ประเภทคลังตั้งไว้ ${legacyDU} รายการ (ระบบยังใช้อยู่)`,
+            h('button', { type:'button', 'data-testid':'item-legacy-du-clear', onClick:() => setClearLegacyDU(c => !c),
+              className:'px-2 py-0.5 border rounded bg-white hover:bg-gray-100' }, clearLegacyDU ? 'ยกเลิก' : 'ล้างค่าเก่า')),
+          h('div', null,
+            h('div', { className:'text-xs font-medium text-gray-700 mb-1' }, '🏷️ Tags (ตัวกรอง/ค้นหา)'),
+            h(TagPicker, { value:tags, onChange:setTags, allTags:state.itemTags || [], dispatch })),
+          h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3' },
+            // 🎁 ชุดสินค้า: ขั้นต่ำ/สูงสุด ไม่มีความหมาย (ไม่มีสต๊อกของตัวเอง)
+            type !== 'kit' && h(Field, { label:`ขั้นต่ำ (${mmLabelU})` },
+              h('input', { type:'number', value:minStock, onChange:e=>{ setMinStock(e.target.value); setMmDirty(true); }, 'data-testid':'item-min',
+                className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
+            type !== 'kit' && h(Field, { label:`สูงสุด (${mmLabelU})` },
+              h('input', { type:'number', value:maxStock, onChange:e=>{ setMaxStock(e.target.value); setMmDirty(true); }, 'data-testid':'item-max',
+                className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
+            type !== 'kit' && !isFgLike && h(Field, { label:'อายุ (วัน)', hint:'0 = ไม่มีวันหมดอายุ' },
+              h('input', { type:'number', value:shelfLife, onChange:e=>setShelfLife(e.target.value),
+                className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
+            (() => {
+              const _isS = global.ERP.isSellableItem;
+              const _def = _isS ? _isS({ type, salePrice:Number(item?.salePrice) || 0, priceBook:item?.priceBook }) : (type !== 'material');
+              return h(Field, { label:'🛒 ขายหน้าร้านได้', hint:'ค่าเริ่มต้นตอนนี้ = ' + (_def ? 'ขายได้' : 'ไม่ขาย') },
+                h('select', { value:sellableMode, onChange:e=>setSellableMode(e.target.value), 'data-testid':'item-sellable',
+                  className:'w-full px-3 py-2 border-2 rounded text-sm' },
+                  h('option', { value:'default' }, 'ค่าเริ่มต้น (' + (_def ? 'ขายได้' : 'ไม่ขาย') + ')'),
+                  h('option', { value:'yes' }, 'ขายได้'),
+                  h('option', { value:'no' }, 'ไม่ขาย')));
+            })()),
+          h('label', { className:'flex items-center gap-2 text-sm' },
+            h('input', { type:'checkbox', checked:active, onChange:e=>setActive(e.target.checked), 'data-testid':'item-active' }),
+            h('span', null, 'เปิดใช้งาน (uncheck = ซ่อนจาก dropdown)')))),
 
       isEdit && h('div', null,
         h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' }, '🏢 สต๊อกปัจจุบัน (read-only)'),
@@ -89414,9 +90086,35 @@ function CompanySettings({ state, dispatch }){
 // ================================================================
 // UNIT EDITOR (dropdown + chain equalTo)
 // ================================================================
+// 🆕 §U กรอกหน่วยได้ 2 ทาง (2026-09-28) — "1 ใบ = N กก." หรือ "1 กก. = N ใบ"
+//   ตัวคูณจริงเก็บที่ equalTo.qty ทิศเดิมเสมอ (1 หน่วยนี้ = qty หน่วยเทียบ) · กรอกกลับทิศ → qty = 1/N (double เต็ม)
+//   equalToInput:{ dir:'inv', qty:N } = เลขที่ผู้ใช้พิมพ์ไว้ "เพื่อแสดงผล" อย่างเดียว — การคำนวณทุกที่ใช้ equalTo ห้ามอ่าน equalToInput
+//   ใช้ได้เมื่อยังสอดคล้องกับ equalTo (มีคนแก้ equalTo ทางอื่น → ถือว่าไม่มี กลับไปแสดงทิศเดิม)
+function unitEqInputIsInv(u){
+  const inp = u && u.equalToInput;
+  if(!inp || inp.dir !== 'inv' || !u.equalTo) return false;
+  const n = Number(inp.qty) || 0, q = Number(u.equalTo.qty) || 0;
+  if(n <= 0) return q <= 0;                         // แถวยังไม่กรอก (แม่แบบ qty ว่าง) — คงทิศกลับไว้
+  return q > 0 && Math.abs(1 / n - q) <= 1e-9 * Math.max(1, Math.abs(q));
+}
+// ตอนบันทึก: ตัด equalToInput ที่ไม่ใช่ทิศกลับ/ไม่สอดคล้อง (ไม่เก็บขยะ) · ไม่แตะ equalTo
+function unitCleanEqInput(u){
+  if(!u || !('equalToInput' in u)) return u;
+  if(unitEqInputIsInv(u) && (Number(u.equalToInput.qty) || 0) > 0) return { ...u, equalToInput:{ dir:'inv', qty:Number(u.equalToInput.qty) } };
+  const { equalToInput, ...rest } = u;
+  return rest;
+}
+// แสดงตัวคูณหน่วยแบบละเอียด (fmtNum ตัดเหลือ 3 ตำแหน่ง → 1 ชิ้น = 0.333 กก. ดูไม่ออกว่าคูณกลับได้ 3)
+function fmtUnitQty(n){
+  n = Number(n);
+  if(!isFinite(n)) return '?';
+  return Number(n.toPrecision(10)).toLocaleString('en-US', { maximumFractionDigits: 6 });
+}
 // purposeScope: 'purchase' | 'bom' | undefined — ติ๊กได้เฉพาะคอลัมน์ของแผนกตัวเอง (คอลัมน์อื่น disabled + ซ่อน ⭐)
 // baseChangeWarning: string — ถ้าไม่ว่าง = item มีสต๊อก/FIFO/BOM ผูกอยู่ → confirm ก่อนเปลี่ยน base
-function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dispatch, purposeScope, baseChangeWarning }){
+// templates/onApplyTemplate (🆕 ITEM-FORM): แถบปุ่มแม่แบบหน่วยเหนือตาราง — ItemEditModal ส่งมาเฉพาะตอนเพิ่มสินค้าใหม่ · activeTemplate = id ที่ใช้อยู่
+function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dispatch, purposeScope, baseChangeWarning, templates, onApplyTemplate, activeTemplate,
+  usageMap, canUnlock, overrides, onOverride }){
   const [showAddPreset, setShowAddPreset] = useState(false);
 
   const baseIdx = units.findIndex(u => u.isBase);
@@ -89426,6 +90124,38 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
   //    ติ๊กได้เฉพาะคอลัมน์ของแผนกตัวเอง · แถวที่แผนกนี้เพิ่มเอง (purposes มีแค่ scope ตัวเอง) แก้ได้ปกติ
   const rowLocked = (u) => !!purposeScope && (u.isBase || (u.purposes||[]).some(p => p !== purposeScope));
   const LOCK_TITLE = 'หน่วยนี้แผนกอื่นใช้อยู่ — ตั้งได้เฉพาะติ๊กคอลัมน์ของแผนกคุณ';
+  // 🔒 §U U2: ล็อกตามเอกสารเปิด — หน่วยที่ใช้อยู่ (ยังไม่ปลดล็อก) + หน่วยในลูกโซ่ของมัน (แก้ ถุง = ลัง เปลี่ยนตาม)
+  //   คืน { direct: usage|null, via: [ชื่อหน่วยที่อ้างผ่านแถวนี้] } หรือ null · ติ๊กวัตถุประสงค์ยังแก้ได้เสมอ
+  const usageLockOf = useMemo(() => {
+    const m = {};
+    const um = usageMap || {}, ov = overrides || {};
+    for(const nm of Object.keys(um)){
+      if(ov[nm]) continue;
+      m[nm] = m[nm] || { direct:null, via:[] };
+      m[nm].direct = um[nm];
+      // เดินลูกโซ่หน่วยเทียบของหน่วยที่ใช้อยู่ (ไม่รวมหน่วยฐาน)
+      const seen = new Set([nm]);
+      let cur = units.find(x => x.name === nm);
+      while(cur && !cur.isBase && cur.equalTo?.unit && !seen.has(cur.equalTo.unit)){
+        const ref = cur.equalTo.unit; seen.add(ref);
+        cur = units.find(x => x.name === ref);
+        if(!cur || cur.isBase) break;
+        m[ref] = m[ref] || { direct:null, via:[] };
+        m[ref].via.push(nm);
+      }
+    }
+    return m;
+  }, [usageMap, overrides, units]);
+  const usageTitle = (ul) => ul.direct
+    ? `ใช้อยู่ใน ${ul.direct.summary} — แก้ตัวคูณ/หน่วยเทียบ/ชื่อ/ลบไม่ได้ (เอกสารพวกนี้แปลงหน่วยด้วยตัวคูณปัจจุบัน)`
+    : `เป็นหน่วยเทียบของ ${ul.via.join(', ')} ที่เอกสารค้างใช้ — แก้ตัวคูณแล้ว ${ul.via.join(', ')} จะเปลี่ยนตาม`;
+  const askOverride = (nm) => {
+    const r = prompt(`ปลดล็อกหน่วย "${nm}" (ใช้อยู่ใน ${(usageMap[nm] || {}).summary || ''})\n\nเอกสารที่ยังเปิดจะแปลงด้วยตัวคูณใหม่ทันที — พิมพ์เหตุผล (จะบันทึกใน audit log) เช่น ผู้ขายเปลี่ยนขนาดลังเป็น 10:`, '');
+    if(r == null) return;
+    // verify: เหตุผลสั้น 1 ตัวอักษร (เช่น "ก") ไม่มีความหมายใน audit → อย่างน้อย 5 ตัวอักษร
+    if(String(r).trim().length < 5) return alert('พิมพ์เหตุผลอย่างน้อย 5 ตัวอักษร เช่น ผู้ขายเปลี่ยนขนาดลังเป็น 10');
+    onOverride && onOverride(nm, String(r).trim());
+  };
 
   // Auto-sync issueUnit with base
   useEffect(() => { if(baseUnit && baseUnit !== issueUnit) setIssueUnit(baseUnit); }, [baseUnit]);
@@ -89458,18 +90188,42 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
     // รักษาอัตราส่วนเดิม: base เก่า A → equalTo { unit: base ใหม่ B, qty: 1/(1 B = N A) }
     const factor = resolveToBase(units, target.name);   // 1 B = factor A (base เดิม)
     setUnits(units.map((u,idx) => {
-      if(idx === i) return { ...u, isBase:true, equalTo:undefined, toBase:undefined };
+      if(idx === i) return { ...u, isBase:true, equalTo:undefined, toBase:undefined, equalToInput:undefined };
       if(baseIdx >= 0 && idx === baseIdx){
+        // §U: base เก่า "1 A = 1/f B" อ่านยาก → แสดงทิศกลับ "1 B = f A" (เลขเดียวกับที่เคยเห็น)
         return { ...u, isBase:false, toBase:undefined,
-          equalTo: { unit: target.name, qty: factor > 0 ? (1 / factor) : 1 } };
+          equalTo: { unit: target.name, qty: factor > 0 ? (1 / factor) : 1 },
+          equalToInput: factor > 0 ? { dir:'inv', qty: factor } : undefined };
       }
-      return { ...u, isBase:false, equalTo: u.equalTo || { unit: target.name, qty:1 } };
+      return u.equalTo ? { ...u, isBase:false }
+        : { ...u, isBase:false, equalTo: { unit: target.name, qty:1 }, equalToInput:undefined };
     }));
   };
   const addUnit = () => {
-    // แถวใหม่ default เทียบกับ "หน่วยที่ตั้งล่าสุด" (ไม่ใช่ base เสมอ) → ไล่ ลัง→ถุง→กรัม ได้ตามธรรมชาติ
-    const prev = [...units].reverse().find(u => u.name)?.name || baseUnit;
-    setUnits([...units, { name:'', equalTo:{unit:prev, qty:1}, purposes:[purposeScope || 'purchase'] }]);
+    // §U (owner 2026-09-28): แถวใหม่เทียบกับ "หน่วยฐาน" เสมอ — เดิมใช้แถวล่าสุด (เช่น กรัม) → คนกรอกงง/ต้องหาร
+    setUnits([...units, { name:'', equalTo:{unit:baseUnit, qty:1}, purposes:[purposeScope || 'purchase'] }]);
+  };
+  // §U กรอกเลขในช่องสเกล: ทิศปกติ = equalTo.qty ตรง ๆ · ทิศกลับ = equalTo.qty = 1/N + จำ N ไว้แสดง
+  const setScaleQty = (i, raw) => {
+    const u = units[i];
+    const n = Number(raw) || 0;
+    const eq = { ...(u.equalTo || { unit: baseUnit }) };
+    if(unitEqInputIsInv(u)){
+      eq.qty = n > 0 ? 1 / n : 0;
+      updateUnit(i, { equalTo: eq, equalToInput: { dir:'inv', qty:n } });
+    } else {
+      eq.qty = n;
+      updateUnit(i, { equalTo: eq, equalToInput: undefined });
+    }
+  };
+  // ⇄ สลับทิศการกรอก — ไม่เปลี่ยนตัวคูณ (equalTo คงเดิม) เปลี่ยนแค่วิธีแสดง/กรอก
+  const toggleDir = (i) => {
+    const u = units[i];
+    if(unitEqInputIsInv(u)) return updateUnit(i, { equalToInput: undefined });
+    const q = Number(u.equalTo?.qty) || 0;
+    // ปัด 1/q ที่ 12 หลักให้อ่านง่าย (ต่าง ≤ 1e-12 สัมพัทธ์ — อยู่ในเกณฑ์ unitEqInputIsInv) · equalTo ไม่แตะ
+    const n = q > 0 ? Number((1 / q).toPrecision(12)) : 0;
+    updateUnit(i, { equalTo: u.equalTo || { unit: baseUnit, qty: 0 }, equalToInput: { dir:'inv', qty:n } });
   };
   // 🔗 ไล่ลูกโซ่เต็มทาง: 1 ลัง = 10 ถุง = 10,000 กรัม (คูณสะสมทุกทอดจนถึง base) · ok=false ถ้าขาด/วน
   const chainOf = (name) => {
@@ -89501,9 +90255,9 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
   // เช่น base = 'กรัม' → suggest 'กก.' (1 กก. = 1000 กรัม)
   const STANDARD_CONVERSIONS = {
     'กรัม':  [{ name:'กก.', qty:1000, label:'1 กก. = 1000 กรัม' }],
-    'กก.':   [{ name:'กรัม', qty:0.001, label:'1 กรัม = 0.001 กก.', invert:true }],
+    'กก.':   [{ name:'กรัม', qty:0.001, label:'1 กก. = 1000 กรัม', invert:1000 }],
     'ml':    [{ name:'ลิตร', qty:1000, label:'1 ลิตร = 1000 ml' }],
-    'ลิตร':  [{ name:'ml', qty:0.001, label:'1 ml = 0.001 ลิตร', invert:true }],
+    'ลิตร':  [{ name:'ml', qty:0.001, label:'1 ลิตร = 1000 ml', invert:1000 }],
   };
 
   // 🆕 Quick add: เพิ่มหน่วยมาตรฐาน 1 คลิก
@@ -89517,7 +90271,8 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
     //   ต้องการ: 1 กรัม = 0.001 กก. → equalTo = { unit:'กก.', qty:0.001 }
     setUnits([...units, {
       name: conv.name,
-      equalTo: { unit: baseUnit, qty: conv.invert ? conv.qty : conv.qty },
+      equalTo: { unit: baseUnit, qty: conv.qty },
+      ...(conv.invert ? { equalToInput: { dir:'inv', qty: conv.invert } } : {}),   // §U แสดงทิศธรรมชาติ 1 กก. = 1000 กรัม
       purposes: purposeScope ? [purposeScope] : ['purchase','transfer'],   // 🏷️ scope: ติ๊กได้เฉพาะคอลัมน์ตัวเอง
     }]);
   };
@@ -89546,6 +90301,16 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
       `🏷️ คุณติ๊กได้เฉพาะคอลัมน์ "${PURPOSE_LABEL[purposeScope]||purposeScope}" — คอลัมน์อื่นแผนกเจ้าของตั้งเอง · เปลี่ยนหน่วยฐาน (⭐) ทำได้เฉพาะผู้จัดการ/admin`
     ),
 
+    // 🆕 ITEM-FORM: แม่แบบหน่วย — กดครั้งเดียวได้หน่วย + ติ๊กซื้อ/โอน/BOM ครบ
+    Array.isArray(templates) && templates.length > 0 && typeof onApplyTemplate === 'function' &&
+      h('div', { className:'flex flex-wrap items-center gap-2 mb-2', 'data-testid':'unit-templates' },
+        h('span', { className:'text-xs text-gray-600' }, '⚡ แม่แบบหน่วย:'),
+        templates.map(t => h('button', { key:t.id, type:'button', 'data-testid':'unit-tpl-' + t.id,
+          onClick:() => onApplyTemplate(t),
+          className: cls('px-3 py-1.5 rounded-full border-2 text-xs font-medium',
+            activeTemplate === t.id ? 'bg-blue-600 text-white border-blue-700' : 'bg-white border-blue-300 text-blue-700 hover:bg-blue-50') },
+          t.label))),
+
     // Units table
     h('div', { className:'bg-white border rounded-lg overflow-hidden overflow-x-auto' },
       h('table', { className:'w-full text-sm min-w-[720px]' },
@@ -89569,9 +90334,25 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
             const curRef = u.equalTo?.unit || '';
             const refMissing = !u.isBase && curRef && !refUnits.some(o => o.name === curRef);
             // 🔒 scope: แถวที่แผนกอื่นใช้อยู่/base → ชื่อ, qty, หน่วยเทียบ, ปุ่มลบ disabled (ติ๊กได้เฉพาะคอลัมน์ตัวเอง)
-            const locked = rowLocked(u);
-            const lockTitle = locked ? (u.isBase ? 'หน่วยฐาน (⭐) — เปลี่ยนได้เฉพาะผู้จัดการ/admin' : LOCK_TITLE) : undefined;
+            // 🔒 §U U2: + ล็อกตามเอกสารเปิด (หน่วยที่ใช้อยู่/ลูกโซ่ของมัน) — ชื่อ/ตัวคูณ/หน่วยเทียบ/⇄/ลบ ปิด · ติ๊กยังแก้ได้
+            const ul = (!u.isBase && u.name) ? usageLockOf[u.name] : null;
+            const scopeLocked = rowLocked(u);
+            const locked = scopeLocked || !!ul;
+            const lockTitle = scopeLocked ? (u.isBase ? 'หน่วยฐาน (⭐) — เปลี่ยนได้เฉพาะผู้จัดการ/admin' : LOCK_TITLE) : ul ? usageTitle(ul) : undefined;
             const showRemove = !u.isBase && units.length > 1;
+            // §U ทิศการกรอก + ช่องหน่วยเทียบ (ใช้ได้ทั้ง 2 ทิศ) + คำอ่านสองทางใต้แถว
+            const inv = !u.isBase && unitEqInputIsInv(u);
+            const refSelect = h('select', { value:curRef, 'data-testid':'unit-ref-' + i,
+              onChange:e=>updateUnit(i, { equalTo: {...(u.equalTo||{qty:1}), unit:e.target.value} }),
+              disabled: locked,
+              className: cls('px-1 py-1 border rounded', refMissing && 'border-red-400 bg-red-50', locked && 'opacity-60 cursor-not-allowed bg-gray-50'),
+              title: locked ? lockTitle : refMissing ? `"${curRef}" ไม่มีในรายการ หรืออ้างวนกลับมาหา ${u.name||'แถวนี้'}` : 'หน่วยเทียบ (แสดงเฉพาะที่ไม่ทำให้อ้างวน)' },
+              !curRef && h('option', { value:'' }, '— เลือก —'),
+              refMissing && h('option', { value:curRef }, `⚠️ ${curRef}`),
+              refUnits.map(o => h('option', { key:o.name, value:o.name }, o.name)));
+            const _q = Number(u.equalTo?.qty) || 0;
+            const reading = (!u.isBase && u.name && curRef && _q > 0)
+              ? `1 ${u.name} = ${fmtUnitQty(_q)} ${curRef} · 1 ${curRef} = ${fmtUnitQty(1 / _q)} ${u.name}` : '';
             return h('tr', { key:i, className: cls(u.isBase && 'bg-yellow-50') },
               // Unit name (dropdown)
               h('td', { className:'px-2 py-1.5' },
@@ -89592,27 +90373,46 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
               h('td', { className:'px-2 py-1.5' },
                 u.isBase
                   ? h('span', { className:'text-xs font-medium text-yellow-700' }, '⭐ หน่วยฐาน (stock)')
-                  : h('div', { className:'flex items-center gap-1 text-xs' },
-                      h('span', { className:'text-gray-500' }, `1 ${u.name||'?'} =`),
-                      h('input', { type:'number', step:'any', value:u.equalTo?.qty||0,
-                        onChange:e=>updateUnit(i, { equalTo: {...(u.equalTo||{unit:baseUnit}), qty:Number(e.target.value)||0} }),
-                        disabled: locked, title: locked ? LOCK_TITLE : undefined,
+                  : h('div', null, h('div', { className:'flex items-center gap-1 text-xs', 'data-testid':'unit-scale-' + i, 'data-dir': inv ? 'inv' : 'fwd' },
+                      // §U ทิศปกติ: 1 [หน่วยนี้] = [N] [หน่วยเทียบ] · ทิศกลับ: 1 [หน่วยเทียบ] = [N] [หน่วยนี้]
+                      !inv && h('span', { className:'text-gray-500' }, `1 ${u.name||'?'} =`),
+                      inv && h('span', { className:'text-gray-500' }, '1'),
+                      inv && refSelect,
+                      inv && h('span', { className:'text-gray-500' }, '='),
+                      h('input', { type:'number', step:'any', 'data-testid':'unit-qty-' + i,
+                        value: inv ? (u.equalToInput.qty||0) : (u.equalTo?.qty||0),
+                        onChange:e=>setScaleQty(i, e.target.value),
+                        disabled: locked, title: locked ? lockTitle : undefined,
                         className: cls('w-20 px-2 py-1 border rounded text-right', locked && 'opacity-60 cursor-not-allowed bg-gray-50') }),
-                      h('select', { value:curRef,
-                        onChange:e=>updateUnit(i, { equalTo: {...(u.equalTo||{qty:1}), unit:e.target.value} }),
-                        disabled: locked,
-                        className: cls('px-1 py-1 border rounded', refMissing && 'border-red-400 bg-red-50', locked && 'opacity-60 cursor-not-allowed bg-gray-50'),
-                        title: locked ? LOCK_TITLE : refMissing ? `"${curRef}" ไม่มีในรายการ หรืออ้างวนกลับมาหา ${u.name||'แถวนี้'}` : 'หน่วยเทียบ (แสดงเฉพาะที่ไม่ทำให้อ้างวน)' },
-                        !curRef && h('option', { value:'' }, '— เลือก —'),
-                        refMissing && h('option', { value:curRef }, `⚠️ ${curRef}`),
-                        refUnits.map(o => h('option', { key:o.name, value:o.name }, o.name))
-                      )
-                    )
+                      inv && h('span', { className:'text-gray-700 font-medium' }, u.name || '?'),
+                      !inv && refSelect,
+                      h('button', { type:'button', 'data-testid':'unit-dir-' + i, onClick:()=>toggleDir(i), disabled: scopeLocked,
+                        title: scopeLocked ? LOCK_TITLE : 'สลับทิศการกรอก (ตัวคูณไม่เปลี่ยน) — เช่น กรอก "1 กก. = 200 ใบ" แทน "1 ใบ = 0.005 กก."',
+                        // verify: เป้ากดบนแท็บเล็ต ≥ 32px + ข้อความ (tooltip เปิดบนแท็บเล็ตไม่ได้)
+                        className: cls('min-h-[32px] px-2 py-1 border rounded text-xs text-blue-700 hover:bg-blue-50 whitespace-nowrap', scopeLocked && 'opacity-40 cursor-not-allowed') }, '⇄ สลับทิศ')),
+                    // UAT S3: อ่านสองทางให้เห็นชัดบนแท็บเล็ต (เดิม 11px เทา) — กันกรอกกลับทิศแล้วเพี้ยน 100 เท่า
+                    reading && h('div', { className:'text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded px-1.5 py-0.5 mt-1 font-medium', 'data-testid':'unit-read-' + i }, '🔎 ', reading),
+                    // 🔒 §U U2: บอกว่าเอกสารไหนใช้ + ทางออก (เพิ่มหน่วยใหม่แทน) + ปลดล็อกสำหรับผู้จัดการ/admin
+                    // UAT S4: เลขเอกสาร 3 ใบแรกแสดงในกล่องเลย (แท็บเล็ตเปิด tooltip ไม่ได้) + ทางออกตามชนิดเอกสาร (สูตร → แก้หน่วยในสูตรก่อน)
+                    ul && h('div', { className:'text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-1', 'data-testid':'unit-lock-' + i,
+                        title: ul.direct ? ul.direct.docs.join('\n') : undefined },
+                      ul.direct ? `🔒 ใช้อยู่: ${ul.direct.summary}` : `🔒 เป็นหน่วยเทียบของ ${ul.via.join(', ')} (เอกสารค้างใช้)`,
+                      ul.direct && h('div', { className:'text-amber-900', 'data-testid':'unit-lock-docs-' + i },
+                        ul.direct.docs.slice(0, 3).join(' · ') + (ul.direct.docs.length > 3 ? ` · และอีก ${ul.direct.docs.length - 3}` : '')),
+                      h('div', { 'data-testid':'unit-lock-advice-' + i }, '→ ' + (ul.direct && global.ERP.unitUsageAdvice ? global.ERP.unitUsageAdvice(ul.direct, u.name)
+                        // verify: หน่วยที่ล็อกผ่านลูกโซ่ ไม่มีปุ่มปลดในแถวนี้ → ชี้ไปแถวต้นทาง
+                        : `ถ้าขนาดเปลี่ยน ให้เพิ่มหน่วยใหม่แทน เช่น ${u.name || 'หน่วยนี้'} (ขนาดใหม่) แล้วเอาติ๊กหน่วยเก่าออก · หรือปลดล็อกที่แถว ${ul.via.join(', ')}`)),
+                      // verify: ผู้ไม่มีสิทธิ์ปลด ต้องรู้ว่าใครปลดได้
+                      ul.direct && !canUnlock && h('div', { className:'text-amber-900', 'data-testid':'unit-lock-ask-' + i }, '→ หรือให้ผู้จัดการ/GM กด 🔓 ปลดล็อก'),
+                      ul.direct && canUnlock && h('button', { type:'button', 'data-testid':'unit-unlock-' + i, onClick:() => askOverride(u.name),
+                        className:'mt-1 min-h-[32px] px-2 py-1 text-xs border border-amber-400 rounded bg-white hover:bg-amber-100' }, '🔓 ปลดล็อก (ผู้จัดการ)')),
+                    !ul && overrides && overrides[u.name] && h('div', { className:'text-[11px] text-red-700 mt-1', 'data-testid':'unit-unlocked-' + i },
+                      `🔓 ปลดล็อกแล้ว — เหตุผล: ${overrides[u.name]} (บันทึกลง audit ตอนกดบันทึก)`))
               ),
               // toBase computed
               h('td', { className:'px-2 py-1.5 text-right text-xs font-mono' },
                 u.isBase ? '1' : h('span', { className:'text-blue-700 font-medium' },
-                  `${fmtNum(toBaseVal)} ${baseUnit}`)
+                  `${fmtUnitQty(toBaseVal)} ${baseUnit}`)
               ),
               // Purpose checkboxes — 🏷️ scope: คอลัมน์ของแผนกอื่น disabled
               ...['purchase','transfer','sale','bom'].map(p =>
@@ -89633,7 +90433,7 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
                     title: baseChangeWarning ? `ตั้งเป็น base (⚠️ มี ${baseChangeWarning})` : 'ตั้งเป็น base',
                     className:'text-xs px-1 py-0.5 hover:bg-yellow-100 rounded' }, '⭐'),
                   showRemove && h('button', { type:'button', onClick:()=>{ if(!locked) removeUnit(i); },
-                    disabled: locked, title: locked ? LOCK_TITLE : 'ลบหน่วยนี้',
+                    disabled: locked, title: locked ? lockTitle : 'ลบหน่วยนี้',
                     className: cls('px-1.5 py-0.5 rounded text-sm', locked ? 'text-gray-300 cursor-not-allowed' : 'text-red-500 hover:bg-red-50') }, '×')
                 )
               )
@@ -89650,12 +90450,12 @@ function UnitEditor({ units, setUnits, issueUnit, setIssueUnit, unitPresets, dis
         h('tbody', null,
           units.filter(u => u.name && !u.isBase).map(u => {
             const c = chainOf(u.name);
-            const text = `1 ${u.name}` + c.steps.map(s => ` = ${fmtNum(s.qty)} ${s.unit}`).join('');
+            const text = `1 ${u.name}` + c.steps.map(s => ` = ${fmtUnitQty(s.qty)} ${s.unit}`).join('');
             return h('tr', { key:u.name, className: cls(!c.ok && 'text-red-700') },
               h('td', { className:'py-0.5 pr-3 font-mono whitespace-nowrap' }, text),
               h('td', { className:'py-0.5 text-right font-mono whitespace-nowrap' },
                 c.ok
-                  ? h('span', { className:'text-blue-700 font-medium' }, `= ${fmtNum(c.total)} ${baseUnit}`)
+                  ? h('span', { className:'text-blue-700 font-medium' }, `= ${fmtUnitQty(c.total)} ${baseUnit}`)
                   : h('span', { className:'font-medium' }, `⚠️ ${c.reason || 'ไม่ถึงหน่วยฐาน'}`)));
           })))),
 
@@ -92888,7 +93688,7 @@ function BackupRestoreTab({ state, dispatch }){
           }
         }
       }
-      const driftValue = drifts.reduce((s,d) => s + Math.abs(d.diff) * (d.item.costPrice||0), 0);
+      const driftValue = drifts.reduce((s,d) => s + Math.abs(d.diff) * (Number(_itemRefCostOf(state, d.item).unitCost) || 0), 0);   // ต้นทุนอ้างอิง (B4.1)
       return h('div', { className: cls('rounded p-4 space-y-2 border-2',
           drifts.length > 0 ? 'bg-orange-50 border-orange-300' : 'bg-green-50 border-green-300') },
         h('div', { className: cls('font-bold mb-1', drifts.length > 0 ? 'text-orange-900':'text-green-900') },
@@ -93579,6 +94379,7 @@ global.ERP.CUSTOMER_FIELDS = CUSTOMER_FIELDS;
 // 🆕 ฟอร์มสินค้า — ให้ mod-purchase (PO quick-add, purposeScope:'purchase') / mod-production (BOM, purposeScope:'bom') เรียก quick-edit ได้
 //    props: { item|null, state, dispatch, onClose, purposeScope?, onSaved?(data) }
 global.ERP.ItemEditModal = ItemEditModal;
+global.ERP.ItemInfoPanel = ItemInfoPanel;   // 🆕 ITEM-FORM: กล่องข้อมูลต้นทุน/ราคาขาย/ซื้อจาก (อ่านอย่างเดียว)
 global.ERP.PendingOpsTab = PendingOpsTab;
 global.ERP.opqOpenCount = opqOpenCount;   // 🆕 UAT M3: แถบแดงนับรายการที่ยังไม่ขึ้นจริง   // 🆕 MW-0.2: แถบเตือนใน shell เปิดรายการได้โดยไม่ต้องเข้าหน้าตั้งค่า
 global.ERP.StateAppendPolicy = StateAppendPolicy;   // 🌊 คลื่น 4 §B4.4
@@ -95124,31 +95925,34 @@ C.registerGroup({
     //      สินค้านำเข้า Ecount defaultSupplierId '' ทั้งหมด (convert_items.py:83) และ 226 รายการตั้ง "ขั้นต่ำ" ไว้แล้ว (163 อยู่ใน PO นำเข้า) → เงื่อนไข minStock>0 + เคยซื้อ ยังขึ้น 163
     //      → count = เฉพาะที่ "ต่ำกว่าขั้นต่ำอยู่ตอนนี้" (lowIdx — กำลังจะเข้าแท็บ ⚠️ สต๊อกต่ำ → สร้าง PO จริง) · total = ทุกตัวที่ตั้งขั้นต่ำ + เคยซื้อ + ยังไม่ผูก
     //      src/mod-settings.js:1696-1704 (radio name 'sup-preferred' label '⭐ Preferred' = เจ้าหลัก)
-    { key:'item_purchased_no_supplier_link', label:'สินค้าต่ำกว่าขั้นต่ำ ยังไม่ผูก Supplier', severity:'info',
+    // 🆕 ITEM-FORM S6: ฟอร์มสินค้าไม่มีช่อง Supplier แล้ว — ผู้ขายตั้งต้น = เจ้าที่ซื้อล่าสุด (itemDefaultSupplierId: ประวัติ GR/PO อนุมัติแล้ว
+    //      → defaultSupplierId/⭐ เดิม) · นับเฉพาะของที่ "ยังไม่เคยซื้อ" (หาผู้ขายไม่ได้เลย) และต่ำกว่าขั้นต่ำอยู่ตอนนี้ · total = มีขั้นต่ำแต่ยังไม่เคยซื้อทั้งหมด
+    { key:'item_purchased_no_supplier_link', label:'สินค้าต่ำกว่าขั้นต่ำ ยังไม่เคยซื้อ (ระบบยังไม่รู้จะสั่งจากใคร)', severity:'info',
       show: (ctx) => gate(ctx),
-      nav: (ctx) => navItems(ctx),
-      hint: (ctx) => ctx.perm('settings','items','edit')
-        ? 'ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า → แก้ไข → ส่วน "🏪 Suppliers" → เพิ่ม supplier + ราคา แล้วเลือก "⭐ Preferred" ให้เจ้าหลัก — แท็บ "⚠️ สต๊อกต่ำ" จะเสนอ supplier และราคาให้เอง'
-        : 'บัญชีนี้ทำเองไม่ได้ → แจ้ง admin ให้เพิ่ม supplier + ราคา แล้วเลือก "⭐ Preferred" ให้เจ้าหลัก ในส่วน "🏪 Suppliers" ของสินค้า ที่ ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า',
-      run: (ctx) => { const b = boughtIdx(ctx), low = lowIdx(ctx);
-                      const all = (ctx.state.items||[]).filter(i => i.active !== false && (Number(i.minStock)||0) > 0 && b.has(i.id)
-                        && !i.defaultSupplierId && !(i.suppliers||[]).some(s => s && s.supplierId));
+      nav: (ctx) => ctx.perm('purchase','po','view') ? NAV_PO : navItems(ctx),
+      hint: 'ระบบจำผู้ขายเองจากการซื้อจริง — 🛒 จัดซื้อ → 📋 ใบสั่งซื้อ → สร้าง PO เลือกผู้ขายเองครั้งแรก พออนุมัติ PO/รับของ (GR) แล้ว Min-Max/PO ครั้งต่อไปจะเลือกเจ้านี้ให้เอง (ไม่ต้องตั้งในฟอร์มสินค้า)',
+      run: (ctx) => { const low = lowIdx(ctx), H = ctx.H || {};
+                      const noSup = (i) => H.itemDefaultSupplierId ? !H.itemDefaultSupplierId(ctx.state, i)
+                        : (!i.defaultSupplierId && !(i.suppliers||[]).some(s => s && s.supplierId));
+                      const all = (ctx.state.items||[]).filter(i => i.active !== false && (Number(i.minStock)||0) > 0 && noSup(i));
                       const l = all.filter(i => low.has(i.id));
                       return { count:l.length, total:all.length, detail:l.map(i => i.name || i.id) }; } },
 
     // ref: src/mod-settings.js:1717 (ช่อง "ต้นทุน" = costPrice) · :1541-1548 (suppliers[].unitPrice) · src/mod-purchase.js:25-43 (getLastPrice จาก PO ไม่ใช่ draft/cancelled — รวม PO นำเข้า) · :756-762 (ลำดับราคา) · :937-948 (เตือนราคา 0)
     //      ราคาอ้างอิงจาก PO นำเข้า Ecount ใช้ได้ (boughtIdx.priced) · line ส่วนลด/ค่าใช้จ่าย (lineKind ≠ item, ราคาติดลบ) ไม่นับเป็นราคา
+    // 🆕 ITEM-FORM S6: ฟอร์มสินค้าไม่มีช่อง ต้นทุน/ราคาผู้ขาย แล้ว → ราคาอ้างอิง = PO ที่มีราคา (boughtIdx.priced) · ต้นทุนอ้างอิง itemRefCost
+    //      (GR → FIFO → costPrice เดิม → สูตร) · ราคาในประวัติซื้อ · ราคาใน suppliers[] เดิม (ของเก่ายังใช้ได้) — ไม่มีเลยสักทาง = นับ
     { key:'item_purchased_no_price', label:'สินค้าที่เคยซื้อ แต่ไม่มีราคาซื้ออ้างอิง', severity:'info',
       show: (ctx) => gate(ctx),
-      nav: (ctx) => navItems(ctx),
-      hint: (ctx) => ctx.perm('settings','items','edit')
-        ? 'ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า → แก้ไข → ใส่ช่อง "ต้นทุน" หรือราคาในส่วน "🏪 Suppliers" — ไม่งั้นเปิด PO ราคาจะขึ้น 0 ต้องยืนยันทุกครั้ง และต้นทุนของที่รับเข้าจะผิด'
-        : 'บัญชีนี้ทำเองไม่ได้ → แจ้ง admin ให้ใส่ช่อง "ต้นทุน" หรือราคาในส่วน "🏪 Suppliers" ของสินค้า ที่ ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า',
-      run: (ctx) => { const b = boughtIdx(ctx);
+      nav: (ctx) => ctx.perm('purchase','po','view') ? NAV_PO : navItems(ctx),
+      hint: 'ราคาอ้างอิงมาจากการซื้อจริง (ไม่มีช่องกรอกในฟอร์มสินค้าแล้ว) — 🛒 จัดซื้อ → 📋 ใบสั่งซื้อ: PO ที่ยังไม่รับของ กด "🔧 แก้เต็ม" ใส่ราคาต่อหน่วย หรือเปิด PO ใหม่ใส่ราคา แล้วรับของ (GR) ระบบจะเติมต้นทุนเอง',
+      run: (ctx) => { const b = boughtIdx(ctx), H = ctx.H || {};
                       const l = (ctx.state.items||[]).filter(i => {
                         if(i.active === false) return false;
                         const e = b.get(i.id); if(!e || e.priced) return false;
-                        if((Number(i.costPrice)||0) > 0) return false;
+                        const rc = H.itemRefCost ? (Number(H.itemRefCost(ctx.state, i).unitCost) || 0) : (Number(i.costPrice) || 0);
+                        if(rc > 0) return false;
+                        if(H.itemPurchaseHistory && H.itemPurchaseHistory(ctx.state, i.id).some(r => (Number(r.lastUnitPrice) || 0) > 0)) return false;
                         return !(i.suppliers||[]).some(s => s && (Number(s.unitPrice)||0) > 0);
                       });
                       return { count:l.length, detail:l.map(i => i.name || i.id) }; } },
@@ -98883,6 +99687,8 @@ const msToDate = (v) => {
   const d = new Date(n); return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());
 };
 const uname = (u) => (u && (u.username || u.name || u.id)) || '-';
+// 🆕 ITEM-FORM S6: ต้นทุนอ้างอิงต่อหน่วยฐาน (itemRefCost) — ไม่มี helper = costPrice เดิม
+const _refUc = (ctx, it) => (ctx.H && ctx.H.itemRefCost) ? (Number(ctx.H.itemRefCost(ctx.state, it).unitCost) || 0) : (Number(it && it.costPrice) || 0);
 const iname = (it) => (it && (it.code ? `${it.code} ${it.name||''}` : (it.name || it.id))) || '-';
 const isActive = (x) => !x || x.active !== false;
 // วันสิ้นเดือนก่อนหน้า (YYYY-MM-DD) จาก today
@@ -99269,6 +100075,20 @@ C.registerGroup({
 
     // ref: src/01-state.js:124 items[].code 'RM-001' · src/mod-settings.js:1494-1501 auto-gen code ถ้าว่างตอนบันทึกฟอร์ม · IMPORT_ITEMS merge ด้วย code src/01-state.js:3926-3939
     //      · BOM import อ้างด้วย code src/mod-production.js:8123 'ไม่พบสินค้ารหัส' · item migrate มี code ทุกตัว (master-import.json) · UAT audit-control: cosmetic → info
+    // 🆕 ITEM-FORM S6 (บังคับ · contract §ความเสี่ยง 2): รหัสอัตโนมัติ nextItemCode อ่าน state เครื่องตัวเอง + ADD_ITEM กันซ้ำด้วย id อย่างเดียว
+    //      → สองคนเพิ่มพร้อมกันได้รหัสเดียวกัน · ไฟล์ POS/นำเข้า/BOM จับคู่ด้วยรหัส → ต้องแก้ · เทียบแบบไม่สนตัวพิมพ์/ช่องว่างหัวท้าย (findItemCodeDup)
+    { key:'items_dup_code', label:'สินค้ารหัสซ้ำกัน', severity:'warn',
+      show: (ctx) => ctx.can('settings'),
+      nav: sNav('itemList'),
+      hint: sHint('itemList', 'ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า → ค้นรหัสนั้น → แก้ไขตัวที่เพิ่มทีหลัง → ▸ ขั้นสูง → เปลี่ยนรหัสสินค้า (ไฟล์ POS/นำเข้าจับคู่ด้วยรหัส — รหัสซ้ำจะตัดสต๊อกผิดตัว)'),
+      run: (ctx) => {
+        const by = new Map();
+        A(ctx.state.items).forEach(i => { if(!isActive(i)) return; const k = S(i.code).toLowerCase(); if(!k) return;
+          const g = by.get(k) || []; g.push(i); by.set(k, g); });
+        const dups = [];
+        by.forEach((g) => { if(g.length > 1) dups.push(`${S(g[0].code)}: ${g.slice(0,3).map(i => i.name || i.id).join(' / ')}${g.length > 3 ? ` +${g.length-3}` : ''}`); });
+        return { count: dups.length, detail: dups }; } },
+
     { key:'items_no_code', label:'สินค้าไม่มีรหัสสินค้า', severity:'info',
       show: (ctx) => ctx.can('settings'),
       nav: sNav('itemList'),
@@ -99282,12 +100102,13 @@ C.registerGroup({
     { key:'items_cost_zero', label:'วัตถุดิบ/บรรจุภัณฑ์ยังไม่มีราคาทุน', severity:'info',
       show: (ctx) => ctx.can('settings'),
       nav: sNav('itemList'),
-      hint: sHint('itemList', 'นับเฉพาะสินค้าที่ตั้งสต๊อกขั้นต่ำหรืออยู่ในสูตร BOM (จะเด้งสั่งซื้อ/คิดต้นทุนสูตรด้วยราคา 0): ตั้งค่า → 📦 สินค้า → 📦 รายการสินค้า → แก้ไข → ใส่ราคาทุนมาตรฐาน หรือผูก Supplier + ราคาซื้อในส่วน Supplier ของสินค้า — สินค้าที่รับของครั้งแรกแล้วระบบจำราคาให้เอง'),
+      // 🆕 ITEM-FORM S6: ฟอร์มสินค้าไม่มีช่องต้นทุนแล้ว → ต้นทุนมาจากการซื้อจริง (ใบสั่งซื้อ/ใบรับของ) เท่านั้น
+      hint: sHint('itemList', 'นับเฉพาะสินค้าที่ตั้งสต๊อกขั้นต่ำหรืออยู่ในสูตร BOM (จะคิดต้นทุนสูตรด้วยราคา 0): ต้นทุนเติมเองจากการซื้อจริง — 🛒 จัดซื้อ → เปิดใบสั่งซื้อ (PO) ใส่ราคาต่อหน่วย แล้วรับของ (GR) ครั้งแรก ระบบจะจำต้นทุน/ผู้ขายให้เอง (ไม่ต้องกรอกในฟอร์มสินค้า)'),
       run: (ctx) => {
         const fifo = M.fifoItems(ctx), poP = M.poPriceItems(ctx), inBom = M.bomItems(ctx);
         const l = A(ctx.state.items).filter(i => isActive(i) && (i.type === 'material' || i.type === 'packaging')
           && ((Number(i.minStock)||0) > 0 || inBom.has(i.id))
-          && !(Number(i.costPrice) > 0) && !A(i.suppliers).some(s => Number(s && s.unitPrice) > 0) && !fifo.has(i.id) && !poP.has(i.id));
+          && !(Number(_refUc(ctx, i)) > 0) && !A(i.suppliers).some(s => Number(s && s.unitPrice) > 0) && !fifo.has(i.id) && !poP.has(i.id));   // ต้นทุนอ้างอิง (GR → FIFO → costPrice เดิม → สูตร) · ราคาใน suppliers[] เดิมยังนับ
         return { count:l.length, detail:l.map(iname) }; } },
 
     // ref: src/01-state.js:270-275 seed suppliers/customers ไม่มี field code · src/00-core.js:1407-1415 nextPartyCode (AP-/AR-nnnn)
