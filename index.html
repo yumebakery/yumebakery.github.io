@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="b77df93330f1";window.__ERP_BUILT_AT__="2026-09-27T13:48:26";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="6ddfec49012e";window.__ERP_BUILT_AT__="2026-09-28T09:40:03";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -4161,6 +4161,8 @@ function partySnapshot(p, fallbackName){
     branchType: p.branchType || '',
     address: p.address || '',
     phone: p.phone || '',
+    // UAT S2: _partyNoTaxBranch อ่าน vatRegistered — ไม่เก็บไว้ = ตรึงแล้วใบเก่า (ไม่จด VAT + 00000) กลับพิมพ์ "สำนักงานใหญ่"
+    ...(typeof p.vatRegistered === 'boolean' ? { vatRegistered: p.vatRegistered } : {}),
   };
 }
 
@@ -4508,7 +4510,11 @@ function _partySearchTextRaw(p){
   const raw = String(p.branchCode != null ? p.branchCode : '').trim();
   const stripped = raw.replace(/^0+(?=\d)/, '');
   const kind = _partyBranchKind(p);
-  return _thNorm([p.name, p.code, p.extCode, p.taxId, p.contact, p.phone, p.address,
+  //   P6: ชื่อค้นได้ทั้งรูปเต็ม/ย่อ (บจก.ยูเมะ ↔ บริษัท ยูเมะ จำกัด) — ถ้าไม่มีไลบรารี party-th (harness เก่า) → ใช้ชื่อเดิมอย่างเดียว
+  const _hayFn = global.ERP && global.ERP.partyNameHay;
+  let nameHay = p.name;
+  if(typeof _hayFn === 'function'){ try { nameHay = _hayFn(p) || p.name; } catch(e){ nameHay = p.name; } }
+  return _thNorm([nameHay, p.code, p.extCode, p.taxId, p.contact, p.phone, p.address,
     raw, stripped, raw && 'สาขา ' + raw, stripped && 'สาขา ' + stripped, stripped && 'สาขา' + stripped,
     kind === 'hq' ? 'สำนักงานใหญ่ สนง.ใหญ่ hq' : '', kind === 'none' ? 'สาขา ไม่ระบุ' : ''].filter(Boolean).join(' ¦ '));
   //   คั่นแต่ละช่องด้วย ¦ — ตอนเทียบแบบตัดช่องว่าง จะได้ไม่ต่อข้ามช่อง (รหัส SP2602015 + เลขภาษี 0107… ≠ "150")
@@ -6585,6 +6591,777 @@ Object.assign(global.ERP, {
 });
 
 })(window);
+
+</script>
+<!--src/00-party-th.js--><script>
+// ==================== 00-PARTY-TH.JS ====================
+// 🆕 PARTY-FORM (PARTY_FORM_CONTRACT v1.1 §D.1/D.2): ตัวช่วยคำนำหน้าชื่อ + ที่อยู่ไทย (pure JS · ES5 · ไม่มี DOM/React)
+//   ส่วนที่ 1 thName   — คำนำหน้า/ประกอบชื่อ/แยกชื่อ (แก้ P3: ตัดท้ายสาขาก่อน RULES + บจก./บมจ. ที่ core ยังมี จำกัด/มหาชน/สาขา → medium)
+//   ส่วนที่ 2 thAddress — ค้นตำบล/ประกอบ/แยกที่อยู่ (แก้ P10: รหัสไปรษณีย์ที่เติมจากฐาน = สูงสุด medium · เพิ่ม provinces())
+//   ส่วนที่ 3 ERP glue — export ขึ้น global.ERP + โหลดฐานตำบล data/th-address.v1.json แบบ lazy (ไม่ฝังใน standalone)
+//   ข้อมูลตำบล: kongvut/thai-province-data @326c2eb (MIT) — ดู data/LICENSE-th-address.txt
+
+// ==================== thName.js ====================
+// Party (SP/CS) name prefix (คำนำหน้าชื่อ) helpers. Pure JS, no DOM, ES5 style.
+// Attaches global.thName (and module.exports under Node).
+//
+// Proposed optional party fields (no migration; name stays the composed legal name):
+//   namePrefix : key from thName.PREFIXES (e.g. 'co')
+//   nameCore   : the bare name ("ยูเมะ เบเกอรี่")
+//   nameTail   : optional trailing text kept verbatim (e.g. "สาขาที่ 00001") — rarely used
+//   name       : composeName(namePrefix, nameCore, {tail}) → printed on every document header
+//
+// Composition rule per prefix: pre + sep + core + suf   (sep = ' ' or '' ; suf includes its leading space)
+//   co      บริษัท ยูเมะ เบเกอรี่ จำกัด
+//   pcl     บริษัท ซีพี ออลล์ จำกัด (มหาชน)
+//   ltdp    ห้างหุ้นส่วนจำกัด ยูเมะ
+//   op      ห้างหุ้นส่วนสามัญ ยูเมะ
+//   coop    สหกรณ์ออมทรัพย์ครู จำกัด     (core = "ออมทรัพย์ครู")
+//   mr/mrs/ms/khun   นายสมชาย ใจดี / นางสมศรี / นางสาวสมหญิง / คุณสมชาย   (no space — Thai convention)
+//   shop/found/assoc ร้านป้าแดง / มูลนิธิชัยพัฒนา / สมาคมผู้ปกครอง
+//   en_co   Bytecrunch Technologies Co., Ltd.
+//   en_pcl  Siam Cement Public Company Limited
+//   en_ltd  Foo Bar Limited
+//   gov / none   core as-is (กรมสรรพากร)
+//   other   custom prefix typed by the user: opts.custom + ' ' + core
+// kind: 'juristic' | 'person' | 'other'  → e.g. choose ภ.ง.ด.53 (juristic) vs ภ.ง.ด.3 (person) on 50 ทวิ.
+(function (global) {
+  'use strict';
+
+  var PREFIXES = [
+    { key: 'co',     label: 'บริษัท … จำกัด',            pre: 'บริษัท',            sep: ' ', suf: ' จำกัด',          abbr: 'บจก.',  kind: 'juristic' },
+    { key: 'pcl',    label: 'บริษัท … จำกัด (มหาชน)',     pre: 'บริษัท',            sep: ' ', suf: ' จำกัด (มหาชน)',  abbr: 'บมจ.',  kind: 'juristic' },
+    { key: 'ltdp',   label: 'ห้างหุ้นส่วนจำกัด …',        pre: 'ห้างหุ้นส่วนจำกัด',   sep: ' ', suf: '',                abbr: 'หจก.',  kind: 'juristic' },
+    { key: 'op',     label: 'ห้างหุ้นส่วนสามัญ …',        pre: 'ห้างหุ้นส่วนสามัญ',   sep: ' ', suf: '',                abbr: 'หสน.',  kind: 'juristic' },
+    { key: 'coop',   label: 'สหกรณ์ … จำกัด',            pre: 'สหกรณ์',            sep: '',  suf: ' จำกัด',          abbr: '',      kind: 'juristic' },
+    { key: 'found',  label: 'มูลนิธิ …',                 pre: 'มูลนิธิ',            sep: '',  suf: '',                abbr: '',      kind: 'juristic' },
+    { key: 'assoc',  label: 'สมาคม …',                  pre: 'สมาคม',             sep: '',  suf: '',                abbr: '',      kind: 'juristic' },
+    { key: 'mr',     label: 'นาย',                      pre: 'นาย',               sep: '',  suf: '',                abbr: '',      kind: 'person' },
+    { key: 'mrs',    label: 'นาง',                      pre: 'นาง',               sep: '',  suf: '',                abbr: '',      kind: 'person' },
+    { key: 'ms',     label: 'นางสาว',                   pre: 'นางสาว',            sep: '',  suf: '',                abbr: 'น.ส.',  kind: 'person' },
+    { key: 'khun',   label: 'คุณ',                      pre: 'คุณ',               sep: '',  suf: '',                abbr: '',      kind: 'person' },
+    { key: 'shop',   label: 'ร้าน …',                   pre: 'ร้าน',              sep: '',  suf: '',                abbr: '',      kind: 'other' },
+    { key: 'en_co',  label: '… Co., Ltd.',              pre: '',                  sep: '',  suf: ' Co., Ltd.',      abbr: '',      kind: 'juristic' },
+    { key: 'en_pcl', label: '… Public Company Limited', pre: '',                  sep: '',  suf: ' Public Company Limited', abbr: 'PCL', kind: 'juristic' },
+    { key: 'en_ltd', label: '… Limited',                pre: '',                  sep: '',  suf: ' Limited',        abbr: 'Ltd.',  kind: 'juristic' },
+    { key: 'gov',    label: 'หน่วยงานราชการ (ไม่มีคำนำหน้า)', pre: '',            sep: '',  suf: '',                abbr: '',      kind: 'juristic' },
+    { key: 'none',   label: 'ไม่มีคำนำหน้า',              pre: '',                  sep: '',  suf: '',                abbr: '',      kind: 'other' },
+    { key: 'other',  label: 'อื่น ๆ (พิมพ์เอง)',           pre: '',                  sep: ' ', suf: '',                abbr: '',      kind: 'other' }
+  ];
+  var BY_KEY = {};
+  for (var i = 0; i < PREFIXES.length; i++) BY_KEY[PREFIXES[i].key] = PREFIXES[i];
+
+  function clean(s) {
+    return String(s == null ? '' : s)
+      .replace(/ํา/g, 'ำ')      // จํากัด → จำกัด
+      .replace(/[​-‍﻿]/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/^\s+|\s+$/g, '');
+  }
+
+  function composeName(k, core, opts) {
+    opts = opts || {};
+    var p = BY_KEY[k] || BY_KEY.none, c = clean(core), tail = clean(opts.tail);
+    if (!c) return '';
+    var s;
+    if (p.key === 'other') s = clean(opts.custom) ? clean(opts.custom) + ' ' + c : c;
+    else s = (p.pre ? p.pre + p.sep : '') + c + p.suf;
+    return tail ? s + ' ' + tail : s;
+  }
+
+  // ---- parse ----
+  // Thai juristic suffix: จำกัด / (มหาชน), optional branch tail after it
+  var RULES = [
+    // บริษัท … จำกัด (มหาชน) / บมจ.
+    { key: 'pcl', re: /^(?:บริษัท|บ\.)\s*(.+?)\s*จำกัด\s*\(?\s*มหาชน\s*\)?\s*(.*)$/, conf: 'high' },
+    { key: 'pcl', re: /^บมจ\.?\s*(.+?)(?:\s*จำกัด)?(?:\s*\(?\s*มหาชน\s*\)?)?\s*()$/, conf: 'high', abbr: true },
+    { key: 'co',  re: /^(?:บริษัท|บ\.)\s*(.+?)\s*จำกัด\s*(.*)$/, conf: 'high' },
+    { key: 'co',  re: /^บจก\.?\s*(.+?)(?:\s*จำกัด)?\s*()$/, conf: 'high', abbr: true },
+    { key: 'co',  re: /^บริษัท\s*(.+?)\s*()$/, conf: 'low', note: 'ขึ้นต้น "บริษัท" แต่ไม่มี "จำกัด"' },
+    { key: 'ltdp', re: /^(?:ห้างหุ้นส่วนจำกัด|หจก\.?)\s*(.+?)\s*()$/, conf: 'high' },
+    { key: 'op',  re: /^(?:ห้างหุ้นส่วนสามัญ(?:นิติบุคคล)?|หสน\.?)\s*(.+?)\s*()$/, conf: 'high' },
+    { key: 'coop', re: /^สหกรณ์\s*(.+?)\s*จำกัด\s*(.*)$/, conf: 'high' },
+    { key: 'found', re: /^มูลนิธิ\s*(.+?)\s*()$/, conf: 'high' },
+    { key: 'assoc', re: /^สมาคม\s*(.+?)\s*()$/, conf: 'high' },
+    { key: 'ms',  re: /^(?:นางสาว|น\.\s?ส\.|นส\.)\s*(.+?)\s*()$/, conf: 'high' },
+    { key: 'mrs', re: /^นาง\s*(.+?)\s*()$/, conf: 'high' },
+    { key: 'mr',  re: /^นาย\s*(.+?)\s*()$/, conf: 'high' },
+    { key: 'khun', re: /^คุณ\s*(.+?)\s*()$/, conf: 'high' },
+    { key: 'shop', re: /^ร้าน\s*(.+?)\s*()$/, conf: 'high' },
+    // English
+    { key: 'en_pcl', re: /^(.+?)\s*,?\s*(?:Public\s+Company\s+Limited|Public\s+Co\.?,?\s*Ltd\.?|PCL\.?|Plc\.?)\s*()$/i, conf: 'high' },
+    { key: 'en_co', re: /^(.+?)\s*,?\s*(?:Co\.?\s*,?\s*Ltd\.?|Company\s+Limited|Co\.?\s*Limited)\s*()$/i, conf: 'high' },
+    { key: 'en_ltd', re: /^(.+?)\s*,?\s*(?:Limited|Ltd\.?)\s*()$/i, conf: 'medium' }
+  ];
+  var GOV_RE = /^(กรม|กระทรวง|สำนักงาน|สำนักนายกรัฐมนตรี|องค์การบริหารส่วน|อบต\.|อบจ\.|เทศบาล|กรุงเทพมหานคร$|การไฟฟ้า|การประปา|การท่าเรือ|การรถไฟ|การยาสูบ|ศาล|ที่ว่าการ|สถานีตำรวจ|กองทัพ|โรงพยาบาล(?!เอกชน)|โรงเรียน|มหาวิทยาลัย|สถาบัน|ธนาคารแห่งประเทศไทย|ธนาคารออมสิน|ธนาคารอาคารสงเคราะห์|ธนาคารเพื่อการเกษตร)/;
+
+  // "นาง" must not swallow names that just start with นาง… as a word? (e.g. "นางฟ้าเบเกอรี่") — kept 'medium'
+  // 🆕 P3 (PARTY_FORM_CONTRACT C.2/C.5): ท้ายชื่อที่เป็นสาขา/สนญ. ตัดออกเป็น tail "ก่อน" เข้า RULES
+  //   (เดิม "บจก.ABC สาขาที่ 00001" ได้ core "ABC สาขาที่ 00001" ระดับ high → ประกอบเป็น "บริษัท ABC สาขาที่ 00001 จำกัด" = ชื่อผิด ม.86/4)
+  var BRANCH_TAIL_RE = /\s*(\(?\s*(?:สำนักงานใหญ่|สนญ\.?|head\s*office)\s*\)?|สาขา(?:ที่)?\s*\d{1,5})\s*$/i;
+
+  function parseName(full) {
+    var s = clean(full), m, r, i, brTail = '';
+    var res = { key: 'none', core: s, tail: '', confidence: 'low', notes: [] };
+    if (!s) { res.confidence = 'none'; return res; }
+    var bm = BRANCH_TAIL_RE.exec(s);
+    if (bm && bm.index > 0) {                       // ต้องเหลือชื่อข้างหน้า (ชื่อที่เป็นแค่ "สำนักงานใหญ่" ไม่ตัด)
+      brTail = clean(bm[1]); s = clean(s.slice(0, bm.index));
+      res.core = s; res.tail = brTail;
+    }
+    for (i = 0; i < RULES.length; i++) {
+      r = RULES[i]; m = r.re.exec(s);
+      if (!m) continue;
+      var core = clean(m[1]).replace(/^[,\s]+|[,\s]+$/g, ''), tail = clean(clean(m[2]) + ' ' + brTail);
+      if (!core) continue;
+      res.key = r.key; res.core = core; res.tail = tail; res.confidence = r.conf;
+      if (r.note) res.notes.push(r.note);
+      // 🆕 P3 ข้อ 2: กฎคำย่อ บจก./บมจ. (ไม่บังคับ "จำกัด" ปิดท้าย) แต่ core ยังมี จำกัด/มหาชน/สาขา → ห้าม high
+      if (r.abbr && /จำกัด|มหาชน|สาขา/.test(core) && res.confidence === 'high') {
+        res.confidence = 'medium'; res.notes.push('ชื่อหลังคำย่อยังมีคำว่า จำกัด/มหาชน/สาขา — โปรดตรวจ');
+      }
+      if (tail) { res.notes.push('มีข้อความต่อท้ายชื่อ: ' + tail); if (res.confidence === 'high') res.confidence = 'medium'; }
+      // individuals: "นาง" without a following space and with a long run could be a shop name ("นางฟ้าเบเกอรี่")
+      if ((r.key === 'mrs' || r.key === 'mr') && !/^(นาย|นาง)\s/.test(s) && core.indexOf(' ') < 0) {
+        res.confidence = 'medium'; res.notes.push('ไม่มีนามสกุล — อาจไม่ใช่ชื่อบุคคล');
+      }
+      if (/^(บจก|หจก|บมจ|หสน|น\.\s?ส|นส)\.?/.test(s)) res.notes.push('ขยายคำย่อเป็นชื่อเต็ม');
+      return res;
+    }
+    if (GOV_RE.test(s)) { res.key = 'gov'; res.confidence = 'medium'; return res; }
+    res.notes.push('ไม่พบคำนำหน้า');
+    return res;
+  }
+
+  function prefixInfo(k) { return BY_KEY[k] || null; }
+
+  var api = {
+    PREFIXES: PREFIXES,
+    prefixInfo: prefixInfo,
+    composeName: composeName,
+    parseName: parseName,
+    _clean: clean
+  };
+  global.thName = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));
+
+// ==================== thAddress.js ====================
+// Thai address helpers for the party (SP/CS) form: autocomplete, compose, parse.
+// Pure JS, no DOM, ES5 style. Attaches global.thAddress (and module.exports under Node).
+//
+// Data: th-address.min.json (kongvut/thai-province-data v2.0.0, MIT) — compact schema
+//   {v, bkk, p:[province], d:[[district, pIdx]], s:[[subdistrict, dIdx, zip]]}
+// Load once (lazy index on first use):  thAddress.load(jsonObjectOrString)
+// If not loaded explicitly, the first call looks for global.TH_ADDRESS_DATA.
+//
+// ---- Composed address style (ONE style, used everywhere; stored in party.address) ----
+//   Bangkok : "<addrLine> แขวง<แขวง> เขต<เขต> กรุงเทพมหานคร <zip>"
+//   Others  : "<addrLine> ต.<ตำบล> อ.<อำเภอ> จ.<จังหวัด> <zip>"
+//   - no space between the marker and the name (Thai convention; matches live data)
+//   - one space between parts; empty parts are skipped
+//   - Bangkok province is always written in full "กรุงเทพมหานคร" (never กทม.)
+//   - "อ.เมือง" is always expanded to the dataset name, e.g. "อ.เมืองนครปฐม"
+//   - opts.long = true → "ตำบล/อำเภอ/จังหวัด" instead of "ต./อ./จ." (Bangkok unchanged)
+//
+// API
+//   load(data)                          → thAddress
+//   isLoaded()                          → bool
+//   searchSubdistrict(query, limit=20)  → [{subdistrict, district, province, postcode, isBkk, label}]
+//   composeAddress(parts, opts)         → string   parts = {addrLine, subdistrict, district, province, postcode}
+//   parseAddress(str)                   → {addrLine, subdistrict, district, province, postcode, isBkk,
+//                                          confidence:'high'|'medium'|'low'|'none', notes:[], candidates:[], raw:{}}
+//   districtsOf(province), subdistrictsOf(district, province), postcodesOf(subdistrict, district, province)
+(function (global) {
+  'use strict';
+
+  var DATA = null, IDX = null;
+  var BKK_NAME = 'กรุงเทพมหานคร';
+
+  // ---------- text normalisation ----------
+  var SARA_AM_RE = /ํา/g;           // "ํา" (nikhahit + sara aa) → "ำ"
+  function clean(s) {
+    return String(s == null ? '' : s)
+      .replace(SARA_AM_RE, 'ำ')
+      .replace(/[​-‍﻿]/g, '')
+      .replace(/…|\.{3,}/g, ' ')         // "…" / "..." (truncated text)
+      .replace(/\s+/g, ' ')
+      .replace(/^\s+|\s+$/g, '');
+  }
+  // comparison key: no spaces / punctuation, lower case
+  function key(s) { return clean(s).replace(/[\s\-().,'"\/]/g, '').toLowerCase(); }
+
+  var BKK_ALIAS = { 'กรุงเทพมหานคร': 1, 'กรุงเทพฯ': 1, 'กรุงเทพ': 1, 'กทม': 1, 'กท': 1, 'bangkok': 1, 'bkk': 1 };
+  function isBkkText(s) { return !!BKK_ALIAS[key(s).replace(/ฯ$/, '')] || !!BKK_ALIAS[key(s)]; }
+
+  // Levenshtein with early exit (small strings only)
+  function lev(a, b, max) {
+    if (Math.abs(a.length - b.length) > max) return max + 1;
+    var prev = [], cur, i, j;
+    for (j = 0; j <= b.length; j++) prev[j] = j;
+    for (i = 1; i <= a.length; i++) {
+      cur = [i]; var rowMin = i;
+      for (j = 1; j <= b.length; j++) {
+        var c = a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1;
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + c);
+        if (cur[j] < rowMin) rowMin = cur[j];
+      }
+      if (rowMin > max) return max + 1;
+      prev = cur;
+    }
+    return prev[b.length];
+  }
+
+  // 3 = exact, 2 = contains (conservative), 1 = one-edit typo, 0 = no match. t, name are keys.
+  function nameLevel(t, name) {
+    if (!t || !name) return 0;
+    if (t === name) return 3;
+    if (t.length >= 3 && name.indexOf(t) >= 0) return 2;                  // "บำหรุ" ⊂ "บางบำหรุ"
+    if (name.length >= 3 && t.indexOf(name) === 0 && t.length - name.length <= 2) return 2; // trailing junk
+    if (t.length >= 4 && name.length >= 4 && lev(t, name, 1) <= 1) return 1;
+    return 0;
+  }
+
+  // ---------- loading / index ----------
+  function load(data) {
+    if (typeof data === 'string') data = JSON.parse(data);
+    if (!data || !data.p || !data.d || !data.s) throw new Error('thAddress.load: bad data');
+    DATA = data; IDX = null;
+    return api;
+  }
+  function isLoaded() { return !!(DATA || global.TH_ADDRESS_DATA); }
+  function ensure() {
+    if (IDX) return IDX;
+    if (!DATA && global.TH_ADDRESS_DATA) load(global.TH_ADDRESS_DATA);
+    if (!DATA) throw new Error('thAddress: data not loaded (call thAddress.load(json))');
+    var d = DATA, bkk = d.bkk || 0, rows = [], byDist = {}, zips = {}, i;
+    var kp = [], kd = [];
+    for (i = 0; i < d.p.length; i++) kp[i] = key(d.p[i]);
+    for (i = 0; i < d.d.length; i++) kd[i] = key(d.d[i][0]);
+    for (i = 0; i < d.s.length; i++) {
+      var r = d.s[i], di = r[1], pi = d.d[di][1];
+      var row = {
+        i: i, s: r[0], d: d.d[di][0], p: d.p[pi], z: String(r[2]), di: di, pi: pi, bkk: pi === bkk,
+        ks: key(r[0]), kd: kd[di], kp: kp[pi]
+      };
+      rows.push(row);
+      (byDist[di] = byDist[di] || []).push(row);
+      zips[row.z] = 1;
+    }
+    IDX = { rows: rows, byDist: byDist, zips: zips, bkk: bkk };
+    return IDX;
+  }
+  function out(row) {
+    return {
+      subdistrict: row.s, district: row.d, province: row.p, postcode: row.z, isBkk: row.bkk,
+      label: (row.bkk ? 'แขวง' : 'ต.') + row.s + ' » ' + (row.bkk ? 'เขต' : 'อ.') + row.d + ' » ' + row.p + ' ' + row.z
+    };
+  }
+
+  // ---------- autocomplete ----------
+  var HINT_RE = /^(ตำบล|แขวง|ต\.|อำเภอ|เขต|อ\.|จังหวัด|จ\.)/;
+  var HINT_FIELD = { 'ตำบล': 's', 'แขวง': 's', 'ต.': 's', 'อำเภอ': 'd', 'เขต': 'd', 'อ.': 'd', 'จังหวัด': 'p', 'จ.': 'p' };
+
+  function fieldScore(k, v, exact, prefix, contains) {
+    if (v === k) return exact;
+    if (v.indexOf(k) === 0) return prefix;
+    if (k.length >= 2 && v.indexOf(k) > 0) return contains;
+    return 0;
+  }
+
+  function searchSubdistrict(query, limit) {
+    var ix = ensure();
+    limit = limit || 20;
+    var parts = clean(query).split(' '), toks = [], i, j;
+    for (i = 0; i < parts.length; i++) {
+      var t = parts[i], hint = null, m = HINT_RE.exec(t);
+      if (m && t.length > m[1].length) { hint = HINT_FIELD[m[1]]; t = t.slice(m[1].length); }
+      else if (m && t.length === m[1].length) continue;             // bare marker
+      if (isBkkText(t) && key(t) !== key(BKK_NAME)) { t = BKK_NAME; hint = 'p'; }
+      var k = key(t);
+      if (k) toks.push({ k: k, hint: hint, digits: /^\d+$/.test(k) });
+    }
+    if (!toks.length) return [];
+    var hits = [];
+    for (i = 0; i < ix.rows.length; i++) {
+      var r = ix.rows[i], total = 0, ok = true;
+      for (j = 0; j < toks.length && ok; j++) {
+        var tk = toks[j], sc = 0;
+        if (tk.digits) {
+          sc = r.z === tk.k ? 100 : (r.z.indexOf(tk.k) === 0 ? 70 : 0);
+        } else {
+          var ss = (!tk.hint || tk.hint === 's') ? fieldScore(tk.k, r.ks, 100, 85, 60) : 0;
+          var sd = (!tk.hint || tk.hint === 'd') ? fieldScore(tk.k, r.kd, 55, 45, 35) : 0;
+          var sp = (!tk.hint || tk.hint === 'p') ? fieldScore(tk.k, r.kp, 40, 35, 25) : 0;
+          // "เมือง" + province typed as district
+          sc = Math.max(ss, sd, sp);
+        }
+        if (!sc) ok = false; else total += sc;
+      }
+      if (ok) hits.push({ r: r, sc: total });
+    }
+    hits.sort(function (a, b) {
+      return (b.sc - a.sc) || (a.r.s.length - b.r.s.length) || (a.r.i - b.r.i);
+    });
+    var res = [];
+    for (i = 0; i < hits.length && i < limit; i++) res.push(out(hits[i].r));
+    return res;
+  }
+
+  // ---------- compose ----------
+  function strip(s, re) { return clean(s).replace(re, '').replace(/^\s+/, ''); }
+  function composeAddress(parts, opts) {
+    parts = parts || {}; opts = opts || {};
+    var line = clean(parts.addrLine);
+    var sub = strip(parts.subdistrict, /^(ตำบล|แขวง|ต\.)\s*/);
+    var dist = strip(parts.district, /^(อำเภอ|เขต|อ\.)\s*/);
+    var prov = strip(parts.province, /^(จังหวัด|จ\.)\s*/);
+    var zip = clean(parts.postcode);
+    var bkk = parts.isBkk === true || (prov ? isBkkText(prov) : false);
+    if (bkk) prov = BKK_NAME;
+    if (dist === 'เมือง' && prov && !bkk) dist = 'เมือง' + prov;
+    var o = [];
+    if (line) o.push(line);
+    if (sub) o.push((bkk ? 'แขวง' : (opts.long ? 'ตำบล' : 'ต.')) + sub);
+    if (dist) o.push((bkk ? 'เขต' : (opts.long ? 'อำเภอ' : 'อ.')) + dist);
+    if (prov) o.push(bkk ? BKK_NAME : (opts.long ? 'จังหวัด' : 'จ.') + prov);
+    if (zip) o.push(zip);
+    return o.join(' ');
+  }
+
+  // ---------- parse ----------
+  // marker must follow start / space / comma / "(" / digit (so "ถ.", "รพ.", "ซี.พี." never trigger)
+  var MARK_RE = /(^|[\s,(0-9])(ตำบล|แขวง|ต\.|อำเภอ|เขต|อ\.|จังหวัด|จ\.)\s?([^\s,0-9]+)/g;
+  var BKK_RE = /(^|[\s,(0-9])(กรุงเทพมหานคร|กรุงเทพฯ|กรุงเทพ|กทม\.?|กท\.)(?=$|[\s,)0-9])/g;
+  var STREET_BEFORE = /(ถ\.|ถนน|ซ\.|ซอย|รพ\.|โรงพยาบาล|อาคาร|หมู่บ้าน|ม\.|ตึก|ห้าง|ตลาด|นิคม|โครงการ)\s?$/;
+
+  function uniq(list, f) {
+    var seen = {}, o = [];
+    for (var i = 0; i < list.length; i++) { var k = f(list[i]); if (!seen[k]) { seen[k] = 1; o.push(list[i]); } }
+    return o;
+  }
+
+  function parseAddress(str) {
+    var ix = ensure();
+    var src = clean(str);
+    var res = { addrLine: '', subdistrict: '', district: '', province: '', postcode: '', isBkk: false,
+      confidence: 'none', notes: [], candidates: [], raw: {} };
+    if (!src) { res.notes.push('ว่าง'); return res; }
+
+    var spans = [];          // [start, end) ranges to cut from addrLine
+    var cand = { s: [], d: [], p: [] };
+    var m, t;
+
+    // 1) postcode = last standalone 5-digit number (prefer one that exists in dataset)
+    var zre = /(^|[^0-9\/\-])([1-9][0-9]{4})(?![0-9])/g, zLast = null, zKnown = null;
+    while ((m = zre.exec(src))) {
+      var zs = m.index + m[1].length, zv = { v: m[2], a: zs, b: zs + 5 };
+      zLast = zv; if (ix.zips[m[2]]) zKnown = zv;
+    }
+    var zHit = zKnown || null;
+    if (!zKnown && zLast && zLast.b >= src.length - 2) { zHit = zLast; res.notes.push('รหัสไปรษณีย์ ' + zLast.v + ' ไม่มีในฐานข้อมูล'); }
+    var zip = zHit ? zHit.v : '';
+    if (zHit) spans.push([zHit.a, zHit.b]);
+
+    // 2) markers
+    MARK_RE.lastIndex = 0;
+    while ((m = MARK_RE.exec(src))) {
+      var mk = m[2], a = m.index + m[1].length, b = a + m[2].length + (m[0].length - m[1].length - m[2].length);
+      var f = HINT_FIELD[mk];
+      cand[f].push({ text: m[3], k: key(m[3]), a: a, b: b, mk: mk });
+    }
+    // 3) Bangkok aliases (as a province candidate)
+    BKK_RE.lastIndex = 0;
+    while ((m = BKK_RE.exec(src))) {
+      var ba = m.index + m[1].length;
+      var inside = false;
+      for (var q = 0; q < cand.p.length; q++) if (ba >= cand.p[q].a && ba < cand.p[q].b) inside = true;
+      if (!inside) cand.p.push({ text: m[2], k: key(BKK_NAME), a: ba, b: ba + m[2].length, mk: '' });
+    }
+    for (var ci = 0; ci < cand.p.length; ci++) if (isBkkText(cand.p[ci].text)) cand.p[ci].k = key(BKK_NAME);
+    // 4) trailing province name without marker ("… อ.เมือง นครปฐม 73000")
+    if (!cand.p.length) {
+      var tail = src, cutAt = zHit ? zHit.a : src.length;
+      tail = src.slice(0, cutAt).replace(/[\s,]+$/, '');
+      var sp = tail.lastIndexOf(' '), lastTok = tail.slice(sp + 1), lk = key(lastTok);
+      if (lk) for (var pi = 0; pi < DATA.p.length; pi++) {
+        if (key(DATA.p[pi]) === lk) { cand.p.push({ text: lastTok, k: lk, a: sp + 1, b: sp + 1 + lastTok.length, mk: '' }); break; }
+      }
+    }
+
+    function best(list, name, extra) {      // best level over candidates → {lv, c}
+      var bl = 0, bc = null;
+      for (var i = 0; i < list.length; i++) {
+        var lv = nameLevel(list[i].k, name);
+        if (extra) lv = Math.max(lv, extra(list[i]));
+        if (lv > bl) { bl = lv; bc = list[i]; }
+      }
+      return { lv: bl, c: bc };
+    }
+
+    // evaluate every dataset row against the provided fields
+    function evalRows(useS, useD, useP) {
+      var outRows = [], topSc = -1;
+      for (var i = 0; i < ix.rows.length; i++) {
+        var r = ix.rows[i], sc = 0, lv = {}, used = {};
+        if (useS) { var bs = best(cand.s, r.ks); if (!bs.lv) continue; sc += bs.lv; lv.s = bs.lv; used.s = bs.c; }
+        if (useD) {
+          var bd = best(cand.d, r.kd, function (c) {
+            return (c.k === 'เมือง' && r.kd === 'เมือง' + r.kp) ? 3 : 0;
+          });
+          if (!bd.lv) continue; sc += bd.lv; lv.d = bd.lv; used.d = bd.c;
+        }
+        if (useP) { var bp = best(cand.p, r.kp); if (!bp.lv) continue; sc += bp.lv; lv.p = bp.lv; used.p = bp.c; }
+        if (zip && r.z === zip) sc += 2;
+        if (sc > topSc) { topSc = sc; outRows = []; }
+        if (sc === topSc) outRows.push({ r: r, lv: lv, used: used });
+      }
+      return outRows;
+    }
+
+    var hasS = cand.s.length > 0, hasD = cand.d.length > 0, hasP = cand.p.length > 0;
+    var top = [], dropped = [], mode = '';
+    if (hasS) {
+      // try all given fields; if nothing matches, drop province, then district (typed wrong)
+      var tries = [[hasD, hasP, []], [hasD, false, ['จังหวัด']], [false, hasP, ['อำเภอ/เขต']]];
+      for (var ti = 0; ti < tries.length; ti++) {
+        if (ti === 1 && !hasP) continue;
+        if (ti === 2 && !hasD) continue;
+        top = evalRows(true, !!tries[ti][0], !!tries[ti][1]);
+        if (top.length) { dropped = tries[ti][2]; mode = 'sub'; break; }
+      }
+      if (!top.length) res.notes.push('ไม่พบตำบล/แขวง "' + cand.s[cand.s.length - 1].text + '" ในฐานข้อมูล');
+    }
+
+    // fallback: no (matching) subdistrict marker → scan text for a subdistrict name inside the narrowed area
+    var scanUsed = null;
+    if (!top.length && (hasD || hasP || zip)) {
+      var area = (hasD || hasP) ? evalRows(false, hasD, hasP) : [];
+      var pool = [];
+      if (hasD || hasP) {
+        // evalRows keeps only top-scoring rows; that is the area (district/province match)
+        pool = area;
+      } else {
+        for (var zi = 0; zi < ix.rows.length; zi++) if (ix.rows[zi].z === zip) pool.push({ r: ix.rows[zi], lv: {}, used: {} });
+      }
+      if (zip) { var pz = []; for (var k1 = 0; k1 < pool.length; k1++) if (pool[k1].r.z === zip) pz.push(pool[k1]); if (pz.length) pool = pz; }
+      if (!hasS && pool.length && pool.length <= 400) {
+        var found = [];
+        for (var k2 = 0; k2 < pool.length; k2++) {
+          var nm = pool[k2].r.s, at = -1, from = 0;
+          while ((at = src.indexOf(nm, from)) >= 0) {
+            from = at + 1;
+            var before = src.slice(0, at);
+            if (at > 0 && !/[\s,]$/.test(before)) continue;           // must start a word
+            if (STREET_BEFORE.test(before.replace(/\s+$/, ' ').replace(/ $/, '')) || STREET_BEFORE.test(before)) continue;
+            var endc = src.charAt(at + nm.length);
+            if (endc && !/[\s,0-9]/.test(endc)) continue;             // must end a word
+            var inMarker = false;
+            for (var f2 in cand) for (var k3 = 0; k3 < cand[f2].length; k3++) if (at >= cand[f2][k3].a && at < cand[f2][k3].b) inMarker = true;
+            if (inMarker) continue;
+            found.push({ p: pool[k2], a: at, b: at + nm.length });
+            break;
+          }
+        }
+        found = uniq(found, function (x) { return x.p.r.i; });
+        if (found.length === 1) {
+          top = [found[0].p]; scanUsed = found[0]; mode = 'scan';
+          res.notes.push('เดาตำบล/แขวงจากชื่อในข้อความ: ' + found[0].p.r.s);
+        } else if (found.length > 1) {
+          res.notes.push('พบชื่อตำบลที่เป็นไปได้หลายชื่อในข้อความ');
+        }
+      }
+      if (!top.length) { top = pool; mode = 'area'; }
+    }
+
+    // ---- decide ----
+    var rowsU = uniq(top, function (x) { return x.r.i; });
+    function allSame(f) { if (!rowsU.length) return false; for (var i = 1; i < rowsU.length; i++) if (rowsU[i].r[f] !== rowsU[0].r[f]) return false; return true; }
+    var chosen = null;
+    if ((mode === 'sub' || mode === 'scan') && rowsU.length === 1) chosen = rowsU[0];
+
+    var usedC = {};
+    if (chosen) {
+      var r0 = chosen.r;
+      res.subdistrict = r0.s; res.district = r0.d; res.province = r0.p; res.isBkk = r0.bkk;
+      res.postcode = zip || r0.z;
+      if (zip && zip !== r0.z) res.notes.push('รหัสไปรษณีย์ในข้อความ (' + zip + ') ต่างจากฐานข้อมูล (' + r0.z + ') — ใช้ตามข้อความ');
+      if (!zip) res.notes.push('เติมรหัสไปรษณีย์จากฐานข้อมูล');
+      usedC = chosen.used;
+      var lv = chosen.lv;
+      var exact = mode === 'sub' && lv.s === 3 && (!hasD || lv.d === 3) && (!hasP || lv.p === 3) && !dropped.length;
+      var complete = hasD || hasP || (zip && zip === r0.z);
+      // 🆕 P10: รหัสไปรษณีย์ที่ระบบเติมจากฐาน (ข้อความเดิมไม่มี) = สูงสุด medium — ฐานเก็บ 1 รหัสต่อตำบล แต่บางตำบลใช้หลายรหัส
+      //   ฟอร์มติดป้าย "(เติมจากฐาน)" ที่ช่องไปรษณีย์ด้วย res.postcodeFromDb
+      if (!zip) res.postcodeFromDb = true;
+      if (exact && complete && zip && zip === r0.z) res.confidence = 'high';
+      else res.confidence = 'medium';
+      if (mode === 'sub' && (lv.s < 3 || (lv.d && lv.d < 3) || (lv.p && lv.p < 3))) res.notes.push('จับคู่ชื่อแบบใกล้เคียง (ไม่ตรงทุกตัวอักษร) — โปรดตรวจ');
+      if (dropped.length) res.notes.push('ไม่ตรงกับ ' + dropped.join(',') + ' ที่พิมพ์ไว้ — ใช้ตามตำบล');
+      if (!hasP) res.notes.push('เติมจังหวัดจากฐานข้อมูล');
+      if (!hasD) res.notes.push('เติมอำเภอ/เขตจากฐานข้อมูล');
+    } else if (rowsU.length) {
+      // ambiguous or area-only → fill only what every candidate agrees on; never guess
+      if (allSame('pi')) { res.province = rowsU[0].r.p; res.isBkk = rowsU[0].r.bkk; }
+      if (allSame('di')) res.district = rowsU[0].r.d;
+      if (zip) res.postcode = zip;
+      else if (res.district && allSame('z')) { res.postcode = rowsU[0].r.z; res.notes.push('เติมรหัสไปรษณีย์จากอำเภอ/เขต (ทุกตำบลใช้รหัสเดียวกัน)'); }
+      if (mode === 'sub') {
+        res.notes.push('ตำบล/แขวงกำกวม มี ' + rowsU.length + ' ตัวเลือก — โปรดเลือก');
+        for (var c1 = 0; c1 < rowsU.length && c1 < 10; c1++) res.candidates.push(out(rowsU[c1].r));
+      } else if (!hasS) res.notes.push('ไม่ระบุตำบล/แขวง — โปรดเลือก');
+      // spans: take the candidate that matched for district/province
+      usedC = rowsU[0].used;
+      if (!allSame('di')) delete usedC.d;
+      if (!allSame('pi')) delete usedC.p;
+      res.confidence = (res.province || res.district || res.candidates.length) ? 'low' : 'none';
+    } else {
+      if (zip) res.postcode = zip;
+      res.confidence = 'none';
+      if (!hasS && !hasD && !hasP) res.notes.push('ไม่พบ ตำบล/อำเภอ/จังหวัด ในข้อความ');
+    }
+
+    // raw texts of unresolved fields (for the UI to prefill) and spans to cut
+    function lastOf(l) { return l.length ? l[l.length - 1] : null; }
+    var fields = { s: 'subdistrict', d: 'district', p: 'province' };
+    for (var fk in fields) {
+      var c = usedC[fk] || null;
+      if (!c && fk === 's' && scanUsed) { spans.push([scanUsed.a, scanUsed.b]); continue; }
+      if (!c && cand[fk].length) {
+        c = lastOf(cand[fk]);
+        if (!res[fields[fk]]) res.raw[fields[fk]] = c.text;
+      }
+      if (c) {
+        // a แขวง/เขต word that did not match anything but another candidate did stays in addrLine
+        spans.push([c.a, c.b]);
+      }
+    }
+    // cut spans → addrLine
+    spans.sort(function (x, y) { return x[0] - y[0]; });
+    var line = '', pos = 0;
+    for (var si = 0; si < spans.length; si++) {
+      if (spans[si][0] < pos) { pos = Math.max(pos, spans[si][1]); continue; }
+      line += src.slice(pos, spans[si][0]) + ' ';
+      pos = spans[si][1];
+    }
+    line += src.slice(pos);
+    res.addrLine = line.replace(/\s+/g, ' ').replace(/[\s,\-]+$/, '').replace(/^[\s,]+/, '');
+    return res;
+  }
+
+  // ---------- small lookups for dropdowns ----------
+  function districtsOf(province) {
+    var ix = ensure(), k = isBkkText(province) ? key(BKK_NAME) : key(province), seen = {}, o = [];
+    for (var i = 0; i < ix.rows.length; i++) { var r = ix.rows[i]; if (r.kp === k && !seen[r.di]) { seen[r.di] = 1; o.push(r.d); } }
+    return o;
+  }
+  function subdistrictsOf(district, province) {
+    var ix = ensure(), kd = key(district), kp = province ? (isBkkText(province) ? key(BKK_NAME) : key(province)) : null, o = [];
+    for (var i = 0; i < ix.rows.length; i++) { var r = ix.rows[i]; if (r.kd === kd && (!kp || r.kp === kp)) o.push(out(r)); }
+    return o;
+  }
+  function postcodesOf(sub, district, province) {
+    var l = subdistrictsOf(district, province), ks = key(sub), o = [];
+    for (var i = 0; i < l.length; i++) if (key(l[i].subdistrict) === ks && o.indexOf(l[i].postcode) < 0) o.push(l[i].postcode);
+    return o;
+  }
+
+  // 🆕 PARTY-FORM: รายชื่อจังหวัดจากฐาน (ลำดับตามไฟล์ข้อมูล) · ยังไม่โหลด = [] (ฟอร์มใช้ ERP.TH_PROVINCES ที่ฝังในโค้ดแทน)
+  function provinces() {
+    if (!DATA && global.TH_ADDRESS_DATA) load(global.TH_ADDRESS_DATA);
+    return DATA ? DATA.p.slice() : [];
+  }
+
+  var api = {
+    load: load, isLoaded: isLoaded, provinces: provinces,
+    searchSubdistrict: searchSubdistrict,
+    composeAddress: composeAddress,
+    parseAddress: parseAddress,
+    districtsOf: districtsOf, subdistrictsOf: subdistrictsOf, postcodesOf: postcodesOf,
+    _clean: clean, _key: key, BKK_NAME: BKK_NAME
+  };
+  global.thAddress = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));
+
+// ==================== ERP glue (PARTY_FORM_CONTRACT §D.2 · B.3 · C.6 · C.7 · F) ====================
+// ทุกฟังก์ชันด้านล่างเป็น pure (ยกเว้น thAddrReady ที่โหลดไฟล์) · compose ไม่ใช้ฐานตำบล → บันทึกได้แม้ออฟไลน์
+(function (global) {
+  'use strict';
+  var ERP = global.ERP = global.ERP || {};
+  var N = global.thName, A = global.thAddress;
+
+  // 77 จังหวัด เรียงตามตัวอักษรไทย (localeCompare 'th') · กรุงเทพมหานครอยู่บนสุด · ดึงจาก th-address.v1.json .p ตอนสร้างไฟล์
+  //   ฝังเป็นค่าคงที่ ให้ช่องจังหวัดใช้ได้แม้โหลดฐานตำบลไม่ได้ (C.3)
+  var TH_PROVINCES = ["กรุงเทพมหานคร","กระบี่","กาญจนบุรี","กาฬสินธุ์","กำแพงเพชร","ขอนแก่น","จันทบุรี","ฉะเชิงเทรา","ชลบุรี","ชัยนาท","ชัยภูมิ","ชุมพร","เชียงราย","เชียงใหม่","ตรัง","ตราด","ตาก","นครนายก","นครปฐม","นครพนม","นครราชสีมา","นครศรีธรรมราช","นครสวรรค์","นนทบุรี","นราธิวาส","น่าน","บึงกาฬ","บุรีรัมย์","ปทุมธานี","ประจวบคีรีขันธ์","ปราจีนบุรี","ปัตตานี","พระนครศรีอยุธยา","พะเยา","พังงา","พัทลุง","พิจิตร","พิษณุโลก","เพชรบุรี","เพชรบูรณ์","แพร่","ภูเก็ต","มหาสารคาม","มุกดาหาร","แม่ฮ่องสอน","ยโสธร","ยะลา","ร้อยเอ็ด","ระนอง","ระยอง","ราชบุรี","ลพบุรี","ลำปาง","ลำพูน","เลย","ศรีสะเกษ","สกลนคร","สงขลา","สตูล","สมุทรปราการ","สมุทรสงคราม","สมุทรสาคร","สระแก้ว","สระบุรี","สิงห์บุรี","สุโขทัย","สุพรรณบุรี","สุราษฎร์ธานี","สุรินทร์","หนองคาย","หนองบัวลำภู","อ่างทอง","อำนาจเจริญ","อุดรธานี","อุตรดิตถ์","อุทัยธานี","อุบลราชธานี"];
+
+  // clean() ตามนิยาม B.3 (ํา→ำ · zero-width · "…"/"..." → ช่องว่าง · ยุบบรรทัดใหม่/ช่องว่างซ้อน · trim) = thAddress._clean
+  var clean = A._clean;
+  function str(v) { return v == null ? '' : String(v); }
+  function nonEmpty(v) { return str(v).replace(/\s+/g, '') !== ''; }
+
+  // ---------- โหลดฐานตำบลแบบ lazy (D.2 · D.4) ----------
+  var st = { status: 'idle', promise: null };   // idle | loading | ready | offline
+  var DATA_URL = 'data/th-address.v1.json';
+  var TIMEOUT_MS = 8000;
+  function fire() { try { if (typeof global.dispatchEvent === 'function' && typeof Event === 'function') global.dispatchEvent(new Event('erp:thaddr')); } catch (e) {} }
+  function thAddrReady() {
+    if (A.isLoaded()) { st.status = 'ready'; return Promise.resolve(true); }   // เทสต์ฉีด window.TH_ADDRESS_DATA ได้
+    if (st.promise) return st.promise;
+    if (typeof fetch !== 'function' || typeof Promise === 'undefined') { st.status = 'offline'; return typeof Promise !== 'undefined' ? Promise.resolve(false) : null; }
+    // 🆕 ขั้น 4 (D.4): เปิดจากไฟล์ (file://) — fetch ของเบราว์เซอร์โหลดไฟล์ไม่ได้อยู่แล้ว (และขึ้น console error ทุกครั้งที่เปิดฟอร์ม)
+    //   → ถือเป็นออฟไลน์เลยโดยไม่ยิง · ยกเว้น fetch ถูกแทนที่ (เทสต์ stub ให้หน่วง/พัง) จึงยังผ่านเส้นทางปกติ
+    try {
+      if (typeof location !== 'undefined' && location.protocol === 'file:' && /\[native code\]/.test(Function.prototype.toString.call(fetch))) {
+        st.status = 'offline'; return Promise.resolve(false);
+      }
+    } catch (e) {}
+    st.status = 'loading';
+    var url = DATA_URL;
+    try { if (typeof document !== 'undefined' && document.baseURI && typeof URL === 'function') url = new URL(DATA_URL, document.baseURI).href; } catch (e) {}
+    // timeout 8 วิ ด้วย Promise.race (ไม่พึ่ง AbortController — เบราว์เซอร์เก่าบางตัวไม่มี แล้ว timeout จะไม่ทำงาน · L6)
+    var timer = null;
+    var timeout = new Promise(function (_, rej) { timer = setTimeout(function () { rej(new Error('timeout')); }, TIMEOUT_MS); });
+    var load;
+    try {
+      load = fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+    } catch (e) { load = Promise.reject(e); }                     // file:// บางเบราว์เซอร์ throw ทันที
+    st.promise = Promise.race([load, timeout])
+      .then(function (j) { A.load(j); st.status = 'ready'; return true; })
+      .catch(function () { st.status = 'offline'; st.promise = null; return false; })   // เปิดฟอร์มครั้งหน้า ลองใหม่
+      .then(function (ok) { if (timer) clearTimeout(timer); fire(); return ok; });
+    return st.promise;
+  }
+
+  // ---------- ชื่อ (B.3 · C.6 · C.7) ----------
+  var NAME_K = ['namePrefixKey', 'namePrefixCustom', 'nameCore', 'nameTail'];
+
+  // C.7: ไม่มี namePrefixKey หรือ nameCore ว่าง → คืน v.name เดิม (ไบต์เดิม)
+  function composePartyName(v) {
+    v = v || {};
+    if (!v.namePrefixKey || !nonEmpty(v.nameCore)) return v.name;
+    return N.composeName(v.namePrefixKey, v.nameCore, { custom: v.namePrefixCustom, tail: v.nameTail });
+  }
+
+  // B.3 + C.6 → { values, offer, state:'split'|'legacy'|'drift' }
+  //   split  = มี namePrefixKey และประกอบแล้ว === clean(name) → ใช้ช่องที่เก็บไว้
+  //   legacy/drift → values = ชื่อเดิมทุกไบต์ (namePrefixKey:'none', nameCore = name) · ผล parseName เป็นแค่ข้อเสนอ (offer)
+  function partyNameParts(p) {
+    p = p || {};
+    var name = str(p.name);
+    if (p.namePrefixKey && N.prefixInfo(p.namePrefixKey) && nonEmpty(p.nameCore)) {
+      var composed = N.composeName(p.namePrefixKey, p.nameCore, { custom: p.namePrefixCustom, tail: p.nameTail });
+      if (composed === clean(name)) {
+        return { state: 'split', offer: null, values: {
+          namePrefixKey: p.namePrefixKey, namePrefixCustom: str(p.namePrefixCustom), nameCore: str(p.nameCore), nameTail: str(p.nameTail) } };
+      }
+    }
+    var state = p.namePrefixKey ? 'drift' : 'legacy';
+    var values = { namePrefixKey: 'none', namePrefixCustom: '', nameCore: name, nameTail: '' };
+    var offer = null;
+    if (nonEmpty(name)) {
+      var r = N.parseName(name);
+      // มีอะไรให้เสนอ = จับคำนำหน้าได้ หรือเจอท้ายชื่อ (สาขา ฯลฯ) · confidence 'none' = ไม่เสนอ
+      if (r.confidence !== 'none' && (r.key !== 'none' || r.tail)) {
+        offer = { key: r.key, core: r.core, tail: r.tail, confidence: r.confidence, notes: r.notes,
+          composed: N.composeName(r.key, r.core, { tail: r.tail }),
+          changed: N.composeName(r.key, r.core, { tail: r.tail }) !== clean(name) };
+      }
+    }
+    return { state: state, offer: offer, values: values };
+  }
+
+  // ---------- ที่อยู่ (B.3 · C.6 · C.7) ----------
+  var ADDR_K = ['addrLine', 'subdistrict', 'district', 'province', 'postcode', 'addrForeign'];
+
+  // C.7: ช่องใหม่ทั้ง 5 ว่าง ไม่มี addrForeign และ addrLine === undefined → คืน v.address เดิม
+  //   addrForeign → clean(addrLine) · ไม่งั้น composeAddress(..., {long}) · ผู้เรียกส่ง settings.partyAddrLong===true เข้ามาเอง (ไม่อ่าน state)
+  function composePartyAddress(v, opts) {
+    v = v || {};
+    var anyPart = nonEmpty(v.subdistrict) || nonEmpty(v.district) || nonEmpty(v.province) || nonEmpty(v.postcode);
+    if (!anyPart && v.addrForeign !== true && v.addrLine === undefined) return v.address;
+    if (v.addrForeign === true) return clean(v.addrLine);
+    return A.composeAddress({ addrLine: v.addrLine, subdistrict: v.subdistrict, district: v.district, province: v.province, postcode: str(v.postcode) },
+      { long: !!(opts && opts.long) });
+  }
+
+  // B.3 + C.6 (P15: เทียบทั้งรูปแบบย่อและเต็ม ตรงแบบใดแบบหนึ่ง = แยกช่องแล้ว)
+  //   → { values, offer, state:'split'|'legacy'|'drift', needData }
+  //   legacy/drift: addrLine = address ทุกไบต์ + 4 ช่องว่าง · offer = parseAddress(address) เมื่อฐานพร้อม · ยังไม่พร้อม = needData:true
+  function partyAddrParts(p) {
+    p = p || {};
+    var address = str(p.address);
+    var hasParts = p.addrForeign === true || nonEmpty(p.addrLine) || nonEmpty(p.subdistrict) || nonEmpty(p.district) || nonEmpty(p.province) || nonEmpty(p.postcode);
+    if (hasParts) {
+      var parts = { addrLine: str(p.addrLine), subdistrict: str(p.subdistrict), district: str(p.district), province: str(p.province), postcode: str(p.postcode), addrForeign: p.addrForeign === true };
+      var target = clean(address), ok;
+      if (parts.addrForeign) ok = clean(parts.addrLine) === target;
+      else ok = composePartyAddress(parts, { long: false }) === target || composePartyAddress(parts, { long: true }) === target;
+      if (ok) return { state: 'split', offer: null, needData: false, values: parts };
+    }
+    var values = { addrLine: address, subdistrict: '', district: '', province: '', postcode: '', addrForeign: false };
+    var offer = null, needData = false;
+    if (nonEmpty(address)) {
+      if (A.isLoaded()) {
+        var r = A.parseAddress(address);
+        if (r.confidence !== 'none') offer = r;
+      } else needData = true;
+    }
+    return { state: hasParts ? 'drift' : 'legacy', offer: offer, needData: needData, values: values };
+  }
+
+  // ---------- ค้นหา / เช็กซ้ำ (§F) ----------
+  // partyNameKey(n) = kind + '|' + key(core) · key ตัดช่องว่าง/จุด/วงเล็บ/ขีด/จุลภาค, lower-case, ํา→ำ
+  //   "บจก.ยูเมะ ซัพพลาย" = "บริษัท ยูเมะซัพพลาย จำกัด" = "บริษัท ยูเมะ ซัพพลาย จํากัด" → 'juristic|ยูเมะซัพพลาย'
+  function nkey(s) { return clean(s).replace(/[\s.()\[\]\-,'"\/]/g, '').toLowerCase(); }
+  function partyNameKey(n) {
+    var r = N.parseName(n), k = nkey(r.core);
+    if (!k) return '';
+    var info = N.prefixInfo(r.key);
+    return (info ? info.kind : 'other') + '|' + k;
+  }
+
+  // partyNameHay(p) (P6) = สตริงสำหรับค้น: name + nameRaw + (abbr+core, abbrไม่มีจุด+' '+core) · ไม่ใช้ข้อมูลตำบล
+  function partyNameHay(p) {
+    p = p || {};
+    var out = [], seen = {};
+    function add(s) { s = str(s); if (s && !seen[s]) { seen[s] = 1; out.push(s); } }
+    add(p.name); add(p.nameRaw);
+    // UAT S1: ใช้ช่องที่เก็บไว้เฉพาะเมื่อประกอบแล้ว === ชื่อปัจจุบัน (ช่องค้างหลังแก้ชื่อ = ไม่ใช้ · ชื่อเก่าต้องค้นไม่เจอ)
+    //   ไม่มีช่อง / ช่องไม่ตรง → แยกจากชื่อเอง (ไม่เขียนกลับ) · ใช้เมื่อประกอบคืนได้ตรงชื่อเท่านั้น (กติกาเดียวกับ partyNameParts)
+    var key = '', core = '', name = clean(p.name);
+    if (p.namePrefixKey && N.prefixInfo(p.namePrefixKey) && nonEmpty(p.nameCore)
+        && N.composeName(p.namePrefixKey, p.nameCore, { custom: p.namePrefixCustom, tail: p.nameTail }) === name) {
+      key = p.namePrefixKey; core = clean(p.nameCore);
+    } else if (name) {
+      var r = N.parseName(name);
+      if (r && r.key && r.key !== 'none' && nonEmpty(r.core) && N.composeName(r.key, r.core, { tail: r.tail }) === name) {
+        key = r.key; core = clean(r.core);
+      }
+    }
+    if (key) {
+      var info = N.prefixInfo(key);
+      if (info && info.abbr) {
+        add(info.abbr + core);
+        var bare = info.abbr.replace(/\./g, '');
+        if (bare) add(bare + ' ' + core);
+      }
+    }
+    return out.join(' ');
+  }
+
+  ERP.thName = N; ERP.thAddress = A;
+  ERP.TH_PROVINCES = TH_PROVINCES; ERP.thAddrReady = thAddrReady;
+  ERP.thAddrStatus = function () { return A.isLoaded() ? 'ready' : st.status; };
+  ERP.partyClean = clean;
+  ERP.PARTY_NAME_KEYS = NAME_K; ERP.PARTY_ADDR_KEYS = ADDR_K;
+  ERP.partyNameParts = partyNameParts;
+  ERP.partyAddrParts = partyAddrParts;
+  ERP.composePartyName = composePartyName;
+  ERP.composePartyAddress = composePartyAddress;
+  ERP.partyNameKey = partyNameKey;
+  ERP.partyNameHay = partyNameHay;
+})(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));
 
 </script>
 <!--src/00-supabase.js--><script>
@@ -10161,6 +10938,101 @@ function _openDepositOnDpPaid(s, deposits, pay){
 //   ADD_STORAGE_LOCATION / ADD_ITEM_TAG เป็น Set อยู่แล้ว · ADD_WEIGH_LOG กัน deviceId|id ใน case เอง
 //   มี key ที่ไม่ใช่ ADD_ ด้วย (RECEIVE_PO / BULK_ADD_PROD_ORDERS / SHIP_TR / RECEIVE_INTRA_TO / CONSUME_PRODUCTION_MATERIALS / PRODUCE_FG_TO_LOCATION)
 //   — กันส่งซ้ำเหมือนกัน แต่ไม่เข้า ADD_REPLAY_SAFE (กรองเฉพาะ ADD_)
+// ════════════════════════════════════════════════════════════════════
+// 🔒 PARTY-FORM ขั้น 2/2b (PARTY_FORM_CONTRACT §E.1) — ตรึงชื่อ/ที่อยู่คู่ค้าไว้กับเอกสาร
+//   ขั้น 2 : ใบลดหนี้/เพิ่มหนี้จากผู้ขาย (supplierMemos) ตรึง supplierSnapshot ตอนสร้าง (แบบ PARTY-SNAP ของ ADD_INV)
+//   ขั้น 2b: แก้ชื่อ/ที่อยู่/เลขภาษี/สาขาของคู่ค้า → ใบเก่าที่ "ยังไม่มี snapshot" ได้ snapshot = ข้อมูลเดิม (ก่อนแก้)
+//            ทำเฉพาะตอนมีคนกดบันทึกรายนั้น (ไม่ใช่ชุด) · ใบที่มี snapshot แล้วไม่แตะ · ไม่แตะ version (G1)
+//   ชื่อ/ที่อยู่เทียบผ่าน clean() — ต่างกันแค่ ํา/ช่องว่าง/บรรทัดใหม่ = ไม่ถือว่าเปลี่ยน (P2)
+// ════════════════════════════════════════════════════════════════════
+function _partyClean(v){
+  const t = String(v == null ? '' : v);
+  const E = global.ERP || {};
+  const c = (E.thName && E.thName._clean) || (E.thAddress && E.thAddress._clean);
+  return c ? c(t) : t.replace(/\s+/g, ' ').trim();
+}
+function _partyBr(v){
+  const n = global.ERP && global.ERP.normalizeBranchCode;
+  return n ? n(v) : String(v == null ? '' : v).trim();
+}
+// ข้อมูลที่พิมพ์บนเอกสารภาษีเปลี่ยนจริงไหม (ชื่อ · ที่อยู่ · เลขภาษี · สาขา)
+function _partyIdentityChanged(o, n){
+  if(!o || !n) return false;
+  return _partyClean(o.name) !== _partyClean(n.name)
+    || _partyClean(o.address) !== _partyClean(n.address)
+    || String(o.taxId || '').trim() !== String(n.taxId || '').trim()
+    || _partyBr(o.branchCode) !== _partyBr(n.branchCode)
+    // สาขาที่พิมพ์จริงเปลี่ยน (เช่น ติ๊ก/เอาติ๊ก "จด VAT" บนผู้ขาย 00000) — เทียบผลลัพธ์ ไม่เทียบ vatRegistered ดิบ (ของเก่า undefined)
+    || !!(global.ERP && global.ERP.partyBranchCode5 && global.ERP.partyBranchCode5(o) !== global.ERP.partyBranchCode5(n));
+}
+function _partySnapOf(p){
+  const f = global.ERP && global.ERP.partySnapshot;
+  return (typeof f === 'function') ? f(p) : null;
+}
+// ขั้น 2: snapshot ผู้ขายของใบลดหนี้/เพิ่มหนี้ใหม่ (ผู้เรียกส่งมาแล้วใช้ของผู้เรียก · ไม่มีผู้ขายในทะเบียน = ไม่ตรึง)
+function _memoSupSnap(s, supplierId, given){
+  if(given && given.name) return given;
+  if(!supplierId) return null;
+  const sup = (s.suppliers || []).find(x => x && x.id === supplierId);
+  const snap = sup ? _partySnapOf(sup) : null;
+  return snap && snap.name ? snap : null;
+}
+// ขั้น 2b ฝั่งซื้อ: PI (+ ใบ 50 ทวิ ในใบ) และ CN/DN ของผู้ขายรายนี้ที่ยังไม่มี snapshot → ตรึงข้อมูลเดิม
+//   คืน patch เฉพาะหมวดที่เปลี่ยนจริง (หมวดที่ไม่มีใบให้ตรึง = ref เดิม ไม่ถูกเขียน)
+function _freezeSupDocs(s, prev, next){
+  if(!prev || !next || !_partyIdentityChanged(prev, next)) return {};
+  const snap = _partySnapOf(prev);
+  if(!snap || !snap.name) return {};
+  const id = prev.id, out = {};
+  const noSnap = d => d && d.supplierId === id && !(d.supplierSnapshot && d.supplierSnapshot.name);
+  if((s.invoices || []).some(noSnap)){
+    out.invoices = s.invoices.map(i => {
+      if(!noSnap(i)) return i;
+      const certs = Array.isArray(i.whtCertificates) && i.whtCertificates.length
+        ? i.whtCertificates.map(c => (!c || (c.payeeSnapshot && c.payeeSnapshot.name)) ? c : { ...c, payeeSnapshot: snap })
+        : i.whtCertificates;
+      return { ...i, supplierSnapshot: snap, ...(certs !== i.whtCertificates ? { whtCertificates: certs } : {}) };
+    });
+  }
+  if((s.supplierMemos || []).some(noSnap)){
+    out.supplierMemos = s.supplierMemos.map(m => noSnap(m) ? { ...m, supplierSnapshot: snap } : m);
+  }
+  // UAT M1: ใบคืนสินค้า (RTV · คอลเลกชัน returns) ตรึงเหมือนกัน — ใบคืนเก่าต้องพิมพ์ชื่อ/ที่อยู่เดิม
+  if((s.returns || []).some(noSnap)){
+    out.returns = s.returns.map(r => noSnap(r) ? { ...r, supplierSnapshot: snap } : r);
+  }
+  return out;
+}
+// UAT S6: แก้ชื่อ/ที่อยู่/เลขภาษี/สาขาของคู่ค้า → ลง audit log ก่อน/หลังทุกครั้ง (nameRaw เก็บแค่ค่าแรก ตามรอยการแก้ซ้ำไม่ได้)
+//   คืน patch { auditLog } หรือ {} · ผู้ทำ = a.by → currentUser ใน state
+function _partyIdentityAudit(s, kind, prev, next, by){
+  if(!prev || !next || !_partyIdentityChanged(prev, next)) return {};
+  const pick = p => ({ name: p.name || '', address: p.address || '', taxId: String(p.taxId || ''), branchCode: p.branchCode == null ? '' : String(p.branchCode),
+    ...(typeof p.vatRegistered === 'boolean' ? { vatRegistered: p.vatRegistered } : {}) });   // verify: ติ๊ก จด VAT อย่างเดียวก็เห็นใน audit
+  const cu = s.currentUser || {};
+  const now = Date.now();
+  const e = { id:'al_' + now.toString(36) + Math.random().toString(36).slice(2,5), ts: now, type:'party_identity_change',
+    kind, partyId: prev.id, by: by || cu.username || cu.id || '', before: pick(prev), after: pick(next),
+    summary: (kind === 'supplier' ? 'แก้ข้อมูลผู้ขาย ' : 'แก้ข้อมูลลูกค้า ') + (prev.code || prev.id) + ': ' + (prev.name || '') + (prev.name !== next.name ? ' → ' + (next.name || '') : '') };
+  return { auditLog: [...(s.auditLog || []), e] };
+}
+// ขั้น 2b ฝั่งขาย: ใบกำกับ (SI) · ใบเสนอราคา (QT ใน salesOrders) · ใบวางบิล (BN) ที่ยังไม่มี customerSnapshot
+function _freezeCusDocs(s, prev, next){
+  if(!prev || !next || !_partyIdentityChanged(prev, next)) return {};
+  const base = _partySnapOf(prev);
+  if(!base || !base.name) return {};
+  // รูปเดียวกับ snapshot ที่หน้าขายสร้าง (name/taxId/branchCode/address/phone)
+  const snap = { name: base.name, taxId: base.taxId, branchCode: base.branchCode, address: base.address, phone: base.phone,
+    ...(typeof base.vatRegistered === 'boolean' ? { vatRegistered: base.vatRegistered } : {}) };   // UAT S2
+  const id = prev.id, out = {};
+  const noSnap = d => d && d.customerId === id && !d.customerSnapshot;
+  const isQt = d => noSnap(d) && d.docType === 'quote';
+  if((s.salesInvoices || []).some(noSnap)) out.salesInvoices = s.salesInvoices.map(d => noSnap(d) ? { ...d, customerSnapshot: snap } : d);
+  if((s.salesOrders || []).some(isQt)) out.salesOrders = s.salesOrders.map(d => isQt(d) ? { ...d, customerSnapshot: snap } : d);
+  if((s.salesBillings || []).some(noSnap)) out.salesBillings = s.salesBillings.map(d => noSnap(d) ? { ...d, customerSnapshot: snap } : d);
+  return out;
+}
+
 const _dupById = (coll, get) => (s, d) => { const id = d && get(d); return !!id && (s[coll] || []).some(x => x && x.id === id); };
 const _dupInBranch = (field, get) => (s, d) => {
   const id = d && get(d); if(!id) return false;
@@ -11894,10 +12766,12 @@ function reducer(s, a){
       const d = new Date(data.date || getToday());
       const ym = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
       const memoNumber = data.memoNumber || `${prefix}-${ym}-${String(seqM).padStart(4,'0')}`;
+      const _rawSnap = _memoSupSnap(s, data.supplierId, data.supplierSnapshot);   // 🔒 PARTY-FORM 2: ตรึงผู้ขายตอนสร้าง
       const memo = {
         id: 'memo_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
         memoNumber,
         ...data,
+        ...(_rawSnap ? { supplierSnapshot: _rawSnap } : {}),
       };
       const auditLog = [...(s.auditLog||[]), { id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,4),
         ts:Date.now(), type:`sup_memo_${data.status||'create'}`, by: data.createdBy,
@@ -11955,6 +12829,8 @@ function reducer(s, a){
         id: data.id || ('memo_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5)),   // MW-T3: รับ id จากผู้เรียก (ส่งซ้ำ = ถูกกันที่ _ADD_DUP)
         memoNumber, type:'credit',
         supplierId: data.recipientType === 'known_supplier' ? data.supplierId : null,
+        // 🔒 PARTY-FORM 2: ผู้ขายในทะเบียน → ตรึงชื่อ/เลขภาษีตอนสร้าง (ผู้รับที่ไม่รู้จัก = ไม่มี snapshot)
+        ...((data.recipientType === 'known_supplier' && _memoSupSnap(s, data.supplierId)) ? { supplierSnapshot: _memoSupSnap(s, data.supplierId) } : {}),
         recipientName: data.recipientName||'', recipientBank: data.recipientBank||'',
         recipientType: data.recipientType,
         date: data.date,
@@ -12148,6 +13024,8 @@ function reducer(s, a){
       const memo = {
         id: data.id || ('memo_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5)),   // MW-T3: รับ id จากผู้เรียก
         memoNumber, type: data.type, supplierId: data.supplierId, branchId: data.branchId,
+        // 🔒 PARTY-FORM 2: ตรึงชื่อ/ที่อยู่/เลขภาษี/สาขาผู้ขายตอนสร้าง → รายงานภาษีซื้อแถว CN/DN ไม่เปลี่ยนตามทะเบียน
+        ...(_memoSupSnap(s, data.supplierId, data.supplierSnapshot) ? { supplierSnapshot: _memoSupSnap(s, data.supplierId, data.supplierSnapshot) } : {}),
         date: data.date, refPoId: data.refPoId, refInvId: data.refInvId,
         // 🆕 CN ต้องอ้างเลขใบกำกับภาษีของ supplier (snapshot ตอนบันทึก — แก้ INV ทีหลังไม่กระทบเอกสาร CN)
         refTaxInvNo: data.refTaxInvNo || null, refTaxInvDate: data.refTaxInvDate || null,
@@ -12594,6 +13472,7 @@ function reducer(s, a){
         nextSupMemos = [...nextSupMemos, {
           id: cnMemoId,
           memoNumber, type: 'credit', supplierId: po.supplierId,
+          ...(_memoSupSnap(s, po.supplierId) ? { supplierSnapshot: _memoSupSnap(s, po.supplierId) } : {}),   // 🔒 PARTY-FORM 2
           branchId: po.destinationBranch, date: getToday(),
           refPoId: poId, refLineIdx: lineIdx,
           amount: cnMemo.amount||0, vatAmount: cnMemo.vatAmount||0,
@@ -13235,6 +14114,33 @@ function reducer(s, a){
     //   · คำนวณใหม่จาก GR lines (source of truth) แล้วเทียบกับที่ UI ส่งมา (±0.05) · ราคารวม VAT (inclusive) ไม่รับ (amount จะขยับ → ใช้แก้ไข INV/ส่งกลับ PO)
     //   · ลง JE ส่วนต่าง (DR/CR 1150 ภาษีซื้อ ↔ 2100 เจ้าหนี้) source:'inv' เพื่อให้ VOID_INV/EditINV กลับรายการตามได้
     //   · sync vatRate ของ GR line ให้ตรง (แก้ไข/ออกใหม่ภายหลังจะคำนวณตรงกัน) · เก็บ editHistory/revisionHistory/vatAdjustHistory + auditLog
+    // 🆕 PARTY-FORM UAT S4: แก้ "สาขาผู้ขาย" บน snapshot ของ PI ที่ตอนออกใบว่าง (ไม่ระบุ) — รายงานยังอ่าน snapshot (P8) แต่เอกสารถูกแก้
+    //   เงื่อนไข: snapshot มีชื่อ + สาขาว่าง · เลขภาษีตรงทะเบียน · งวดภาษีซื้อยังไม่ปิด · มีเหตุผล · บันทึก audit log (ก่อน/หลัง)
+    //   ผู้กด = สิทธิ์อนุมัติ (accounting.approvals.approve) — ตรวจที่หน้าจอ (ไม่เพิ่มกฎอนุมัติ = ไม่ต้อง migrate state)
+    case 'ADJUST_INV_PARTY_BRANCH': {
+      const d = a.data || {};
+      const inv = (s.invoices||[]).find(i => i.id === d.invId);
+      if(!inv || inv.voided){ alert('ไม่พบใบตั้งหนี้ / ใบถูกยกเลิกแล้ว'); return s; }
+      const snap = inv.supplierSnapshot;
+      if(!(snap && snap.name)){ alert('ใบนี้ยังไม่ได้ตรึงข้อมูลผู้ขาย — รายงานอ่านทะเบียนสดอยู่แล้ว แก้ที่ทะเบียนผู้ขาย'); return s; }
+      const pc5 = global.ERP.partyBranchCode5 || (() => '');
+      if(pc5(snap)){ alert('ใบนี้ระบุสาขาไว้แล้ว (' + pc5(snap) + ') — แก้ทางนี้ได้เฉพาะใบที่สาขาว่าง'); return s; }
+      const br = (global.ERP.normalizeBranchCode || (x => String(x||'').trim()))(d.branchCode);
+      if(!/^\d{5}$/.test(br)){ alert('เลขสาขาต้องเป็นตัวเลข 5 หลัก'); return s; }
+      const sup = (s.suppliers||[]).find(x => x.id === inv.supplierId);
+      const dg = x => String(x||'').replace(/\D/g, '');
+      if(!sup || !dg(snap.taxId) || dg(sup.taxId) !== dg(snap.taxId)){ alert('⛔ เลขผู้เสียภาษีบนใบไม่ตรงกับทะเบียนผู้ขาย — ตรวจใบกำกับจริงก่อน (แก้ทางนี้ไม่ได้)'); return s; }
+      if(!String(d.reason||'').trim()){ alert('ใส่เหตุผล (เช่น ตรวจกับใบกำกับจริงแล้ว)'); return s; }
+      const _tp = inv.supVatClaimDate || inv.supTaxInvDate || inv.invDate;
+      if(_rtvPeriodLocked(s, _tp)){ alert('📅 งวดภาษีซื้อ ' + String(_tp).slice(0,7) + ' ปิดงวด/ยื่นแล้ว — แก้สาขาย้อนหลังไม่ได้ (ผู้ดูแลปลดล็อกงวดก่อน แล้วยื่นเพิ่มเติม)'); return s; }
+      const now = Date.now();
+      const audit = { id:'al_' + now.toString(36) + Math.random().toString(36).slice(2,5), ts:now, type:'party_branch_fix', by: d.by || '',
+        invId: inv.id, before: { branchCode: snap.branchCode == null ? '' : String(snap.branchCode) }, after: { branchCode: br }, reason: String(d.reason).trim(),
+        summary: 'แก้สาขาผู้ขายบน ' + (inv.invNumber||inv.id) + ' : ไม่ระบุ → ' + br + ' (' + String(d.reason).trim() + ')' };
+      return { ...s,
+        invoices: s.invoices.map(i => i.id === inv.id ? { ...i, supplierSnapshot: { ...snap, branchCode: br, branchFixedAt: now, branchFixedBy: d.by || '' } } : i),
+        auditLog: [...(s.auditLog||[]), audit] };
+    }
     case 'ADJUST_INV_VAT': {
       const d = a.data || {};
       const inv = (s.invoices||[]).find(i => i.id === d.invId);
@@ -13989,6 +14895,14 @@ function reducer(s, a){
       // Adjust INV + คำนวณ split AP vs creditDue เก็บบน rtv ให้ autoPostRTV ใช้
       let invoices = s.invoices;
       let rtvFinal = { ...rtv, apReduction:0, creditDuePortion:0 };
+      // 🔒 PARTY-FORM UAT M1: ตรึงผู้ขายบนใบคืน — ผูก PI อยู่ใช้ snapshot ของ PI นั้นก่อน (CN/DN/RTV ชุดเดียวกันตรงกัน) · ไม่มีค่อยทะเบียนตอนนี้
+      if(!(rtv && rtv.supplierSnapshot && rtv.supplierSnapshot.name)){
+        const _lnk = (rtv && rtv.linkedINV) || (invAdjust && invAdjust.invId);
+        const _pi = _lnk ? (s.invoices || []).find(i => i && i.id === _lnk) : null;
+        const _piSnap = (_pi && _pi.supplierSnapshot && _pi.supplierSnapshot.name && (!rtv.supplierId || _pi.supplierId === rtv.supplierId)) ? _pi.supplierSnapshot : null;
+        const _rs = _piSnap || _memoSupSnap(s, rtv && rtv.supplierId);
+        if(_rs) rtvFinal.supplierSnapshot = _rs;
+      }
       if(invAdjust){
         invoices = invoices.map(i => {
           if(i.id !== invAdjust.invId) return i;
@@ -14130,6 +15044,9 @@ function reducer(s, a){
         return {
           id: memoId, memoNumber, type,
           supplierId: rtv.supplierId, branchId: rtv.branch, date: getToday(),
+          // verify: ใช้ snapshot ของใบคืน (ตรึงจาก PI ตอน ADD_RTV) ก่อน → CN/DN/RTV/PI ชุดเดียวกันชื่อ/สาขาตรงกัน
+          ...((rtv.supplierSnapshot && rtv.supplierSnapshot.name) ? { supplierSnapshot: rtv.supplierSnapshot }
+            : _memoSupSnap(s, rtv.supplierId) ? { supplierSnapshot: _memoSupSnap(s, rtv.supplierId) } : {}),   // 🔒 PARTY-FORM 2
           refPoId: rtv.poId, refInvId: rtv.linkedINV,
           rtvId: rtv.id, rtvRef: rtv.rtvNumber,
           amount: totalValue, vatAmount: vatPortion, netAmount: netValue,
@@ -14752,7 +15669,12 @@ function reducer(s, a){
 
     // ---------- Suppliers / Customers ----------
     case 'ADD_SUPPLIER':     return { ...s, suppliers:[...(s.suppliers||[]), a.data] };
-    case 'UPDATE_SUPPLIER':  return { ...s, suppliers:(s.suppliers||[]).map(x => x.id===a.data.id ? a.data : x) };
+    case 'UPDATE_SUPPLIER': {
+      // 🔒 PARTY-FORM 2b: ชื่อ/ที่อยู่/เลขภาษี/สาขาเปลี่ยน → ใบเก่าที่ยังไม่มี snapshot ได้ข้อมูลเดิม (พิมพ์ซ้ำ/รายงานงวดที่ยื่นแล้วไม่เปลี่ยน)
+      const _prevSup = (s.suppliers||[]).find(x => x.id === a.data.id);
+      return { ...s, ..._freezeSupDocs(s, _prevSup, a.data), ..._partyIdentityAudit(s, 'supplier', _prevSup, a.data, a.by),   // UAT S6
+        suppliers:(s.suppliers||[]).map(x => x.id===a.data.id ? a.data : x) };
+    }
     case 'DELETE_SUPPLIER': {
       // 🛡 กันลบ supplier ที่มีเอกสารผูกอยู่ (PO/GR/INV) — ประวัติจะกลายเป็นชื่อว่าง
       const _sid = a.data;
@@ -14765,7 +15687,12 @@ function reducer(s, a){
       return { ...s, suppliers:(s.suppliers||[]).filter(x => x.id!==a.data) };
     }
     case 'ADD_CUSTOMER':     return { ...s, customers:[...(s.customers||[]), a.data] };
-    case 'UPDATE_CUSTOMER':  return { ...s, customers:(s.customers||[]).map(x => x.id===a.data.id ? a.data : x) };
+    case 'UPDATE_CUSTOMER': {
+      // 🔒 PARTY-FORM 2b: ใบกำกับ/ใบเสนอราคา/ใบวางบิล ที่ยังไม่มี customerSnapshot ได้ข้อมูลลูกค้าเดิม
+      const _prevCus = (s.customers||[]).find(x => x.id === a.data.id);
+      return { ...s, ..._freezeCusDocs(s, _prevCus, a.data), ..._partyIdentityAudit(s, 'customer', _prevCus, a.data, a.by),   // UAT S6
+        customers:(s.customers||[]).map(x => x.id===a.data.id ? a.data : x) };
+    }
     // 🆕 กันลบลูกค้าที่เคยออกใบกำกับ/บันทึกขาย — เอกสารภาษีต้องตามรอยผู้ซื้อได้ (ม.87 เก็บ 5 ปี)
     //   ใบที่ออกหลังมี customerSnapshot จะพิมพ์ได้ถูกอยู่แล้ว แต่ลบทิ้ง = ตามรอย/ทวงหนี้/ออกใบลดหนี้ไม่ได้
     case 'DELETE_CUSTOMER': {
@@ -14868,23 +15795,33 @@ function reducer(s, a){
     case 'IMPORT_SUPPLIERS': {
       // a.data = [supplier, ...] — merge โดย id (ซ้ำ=อัปเดตทับ field ที่มา, ไม่ซ้ำ=เพิ่ม) · pattern เดียวกับ IMPORT_ITEMS
       let sups = [...(s.suppliers||[])];
+      let st = s;   // UAT S5: นำเข้าทับรายเดิมที่ชื่อ/ที่อยู่/เลขภาษี/สาขาเปลี่ยน → ตรึงใบเก่าที่ยังไม่มี snapshot ก่อน (เหมือน UPDATE_SUPPLIER)
       for(const sp of a.data){
         const idx = sups.findIndex(x => x.id === sp.id);
-        if(idx >= 0) sups[idx] = { ...sups[idx], ...sp };
+        if(idx >= 0){
+          const next = { ...sups[idx], ...sp };
+          st = { ...st, ..._freezeSupDocs(st, sups[idx], next) };
+          sups[idx] = next;
+        }
         else sups.push(sp);
       }
-      return { ...s, suppliers: sups };
+      return { ...st, suppliers: sups };
     }
     // 🆕 นำเข้าลูกค้า (Ecount) — pattern เดียวกับ IMPORT_SUPPLIERS
     case 'IMPORT_CUSTOMERS': {
       // a.data = [customer, ...] — merge โดย id (ซ้ำ=อัปเดตทับ field ที่มา, ไม่ซ้ำ=เพิ่ม)
       let custs = [...(s.customers||[])];
+      let st = s;   // UAT S5: ตรึง SI/QT/BN เก่าที่ยังไม่มี customerSnapshot ก่อนนำเข้าทับ
       for(const c of a.data){
         const idx = custs.findIndex(x => x.id === c.id);
-        if(idx >= 0) custs[idx] = { ...custs[idx], ...c };
+        if(idx >= 0){
+          const next = { ...custs[idx], ...c };
+          st = { ...st, ..._freezeCusDocs(st, custs[idx], next) };
+          custs[idx] = next;
+        }
         else custs.push(c);
       }
-      return { ...s, customers: custs };
+      return { ...st, customers: custs };
     }
 
     // ---------- Unit presets (master list) ----------
@@ -18198,6 +19135,7 @@ const ACTION_MERGE = Object.freeze({
   ADJUST_BRANCH_STOCK: { kind:'delta' },
   ADJUST_INV_VAT: { kind:'delta' },
   ADJUST_INV_WHT: { kind:'replace', coll:'invoices', id: d => d && d.invId },
+  ADJUST_INV_PARTY_BRANCH: { kind:'replace', coll:'invoices', id: d => d && d.invId },   // UAT S4
   ADJUST_STOCK: { kind:'delta' },
   APPEND_AUDIT_LOG: { kind:'delta' },
   APPLY_CN_AUTO_ON_PI: { kind:'delta' },
@@ -18426,8 +19364,8 @@ const ACTION_READS = Object.freeze({
   ADD_SCRAP: ['boms','fifoLayers','items','journalEntries','movements','scrapEntries'],   // boms: deductFromStore NEG @negUnitCost (prod-live รอบ 2)
   ADD_APPROVAL_REQUEST: ['approvalRequests'], UPDATE_APPROVAL_REQUEST: ['approvalRequests'],
   ADD_PETTY_TXN: ['pettyTxns'],
-  ADD_SUPPLIER: ['suppliers'], UPDATE_SUPPLIER: ['suppliers'],
-  ADD_CUSTOMER: ['customers'], UPDATE_CUSTOMER: ['customers'],
+  ADD_SUPPLIER: ['suppliers'], UPDATE_SUPPLIER: ['auditLog','invoices','supplierMemos','returns','suppliers'],   // 🔒 PARTY-FORM 2b: อ่านใบที่ยังไม่มี snapshot
+  ADD_CUSTOMER: ['customers'], UPDATE_CUSTOMER: ['auditLog','customers','salesBillings','salesInvoices','salesOrders'],
   ADD_ITEM: ['items'], UPDATE_ITEM: ['items'],
   SET_ITEM_FAVORITES: ['itemFavorites'],
   ADD_STOCK_COUNT_SESSION: ['stockCounts'],
@@ -18436,7 +19374,7 @@ const ACTION_READS = Object.freeze({
   ADD_GR: ['grs'],
   UPDATE_GR: ['grs','invoices'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก invoiceId ที่ไม่มีอยู่จริง
   UPDATE_RTV: ['invoices','returns'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก linkedINV ที่ไม่มีอยู่จริง
-  ADD_RTV: ['boms','fifoLayers','invoices','items','movements','returns'],   // boms: deductFromStore NEG @negUnitCost (prod-live รอบ 2)
+  ADD_RTV: ['boms','fifoLayers','invoices','items','movements','returns','suppliers'],   // boms: deductFromStore NEG @negUnitCost (prod-live รอบ 2)
   UPDATE_PAY: ['deposits','invoices','payments','returns','suppliers'],
   VOID_INV: ['auditLog','bankAccounts','deposits','grs','invoices','journalEntries','payments','pettyTxns','pos','returns','supplierMemos'],
   VOID_GR: ['auditLog','fifoLayers','grs','invoices','items','journalEntries','movements','pos','returns'],
@@ -18445,6 +19383,7 @@ const ACTION_READS = Object.freeze({
   SET_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],     // 🆕 DEPOSIT-VAT E-5 R1/R2 (งวดล็อกอยู่ใน settings = หมวดคุม)
   CLEAR_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],
   ADJUST_INV_WHT: ['auditLog','invoices','journalEntries','payments','suppliers'],
+  ADJUST_INV_PARTY_BRANCH: ['auditLog','invoices','suppliers'],   // UAT S4
   ADD_SUP_MEMO: ['auditLog','invoices','journalEntries','supplierMemos','suppliers'],
 });
 // เลขเอกสารที่ "หน้าจอออกให้ก่อน dispatch" — สองเครื่องออกเลขเดียวกันได้ → ตอนเล่นซ้ำถ้าชน ออกเลขถัดไปให้ (แจ้งผู้ใช้)
@@ -27942,11 +28881,13 @@ function printRTV(rtv, state, sup){
   const branch = (state.branches||[]).find(b => b.id === rtv.branch);
   const company = state.settings?.companyName || 'บริษัท';
   const company2 = state.settings?.companyAddress || '';
-  const supName = sup?.name || (state.suppliers||[]).find(s => s.id === rtv.supplierId)?.name || '-';
-  const supTax = sup?.taxId || '';
-  const supAddr = sup?.address || '';
+  // 🔒 PARTY-FORM ขั้น 2: ใบคืนที่ตรึง supplierSnapshot ไว้ → ใช้ snapshot ทั้งก้อน (ชื่อ/ที่อยู่/เลขภาษี/สาขา) · ไม่มีค่อยทะเบียนสด
+  const _snapV = (rtv && rtv.supplierSnapshot && rtv.supplierSnapshot.name) ? rtv.supplierSnapshot : null;
+  const _supObj = _snapV || sup || (state.suppliers||[]).find(s => s.id === rtv.supplierId);
+  const supName = _supObj?.name || '-';
+  const supTax = _supObj?.taxId || '';
+  const supAddr = _supObj?.address || '';
   // 🆕 PARTY-BRANCH (UAT): สาขาผู้ขาย (สำนักงานใหญ่ / สาขาที่ 00150) — ผู้ขายหลายสาขาเลขภาษีเดียวกัน ใบคืนต้องบอกว่าคืนสาขาไหน
-  const _supObj = sup || (state.suppliers||[]).find(s => s.id === rtv.supplierId);
   const supBr = (global.ERP.partyTaxBranchText ? global.ERP.partyTaxBranchText(_supObj) : '').replace(/[&<>"]/g, '');
   const rows = (rtv.lines||[]).map((l, i) => {
     const item = (state.items||[]).find(x => x.id === l.itemId);
@@ -31106,7 +32047,7 @@ function InTransitModal({ state, user, onClose, side, branchId, branchIds, locId
 global.ERP.InTransitModal = InTransitModal;
 global.ERP.ItemMovementPopup = ItemMovementPopup;   // 🚚 S6 — ให้ test/โมดูลอื่นเปิด popup เคลื่อนไหวได้
 
-global.ERP.registerModule('stock', { main: StockModule, PendingAssetsTab, ReceiveFromTOModal });   // 🆕 PendingAssetsTab ให้ mod-accounting ฝังในแท็บทรัพย์สินได้ · 🆕 ReceiveFromTOModal ให้ 📦 คลังไลน์ กดรับของเข้าไลน์ได้
+global.ERP.registerModule('stock', { main: StockModule, PendingAssetsTab, ReceiveFromTOModal, printRTV });   // 🆕 PendingAssetsTab ให้ mod-accounting ฝังในแท็บทรัพย์สินได้ · 🆕 ReceiveFromTOModal ให้ 📦 คลังไลน์ กดรับของเข้าไลน์ได้ · 🆕 printRTV ให้เทสต์ใบพิมพ์ (PARTY-FORM ขั้น 2) เรียกได้
 
 })(window);
 
@@ -64897,7 +65838,8 @@ function printPV(pay, inv, state){
 
 // PRINT RTV / Credit Note — ใบลดหนี้/ใบคืนของ
 function printRTV(rtv, state){
-  const sup = state.suppliers.find(s => s.id === rtv.supplierId);
+  // 🔒 PARTY-FORM ขั้น 2: ผู้รับคืน = snapshot ของใบคืน (ถ้ามี) ทั้งก้อน → ไม่มีค่อยทะเบียนสด (ชื่อ/ที่อยู่/เลขภาษี/สาขาจากแหล่งเดียว)
+  const sup = _printVendor(rtv, state);
   const branch = state.branches.find(b => b.id === rtv.branch);
   const company = state.company || {};
   const linkedInv = rtv.linkedINV ? state.invoices.find(i => i.id === rtv.linkedINV) : null;
@@ -67380,7 +68322,8 @@ function RTVViewTab({ state, dispatch, user }){
         const sup = state.suppliers.find(s => s.id === r.supplierId);
         return (r.rtvNumber||'').toLowerCase().includes(q) ||
           (r.grNumber||'').toLowerCase().includes(q) ||
-          (sup?.name||'').toLowerCase().includes(q);
+          // verify: ค้นชื่อผู้ขายด้วยคำย่อคำนำหน้า (บจก ↔ บริษัท … จำกัด) เหมือนหน้าอื่น
+          (sup && typeof global.ERP.partyMatches === 'function' ? global.ERP.partyMatches(sup, search) : (sup?.name||'').toLowerCase().includes(q));
       });
     }
     if(statusFilter !== 'all'){
@@ -68824,6 +69767,13 @@ function apMatch(q, fields){
     if(String(f).toLowerCase().includes(s)) return true;
   }
   return false;
+}
+// 🆕 PARTY-FORM §F (P6): ชื่อผู้ขายสำหรับค้น — รวมคำย่อคำนำหน้า (พิมพ์ "บจก ยูเมะ" เจอ "บริษัท ยูเมะ จำกัด") · ไม่มี lib → ชื่อเดิม
+function apPartyHay(sup){
+  if(!sup) return '';
+  const fn = global.ERP && global.ERP.partyNameHay;
+  if(typeof fn === 'function'){ try { return fn(sup) || sup.name || ''; } catch(e){ /* ตกไปใช้ชื่อเดิม */ } }
+  return sup.name || '';
 }
 
 // 🆕 เครดิต supplier → วันครบกำหนดตามระบบ (ฐาน = วันรับของ GR หรือวันที่ INV) · days ว่าง/0 = วันเดียวกับฐาน
@@ -71866,14 +72816,15 @@ function VATReport({ state, dispatch, user }){
 // 🆕 PARTY-BRANCH (UAT): สถานประกอบการของผู้ขาย (สนญ./สาขาที่) สำหรับรายงานภาษีซื้อ/WHT — ช่องบังคับตามแบบรายงานภาษีซื้อ + ใบแนบ ภ.ง.ด.53
 //   ใช้ supplierSnapshot ของใบ (ตรึงตอนตั้งหนี้) ก่อน → ไม่มีค่อยใช้ทะเบียนสด · br5 = เลข 5 หลัก (CSV) · ว่าง = ไม่ระบุ
 //   🆕 (verify): ชื่อ/เลขภาษี/สาขา มาจาก "แหล่งเดียว" — snapshot (มี name) ทั้งก้อน ไม่งั้นทะเบียนสดทั้งก้อน (ไม่ปนกันทีละช่อง)
-//   snapshot ที่สาขาว่าง → เติมเลขสาขาจากทะเบียนปัจจุบันให้บนจอ/CSV แต่ติดธง brFromLive (ป้าย "จากทะเบียนปัจจุบัน")
+//   🔒 PARTY-FORM ขั้น 2 (P8): มี snapshot = สาขาจาก snapshot เสมอ แม้ว่าง (ว่าง = ตอนออกใบ "ไม่ระบุ") → รายงานงวดที่ยื่นแล้วไม่เปลี่ยนตามทะเบียน
+//   (เดิม party-branch verify เติมเลขสาขาจากทะเบียนปัจจุบันลงจอ/CSV) · ตอนนี้เลขในทะเบียนปัจจุบันเป็นแค่ "คำใบ้" brLive บนจอ ไม่ลง br5/CSV
 function _vatPartyFrom(snap, sup, freeform){
   const pc5 = x => (x && global.ERP.partyBranchCode5) ? global.ERP.partyBranchCode5(x) : '';
   const s = snap && snap.name ? snap : null;
   const p = s || sup || null;
-  let br5 = pc5(p), brFromLive = false;
-  if(s && !br5 && sup){ const l = pc5(sup); if(l){ br5 = l; brFromLive = true; } }
-  return { supName: (p && p.name) || freeform || '-', taxId: (p && p.taxId) || '-', brParty: p, br5, brFromLive };
+  const br5 = pc5(p);
+  const brLive = (s && !br5 && sup) ? pc5(sup) : '';
+  return { supName: (p && p.name) || freeform || '-', taxId: (p && p.taxId) || '-', brParty: p, br5, brLive };
 }
 function _vatPartyBranch(doc, sup){
   return _vatPartyFrom(doc && doc.supplierSnapshot, sup, doc && doc.supplierNameFreeform);
@@ -71882,16 +72833,31 @@ function _vatPartyBranch(doc, sup){
 //   ห่อที่จุดเรียกเท่านั้น (exportCSV กลางไม่แตะ — รายงานอื่นใช้อยู่)
 function _xlText(v){ const t = String(v == null ? '' : v); return (t && t !== '-') ? '="' + t + '"' : t; }
 // เซลล์บนจอ: 🏢 สำนักงานใหญ่ / สาขา 00150 · ไม่ระบุ → ⚠️ ไม่ระบุ (เตือนให้ไปกรอกเลขสาขาในทะเบียนผู้ขาย)
-function VatBranchCell({ r }){
+function VatBranchCell({ r, onFix }){
   if(!r.br5) return h('span', { 'data-vat-branch':'', className:'text-amber-700 text-[11px] whitespace-nowrap',
-    title:'ยังไม่ระบุเลขสาขาของผู้ขาย — แก้ในทะเบียนผู้ขาย (ตั้งค่า → คู่ค้า) ให้ตรงใบกำกับ' }, '⚠️ ไม่ระบุ');
+    title: r.brLive
+      ? 'ตอนออกเอกสารยังไม่ได้ระบุสาขา — ทะเบียนผู้ขายปัจจุบันเป็น ' + r.brLive + ' (ตรวจกับใบกำกับจริงก่อนยื่น)'
+      : 'ยังไม่ระบุเลขสาขาของผู้ขาย — แก้ในทะเบียนผู้ขาย (ตั้งค่า → คู่ค้า) ให้ตรงใบกำกับ' }, '⚠️ ไม่ระบุ',
+    r.brLive && h('span', { 'data-vat-branch-live': r.brLive, className:'ml-1 text-[10px] text-gray-500 font-sans' }, '(ทะเบียนตอนนี้ ' + r.brLive + ')'),
+    // UAT S4: ผู้มีสิทธิ์อนุมัติ แก้สาขาบนใบ (snapshot) ได้ — ต้องตรวจกับใบกำกับจริง + ใส่เหตุผล · ลง audit log
+    (r.brLive && onFix) && h('button', { type:'button', 'data-vat-branch-fix': r.brLive, onClick:() => onFix(r),
+      className:'ml-1 px-1.5 py-0.5 text-[10px] rounded border border-amber-400 bg-amber-50 hover:bg-amber-100 font-sans' }, '✏️ แก้สาขาบนใบ'));
   return h('span', { 'data-vat-branch': r.br5, className:'font-mono text-xs whitespace-nowrap' },
-    r.br5 === '00000' ? 'สนญ. 00000' : r.br5,
-    r.brFromLive && h('span', { className:'ml-1 text-[10px] text-gray-500 font-sans', title:'ตอนตั้งหนี้ยังไม่ได้ระบุสาขา — ค่านี้มาจากทะเบียนผู้ขายปัจจุบัน' }, '(จากทะเบียนปัจจุบัน)'));
+    r.br5 === '00000' ? 'สนญ. 00000' : r.br5);
 }
 function VATByInvoiceReport({ state, dispatch, user }){
   const dr = useDateRange(31);
   const [taxInvEntry, setTaxInvEntry] = useState(null);
+  // 🆕 UAT S4: แก้สาขาผู้ขายบน PI ที่ snapshot ว่าง (เฉพาะผู้มีสิทธิ์อนุมัติ) — reducer ตรวจเลขภาษี/งวดปิด/เหตุผล + ลง audit log
+  const canFixBr = isSuperUser(user) || hasPerm(user, 'accounting', 'approvals', 'approve');
+  const fixBranch = (r) => {
+    const inv = r && r.i;
+    if(!inv || !(state.invoices||[]).some(x => x.id === inv.id)) return;
+    const reason = prompt('แก้สาขาผู้ขายบน ' + (inv.invNumber||'') + ' เป็น ' + r.brLive + ' (ตามทะเบียนปัจจุบัน)\n'
+      + 'ตรวจกับใบกำกับภาษีจริงแล้วว่าเป็นสาขานี้ — ใส่เหตุผล:', 'ตรวจกับใบกำกับจริงแล้ว');
+    if(reason == null) return;
+    dispatch({ type:'ADJUST_INV_PARTY_BRANCH', data:{ invId: inv.id, branchCode: r.brLive, reason, by: (user && user.username) || '' } });
+  };
   // ⏳ INV มี VAT แต่ยังไม่มีใบกำกับ → ไม่เข้าตาราง (ม.82/10) แสดงกล่องแยก — ตรรกะเดียวกับ 📊 VAT สรุปเดือน
   const pendingTaxInvs = useMemo(() => pendingTaxInvList(state, dr.endDate), [state.invoices, dr.endDate]);
 
@@ -72064,7 +73030,7 @@ function VATByInvoiceReport({ state, dispatch, user }){
                         : h('span', { className:'text-gray-400' }, '-'))),
                 h('td', { className:'px-2 py-1.5 text-xs' }, r.supName),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs' }, r.taxId),
-                h('td', { className:'px-2 py-1.5' }, h(VatBranchCell, { r })),
+                h('td', { className:'px-2 py-1.5' }, h(VatBranchCell, { r, onFix: (canFixBr && !r.isCN && !r.isDN) ? fixBranch : null })),
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs' }, fmtCur(r.total)),
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs' },
                   r.vatableBase !== 0 ? fmtCur(r.vatableBase) : '-'),
@@ -72281,7 +73247,8 @@ function ExpenseByInvoiceReport({ state }){
       mapped = mapped.filter(r =>
         r.i.invNumber?.toLowerCase().includes(q) ||
         r.i.supInvNumber?.toLowerCase().includes(q) ||
-        r.supName.toLowerCase().includes(q) ||
+        // verify: ชื่อผู้ขายค้นด้วยคำย่อคำนำหน้า (partyMatches → apPartyHay → ชื่อ)
+        (typeof global.ERP.partyMatches === 'function' ? global.ERP.partyMatches(r.supObj || { name:r.supName }, searchText) : apPartyHay(r.supObj || { name:r.supName }).toLowerCase().includes(q)) ||
         r.bankRefs.toLowerCase().includes(q) ||
         r.i.description?.toLowerCase().includes(q)
       );
@@ -73742,9 +74709,13 @@ function VoidedWHTReport({ state }){
       for(const c of certs){
         const voidedDate = c.voidedAt ? new Date(c.voidedAt).toISOString().slice(0,10) : '';
         if(voidedDate && inDateRange(voidedDate, dr.startDate, dr.endDate)){
-          const sup = state.suppliers.find(s => s.id === i.supplierId);
+          // 🔒 PARTY-FORM ขั้น 2 (P7): ผู้ถูกหัก = payeeSnapshot ของใบที่ยกเลิก → snapshot PI → ทะเบียนสด (ไม่เปลี่ยนตามการแก้ทะเบียน)
+          const live = state.suppliers.find(s => s.id === i.supplierId);
+          const payee = global.ERP.whtPayee ? global.ERP.whtPayee(i, state, c) : live;
           out.push({
-            inv: i, cert: c, sup,
+            inv: i, cert: c, sup: live, payee,
+            payeeName: (payee && payee.name) || i.supplierNameFreeform || '-',
+            payeeTaxId: (payee && payee.taxId) || '',
             voidedDate, voidedBy: c.voidedBy,
             certNumber: c.certNumber || '-',
             form: c.form || i.whtForm || '53',
@@ -73764,7 +74735,7 @@ function VoidedWHTReport({ state }){
       ['วันที่ยกเลิก','เลขที่ใบหัก','ภงด.','Supplier','Tax ID','PI เดิม','ยอดหัก','ผู้ยกเลิก','เหตุผล'].join(','),
       ...rows.map(r => [
         r.voidedDate, r.certNumber, r.form,
-        `"${r.sup?.name||'-'}"`, r.sup?.taxId||'',
+        `"${String(r.payeeName).replace(/"/g, '""')}"`, _xlText(r.payeeTaxId),
         r.inv.invNumber, r.whtAmount.toFixed(2),
         r.voidedBy||'-', `"${r.cert.voidReason||'-'}"`,
       ].join(','))
@@ -73818,8 +74789,8 @@ function VoidedWHTReport({ state }){
                 h('td', { className:'px-3 py-2 text-xs' }, fmtDate(r.voidedDate)),
                 h('td', { className:'px-3 py-2 font-mono text-xs text-red-700' }, r.certNumber),
                 h('td', { className:'px-3 py-2 text-center text-xs' }, r.form),
-                h('td', { className:'px-3 py-2 text-sm' }, r.sup?.name||'-'),
-                h('td', { className:'px-3 py-2 font-mono text-xs' }, r.sup?.taxId||'-'),
+                h('td', { className:'px-3 py-2 text-sm', 'data-voided-payee':'' }, r.payeeName),
+                h('td', { className:'px-3 py-2 font-mono text-xs' }, r.payeeTaxId||'-'),
                 h('td', { className:'px-3 py-2 font-mono text-xs text-blue-700' }, r.inv.invNumber),
                 h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(r.whtAmount)),
                 h('td', { className:'px-3 py-2 text-xs text-gray-600' }, r.voidedBy||'-'),
@@ -73878,7 +74849,7 @@ function WHTReport({ state }){
         // 🆕 (verify): ผู้ถูกหัก = payeeSnapshot ของใบ 50ทวิ (ตรงกับหนังสือรับรองที่ออกไป) → snapshot PI → ทะเบียนสด
         const payee = global.ERP.whtPayee ? global.ERP.whtPayee(i, state, cert && cert.payeeSnapshot && cert.payeeSnapshot.name ? cert : null) : null;
         const pp = _vatPartyFrom(payee, sup, i.supplierNameFreeform);
-        if(lineForm === '3'){ pp.br5 = ''; pp.brFromLive = false; }   // ภ.ง.ด.3 (บุคคล) ไม่มีช่องสาขา
+        if(lineForm === '3'){ pp.br5 = ''; pp.brLive = ''; }   // ภ.ง.ด.3 (บุคคล) ไม่มีช่องสาขา
         result.push({
           inv: i, sup, pp, line: l, idx, totalLines: lines.length,
           categoryLabel, cat, sub, isCustom,
@@ -74701,7 +75672,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
         return (i.invNumber||'').toLowerCase().includes(q) ||
           (i.supInvNumber||'').toLowerCase().includes(q) ||
           (i.poNumber||'').toLowerCase().includes(q) ||
-          (sup?.name||'').toLowerCase().includes(q);
+          apPartyHay(sup).toLowerCase().includes(q);
       });
     }
     if(statusFilter !== 'all'){
@@ -75375,7 +76346,7 @@ function INVQueueTab({ state, dispatch, user }){
   //   กรองก่อนจัดกลุ่ม → ตารางด้านล่างเห็นเฉพาะที่ค้นเจอ · KPI ด้านบนยังคิดจากทั้งชุด
   const filteredGRs = useMemo(() => pendingGRs.filter(g => {
     const sup = (state.suppliers||[]).find(s => s.id === g.supplierId);
-    return apMatch(q, [sup && sup.name, sup && sup.taxId, g.grNumber, g.poNumber,
+    return apMatch(q, [apPartyHay(sup), sup && sup.taxId, g.grNumber, g.poNumber,
       g.supInvNumber, g.invoiceNumber, g.note,
       grTaxInvNo(g), g.deliveryNoteNo]);   // 🆕 DOC-GR: เลขใบกำกับ/ใบส่งของที่คลังบันทึกตอนรับ
   }), [pendingGRs, q, state.suppliers]);
@@ -75807,7 +76778,7 @@ function PayApprovalTab({ state, dispatch, user }){
     const sup = supOf(p.supplierId);
     const memberFields = [];
     for(const m of invsOf(p)) if(m.inv) memberFields.push(m.inv.invNumber, m.inv.supInvNumber, m.inv.supTaxInvNumber);
-    return apMatch(q, [sup && sup.name, sup && sup.taxId, p.pvNumber, p.ref, p.by, bankLabelOf(p), ...memberFields]);
+    return apMatch(q, [apPartyHay(sup), sup && sup.taxId, p.pvNumber, p.ref, p.by, bankLabelOf(p), ...memberFields]);
   }), [state.payments, state.invoices, state.suppliers, state.bankAccounts, q]);
 
   // 🆕 ACCT-V2 (E): จัดกลุ่มตามวันนัดจ่าย (1 ตาราง/วัน) — paginate ที่ "วัน" บิลในวันแสดงครบเสมอ (ยอดรวมวันจึงถูกต้อง)
@@ -75979,7 +76950,7 @@ function PayApprovalTab({ state, dispatch, user }){
   // 🆕 1.8: ค้นหาในประวัติอนุมัติด้วยคำค้นเดียวกัน
   const historyPays = useMemo(() => historyPaysAll.filter(p => {
     const inv = invOf(p); const sup = supOf(p.supplierId);
-    return apMatch(q, [sup && sup.name, sup && sup.taxId, p.pvNumber, p.ref,
+    return apMatch(q, [apPartyHay(sup), sup && sup.taxId, p.pvNumber, p.ref,
       p.approvedBy, p.rejectedBy, inv && inv.invNumber, inv && inv.supInvNumber,
       inv && inv.supTaxInvNumber]);
   }), [historyPaysAll, state.invoices, state.suppliers, q]);
@@ -76735,7 +77706,7 @@ function PaymentCenter({ state, dispatch, user }){
   //   กรองก่อนส่งเข้าตาราง (usePaged อยู่ในตารางลูก) · KPI + ตัวเลขบนปุ่ม tab ยังคิดจากทั้งชุด
   const matchInv = (i) => {
     const sup = (state.suppliers||[]).find(s => s.id === i.supplierId);
-    return apMatch(q, [sup && sup.name, sup && sup.taxId, i.invNumber, i.supInvNumber,
+    return apMatch(q, [apPartyHay(sup), sup && sup.taxId, i.invNumber, i.supInvNumber,
       i.supTaxInvNumber, i.supplierNameFreeform, i.poNumber, i.grNumber]);
   };
   const invsToPayF = useMemo(() => invsToPay.filter(matchInv),
@@ -78807,7 +79778,7 @@ function PaidPaymentsTab({ state, dispatch, user }){
     // 🆕 PV-GROUP: ค้นเจอจาก PI สมาชิกทุกใบของ PV รวม
     const memberFields = [];
     for(const m of (r.members||[])) if(m.inv) memberFields.push(m.inv.invNumber, m.inv.supInvNumber, m.inv.supTaxInvNumber);
-    return apMatch(q, [sup.name, sup.taxId, p.pvNumber, p.ref, inv.invNumber, inv.supInvNumber, inv.supTaxInvNumber,
+    return apMatch(q, [apPartyHay(sup), sup.taxId, p.pvNumber, p.ref, inv.invNumber, inv.supInvNumber, inv.supTaxInvNumber,
       inv.supplierNameFreeform, r.byName, p.bankName, p.by, p.approvedBy, ...memberFields]);
   }), [rowsAll, view, hideReversed, dr.startDate, dr.endDate, q]);
   const pg = usePaged(rows, 50);
@@ -79257,6 +80228,15 @@ function siBuyer(state, si){
   const c = ((state && state.customers)||[]).find(x => x.id === (si && si.customerId));
   if(c) return c;
   return { name: (si && si.customerName) || '', taxId:'', branchCode:'', address:'', phone:'' };
+}
+
+// 🆕 PARTY-FORM ขั้น 5: ป้ายสาขาผู้ซื้อบนใบพิมพ์ขาย (ใบกำกับ/ใบวางบิล) — ใช้ partyTaxBranchText ของ party-branch
+//   ได้ "สำนักงานใหญ่" / "สาขาที่ 00150" (5 หลักเสมอ) · ไม่ระบุ/บุคคลธรรมดา → '' (ไม่พิมพ์บรรทัดสาขา)
+//   core รุ่นเก่าที่ยังไม่มี helper → ตรรกะเดิม (กันพัง)
+function _buyerBranchText(p){
+  if(!p) return '';
+  if(typeof global.ERP.partyTaxBranchText === 'function') return global.ERP.partyTaxBranchText(p) || '';
+  return p.branchCode ? (String(p.branchCode) === '00000' ? 'สำนักงานใหญ่' : 'สาขาที่ ' + p.branchCode) : '';
 }
 
 // ---------- Main ----------
@@ -79784,6 +80764,7 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote }){
         branchCode: customer.branchCode || '',
         address: customer.address || '',
         phone: customer.phone || '',
+        ...(typeof customer.vatRegistered === 'boolean' ? { vatRegistered: customer.vatRegistered } : {}),   // UAT S2
       } : null,
       branch: sourceBranch,
       fromLocId: (_srcMulti && shipLoc) ? shipLoc : null,   // 🆕 PRODLIVE-W2 E1: คลังที่เลือกบนหัวใบ (null = อัตโนมัติ/สาขา simple)
@@ -80300,7 +81281,8 @@ function NewBillingModal({ state, dispatch, user, mode, onClose }){
     const doc = {
       id: genId('bn'), bnNumber, bnDate, dueDate, mode,
       customerId, customerSnapshot: customer ? { name:customer.name||'', taxId:customer.taxId||'',
-        branchCode:customer.branchCode||'', address:customer.address||'', phone:customer.phone||'' } : null,
+        branchCode:customer.branchCode||'', address:customer.address||'', phone:customer.phone||'',
+        ...(typeof customer.vatRegistered === 'boolean' ? { vatRegistered: customer.vatRegistered } : {}) } : null,   // UAT S2
       collectDate, note, status:'open',
       createdBy: user.username, createdAt: Date.now(),
     };
@@ -80468,7 +81450,7 @@ function printBilling(bn, state){
   <div class="box"><b>ผู้วางบิล</b><br/>${company.name||''}<br/>${company.address||'-'}<br/>
     เลขประจำตัวผู้เสียภาษี ${company.taxId||'-'}<br/>โทร ${company.phone||'-'}</div>
   <div class="box"><b>ลูกค้า</b><br/>${cs.name||'-'}<br/>${cs.address||''}<br/>
-    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId : ''}</div>
+    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + (_buyerBranchText(cs) ? ' · ' + _buyerBranchText(cs) : '') : ''}</div>
 </div>
 <table>${head}<tbody>${rows}</tbody></table>
 ${isPro ? `<div style="font-size:9.5pt;margin:2mm 0">ราคาข้างต้น <b>${bn.priceMode === 'inclusive' ? 'รวมภาษีมูลค่าเพิ่ม 7% แล้ว' : 'ยังไม่รวมภาษีมูลค่าเพิ่ม 7%'}</b></div>` : ''}
@@ -80749,7 +81731,8 @@ function NewQuoteModal({ state, dispatch, user, quote, revise, onClose }){
       docType:'quote', customerId,
       customerName: customer?.name,
       customerSnapshot: customer ? { name:customer.name||'', taxId:customer.taxId||'', branchCode:customer.branchCode||'',
-        address:customer.address||'', phone:customer.phone||'' } : null,
+        address:customer.address||'', phone:customer.phone||'',
+        ...(typeof customer.vatRegistered === 'boolean' ? { vatRegistered: customer.vatRegistered } : {}) } : null,   // UAT S2
       contactName, contactPhone, date, validUntil, branch, priceMode,
       lines: out, subtotal, vat: vatTotal, total, whtRate: Number(whtRate), whtAmount: wht, netTotal,
       deliveryDate, deliveryPlace, paymentTerms, depositPct: Number(depositPct)||0,
@@ -80915,7 +81898,7 @@ function printQuote(qt, state){
     เลขประจำตัวผู้เสียภาษี ${company.taxId || '-'}<br/>โทร ${(b && b.phone) || company.phone || '-'}</div>
   <div class="box"><div class="label">ลูกค้า</div>
     ${cs.name || qt.customerName || '-'}<br/>${cs.address || ''}<br/>
-    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + ((global.ERP.partyTaxBranchText ? global.ERP.partyTaxBranchText(cs) : '') ? ' · ' + (global.ERP.partyTaxBranchText ? global.ERP.partyTaxBranchText(cs) : '') : '') + '<br/>' : ''}
+    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + (_buyerBranchText(cs) ? ' · ' + _buyerBranchText(cs) : '') + '<br/>' : ''}
     ${qt.contactName ? 'ผู้ติดต่อ: ' + qt.contactName : ''} ${qt.contactPhone || ''}</div>
 </div>
 <table class="items">
@@ -82178,7 +83161,7 @@ function printSalesInvoice(si, state, opts){
       <div><b>${c?.name||'-'}</b></div>
       <div>${c?.address||'-'}</div>
       <div>เลขประจำตัวผู้เสียภาษี: <b>${c?.taxId||'-'}</b></div>
-      <div>${c?.branchCode ? (String(c.branchCode) === '00000' ? 'สำนักงานใหญ่' : 'สาขาที่ ' + c.branchCode) : ''}</div>
+      ${_buyerBranchText(c) ? `<div>${_buyerBranchText(c)}</div>` : ''}
     </div>
   </div>
   <div style="display:flex;justify-content:space-between;margin-bottom:4mm;font-size:10pt">
@@ -82265,7 +83248,7 @@ function printPackingList(si, state){
 <div class="warn">เอกสารนี้ไม่ใช่ใบกำกับภาษี และไม่ใช่เอกสารทางบัญชี</div>
 <div class="info">
   <div class="box"><b>ผู้ส่ง</b><br/>${company.name || ''}${sellerBranch ? ' — ' + sellerBranch.name : ''}</div>
-  <div class="box"><b>ลูกค้า</b><br/>${(c && c.name) || si.customerName || ''}${c && (global.ERP.partyTaxBranchText ? global.ERP.partyTaxBranchText(c) : '') ? ' — <b>' + (global.ERP.partyTaxBranchText ? global.ERP.partyTaxBranchText(c) : '') + '</b>' : ''}<br/>${(c && c.address) || ''}
+  <div class="box"><b>ลูกค้า</b><br/>${(c && c.name) || si.customerName || ''}${_buyerBranchText(c) ? ' — <b>' + _buyerBranchText(c) + '</b>' : ''}<br/>${(c && c.address) || ''}
     ${si.deliveryPlace ? `<br/><b>สถานที่ส่ง:</b> ${si.deliveryPlace}` : ''}
     ${si.contactName || si.contactPhone ? `<br/><b>ผู้ติดต่อ:</b> ${si.contactName || ''} ${si.contactPhone || ''}` : ''}</div>
 </div>
@@ -82614,6 +83597,20 @@ function SystemPolicyToggles({ state, dispatch }){
         h('div', null,
           h('div', { className:'font-bold text-indigo-900' }, '🏠 หน้าแรกแบบใหม่ (ทำเลย · ตัวเลขสำคัญ · รอฉันตัดสินใจ · สาขา×วันนี้)'),
           h('div', { className:'text-xs text-indigo-800 mt-0.5' }, 'ปิด = กลับไปใช้หน้าแรกแบบเดิมทุกเครื่องทันที (ใช้เมื่อหน้าใหม่มีปัญหา) · เมนูซ้ายสว่าง/เข้ม สลับได้ต่อเครื่องที่เมนูผู้ใช้มุมขวาบน')))),
+
+    // 🆕 PARTY-FORM (C.9): ฟอร์มคู่ค้าแบบแยกช่อง (คำนำหน้า ▾ + ชื่อ · ปุ่มสาขา · preview หัวเอกสาร) — default เปิด · ปิด = ฟอร์มเดิมทุกเครื่อง (settings.partyFormSplit)
+    h('div', { className:'bg-violet-50 border-2 border-violet-300 rounded p-4', 'data-testid':'policy-party-form-split' },
+      h('label', { className:'flex items-center gap-3 cursor-pointer' },
+        h('input', { type:'checkbox', checked: st.partyFormSplit !== false, onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ partyFormSplit: e.target.checked ? true : false } }), className:'w-5 h-5', 'data-testid':'toggle-party-form-split' }),
+        h('div', null,
+          h('div', { className:'font-bold text-violet-900' }, '🪪 ฟอร์มคู่ค้าแบบแยกช่อง (เลือกคำนำหน้าชื่อ · ปุ่มสาขาตามภาษี · ตัวอย่างหัวเอกสาร)'),
+          h('div', { className:'text-xs text-violet-800 mt-0.5' }, 'ปิด = กลับไปใช้ฟอร์มผู้ขาย/ลูกค้าแบบเดิม (ช่องชื่อ/ที่อยู่ช่องเดียว) ทุกเครื่องทันที · ข้อมูลที่แยกช่องไว้แล้วไม่หาย'))),
+      // 🆕 PARTY-FORM ขั้น 4 (§H ข้อ 1): รูปแบบที่อยู่ต่างจังหวัดบนเอกสาร — ค่าตั้งต้น = ย่อ (ต./อ./จ.) · กรุงเทพฯ = แขวง/เขต/กรุงเทพมหานคร ทั้งสองแบบ
+      h('label', { className:'flex items-start gap-3 cursor-pointer mt-3 pl-8' },
+        h('input', { type:'checkbox', checked: st.partyAddrLong === true, onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ partyAddrLong: e.target.checked ? true : false } }), className:'mt-0.5 w-4 h-4', 'data-testid':'toggle-party-addr-long' }),
+        h('div', null,
+          h('div', { className:'text-sm font-medium text-violet-900' }, 'ที่อยู่ต่างจังหวัดเขียนแบบเต็ม (ตำบล… อำเภอ… จังหวัด…)'),
+          h('div', { className:'text-xs text-violet-800 mt-0.5' }, 'ไม่ติ๊ก = แบบย่อ ต./อ./จ. (บรรทัดสั้น ไม่ล้นกล่องบน 50 ทวิ) · มีผลกับคู่ค้าที่บันทึกหลังจากนี้เท่านั้น · รายที่แยกช่องไว้แล้วไม่เพี้ยน')))),
 
     // ☁️ บันทึกรายหมวด (คลื่น 3) — สวิตช์ถอยกลับชั้น 1 (WAVE3_CONTRACT §B9) · settings.stateRpc
     h(StateRpcPolicy, { st, dispatch, user: state.currentUser }),
@@ -86470,21 +87467,22 @@ function TagsSection({ state, dispatch }){
 const SUPPLIER_FIELDS = [
   // 🆕 รหัสผู้ขาย — ว่างตอนเพิ่มใหม่ = ระบบออก SP+ปีเดือน+ลำดับ (nextPartyCode ต่อชุด Ecount) · ที่ import จาก Ecount ยังใช้ extCode (SP/SU) แสดงแทน
   { k:'code', label:'รหัสผู้ขาย (SP)', mono:true, hint:'ว่าง = ระบบออกรหัสให้เอง SP+ปีเดือน+ลำดับ (เช่น SP2609001 ต่อชุดเดิมจาก Ecount) · พิมพ์เองได้ถ้าต้องการ' },
-  { k:'name',    label:'ชื่อบริษัท *', required:true },
+  { k:'name',    label:'ชื่อบริษัท *', required:true, type:'partyName' },   // 🆕 PARTY-FORM: คำนำหน้า ▾ + ชื่อ (PartyNameFields) · ถอยกลับ = ช่องเดิม
   // 🔒 จด VAT → ต้องมีเลขผู้เสียภาษี (ใช้ออกใบกำกับ/รับใบกำกับ)
   { k:'taxId',   label:'เลขผู้เสียภาษี', mono:true,
     requiredIf: v => !!v.vatRegistered,
     requiredMsg:'จด VAT แล้ว — ต้องใส่เลขผู้เสียภาษี (หรือเอาติ๊ก "จด VAT" ออกถ้าไม่จด)' },
   // 🆕 เลขสาขา (ภาษี) — ต้องมีในรายงานภาษีซื้อ · สำนักงานใหญ่ = 00000
-  { k:'branchCode', label:'เลขสาขา (ภาษี)', mono:true, defaultValue:'00000', newOnlyDefault:true,
+  { k:'branchCode', label:'เลขสาขา (ภาษี)', mono:true, defaultValue:'00000', newOnlyDefault:true, type:'partyBranch',   // 🆕 PARTY-FORM: ปุ่มเลือก สนญ./สาขาที่/ไม่ระบุ
     hint:'ใช้ในรายงานภาษีซื้อ · สำนักงานใหญ่ = 00000 · สาขา = เลข 5 หลัก' },
   // 🆕 จด VAT? — กำหนดให้ระบบรู้ว่าต้องคาดหวังใบกำกับ หรือต้องแนบบัตรประชาชนแทน
   { k:'vatRegistered', label:'จด VAT (ออกใบกำกับภาษีได้)', type:'checkbox', defaultValue:true,
     hint:'✅ จด VAT = ต้องมีเลขภาษี+ใบกำกับ · ⛔ ไม่จด VAT = ต้องแนบบัตรประชาชนเพื่อรับรองค่าใช้จ่าย' },
+  // 🆕 PARTY-FORM ขั้น 4: ที่อยู่ย้ายขึ้นมาต่อจาก จด VAT (ชื่อ → สาขา → ที่อยู่ → ติดต่อ) · type thAddress = 5 ช่อง + เลือกตำบล (ThAddressFields) · ถอยกลับ = textarea เดิม
+  { k:'address', label:'ที่อยู่', type:'thAddress' },
   { k:'contact', label:'ผู้ติดต่อ' },
   { k:'phone',   label:'โทร' },
   { k:'email',   label:'Email' },
-  { k:'address', label:'ที่อยู่', type:'textarea' },
   // 🔒 บัญชีผู้รับเงิน — ระบบต้องรู้ว่าจ่ายเข้าบัญชีไหน (กัน "ghost vendor" โอนเข้าบัญชีลอย)
   { k:'payeeBankName',    label:'ธนาคารผู้รับเงิน',
     hint:'บัญชีปลายทางที่ใช้จ่ายเงินให้ผู้ขายรายนี้ — ใช้ตรวจสอบก่อนโอน' },
@@ -86495,13 +87493,13 @@ const SUPPLIER_FIELDS = [
 const CUSTOMER_FIELDS = [
   // 🆕 รหัสลูกหนี้ — ว่างตอนเพิ่มใหม่ = ระบบออก AR-xxxx (nextPartyCode) · ที่ import จาก Ecount ยังใช้ extCode (CS) แสดงแทน
   { k:'code',      label:'รหัสลูกค้า (CS)', mono:true, hint:'ว่าง = ระบบออกรหัสให้เอง CS+ปีเดือน+ลำดับ (เช่น CS2609001 ต่อชุดเดิมจาก Ecount) · พิมพ์เองได้ถ้าต้องการ' },
-  { k:'name',      label:'ชื่อลูกค้า *', required:true },
+  { k:'name',      label:'ชื่อลูกค้า *', required:true, type:'partyName' },   // 🆕 PARTY-FORM
   // 🔒 บังคับ เลขภาษี + ที่อยู่ (ออกใบกำกับภาษีให้ลูกค้าได้ครบ)
   { k:'taxId',     label:'เลขผู้เสียภาษี *', mono:true, required:true },
   // 🆕 เลขสาขา (ภาษี) — ต้องมีในรายงานภาษีขาย · สำนักงานใหญ่ = 00000
-  { k:'branchCode', label:'เลขสาขา (ภาษี)', mono:true, defaultValue:'00000', newOnlyDefault:true,
+  { k:'branchCode', label:'เลขสาขา (ภาษี)', mono:true, defaultValue:'00000', newOnlyDefault:true, type:'partyBranch',   // 🆕 PARTY-FORM
     hint:'ใช้ในรายงานภาษีขาย · สำนักงานใหญ่ = 00000 · สาขา = เลข 5 หลัก' },
-  { k:'address',   label:'ที่อยู่ *', type:'textarea', required:true },
+  { k:'address',   label:'ที่อยู่ *', type:'thAddress', required:true },   // 🆕 PARTY-FORM ขั้น 4: 5 ช่อง + เลือกตำบล · ถอยกลับ = textarea เดิม
   { k:'contact',   label:'ผู้ติดต่อ' },
   { k:'phone',     label:'โทร' },
   { k:'email',     label:'Email' },
@@ -86640,7 +87638,7 @@ function PartiesSettings({ state, dispatch, type, setType }){
           : { icon:'🔍', title:`ไม่พบคู่ค้า${type !== 'all' ? ' ประเภท ' + (type === 'SP' ? 'ผู้ขาย' : 'ลูกค้า') : ''}${q ? ' ที่ตรง "' + q + '"' : ''}`, actions:[{ label:'ล้างตัวกรอง', onClick:()=>{ setType('all'); setQ(''); }, dataTestId:'filter-clear' }] } })),
     // key 'new' คงที่ → สลับ SP↔CS ไม่ remount (ค่าที่พิมพ์ไว้ไม่หาย)
     modal && h(PartyEditModal, { key: modal.party ? modal.party.id : 'new', title: meta.title, party: modal.party, fields: meta.fields, dispatch,
-      addAction: meta.add, updateAction: meta.upd, existing: state[meta.list] || [], onClose: () => setModal(null),
+      addAction: meta.add, updateAction: meta.upd, existing: state[meta.list] || [], onClose: () => setModal(null), settings: state.settings,   // 🆕 PARTY-FORM: partyFormSplit / partyAddrLong
       typeChoice: modal.party ? null : { value: modal.type, options: allowedNew, onChange: (v) => { if(!allowedNew.includes(v)){ _toastWarn(`ไม่มีสิทธิ์เพิ่ม${PARTY_TYPE_META[v].label}`); return; } setNewType(v); setModal({ type:v, party:null }); } } }),
     showCredit && h(BulkCreditModal, { state, dispatch, onClose:()=>setShowCredit(false) }));
 }
@@ -86739,8 +87737,405 @@ function PartyTable({ title, pagerLabel, data, dispatch, addAction, updateAction
   );
 }
 
+// ================================================================
+// 🆕 PARTY-FORM ขั้น 3 (PARTY_FORM_CONTRACT v1.1 §C.2 · C.4 · C.5 · C.6 · C.7 · C.9)
+//   คำนำหน้า ▾ + ชื่อ · ปุ่มสาขาตามภาษี · แถบ ✨ ข้อเสนอแยกชื่อของรายเดิม · preview หัวเอกสาร (ใหม่ vs เดิม)
+//   กติกา: รายเดิมเปิดด้วยชื่อเดิมทุกไบต์ · ไม่กด ✨ = บันทึกไบต์เดิม (passthrough) · flag __splitName อยู่ใน values ชั่วคราว ลบก่อน dispatch
+//   ถอยกลับ: settings.partyFormSplit === false / ไม่มี lib (00-party-th.js) / component พัง (boundary) → ช่องชื่อเดิม ไม่ตั้ง flag
+// ================================================================
+const _pfLib = () => { const E = global.ERP || {}; return (E.composePartyName && E.partyNameParts && E.thName && E.thName.composeName) ? E : null; };
+const _pfClean = (s) => { const E = global.ERP || {}; return (E.thName && E.thName._clean) ? E.thName._clean(s) : String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); };
+//   ผู้เรียกที่มี state (หน้าคู่ค้า) ส่ง settings มาเอง · quick-add จาก PO/INV/SI ไม่ส่ง → อ่านผ่าน __getState (03-shell)
+const _pfSettings = (given) => { if(given) return given; try { return (((global.ERP.__getState && global.ERP.__getState()) || {}).settings) || {}; } catch(_e){ return {}; } };
+// ฟอร์มแยกช่องเปิดอยู่ไหม (ค่าตั้งต้น = เปิด · ปิดได้ที่ ตั้งค่า → นโยบายระบบ)
+const _pfSplitOn = (given) => !!_pfLib() && _pfSettings(given).partyFormSplit !== false;
+const _PF_PERSON = { mr:1, mrs:1, ms:1, khun:1 };
+const _PF_GROUPS = [
+  ['นิติบุคคล', ['co','pcl','ltdp','op','coop','found','assoc']],
+  ['บุคคล', ['mr','mrs','ms','khun']],
+  ['อื่น ๆ', ['shop','en_co','en_pcl','en_ltd','gov','none','other']],
+];
+const _pfPrefix = (k) => { const L = _pfLib(); return (L && L.thName.prefixInfo(k)) || null; };
+const _pfKind = (k) => { const p = _pfPrefix(k); return p ? p.kind : 'other'; };
+// ท้ายชื่อที่เป็นสาขา/สนญ. (C.5) → เลขสาขา 5 หลัก · strong = "สาขาที่ #####" หรือ สนญ. (ติ๊กไว้ให้ได้) · อื่น ๆ ('สาขา 2') = อาจเป็นเลขร้าน
+const _PF_BR_TAIL = /^(\(?\s*(สำนักงานใหญ่|สนญ\.?|head\s*office)\s*\)?|สาขา(ที่)?\s*\d{1,5})$/i;
+function _pfBranchTail(tail){
+  const t = _pfClean(tail);
+  if(!t || !_PF_BR_TAIL.test(t)) return null;
+  if(/สำนักงานใหญ่|สนญ|head\s*office/i.test(t)) return { tail:t, code:'00000', strong:true };
+  const d = (t.match(/\d{1,5}/) || [''])[0];
+  return { tail:t, code:d.padStart(5, '0'), strong: /สาขาที่\s*\d{5}$/.test(t) };
+}
+// ตรวจเลขผู้เสียภาษี 13 หลักแบบ mod-11 (soft · ไม่บล็อก)
+function _pfTaxChecksumOk(d){
+  if(!/^\d{13}$/.test(d)) return false;
+  let sum = 0; for(let i = 0; i < 12; i++) sum += Number(d[i]) * (13 - i);
+  return (11 - (sum % 11)) % 10 === Number(d[12]);
+}
+// โหมดปุ่มสาขาจากค่าเลขสาขา: '' → none · 00000/สนญ. → hq · อื่น → branch
+function _pfBrMode(v){
+  const nb = (global.ERP.normalizeBranchCode || (x => String(x == null ? '' : x).trim()))(v);
+  if(!nb) return 'none';
+  return nb === '00000' ? 'hq' : 'branch';
+}
+
+// error boundary แยกส่วน (ลอก TableBoundary) — พัง → onFail() (ลบ flag ของส่วนนั้น) แล้ว render fallback() = ช่องเดิม
+class PartyPartBoundary extends global.React.Component {
+  constructor(p){ super(p); this.state = { err:null }; }
+  static getDerivedStateFromError(err){ return { err }; }
+  componentDidCatch(err, info){ console.error('[party-form:' + this.props.id + '] render failed → ช่องเดิม', err, info && info.componentStack); if(typeof this.props.onFail === 'function') this.props.onFail(err); }
+  render(){
+    if(!this.state.err) return this.props.children;
+    return h('div', { 'data-party-fallback': this.props.id },
+      h('div', { className:'mb-1 text-[11px] text-amber-800' }, '⚠️ ช่องแบบใหม่มีปัญหา — ใช้ช่องเดิมชั่วคราว'),
+      typeof this.props.fallback === 'function' ? this.props.fallback() : null);
+  }
+}
+
+// ---------- C.2 <PartyNameFields> คำนำหน้า ▾ + ชื่อ ----------
+function PartyNameFields({ f, values, setValues, touchName, offerBar, onSplitChip, brMove, onBrMove }){
+  const L = _pfLib();
+  // ตั้ง flag ตอน mount สำเร็จ (C.7) — save() compose ชื่อเฉพาะเมื่อ flag นี้เป็น true
+  useEffect(() => { setValues(v => (v.__splitName === true ? v : { ...v, __splitName:true })); }, []);
+  if(global.ERP.__pfThrowName) throw new Error('test: PartyNameFields');   // เทสต์ boundary (A11)
+  const key = values.namePrefixKey || 'none';
+  const kind = _pfKind(key);
+  const set = (patch) => { touchName(); setValues(v => ({ ...v, ...patch })); };
+  const core = values.nameCore == null ? '' : values.nameCore;
+  // ชิป ✨ แยกคำนำหน้าให้ (ยังเป็น none + parser จับได้ high/medium) — ไม่กดก็บันทึกชื่อเต็มแบบเดิม
+  let splitChip = null;
+  if(key === 'none' && !offerBar && _pfClean(core)){
+    const r = L.thName.parseName(core);
+    if(r.key !== 'none' && r.key !== 'gov' && (r.confidence === 'high' || r.confidence === 'medium')) splitChip = r;
+  }
+  // กันซ้อนสองชั้น: เลือกคำนำหน้าแล้วแต่ในชื่อยังมีคำนำหน้า/คำท้ายซ้ำ
+  let dupChip = null;
+  if(key !== 'none' && key !== 'other' && key !== 'gov' && _pfClean(core)){
+    const p = _pfPrefix(key), c0 = _pfClean(core);
+    let c = c0;
+    const r = L.thName.parseName(c0);
+    if(r.key !== 'none' && r.key !== 'gov' && r.core && r.core !== c0) c = r.core;
+    const suf = p && p.suf ? p.suf.trim() : '';
+    if(suf && c.length > suf.length && c.slice(-suf.length) === suf) c = _pfClean(c.slice(0, -suf.length));
+    if(p && p.pre && c.indexOf(p.pre) === 0 && c.length > p.pre.length) c = _pfClean(c.slice(p.pre.length));
+    if(c && c !== c0) dupChip = { core:c, shown: L.thName.composeName(key, c0, { custom: values.namePrefixCustom, tail: values.nameTail }) };
+  }
+  const hint = kind === 'person' ? 'ชื่อ นามสกุล' : (kind === 'juristic' && key !== 'gov' ? 'พิมพ์เฉพาะชื่อ ไม่ต้องพิมพ์ บริษัท/จำกัด' : '');
+  const taxD = String(values.taxId == null ? '' : values.taxId).replace(/\D/g, '');
+  const khunWarn = key === 'khun' && (values.vatRegistered === true || taxD.length === 13);
+  const inp = 'w-full px-3 py-2 border-2 rounded text-[16px]';
+  return h('div', { className:'space-y-2', 'data-party-name-fields':'1' },
+    h('div', { className:'grid grid-cols-1 sm:grid-cols-12 gap-3' },
+      h('div', { className:'sm:col-span-4' },
+        h(Field, { label:'คำนำหน้า' },
+          h('select', { value:key, 'data-f':'namePrefixKey', className:inp,
+              onChange:e => set({ namePrefixKey:e.target.value }) },
+            _PF_GROUPS.map(([g, ks]) => h('optgroup', { key:g, label:g },
+              ks.map(k => { const p = _pfPrefix(k); return p ? h('option', { key:k, value:k }, k === 'none' ? '— ไม่มีคำนำหน้า —' : p.label) : null; })))))),
+      h('div', { className:'sm:col-span-8' },
+        h(Field, { label:f.label },
+          h('input', { type:'text', value:core, 'data-f':'nameCore', className:inp,
+            onChange:e => set({ nameCore:e.target.value }) })),
+        hint && h('div', { className:'text-[11px] text-gray-500 mt-0.5' }, hint))),
+    key === 'other' && h(Field, { label:'คำนำหน้า (พิมพ์เอง)' },
+      h('input', { type:'text', value:values.namePrefixCustom || '', 'data-f':'namePrefixCustom', placeholder:'เช่น วัด / โรงเรียน', className:inp,
+        onChange:e => set({ namePrefixCustom:e.target.value }) })),
+    (values.nameTail || '') !== '' && h(Field, { label:'ต่อท้ายชื่อ' },
+      h('input', { type:'text', value:values.nameTail, 'data-f':'nameTail', className:'w-full px-3 py-2 border rounded text-[16px] text-gray-600 bg-gray-50',
+        onChange:e => set({ nameTail:e.target.value }) })),
+    splitChip && h('button', { type:'button', 'data-testid':'pf-split-chip', onClick:() => onSplitChip(splitChip),
+        className:'text-xs px-2.5 py-1.5 rounded-full border border-violet-300 bg-violet-50 text-violet-800 hover:bg-violet-100 text-left' },
+      `✨ แยกคำนำหน้าให้: ${(_pfPrefix(splitChip.key) || {}).label || splitChip.key} + "${splitChip.core}"` + (splitChip.tail ? ` · ท้าย "${splitChip.tail}"` : '')),
+    dupChip && h('button', { type:'button', 'data-testid':'pf-dup-chip', onClick:() => set({ nameCore:dupChip.core }),
+        className:'text-xs px-2.5 py-1.5 rounded-full border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100 text-left' },
+      `⚠️ จะพิมพ์ว่า "${dupChip.shown}" — ตัดคำซ้ำให้`),
+    brMove && h(PartyBranchMoveChip, { brMove, onBrMove }),
+    khunWarn && h('div', { className:'text-xs rounded border border-yellow-300 bg-yellow-50 text-yellow-900 px-2 py-1', 'data-testid':'pf-khun-warn' },
+      '⚠️ ใบกำกับ/50 ทวิ ควรใช้ นาย/นาง/นางสาว (ผู้นี้จด VAT หรือมีเลขภาษี 13 หลัก) — บันทึกได้'));
+}
+
+// ---------- C.5 ชิป "ย้าย '…' ไปช่องสาขา" ----------
+function PartyBranchMoveChip({ brMove, onBrMove }){
+  if(brMove.mode === 'conflict'){
+    return h('div', { className:'text-xs rounded border border-amber-300 bg-amber-50 text-amber-900 px-2 py-1', 'data-testid':'pf-brmove', 'data-mode':'conflict' },
+      `⚠️ ชื่อบอก '${brMove.tail}' แต่ทะเบียนเป็น '${brMove.curText}' — ตรวจก่อน (ระบบไม่เปลี่ยนเลขสาขาให้ · ท้ายชื่อคงไว้)`);
+  }
+  return h('label', { className:'flex items-start gap-2 text-xs rounded border border-sky-300 bg-sky-50 text-sky-900 px-2 py-1.5 cursor-pointer', 'data-testid':'pf-brmove', 'data-mode':brMove.mode },
+    h('input', { type:'checkbox', checked:!!brMove.checked, onChange:e => onBrMove(e.target.checked), className:'mt-0.5 w-4 h-4', 'data-testid':'pf-brmove-cb' }),
+    h('span', null,
+      h('b', null, `ย้าย '${brMove.tail}' ไปช่องสาขา`),
+      brMove.mode === 'same' ? ' (ตรงกับเลขสาขาในทะเบียนแล้ว — ตัดออกจากชื่อ)' : ` → ${brMove.code === '00000' ? 'สำนักงานใหญ่' : 'สาขาที่ ' + brMove.code}`,
+      brMove.mode === 'weak' && h('div', { className:'text-amber-800 mt-0.5' }, 'เลขนี้อาจเป็นเลขร้าน ไม่ใช่เลขสาขาที่จดกับสรรพากร — ตรวจใบ ภ.พ.20 ก่อนติ๊ก'),
+      h('div', { className:'text-gray-500' }, 'ไม่ติ๊ก = ท้ายชื่อคงไว้ ชื่อบนเอกสารไม่เปลี่ยน')));
+}
+
+// ---------- C.4 <PartyBranchRadio> สาขาตามภาษี ----------
+function PartyBranchRadio({ mode, value, onPick, onNum }){
+  const grp = useRef('pf-branch-' + Math.random().toString(36).slice(2, 8)).current;
+  const numRef = useRef(null);   // ชื่อกลุ่ม radio ไม่ชนกันเมื่อมีฟอร์มซ้อน (quick-add ในฟอร์มอื่น)
+  const rb = (m, label) => h('label', { className:cls('inline-flex items-center gap-1.5 px-2 min-h-[40px] rounded border cursor-pointer text-sm', mode === m ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white hover:bg-gray-50') },
+    // onClick (ไม่ใช่แค่ onChange) — กดปุ่มที่เลือกอยู่แล้วก็นับว่า "แตะ" (L4 จะไม่สลับให้อีก)
+    h('input', { type:'radio', name:grp, checked:mode === m, onChange:() => onPick(m), 'data-br':m, className:'w-4 h-4',
+      onClick:() => { onPick(m); if(m === 'branch') setTimeout(() => { try { numRef.current && numRef.current.focus(); } catch(_e){} }, 0); } }), label);   // verify: เลือก "สาขาที่" → โฟกัสช่องเลขเลย
+  return h('div', { className:'flex flex-wrap items-center gap-2', 'data-f':'branchCode', 'data-br-mode':mode },
+    rb('hq', '🏢 สำนักงานใหญ่'),
+    h('span', { className:'inline-flex items-center gap-1' },
+      rb('branch', '🏪 สาขาที่'),
+      h('input', { type:'text', inputMode:'numeric', maxLength:5, autoComplete:'off', 'data-f':'branchNum',
+        value: mode === 'branch' ? (value == null ? '' : String(value)) : '',
+        placeholder:'#####', ref:numRef, 'aria-disabled': mode !== 'branch' ? 'true' : undefined,
+        // verify: ไม่ disabled (แท็บเล็ตแตะช่องแล้วไม่มีอะไรเกิด) — แตะช่องเลข/พิมพ์เลข = เลือก "สาขาที่" ให้เลย · ยังไม่เลือกแค่ทำสีเทา
+        //   ไม่ใช้ onFocus: กด Tab ผ่านบน PC ห้ามเปลี่ยน สนญ. เป็นสาขา
+        onPointerDown:() => { if(mode !== 'branch') onPick('branch'); },
+        onChange:e => { if(mode !== 'branch') onPick('branch'); onNum(String(e.target.value || '').replace(/\D/g, '').slice(0, 5)); },
+        className:cls('w-24 px-2 py-2 border-2 rounded text-[16px] font-mono', mode !== 'branch' && 'bg-gray-100 text-gray-400') })),
+    rb('none', 'ไม่ระบุ (บุคคลธรรมดา/ไม่ทราบ)'));
+}
+
+// ---------- C.6 แถบ ✨ ข้อเสนอแยกชื่อ (รายเดิม legacy/drift) ----------
+function PartyOfferBar({ offer, applied, onApply, onUndo }){
+  if(applied) return h('div', { className:'flex items-center gap-2 flex-wrap rounded-lg border border-violet-300 bg-violet-50 px-3 py-2 text-sm text-violet-900', 'data-testid':'pf-offer-bar', 'data-applied':'1' },
+    h('span', null, '✨ แยกชื่อให้แล้ว — ตรวจแล้วกดบันทึก'),
+    h('button', { type:'button', onClick:onUndo, 'data-testid':'pf-offer-undo', className:'ml-auto px-3 min-h-[36px] rounded border border-violet-400 bg-white hover:bg-violet-100 text-sm' }, '↩️ ใช้ข้อความเดิม'));
+  return h('div', { className:'flex items-center gap-2 flex-wrap rounded-lg border border-violet-300 bg-violet-50 px-3 py-2 text-sm text-violet-900', 'data-testid':'pf-offer-bar', 'data-applied':'0' },
+    h('span', null, '✨ ระบบแยกชื่อให้ได้ — ', h('b', null, offer.composed)),
+    h('button', { type:'button', onClick:onApply, 'data-testid':'pf-offer-apply', className:'px-3 min-h-[36px] rounded bg-violet-600 text-white hover:bg-violet-700 text-sm' },
+      offer.confidence === 'high' ? '✨ แยกช่องให้ (ใช้ค่าที่แยกให้)' : '✨ แยกช่องให้ (ตรวจก่อน)'),
+    h('span', { className:'text-xs text-violet-700' }, 'ไม่กด = ข้อมูลเดิมไม่เปลี่ยน'));
+}
+
+// กล่องตรวจก่อนเติม (ชื่อ confidence medium/low) — เดิม / คำนำหน้า / ชื่อ / ผล
+function PartyNameOfferPreview({ original, offer, onUse, onCancel }){
+  const p = _pfPrefix(offer.key);
+  const conf = { high:'🟢 สูง', medium:'🟡 กลาง', low:'🔴 ต่ำ' }[offer.confidence] || offer.confidence;
+  const row = (k, v) => h('div', { className:'flex gap-2' }, h('span', { className:'w-20 shrink-0 text-gray-500' }, k), h('span', { className:'font-medium break-all' }, v));
+  return h('div', { className:'rounded-lg border-2 border-amber-300 bg-amber-50 p-3 text-sm space-y-1', 'data-testid':'pf-name-preview' },
+    h('div', { className:'flex justify-between font-semibold text-amber-900' }, h('span', null, 'แยกชื่อ — โปรดตรวจ'), h('span', { className:'text-xs' }, 'ความมั่นใจ: ' + conf)),
+    row('เดิม', original),
+    row('คำนำหน้า', p ? p.label : offer.key),
+    row('ชื่อ', offer.core),
+    offer.tail && row('ท้ายชื่อ', offer.tail),
+    row('ผล', offer.composed),
+    (offer.notes || []).map((n, i) => h('div', { key:i, className:'text-xs text-gray-500' }, '· ' + n)),
+    h('div', { className:'flex gap-2 justify-end pt-1' },
+      h('button', { type:'button', onClick:onUse, 'data-testid':'pf-name-preview-use', className:'px-3 min-h-[36px] rounded bg-amber-600 text-white text-sm hover:bg-amber-700' }, 'ใช้ค่านี้'),
+      h('button', { type:'button', onClick:onCancel, className:'px-3 min-h-[36px] rounded border bg-white text-sm hover:bg-gray-50' }, 'ยกเลิก')));
+}
+
+// ---------- preview หัวเอกสาร (ใหม่ vs เดิม · "เดิม:" เฉพาะเมื่อ clean(ใหม่) ≠ clean(ทะเบียน)) ----------
+function PartyDocPreview({ name, address, branchText, taxId, oldLine, warns }){
+  return h('div', { className:'rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm', 'data-testid':'party-doc-preview' },
+    h('div', { className:'text-xs font-semibold text-slate-600 mb-1' }, '📄 หัวเอกสารจะพิมพ์ว่า'),
+    h('div', { className:'font-semibold text-slate-900 break-words', 'data-testid':'party-doc-preview-name' }, (name || '—') + (branchText ? ' · ' + branchText : '')),
+    address && h('div', { className:'text-slate-700 break-words', 'data-testid':'party-doc-preview-addr' }, address),
+    taxId && h('div', { className:'text-slate-700' }, 'เลขประจำตัวผู้เสียภาษี ' + taxId),
+    oldLine && h('div', { className:'mt-1 text-xs text-slate-500 break-words', 'data-testid':'party-doc-preview-old' }, 'เดิม: ' + oldLine + '   (เอกสารเก่าไม่เปลี่ยน)'),
+    (warns || []).map((w, i) => h('div', { key:i, className:'mt-1 text-xs rounded border border-yellow-300 bg-yellow-50 text-yellow-900 px-2 py-0.5', 'data-testid':'pf-soft-warn' }, w)));
+}
+
+// ================================================================
+// 🆕 PARTY-FORM ขั้น 4 (PARTY_FORM_CONTRACT v1.1 §C.3 · C.6 · C.7 · C.8 · D.2 · D.4)
+//   ที่อยู่ 5 ช่อง (ที่อยู่ / แขวง-ตำบล / เขต-อำเภอ / จังหวัด / รหัสไปรษณีย์) + ตัวช่วยเลือกตำบล (เลือก 1 = เติม 4 ช่อง · แก้เองได้ทุกช่อง)
+//   ป้ายสลับตามกรุงเทพฯ · 🌐 ต่างประเทศ (addrForeign) · ✨ แยกที่อยู่จากข้อความเดิม (กล่องตรวจก่อน) · แท็บเล็ต/iOS (P14)
+//   กติกา: รายเดิมเปิดด้วยที่อยู่เดิมทุกไบต์ · ข้อมูลตำบลมาทีหลัง = คำนวณแค่ข้อเสนอ ✨ (ห้ามเขียนลงช่อง · P11)
+//   flag __splitAddr อยู่ใน values ชั่วคราว ลบก่อน dispatch · ถอยกลับ (ปิดฟอร์มแยกช่อง / ไม่มี lib / พัง) = textarea เดิม
+// ================================================================
+const _PF_BKK = 'กรุงเทพมหานคร';
+const _PF_FOREIGN = '__foreign';
+// ข้อความในช่อง "ที่อยู่" ดูเหมือนที่อยู่เต็ม (มี ต./แขวง/อ./เขต/จ./กทม หรือเลข 5 หลัก) → เสนอ ✨ แยกให้
+const _PF_ADDR_MARK = /(^|[\s,(0-9])(ตำบล|แขวง|ต\.|อำเภอ|เขต|อ\.|จังหวัด|จ\.|กทม|กรุงเทพ)|(^|[^0-9\/\-])[1-9][0-9]{4}(?![0-9])/;
+const _pfStripPre = (s, re) => _pfClean(s).replace(re, '').trim();
+// ผล parseAddress (+ ตัวเลือกที่คลิกจาก candidates) → ค่าที่จะเติม 5 ช่อง · fromDb = รหัสไปรษณีย์ไม่ได้มาจากข้อความเดิม (P10 ป้าย "เติมจากฐาน")
+function _pfAddrFromParse(r, src, cand){
+  const raw = r.raw || {};
+  const zipInText = !!r.postcode && new RegExp('(^|[^0-9])' + r.postcode + '(?![0-9])').test(_pfClean(src));
+  if(cand) return { addrLine:r.addrLine || '', subdistrict:cand.subdistrict, district:cand.district, province:cand.province,
+    postcode: zipInText ? r.postcode : String(cand.postcode || ''), fromDb: !zipInText };
+  return { addrLine:r.addrLine || '', subdistrict: r.subdistrict || raw.subdistrict || '', district: r.district || raw.district || '',
+    province: r.province || raw.province || '', postcode: r.postcode || '', fromDb: !!r.postcode && !zipInText };
+}
+// ตำบล/อำเภอ/ไปรษณีย์ที่มีอยู่ ยังอยู่ในจังหวัดใหม่ไหม (ไม่มีฐาน = เทียบกับจังหวัดเดิมตรง ๆ)
+function _pfAddrFits(v, prov, ready){
+  const sub = _pfStripPre(v.subdistrict, /^(ตำบล|แขวง|ต\.)\s*/), dist = _pfStripPre(v.district, /^(อำเภอ|เขต|อ\.)\s*/), pc = _pfClean(v.postcode);
+  if(!sub && !dist && !pc) return true;
+  if(!ready) return !_pfClean(v.province) || _pfClean(v.province) === prov;
+  try {
+    const A = _pfLib().thAddress, k = A._key;
+    if(dist){
+      const d2 = (dist === 'เมือง' && prov !== _PF_BKK) ? 'เมือง' + prov : dist;
+      if(!A.districtsOf(prov).some(d => k(d) === k(d2))) return false;
+      if(sub && !A.subdistrictsOf(d2, prov).some(x => k(x.subdistrict) === k(sub))) return false;
+      return true;
+    }
+    if(sub) return A.searchSubdistrict(sub + ' จ.' + prov, 30).some(x => k(x.subdistrict) === k(sub));
+    return A.searchSubdistrict(pc, 30).some(x => x.province === prov);
+  } catch(_e){ return true; }
+}
+// เตือน (soft) — 4 ช่องครบแต่ไม่มีในฐาน / รหัสไปรษณีย์ไม่ตรงฐาน · บันทึกได้
+function _pfAddrWarn(v, ready){
+  if(!ready || v.addrForeign === true) return null;
+  const sub = _pfStripPre(v.subdistrict, /^(ตำบล|แขวง|ต\.)\s*/), prov = _pfStripPre(v.province, /^(จังหวัด|จ\.)\s*/), pc = _pfClean(v.postcode);
+  let dist = _pfStripPre(v.district, /^(อำเภอ|เขต|อ\.)\s*/);
+  if(!sub || !dist || !prov || !pc) return null;
+  if(dist === 'เมือง' && prov !== _PF_BKK) dist = 'เมือง' + prov;
+  try {
+    const pcs = _pfLib().thAddress.postcodesOf(sub, dist, prov);
+    if(!pcs.length) return 'ไม่พบในฐานข้อมูล — ตรวจตัวสะกด แขวง/ตำบล · เขต/อำเภอ · จังหวัด (บันทึกได้)';
+    if(pcs.indexOf(pc) < 0) return `ไม่พบในฐานข้อมูล — รหัสไปรษณีย์ ${pc} ไม่ตรงกับฐาน (${pcs.join(', ')}) ตรวจอีกครั้ง (บันทึกได้ · บางตำบลใช้หลายรหัส)`;
+  } catch(_e){}
+  return null;
+}
+
+// ---------- ช่องกรอก + รายการแนะนำ (combobox · แตะด้วยนิ้วได้ · ไม่ใช้ <datalist>) ----------
+//   pointerdown + preventDefault กันโฟกัสหลุด (iOS) · เมาส์เลือกตอน pointerdown · นิ้วเลือกตอน click (ลากเลื่อนรายการไม่เลือก) · แถว ≥ 44px · ฟอนต์ 16px
+//   ↑ ↓ Enter เลือก · Esc ปิด · Tab ออกโดยไม่เลือก · Enter ระหว่างประกอบตัวอักษร (IME) ไม่ทำงาน · Enter ในรายการไม่ไปกดบันทึก
+function PfAddrCombo({ dataF, value, onText, getItems, onPick, inputMode, maxLength, alignRight, placeholder }){
+  const [open, setOpen] = useState(false);
+  const [act, setAct] = useState(0);
+  const uid = useRef('pfc-' + dataF + '-' + Math.random().toString(36).slice(2, 7)).current;
+  const pickedRef = useRef(false);   // เมาส์เติมไปแล้วตอน pointerdown (ต่อ gesture — ไม่ใช้ตัวจับเวลา)
+  let items = [];
+  if(open){ try { items = getItems(value == null ? '' : String(value)) || []; } catch(_e){ items = []; } }
+  const show = items.length > 0;
+  const a = show ? Math.min(Math.max(act, 0), items.length - 1) : -1;
+  const pick = (it) => { onPick(it); setOpen(false); setAct(0); };
+  const onKeyDown = (e) => {
+    if((e.nativeEvent && e.nativeEvent.isComposing) || e.keyCode === 229) return;   // กำลังประกอบตัวอักษร (IME) — ห้ามเลือก/ห้ามส่ง
+    if(e.key === 'ArrowDown'){ e.preventDefault(); if(!open){ setOpen(true); setAct(0); } else if(show) setAct(Math.min(items.length - 1, a + 1)); }
+    else if(e.key === 'ArrowUp'){ if(show){ e.preventDefault(); setAct(Math.max(0, a - 1)); } }
+    else if(e.key === 'Enter'){ if(show){ e.preventDefault(); e.stopPropagation(); pick(items[a]); } }
+    else if(e.key === 'Escape'){ if(show){ e.preventDefault(); e.stopPropagation(); setOpen(false); } }
+    else if(e.key === 'Tab'){ setOpen(false); }
+  };
+  const listId = uid + '-list';
+  return h('div', { className:'relative' },
+    h('input', { type:'text', value: value == null ? '' : value, 'data-f':dataF, role:'combobox', autoComplete:'off', autoCorrect:'off', spellCheck:false,
+      'aria-autocomplete':'list', 'aria-expanded': show ? 'true' : 'false', 'aria-controls':listId,
+      'aria-activedescendant': show && a >= 0 ? uid + '-o' + a : undefined,
+      inputMode, maxLength, placeholder,
+      className:'w-full px-3 py-2 border-2 rounded text-[16px]',
+      onChange:e => { onText(e.target.value); setOpen(true); setAct(0); },
+      onFocus:e => { setOpen(true); const el = e.target; setTimeout(() => { try { el.scrollIntoView({ block:'center' }); } catch(_e){} }, 60); },   // คีย์บอร์ดบนจอไม่บังรายการ
+      onBlur:() => setOpen(false),
+      onKeyDown }),
+    show && h('ul', { id:listId, role:'listbox', 'data-testid':'pf-addr-list', 'data-for':dataF,
+        className:cls('absolute z-30 mt-1 w-full sm:w-[22rem] max-w-[calc(100vw-2.5rem)] max-h-80 overflow-auto rounded-lg border-2 border-blue-300 bg-white shadow-xl', alignRight ? 'right-0' : 'left-0') },
+      items.map((it, i) => h('li', { key:i, id:uid + '-o' + i, role:'option', 'aria-selected': i === a ? 'true' : 'false', 'data-testid':'pf-addr-opt',
+        className:cls('min-h-[44px] flex items-center px-3 py-2 text-[16px] cursor-pointer border-b last:border-b-0', i === a ? 'bg-blue-50 text-blue-900' : 'hover:bg-gray-50'),
+        // verify: นิ้วแตะเพื่อเลื่อนรายการ ห้ามเลือกทันที — pointerdown แค่กันโฟกัสหลุด · เมาส์เติมทันที · สัมผัสเติมตอน click (เลื่อนแล้วไม่มี click)
+        onPointerDown:e => { e.preventDefault(); pickedRef.current = e.pointerType === 'mouse'; if(pickedRef.current) onPick(it); },
+        onMouseDown:e => e.preventDefault(),
+        onMouseEnter:() => setAct(i),
+        // click ที่ตามมาจากการแตะ (หรือคีย์บอร์ด/โปรแกรมอ่านจอ) — ปิดรายการ · ถ้ายังไม่ได้เติมจาก pointerdown ให้เติมตอนนี้
+        onClick:() => { if(!pickedRef.current) onPick(it); pickedRef.current = false; setOpen(false); setAct(0); } }, it.label))));
+}
+
+// ---------- C.3 <ThAddressFields> ที่อยู่ 5 ช่อง ----------
+function ThAddressFields({ f, values, setValues, touchAddr, thSt, pcFromDb, onPcTouched, onProvince, warn, splitBtn, msg }){
+  const L = _pfLib();
+  // ตั้ง flag ตอน mount สำเร็จ (C.7) — save() compose ที่อยู่เฉพาะเมื่อ flag นี้เป็น true
+  useEffect(() => { setValues(v => (v.__splitAddr === true ? v : { ...v, __splitAddr:true })); }, []);
+  if(global.ERP.__pfThrowAddr) throw new Error('test: ThAddressFields');   // เทสต์ boundary (A11)
+  const A = L.thAddress;
+  const ready = thSt === 'ready';
+  const foreign = values.addrForeign === true;
+  const prov = values.province == null ? '' : String(values.province);
+  const bkk = prov === _PF_BKK;
+  const subL = bkk ? 'แขวง' : (prov ? 'ตำบล' : 'แขวง/ตำบล');
+  const distL = bkk ? 'เขต' : (prov ? 'อำเภอ' : 'เขต/อำเภอ');
+  const set = (patch) => { touchAddr(); setValues(v => ({ ...v, ...patch })); };
+  const pick4 = (it) => { onPcTouched(); set({ subdistrict:it.subdistrict, district:it.district, province:it.province, postcode:String(it.postcode), addrForeign:false }); };
+  const subItems = (q) => {
+    if(!ready) return [];
+    const c = _pfStripPre(q, /^(ตำบล|แขวง|ต\.)\s*/);
+    if(c.length < 2) return [];
+    return A.searchSubdistrict(c + (prov ? ' จ.' + prov : ''), 8);
+  };
+  const pcItems = (q) => { if(!ready) return []; const d = String(q || '').replace(/\D/g, ''); return d.length < 3 ? [] : A.searchSubdistrict(d, 8); };
+  const distItems = (q) => {
+    if(!ready || !prov) return [];
+    const k = A._key(_pfStripPre(q, /^(อำเภอ|เขต|อ\.)\s*/));
+    return A.districtsOf(prov).filter(d => !k || A._key(d).indexOf(k) >= 0).slice(0, 12)
+      .map(d => ({ label:(bkk ? 'เขต' : 'อ.') + d, district:d }));
+  };
+  const provs = global.ERP.TH_PROVINCES || [];
+  const icon = (t) => h('span', { className: ready ? '' : 'grayscale opacity-40', title: ready ? 'พิมพ์แล้วเลือกจากรายการ' : 'ไม่มีรายชื่อตำบล — พิมพ์เอง' }, t);
+  const inp = 'w-full px-3 py-2 border-2 rounded text-[16px]';
+  return h('div', { className:'space-y-2', 'data-th-address-fields':'1' },
+    // ช่องแรก: label ต้องขึ้นต้นด้วย "ที่อยู่" และเป็น label แรกของฟอร์มที่ขึ้นต้นด้วยคำนี้ (parties_e2e หาช่องด้วย label.nextElementSibling) · textarea = เก็บที่อยู่เดิมหลายบรรทัดได้ทุกไบต์
+    h(Field, { label:'ที่อยู่' + (f.required ? ' *' : '') + (foreign ? ' (ต่างประเทศ — พิมพ์ทั้งหมดในช่องนี้)' : ' (เลขที่ อาคาร ถนน ซอย)') },
+      h('textarea', { value: values.addrLine == null ? '' : values.addrLine, rows:2, 'data-f':'addrLine', className:inp,
+        onChange:e => set({ addrLine:e.target.value }) })),
+    h('div', { className:'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3', 'data-testid':'pf-addr-grid' },
+      !foreign && h('div', { 'data-cell':'subdistrict' }, h(Field, { label:h('span', null, subL, ' ', icon('🔎')) },
+        h(PfAddrCombo, { dataF:'subdistrict', value:values.subdistrict, getItems:subItems, onPick:pick4, placeholder: ready ? 'พิมพ์ 2 ตัวอักษรขึ้นไป' : '',
+          onText:t => set({ subdistrict:t }) }))),
+      !foreign && h('div', { 'data-cell':'district' }, h(Field, { label:distL },
+        h(PfAddrCombo, { dataF:'district', value:values.district, getItems:distItems, alignRight:true,
+          onPick:it => set({ district:it.district }), onText:t => set({ district:t }) }))),
+      h('div', { 'data-cell':'province' }, h(Field, { label:'จังหวัด' },
+        h('select', { value: foreign ? _PF_FOREIGN : prov, 'data-f':'province', className:inp, onChange:e => onProvince(e.target.value) },
+          h('option', { value:'' }, '— ยังไม่ระบุ —'),
+          h('option', { value:_PF_FOREIGN }, '🌐 ต่างประเทศ'),
+          prov && provs.indexOf(prov) < 0 && h('option', { value:prov }, prov + ' (ตามที่พิมพ์)'),
+          provs.map(p => h('option', { key:p, value:p }, p))))),
+      !foreign && h('div', { 'data-cell':'postcode' }, h(Field, { label:h('span', null, 'รหัสไปรษณีย์ ', icon('🔎'),
+          pcFromDb && h('span', { className:'ml-1 text-[11px] font-normal text-amber-700', 'data-testid':'pf-pc-fromdb' }, '(เติมจากฐาน)')) },
+        h(PfAddrCombo, { dataF:'postcode', value:values.postcode, getItems:pcItems, onPick:pick4, inputMode:'numeric', maxLength:5, alignRight:true,
+          onText:t => { onPcTouched(); set({ postcode:String(t || '').replace(/\D/g, '').slice(0, 5) }); } })))),
+    thSt === 'offline' && h('div', { className:'text-[11px] text-amber-700', 'data-testid':'pf-addr-offline' }, '⚠️ โหลดรายชื่อตำบลไม่ได้ — พิมพ์เองได้ทุกช่อง บันทึกได้ตามปกติ'),
+    thSt === 'loading' && h('div', { className:'text-[11px] text-gray-500', 'data-testid':'pf-addr-loading' }, '⏳ กำลังโหลดรายชื่อตำบล… (พิมพ์เองได้เลย)'),
+    warn && h('div', { className:'text-xs rounded border border-yellow-300 bg-yellow-50 text-yellow-900 px-2 py-1', 'data-testid':'pf-addr-warn' }, '⚠️ ' + warn),
+    msg && h('div', { className:'text-xs text-gray-600', 'data-testid':'pf-addr-msg' }, msg),
+    splitBtn && h('button', { type:'button', 'data-testid':'pf-addr-split', onClick:splitBtn.onClick, disabled:splitBtn.disabled, title:splitBtn.title,
+        className:'text-xs px-3 min-h-[36px] rounded-full border border-violet-300 bg-violet-50 text-violet-800 hover:bg-violet-100 text-left disabled:opacity-50 disabled:cursor-not-allowed' },
+      splitBtn.label));
+}
+
+// ---------- แถบ ✨ ที่อยู่ (รายเดิม) / แยกให้แล้ว + ↩️ ----------
+function PartyAddrOfferBar({ composed, applied, onApply, onUndo, high }){
+  if(applied) return h('div', { className:'flex items-center gap-2 flex-wrap rounded-lg border border-violet-300 bg-violet-50 px-3 py-2 text-sm text-violet-900', 'data-testid':'pf-addr-bar', 'data-applied':'1' },
+    h('span', null, '✨ แยกที่อยู่ให้แล้ว — ตรวจแล้วกดบันทึก'),
+    h('button', { type:'button', onClick:onUndo, 'data-testid':'pf-addr-undo', className:'ml-auto px-3 min-h-[36px] rounded border border-violet-400 bg-white hover:bg-violet-100 text-sm' }, '↩️ ใช้ข้อความเดิม'));
+  return h('div', { className:'flex items-center gap-2 flex-wrap rounded-lg border border-violet-300 bg-violet-50 px-3 py-2 text-sm text-violet-900', 'data-testid':'pf-addr-bar', 'data-applied':'0' },
+    h('span', { className:'break-words' }, '✨ ระบบแยกที่อยู่ให้ได้ — ', h('b', null, composed)),
+    h('button', { type:'button', onClick:onApply, 'data-testid':'pf-addr-apply', className:'px-3 min-h-[36px] rounded bg-violet-600 text-white hover:bg-violet-700 text-sm' },
+      high ? '✨ แยกช่องให้ (ใช้ค่าที่แยกให้)' : '✨ แยกช่องให้ (ตรวจก่อน)'),
+    h('span', { className:'text-xs text-violet-700' }, 'ไม่กด = ข้อมูลเดิมไม่เปลี่ยน'));
+}
+
+// กล่องตรวจก่อนเติม (ที่อยู่ medium/low · กำกวม = เลือกจาก candidates ≤ 10)
+function PartyAddrOfferPreview({ src, r, long, onUse, onCancel }){
+  const [ci, setCi] = useState(-1);
+  const cands = (r.candidates || []).slice(0, 10);
+  const parts = _pfAddrFromParse(r, src, ci >= 0 ? cands[ci] : null);
+  const L = _pfLib();
+  const composed = L ? L.composePartyAddress(parts, { long }) : '';
+  const bkk = parts.province === _PF_BKK;
+  const conf = { high:'🟢 สูง', medium:'🟡 กลาง', low:'🔴 ต่ำ' }[r.confidence] || r.confidence;
+  const row = (k, v, extra) => h('div', { className:'flex gap-2' }, h('span', { className:'w-24 shrink-0 text-gray-500' }, k), h('span', { className:'font-medium break-all' }, v || '—', extra || null));
+  return h('div', { className:'rounded-lg border-2 border-amber-300 bg-amber-50 p-3 text-sm space-y-1', 'data-testid':'pf-addr-preview', 'data-conf':r.confidence },
+    h('div', { className:'flex justify-between gap-2 font-semibold text-amber-900' }, h('span', null, 'แยกที่อยู่ — โปรดตรวจ'), h('span', { className:'text-xs' }, 'ความมั่นใจ: ' + conf)),
+    row('เดิม', _pfClean(src)),
+    row('ที่อยู่', parts.addrLine),
+    row(bkk ? 'แขวง' : 'ตำบล', parts.subdistrict),
+    row(bkk ? 'เขต' : 'อำเภอ', parts.district),
+    row('จังหวัด', parts.province),
+    row('ไปรษณีย์', parts.postcode, parts.postcode && parts.fromDb ? h('span', { className:'ml-1 text-xs font-normal text-amber-700' }, '(เติมจากฐาน)') : null),
+    row('ผล', composed),
+    cands.length > 0 && h('div', { className:'pt-1' },
+      h('div', { className:'text-xs font-semibold text-amber-900 mb-1' }, `ตำบล/แขวงกำกวม — แตะเลือก 1 ใน ${cands.length}`),
+      h('div', { className:'grid gap-1', role:'listbox' }, cands.map((c, i) => h('button', { key:i, type:'button', role:'option', 'aria-selected': ci === i ? 'true' : 'false', 'data-testid':'pf-addr-cand',
+        onClick:() => setCi(i),
+        className:cls('min-h-[44px] text-left px-3 rounded border text-[16px]', ci === i ? 'border-blue-500 bg-blue-50 text-blue-900' : 'border-gray-200 bg-white hover:bg-gray-50') }, c.label)))),
+    (r.notes || []).map((n, i) => h('div', { key:i, className:'text-xs text-gray-500' }, '· ' + n)),
+    h('div', { className:'flex gap-2 justify-end pt-1' },
+      h('button', { type:'button', onClick:() => onUse(parts), 'data-testid':'pf-addr-preview-use', className:'px-3 min-h-[40px] rounded bg-amber-600 text-white text-sm hover:bg-amber-700' }, 'ใช้ค่านี้'),
+      h('button', { type:'button', onClick:onCancel, 'data-testid':'pf-addr-preview-cancel', className:'px-3 min-h-[40px] rounded border bg-white text-sm hover:bg-gray-50' }, 'ยกเลิก')));
+}
+
 // typeChoice (🆕 หน้าคู่ค้า SP/CS): { value:'SP'|'CS', onChange } — แสดงตัวเลือกประเภทบนสุดตอน "เพิ่มใหม่" · ผู้เรียกสลับ fields/addAction ตามค่า
-function PartyEditModal({ title, party, fields, dispatch, addAction, updateAction, onClose, onSaved, existing, typeChoice }){
+function PartyEditModal({ title, party, fields, dispatch, addAction, updateAction, onClose, onSaved, existing, typeChoice, settings }){
   const isEdit = !!party;
   const _defaults = (fs, base) => {
     const v = {};
@@ -86756,11 +88151,213 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
     });
     return v;
   };
-  const [values, setValues] = useState(() => _defaults(fields, party));
+  // 🆕 PARTY-FORM (ขั้น 3): ตัดสินครั้งเดียวตอนเปิดว่าจะใช้ฟอร์มแยกช่องไหม (C.9) · รายเดิม legacy/drift = ชื่อเดิมทุกไบต์ + ข้อเสนอ ✨ (C.6)
+  const splitOn = useRef(_pfSplitOn(settings)).current;
+  const nameInit = useRef(null);
+  if(nameInit.current === null){
+    let ni = false;
+    if(splitOn && fields.some(f => f.type === 'partyName')){
+      try { ni = isEdit ? _pfLib().partyNameParts(party) : { state:'new', offer:null, values:{ namePrefixKey:'none', namePrefixCustom:'', nameCore:'', nameTail:'' } }; }
+      catch(e){ console.error('[party-form] partyNameParts', e); ni = false; }
+    }
+    nameInit.current = ni;
+  }
+  const NI = nameInit.current || null;
+  // 🆕 PARTY-FORM (ขั้น 4): ที่อยู่ — รายเดิม legacy/drift = addrLine เป็นที่อยู่เดิมทุกไบต์ + 4 ช่องว่าง · ผล parse เป็นข้อเสนอ ✨ (C.6)
+  const addrInit = useRef(null);
+  if(addrInit.current === null){
+    let ai = false;
+    if(splitOn && fields.some(f => f.type === 'thAddress')){
+      try { ai = isEdit ? _pfLib().partyAddrParts(party) : { state:'new', offer:null, needData:false, values:{ addrLine:'', subdistrict:'', district:'', province:'', postcode:'', addrForeign:false } }; }
+      catch(e){ console.error('[party-form] partyAddrParts', e); ai = false; }
+    }
+    addrInit.current = ai;
+  }
+  const AI = addrInit.current || null;
+  const pristine = useRef({ name:true, address:true });   // C.7: ส่วนที่ผู้ใช้ยังไม่แตะ → บันทึกไบต์เดิม
+  const touched = useRef({ taxId:false, province:false }); // C.8: เช็กเลขภาษี 13 หลักเฉพาะรายใหม่/แตะช่องเลขภาษีหรือช่องจังหวัด
+  const brTouched = useRef(false);                        // C.4 L4: แตะปุ่มสาขาแล้ว = ไม่สลับให้อีก
+  const [taxErr, setTaxErr] = useState(null);             // UAT S3: ข้อความเลขภาษีไม่ครบ แสดงใต้ช่อง (ไม่ใช่แค่ alert)
+  const [values, setValues] = useState(() => ({ ..._defaults(fields, party), ...(NI ? NI.values : {}), ...(AI ? AI.values : {}) }));
+  // 🆕 PARTY-FORM (ขั้น 4): สถานะฐานตำบล (ready/loading/offline) · ข้อเสนอ ✨ ที่อยู่ · กล่องตรวจ · ป้าย "(เติมจากฐาน)"
+  const [thSt, setThSt] = useState(() => { const L = _pfLib(); return L && L.thAddrStatus ? L.thAddrStatus() : 'offline'; });
+  const [addrOffer, setAddrOffer] = useState(() => (AI && AI.offer) || null);
+  const [addrFailed, setAddrFailed] = useState(false);
+  const [addrApplied, setAddrApplied] = useState(false);
+  const [addrPreview, setAddrPreview] = useState(null);
+  const [addrMsg, setAddrMsg] = useState(null);
+  const [pcFromDb, setPcFromDb] = useState(false);
+  const addrUndo = useRef(null);   // ค่าช่องที่อยู่ก่อนกด ✨ (↩️ คืนค่านี้ + สถานะ pristine เดิม)
+  const addrSplitLive = splitOn && !!AI && !addrFailed;
+  const hasBrField = fields.some(f => f.k === 'branchCode');
+  const [brMode, setBrMode] = useState(() => _pfBrMode(_defaults(fields, party).branchCode));
+  const [nameFailed, setNameFailed] = useState(false);
+  const [offerApplied, setOfferApplied] = useState(false);
+  const [namePreview, setNamePreview] = useState(null);
+  const [brMove, setBrMove] = useState(null);
+  const nameOffer = (NI && isEdit && NI.offer && (NI.offer.key !== 'none' || _pfBranchTail(NI.offer.tail))) ? NI.offer : null;
+  const nameSplitLive = splitOn && !!NI && !nameFailed;
+  const touchName = () => { pristine.current.name = false; };
+  // ✨ ใช้ค่าที่แยกให้ (ชื่อ) + ชิปย้ายสาขาจากท้ายชื่อ (C.5 · ห้ามทับ branchCode เดิมที่ไม่ว่าง)
+  const applyNameOffer = (o) => {
+    pristine.current.name = false;
+    const patch = { namePrefixKey:o.key, nameCore:o.core, nameTail:o.tail || '', namePrefixCustom:'' };
+    const bt = hasBrField ? _pfBranchTail(o.tail) : null;
+    let mv = null;
+    if(bt){
+      const _nb = global.ERP.normalizeBranchCode || (x => String(x == null ? '' : x).trim());
+      const cur = isEdit ? _nb(party.branchCode) : (brTouched.current ? _nb(values.branchCode) : '');
+      const mode = !cur ? (bt.strong ? 'strong' : 'weak') : (cur === bt.code ? 'same' : 'conflict');
+      mv = { tail:bt.tail, code:bt.code, mode, checked: mode === 'strong' || mode === 'same',
+             curText: cur === '00000' ? 'สำนักงานใหญ่' : 'สาขาที่ ' + cur, prev:{ code: values.branchCode, mode: brMode, touched: brTouched.current } };
+      if(mv.checked){
+        patch.nameTail = '';
+        if(mode === 'strong'){ patch.branchCode = bt.code; setBrMode(bt.code === '00000' ? 'hq' : 'branch'); brTouched.current = true; }
+      }
+    }
+    setBrMove(mv);
+    setValues(v => ({ ...v, ...patch }));
+  };
+  const onBrMove = (checked) => {
+    if(!brMove || brMove.mode === 'conflict') return;
+    pristine.current.name = false;
+    const mv = { ...brMove, checked };
+    setBrMove(mv);
+    if(checked){
+      setValues(v => ({ ...v, nameTail:'', ...(mv.mode === 'same' ? {} : { branchCode: mv.code }) }));
+      if(mv.mode !== 'same'){ setBrMode(mv.code === '00000' ? 'hq' : 'branch'); brTouched.current = true; }
+    } else {
+      setValues(v => ({ ...v, nameTail: mv.tail, ...(mv.mode === 'same' ? {} : { branchCode: mv.prev.code }) }));
+      if(mv.mode !== 'same'){ setBrMode(mv.prev.mode); brTouched.current = mv.prev.touched; }
+    }
+  };
+  const clickOffer = () => {
+    if(!nameOffer) return;
+    if(nameOffer.confidence === 'high'){ applyNameOffer(nameOffer); setOfferApplied(true); }
+    else setNamePreview(nameOffer);   // medium/low → กล่องตรวจก่อนเติม
+  };
+  const undoOffer = () => {   // ↩️ คืนข้อความเดิมทุกไบต์ + กลับเป็น passthrough
+    if(brMove && brMove.checked && brMove.mode !== 'same' && brMove.mode !== 'conflict'){ setBrMode(brMove.prev.mode); brTouched.current = brMove.prev.touched; }
+    const brBack = (brMove && brMove.checked && brMove.mode !== 'same' && brMove.mode !== 'conflict') ? { branchCode: brMove.prev.code } : {};
+    setValues(v => ({ ...v, ...NI.values, ...brBack }));
+    setBrMove(null); setOfferApplied(false); setNamePreview(null);
+    pristine.current.name = true;
+  };
+  // ---------- 🆕 PARTY-FORM ขั้น 4: ที่อยู่ ----------
+  const touchAddr = () => { pristine.current.address = false; };
+  // โหลดฐานตำบลตอนเปิดฟอร์ม (ครั้งเดียวต่อแท็บ) · ข้อมูลมาทีหลัง → คำนวณแค่ข้อเสนอ ✨ เมื่อส่วนที่อยู่ยังไม่ถูกแตะ · ห้ามเขียนลงช่อง (P11)
+  useEffect(() => {
+    if(!addrSplitLive) return;
+    const L = _pfLib();
+    if(!L || !L.thAddrReady) return;
+    let alive = true;
+    const on = () => {
+      if(!alive) return;
+      setThSt(L.thAddrStatus());
+      if(isEdit && AI && AI.state !== 'split' && AI.needData && pristine.current.address){
+        try { const o = L.partyAddrParts(party).offer; if(o) setAddrOffer(o); } catch(e){ console.error('[party-form] offer', e); }
+      }
+    };
+    global.addEventListener('erp:thaddr', on);
+    try { const pr = L.thAddrReady(); setThSt(L.thAddrStatus()); if(pr && pr.then) pr.then(on); } catch(e){ setThSt('offline'); }
+    return () => { alive = false; global.removeEventListener('erp:thaddr', on); };
+  }, []);
+  const _ADDR_V = ['addrLine','subdistrict','district','province','postcode','addrForeign'];
+  const applyAddr = (parts) => {
+    if(!addrUndo.current){ const snap = {}; _ADDR_V.forEach(k => { snap[k] = values[k]; }); addrUndo.current = { vals:snap, pristine:pristine.current.address }; }
+    pristine.current.address = false;
+    setValues(v => ({ ...v, addrLine:parts.addrLine, subdistrict:parts.subdistrict, district:parts.district, province:parts.province, postcode:String(parts.postcode || ''), addrForeign:false }));
+    setPcFromDb(!!(parts.fromDb && parts.postcode));
+    setAddrApplied(true); setAddrPreview(null); setAddrMsg(null);
+  };
+  const undoAddr = () => {   // ↩️ คืนค่าช่องที่อยู่ก่อนกด ✨ (รายเดิม = ที่อยู่เดิมทุกไบต์ + กลับเป็น passthrough)
+    const u = addrUndo.current;
+    if(u){ setValues(v => ({ ...v, ...u.vals })); pristine.current.address = u.pristine; }
+    addrUndo.current = null;
+    setPcFromDb(false); setAddrApplied(false); setAddrPreview(null); setAddrMsg(null);
+  };
+  // ✨ แยกที่อยู่: high → เติมเลย · medium/low → กล่องตรวจก่อน · none → บอกให้พิมพ์เอง
+  const runAddrSplit = (src, preset) => {
+    const L = _pfLib();
+    if(!L || thSt !== 'ready') return;
+    let r = preset || null;
+    if(!r){ try { r = L.thAddress.parseAddress(src); } catch(e){ console.error('[party-form] parseAddress', e); r = null; } }
+    if(!r || r.confidence === 'none'){ setAddrMsg('แยกที่อยู่อัตโนมัติไม่ได้ — พิมพ์แยกเองในแต่ละช่อง (หรือเว้นไว้ในช่อง "ที่อยู่" ช่องเดียวก็บันทึกได้)'); return; }
+    if(r.confidence === 'high') applyAddr(_pfAddrFromParse(r, src, null));
+    else { setAddrPreview({ src, r }); setAddrMsg(null); }
+  };
+  const onProvince = (val) => {
+    touchAddr(); touched.current.province = true;
+    if(val === _PF_FOREIGN){
+      setValues(v => ({ ...v, addrForeign:true, province:'', subdistrict:'', district:'', postcode:'' })); setPcFromDb(false); return;
+    }
+    const fits = !val || _pfAddrFits(values, val, thSt === 'ready');
+    // verify: ล้างเฉพาะเมื่อของเดิม "เข้ากับจังหวัดเดิม" (มาจากฐาน) — พิมพ์เองแล้วไม่ตรงฐาน เก็บไว้ ให้ _pfAddrWarn เตือนเหลือง (บันทึกได้)
+    const fitsOld = !!_pfClean(values.province) && _pfAddrFits(values, _pfClean(values.province), thSt === 'ready');
+    if(!fits && fitsOld){
+      setValues(v => ({ ...v, province:val, addrForeign:false, subdistrict:'', district:'', postcode:'' })); setPcFromDb(false);
+      _toastWarn('เปลี่ยนจังหวัด — ล้างตำบล/อำเภอเดิมแล้ว');
+    } else setValues(v => ({ ...v, province:val, addrForeign:false }));
+  };
+  // L4: รายใหม่ + คำนำหน้าบุคคล + ยังไม่แตะปุ่มสาขา → "ไม่ระบุ" (ไม่พิมพ์ "สำนักงานใหญ่" ให้บุคคลธรรมดา) · เปลี่ยนกลับเป็นนิติบุคคล → สนญ.
+  useEffect(() => {
+    if(!nameSplitLive || isEdit || brTouched.current || !hasBrField) return;
+    const person = !!_PF_PERSON[values.namePrefixKey];
+    const want = person ? 'none' : 'hq';
+    if(brMode !== want){ setBrMode(want); setValues(v => ({ ...v, branchCode: person ? '' : '00000' })); }
+  }, [values.namePrefixKey]);
   // สลับประเภท (SP↔CS) → ชุดช่องเปลี่ยน: เติมค่าเริ่มต้นให้ช่องใหม่ เก็บค่าที่พิมพ์ไว้แล้ว (ชื่อ/เลขภาษี/ที่อยู่ ใช้ร่วมกัน) · รหัสที่พิมพ์ไว้ล้าง (รหัสหน้าผูกกับประเภท)
   useEffect(() => { setValues(prev => Object.assign(_defaults(fields, party), prev, isEdit ? {} : { code:'' })); }, [fields]);
 
+  // 🆕 PARTY-FORM (C.7): ประกอบชื่อ/ที่อยู่จากช่องแยก — compose เฉพาะส่วนที่ component แยกช่อง mount สำเร็จ (__splitName / __splitAddr)
+  //   passthrough (กติกาข้อ 6): ส่วนที่ไม่ถูกแตะ หรือต่างกันแค่ clean() → คืนไบต์เดิม · ใช้ทั้ง preview และ save
+  const _pfCompose = () => {
+    const L = _pfLib();
+    let nm = values.name, ad = values.address;
+    if(values.__splitName === true && L){
+      nm = _pfClean(values.nameCore) ? L.composePartyName(values) : '';
+      if(isEdit && party.name != null && (pristine.current.name || _pfClean(nm) === _pfClean(party.name))) nm = party.name;
+    }
+    if(values.__splitAddr === true && L && L.composePartyAddress){
+      ad = L.composePartyAddress(values, { long: _pfSettings(settings).partyAddrLong === true });
+      if(isEdit && party.address != null && (pristine.current.address || _pfClean(ad) === _pfClean(party.address))) ad = party.address;
+    }
+    return { ...values, name:nm, address:ad };
+  };
+
   const save = () => {
+    const values = _pfCompose();   // 🆕 PARTY-FORM: บรรทัดแรกของ save — ก่อนทุก validation (required 'name'/'address' เดิมทำงานต่อได้ทันที)
+    // 🆕 PARTY-FORM (C.8 · C.4): validation ของฟอร์มแยกช่อง
+    if(splitOn){
+      if(values.__splitName === true && values.namePrefixKey === 'other' && !_pfClean(values.namePrefixCustom)) return alert("พิมพ์คำนำหน้า หรือเลือก 'ไม่มีคำนำหน้า'");
+      // 🆕 ขั้น 4: รหัสไปรษณีย์ (hard) — ไม่ว่างต้องเป็นเลข 5 หลัก (ต่างประเทศไม่มีช่องนี้)
+      if(values.__splitAddr === true && values.addrForeign !== true){
+        const pc = String(values.postcode == null ? '' : values.postcode).trim();
+        if(pc && !/^\d{5}$/.test(pc)) return alert('รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลัก');
+      }
+      if(hasBrField && brMode === 'branch'){
+        const raw = String(values.branchCode == null ? '' : values.branchCode).trim();
+        if(!raw) return alert('ใส่เลขสาขา 5 หลัก');
+        if((global.ERP.normalizeBranchCode || (x => x))(raw) === '00000') return alert('00000 = สำนักงานใหญ่ — เลือกปุ่มสำนักงานใหญ่แทน');
+      }
+      // เลขผู้เสียภาษี 13 หลัก (hard) — รายใหม่ หรือแตะช่องนี้ · ยกเว้นเฉพาะคู่ค้าต่างประเทศ (addrForeign) · รายเดิมที่ไม่ได้แตะ ไม่บล็อก
+      const taxRaw = String(values.taxId == null ? '' : values.taxId).trim();
+      // UAT S3: รายเดิมแค่เปลี่ยนจังหวัด (ไทย→ไทย) ไม่เช็ก — เช็กเมื่อแตะเลขภาษี หรือเปลี่ยนจากต่างประเทศ → ไทย เท่านั้น
+      const _wasForeign = !!(isEdit && party && party.addrForeign === true);
+      if(taxRaw && values.addrForeign !== true && (!isEdit || touched.current.taxId || _wasForeign)){
+        const t = taxRaw.replace(/[\s-]/g, '');
+        if(!/^\d{13}$/.test(t)){
+          const n = t.replace(/\D/g, '').length;
+          const legacy = isEdit && !touched.current.taxId;   // เลขเดิมในทะเบียน ผู้ใช้ไม่ได้พิมพ์เอง
+          // เสนอ "ต่างประเทศ" เฉพาะเมื่อน่าจะจริง: เดิมเป็นต่างประเทศ หรือเลขมีตัวอักษร (เลขภาษีต่างชาติ)
+          const foreignHint = (_wasForeign || /[A-Za-z]/.test(t)) ? ` — ถ้าคู่ค้าอยู่ต่างประเทศจริง เลือก '🌐 ต่างประเทศ' ในช่องจังหวัด` : '';
+          const msg = (legacy ? `เลขภาษีเดิมไม่ครบ 13 หลัก (ตอนนี้ ${n} หลัก) — ถามบัญชีก่อน` : `เลขผู้เสียภาษีต้องเป็นตัวเลข 13 หลัก (ตอนนี้ ${n} หลัก)`) + foreignHint;
+          setTaxErr(msg);
+          return alert(msg);
+        }
+        values.taxId = t;   // เก็บเลขล้วน เฉพาะเมื่อคนแก้ช่องนี้
+      }
+    }
     // 🔒 บังคับช่องสำคัญ — required:true เสมอ · requiredIf:(values)=>bool ตามเงื่อนไข
     const required = fields.filter(f => f.required || (typeof f.requiredIf === 'function' && f.requiredIf(values)));
     for(const f of required){
@@ -86788,6 +88385,8 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
     const others = list.filter(s => s && s.id !== (party && party.id));
     const sameTax = newTax ? others.filter(s => taxD(s.taxId) === newTax) : [];
     const brLab = b => b ? (b === '00000' ? 'สำนักงานใหญ่ 00000' : 'สาขา ' + b) : 'สาขา ไม่ระบุ';
+    const _nk = global.ERP.partyNameKey;
+    const _keyOf = n => { const t = norm(n); if(!t || typeof _nk !== 'function') return t; try { return _nk(n) || t; } catch(e){ return t; } };
     // ② (ตรวจก่อน ①) เลขภาษีซ้ำกับรายอื่น แต่ยังไม่กรอกสาขา → บังคับกรอก (ไม่งั้นแยกสาขาไม่ออกตอนเลือก)
     //   🆕 (verify): เดิมอยู่หลัง ① → มีระเบียนเดิมสาขาว่าง + เพิ่มใหม่สาขาว่าง = เข้า ① (แค่ confirm) ข้ามการบังคับ
     //   แก้ไขรายเดิมแล้วเปลี่ยนเลขภาษีให้ชนรายอื่น → บังคับเหมือนกัน
@@ -86803,10 +88402,12 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
       const brs = [...new Set(sameTax.map(s => _nb(s.branchCode) || 'ไม่ระบุ'))].sort().join(', ');
       // ③ บริษัทเดิม สาขาใหม่ → แจ้งเพื่อทราบ
       if(!confirm(`ℹ️ เพิ่มสาขาใหม่ของ "${sameTax[0].name||'-'}" — ${brLab(newBr)}\nสาขาที่มีแล้ว ${sameTax.length} สาขา: ${brs}\n\nตรวจเลขสาขาให้ตรงใบกำกับ แล้วกดตกลง`)) return;
-    } else if(!isEdit && !sameTax.length){
-      const newName = norm(values.name);
-      const dupN = newName && others.find(s => norm(s.name) === newName);
-      if(dupN && !confirm(`⚠️ ${partyWord}ชื่อซ้ำ — มี "${dupN.name||'-'}" (${brLab(_nb(dupN.branchCode))}) อยู่แล้ว\nถ้าเป็นคนละสาขา ตรวจเลขภาษี/เลขสาขาให้ครบ · ยืนยันสร้าง${partyWord}ใหม่?`)) return;
+    } else if(!sameTax.length && (!isEdit || _keyOf(values.name) !== _keyOf(party.name))){
+      // 🆕 PARTY-FORM §F: เทียบด้วย partyNameKey (ไม่สนรูปคำนำหน้า) — "บจก.ยูเมะ" = "บริษัท ยูเมะ จำกัด" · ไม่มี lib → เทียบสตริงตรงแบบเดิม
+      //   UAT S6: แก้ชื่อรายเดิมให้ไปชนชื่อรายอื่น → เตือนเหมือนเพิ่มใหม่ (กันผู้ขายซ้ำ/ghost vendor จากการ ✨ แยกชื่อ)
+      const newName = _keyOf(values.name);
+      const dupN = newName && others.find(s => _keyOf(s.name) === newName);
+      if(dupN && !confirm(`⚠️ ${partyWord}ชื่อซ้ำ — มี "${dupN.name||'-'}" (${dupN.code || dupN.extCode || '-'} · ${brLab(_nb(dupN.branchCode))}) อยู่แล้ว\nถ้าเป็นคนละสาขา ตรวจเลขภาษี/เลขสาขาให้ครบ · ยืนยัน${isEdit ? 'เปลี่ยนชื่อเป็นชื่อนี้' : 'สร้าง' + partyWord + 'ใหม่'}?`)) return;
     }
     // 🆕 รหัสคู่ค้า: กรอกเอง → เช็คซ้ำ (code และ extCode ของรายอื่น) · ว่างตอนเพิ่มใหม่ → nextPartyCode AP-/AR- · แก้ไข → คง code เดิม
     // 🔐 UAT: หน้าคู่ค้า (typeChoice) — เพิ่มได้เฉพาะประเภทที่มีสิทธิ์ create (กันชั้นสุดท้ายก่อน dispatch)
@@ -86828,14 +88429,74 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
     //    (UPDATE_SUPPLIER/UPDATE_CUSTOMER replace ทั้ง record)
     const data = { ...(party || {}), ...values, id: isEdit ? party.id : genId(title.slice(0,3).toLowerCase()), code };
     delete data._t; delete data._twin;   // field ของหน้ารวม — ไม่เก็บลง state
+    // 🆕 PARTY-FORM (C.7): ส่วนที่ไม่ได้ใช้ฟอร์มแยกช่อง (rollback/boundary/ไม่มี lib) → ช่องแยกคงตามทะเบียนเดิม
+    {
+      const _NAME_K = ['namePrefixKey','namePrefixCustom','nameCore','nameTail'];
+      const _ADDR_K = ['addrLine','subdistrict','district','province','postcode','addrForeign'];
+      if(values.__splitName !== true) _NAME_K.forEach(k => { if(party && k in party) data[k] = party[k]; else delete data[k]; });
+      if(values.__splitAddr !== true) _ADDR_K.forEach(k => { if(party && k in party) data[k] = party[k]; else delete data[k]; });
+      delete data.__splitName; delete data.__splitAddr;   // flag ชั่วคราวของฟอร์ม — ห้ามลง state เด็ดขาด
+      // ช่องใหม่ที่ว่าง → ลบทิ้ง (ไม่เขียน '' ลง blob)
+      ['namePrefixKey','namePrefixCustom','nameCore','nameTail','addrLine','subdistrict','district','province','postcode']
+        .forEach(k => { if(data[k] == null || String(data[k]).trim() === '') delete data[k]; });
+      if(data.addrForeign !== true) delete data.addrForeign;
+      if(data.namePrefixKey !== 'other') delete data.namePrefixCustom;
+      if(data.namePrefixKey === 'none' && !data.nameTail){ delete data.namePrefixKey; delete data.nameCore; }   // none = โหมดเดิม ไม่ต้องเก็บ
+      // ที่อยู่ก้อนเดียว (addrLine อย่างเดียว = address) → ไม่เก็บ addrLine ซ้ำ
+      if(!data.subdistrict && !data.district && !data.province && !data.postcode && !data.addrForeign
+         && data.addrLine != null && _pfClean(data.addrLine) === _pfClean(data.address)) delete data.addrLine;
+      // ของเดิมก่อนแปลงครั้งแรก (เขียนครั้งเดียว · เทียบผ่าน clean())
+      if(isEdit && !party.nameRaw    && party.name    && _pfClean(party.name)    !== _pfClean(data.name))    data.nameRaw    = party.name;
+      if(isEdit && !party.addressRaw && party.address && _pfClean(party.address) !== _pfClean(data.address)) data.addressRaw = party.address;
+      if(data.postcode) data.postcode = String(data.postcode);
+    }
     dispatch({ type: isEdit ? updateAction : addAction, data });
     if(typeof onSaved === 'function') onSaved(data);   // 🆕 ให้ผู้เรียก (quick-add) เลือกอัตโนมัติ
     onClose();
   };
 
   // 🆕 docKey 'sup:'+id / 'cus:'+id — เปิดรายเดิมซ้ำขณะย่ออยู่ (ตารางตั้งค่า / แท็บคู่ค้าในบัญชี / Command palette) = เด้งอันเดิม · เพิ่มใหม่/quick-add ไม่มี key
+  // ช่องแบบเดิม (input/textarea/select) — ใช้ทั้งฟอร์มปกติ และตอนฟอร์มแยกช่องถอยกลับ (C.9)
+  const renderLegacyField = (f) => h(Field, { key:f.k, label:f.label, hint:f.hint },   // 🆕 ส่ง hint (Field รองรับอยู่แล้ว) — เห็นคำอธิบายรหัส
+              (f.type === 'textarea' || f.type === 'thAddress') ?   // 🆕 PARTY-FORM: ที่อยู่แบบแยกช่องถอยกลับ = textarea เดิม
+                h('textarea', { value:values[f.k], onChange:e=>setValues(v => ({...v, [f.k]:e.target.value})),
+                  rows:2, className:cls('w-full px-3 py-2 border-2 rounded', splitOn ? 'text-[16px]' : 'text-sm') })
+                :
+              f.type === 'number' ?
+                h('input', { type:'number', value:values[f.k], onChange:e=>setValues({...values, [f.k]:Number(e.target.value)||0}),
+                  className:cls('w-full px-3 py-2 border-2 rounded text-right', splitOn ? 'text-[16px]' : 'text-sm') })
+                :
+              f.type === 'select' ?
+                h('select', { value:values[f.k], onChange:e=>setValues({...values, [f.k]:e.target.value}),
+                  className:cls('w-full px-3 py-2 border-2 rounded', splitOn ? 'text-[16px]' : 'text-sm') },
+                  h('option', { value:'' }, '— เลือก —'),
+                  f.options.map(o => h('option', { key:o.v, value:o.v }, o.label))
+                )
+                :
+                h(global.React.Fragment, null, h('input', { type:'text', value:values[f.k], onChange:e=>{ if(f.k === 'taxId'){ touched.current.taxId = true; setTaxErr(null); } setValues({...values, [f.k]:e.target.value}); },
+                  // 🆕 code ว่างของรายที่ import → โชว์ extCode เป็น placeholder ให้รู้ว่าใช้รหัส Ecount อยู่
+                  placeholder: (f.k === 'code' && party?.extCode) ? `ใช้รหัส Ecount: ${party.extCode}` : undefined,
+                  // 🆕 PARTY-FORM (P14): ฟอร์มแยกช่อง = ฟอนต์ 16px ทุกช่อง (ต่ำกว่านี้ iOS ซูมจอเอง) · เลขภาษีใช้แป้นตัวเลข
+                  inputMode: (splitOn && f.k === 'taxId') ? 'numeric' : undefined,
+                  className: cls('w-full px-3 py-2 border-2 rounded', splitOn ? 'text-[16px]' : 'text-sm', f.mono && 'font-mono', (f.k === 'taxId' && taxErr) && 'border-red-400') }),
+                  // UAT S3: ข้อความเลขภาษีไม่ครบ ใต้ช่อง
+                  (f.k === 'taxId' && taxErr) ? h('div', { 'data-tid':'pf-tax-err', className:'text-xs text-red-700 mt-1' }, '⛔ ' + taxErr) : null)
+        );
+  // 🆕 PARTY-FORM preview หัวเอกสาร (C.6: "เดิม:" เฉพาะเมื่อ clean(ใหม่) ≠ clean(ทะเบียน))
+  let _preview = null;
+  if(splitOn){
+    const pv = _pfCompose();
+    const _nb = global.ERP.normalizeBranchCode || (x => String(x == null ? '' : x).trim());
+    const brText = hasBrField && global.ERP.partyTaxBranchText ? global.ERP.partyTaxBranchText({ branchCode:_nb(pv.branchCode), taxId:pv.taxId, vatRegistered:pv.vatRegistered }) : '';
+    const oldChanged = isEdit && (_pfClean(pv.name) !== _pfClean(party.name) || _pfClean(pv.address) !== _pfClean(party.address));
+    const taxD = String(pv.taxId == null ? '' : pv.taxId).replace(/[\s-]/g, '');
+    const warns = [];
+    if(/^\d{13}$/.test(taxD) && pv.addrForeign !== true && !_pfTaxChecksumOk(taxD)) warns.push('⚠️ เลขผู้เสียภาษีหลักตรวจสอบไม่ตรง (mod-11) — อาจพิมพ์ผิด ตรวจอีกครั้ง (บันทึกได้)');
+    _preview = h(PartyDocPreview, { name:pv.name, address:pv.address, branchText:brText, taxId:pv.taxId,
+      oldLine: oldChanged ? [party.name, party.address].filter(x => x != null && String(x).trim() !== '').join(' · ') : null, warns });
+  }
   const _docKey = isEdit ? ((addAction === 'ADD_SUPPLIER' ? 'sup' : 'cus') + ':' + party.id) : undefined;
-  return h(Modal, { isOpen:true, title: isEdit ? `แก้ไข: ${party.name}` : (typeChoice ? 'เพิ่มคู่ค้า (ผู้ขาย SP / ลูกค้า CS)' : `เพิ่ม ${title}`), onClose, size:'md', docKey: _docKey },
+  return h(Modal, { isOpen:true, title: isEdit ? `แก้ไข: ${party.name}` : (typeChoice ? 'เพิ่มคู่ค้า (ผู้ขาย SP / ลูกค้า CS)' : `เพิ่ม ${title}`), onClose, size: splitOn ? 'lg' : 'md', docKey: _docKey },
     h('div', { className:'space-y-3' },
       typeChoice && !isEdit && h('div', { className:'border rounded p-3 bg-gray-50', 'data-party-type-choice':'1' },
         h('div', { className:'text-sm font-medium mb-1.5' }, 'ประเภทคู่ค้า *'),
@@ -86847,7 +88508,52 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
               h('div', null, h('div', { className:'text-sm font-semibold' }, lb), h('div', { className:'text-[11px] text-gray-600' }, allowed ? hint : 'ไม่มีสิทธิ์เพิ่มประเภทนี้'))); })),
         h('div', { className:'text-[11px] text-gray-500 mt-1.5' }, `รหัสจะออกให้อัตโนมัติ: ${typeChoice.value === 'CS' ? 'CS' : 'SP'} + ปีเดือน + ลำดับ (เช่น ${nextPartyCode(Array.isArray(existing) ? existing : [], typeChoice.value === 'CS' ? 'CS' : 'SP')}) · เว้นช่อง "รหัส" ว่างไว้`)),
       fields.map(f =>
-        f.type === 'checkbox'
+        f.type === 'partyName' && nameSplitLive
+          ? h('div', { key:f.k, className:'space-y-2' },
+              // 🆕 PARTY-FORM: แถบ ✨ ข้อเสนอแยกชื่อของรายเดิม (C.6) อยู่เหนือส่วนชื่อ · ไม่กด = ข้อมูลเดิมไม่เปลี่ยน
+              nameOffer && h(PartyOfferBar, { offer:nameOffer, applied:offerApplied, onApply:clickOffer, onUndo:undoOffer }),
+              namePreview && h(PartyNameOfferPreview, { original: party ? party.name : '', offer:namePreview,
+                onUse:() => { applyNameOffer(namePreview); setNamePreview(null); setOfferApplied(true); }, onCancel:() => setNamePreview(null) }),
+              h(PartyPartBoundary, { id:'name', fallback:() => renderLegacyField(f),
+                onFail:() => { setNameFailed(true); setValues(v => { const n = { ...v }; delete n.__splitName; if(!isEdit && !n.name && n.nameCore) n.name = n.nameCore; return n; }); } },
+                h(PartyNameFields, { f, values, setValues, touchName, offerBar: !!(nameOffer && !offerApplied),
+                  onSplitChip:(r) => applyNameOffer(r), brMove, onBrMove })))
+        : f.type === 'thAddress' && addrSplitLive
+          ? (() => {
+              // 🆕 PARTY-FORM ขั้น 4: แถบ ✨ ที่อยู่ของรายเดิม (C.6) + กล่องตรวจ + ที่อยู่ 5 ช่อง (boundary แยกจากส่วนชื่อ)
+              const L = _pfLib();
+              const long = _pfSettings(settings).partyAddrLong === true;
+              const legacyEdit = isEdit && AI.state !== 'split' && !!_pfClean(party.address);
+              const offerHas = !!(addrOffer && (addrOffer.subdistrict || addrOffer.district || addrOffer.province || addrOffer.postcode || (addrOffer.candidates || []).length));
+              const showOfferBar = legacyEdit && offerHas && !addrApplied && values.addrForeign !== true;   // verify: เลือกต่างประเทศแล้วไม่เสนอแยกที่อยู่ไทย
+              const offerSrc = party ? (party.address || '') : '';
+              const line = values.addrLine == null ? '' : String(values.addrLine);
+              const marked = _PF_ADDR_MARK.test(line);
+              let splitBtn = null;
+              if(!addrApplied && !showOfferBar && !addrPreview && values.addrForeign !== true && (legacyEdit || marked)){
+                const src = marked ? line : (party.addressRaw || party.address || '');
+                splitBtn = { onClick:() => runAddrSplit(src), disabled: thSt !== 'ready',
+                  title: thSt !== 'ready' ? 'ต้องออนไลน์ (โหลดรายชื่อตำบลก่อน)' : undefined,
+                  label: (marked && !(legacyEdit && pristine.current.address)) ? '✨ ดูเหมือนที่อยู่เต็ม — แยกให้ไหม?' : '✨ แยกที่อยู่จากข้อความเดิม' };
+              }
+              return h('div', { key:f.k, className:'space-y-2 pt-1 border-t', 'data-party-addr':'1' },
+                h('div', { className:'text-xs font-semibold text-slate-600' }, '📍 ที่อยู่'),
+                showOfferBar && h(PartyAddrOfferBar, { composed: L.composePartyAddress(_pfAddrFromParse(addrOffer, offerSrc, null), { long }), high: addrOffer.confidence === 'high',
+                  onApply:() => runAddrSplit(offerSrc, addrOffer) }),   // กด ✨ → pristine=false ตอนเติมจริง (applyAddr) · ยกเลิกกล่องตรวจ = ไม่แตะ
+                addrApplied && h(PartyAddrOfferBar, { applied:true, onUndo:undoAddr }),
+                addrPreview && h(PartyAddrOfferPreview, { src:addrPreview.src, r:addrPreview.r, long, onUse:(parts) => applyAddr(parts), onCancel:() => setAddrPreview(null) }),
+                h(PartyPartBoundary, { id:'addr', fallback:() => renderLegacyField(f),
+                  onFail:() => { setAddrFailed(true); setValues(v => { const n = { ...v }; delete n.__splitAddr; if(!isEdit && !n.address && n.addrLine) n.address = n.addrLine; return n; }); } },
+                  h(ThAddressFields, { f, values, setValues, touchAddr, thSt, pcFromDb, onPcTouched:() => setPcFromDb(false), onProvince,
+                    warn: _pfAddrWarn(values, thSt === 'ready'), splitBtn, msg:addrMsg })));
+            })()
+        : f.type === 'partyBranch' && splitOn
+          ? h(Field, { key:f.k, label:'สาขาตามภาษี', hint:'สำนักงานใหญ่ = 00000 · สาขา = เลข 5 หลักตาม ภ.พ.20 · บุคคลธรรมดา = ไม่ระบุ' },
+              h(PartyBranchRadio, { mode:brMode, value:values.branchCode,
+                onPick:(m) => { brTouched.current = true; setBrMode(m);
+                  setValues(v => ({ ...v, branchCode: m === 'hq' ? '00000' : m === 'none' ? '' : (_pfBrMode(v.branchCode) === 'branch' ? v.branchCode : '') })); },
+                onNum:(d) => { brTouched.current = true; setValues(v => ({ ...v, branchCode:d })); } }))
+        : f.type === 'checkbox'
           ? h('div', { key:f.k, className:'border rounded p-3 bg-gray-50' },
               h('label', { className:'flex items-start gap-2 cursor-pointer' },
                 h('input', { type:'checkbox', checked: !!values[f.k],
@@ -86856,27 +88562,8 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
                 h('div', null,
                   h('div', { className:'text-sm font-medium' }, f.label),
                   f.hint && h('div', { className:'text-[11px] text-gray-600 mt-0.5' }, f.hint))))
-          : h(Field, { key:f.k, label:f.label, hint:f.hint },   // 🆕 ส่ง hint (Field รองรับอยู่แล้ว) — เห็นคำอธิบายรหัส
-              f.type === 'textarea' ?
-                h('textarea', { value:values[f.k], onChange:e=>setValues({...values, [f.k]:e.target.value}),
-                  rows:2, className:'w-full px-3 py-2 border-2 rounded text-sm' })
-                :
-              f.type === 'number' ?
-                h('input', { type:'number', value:values[f.k], onChange:e=>setValues({...values, [f.k]:Number(e.target.value)||0}),
-                  className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })
-                :
-              f.type === 'select' ?
-                h('select', { value:values[f.k], onChange:e=>setValues({...values, [f.k]:e.target.value}),
-                  className:'w-full px-3 py-2 border-2 rounded text-sm' },
-                  h('option', { value:'' }, '— เลือก —'),
-                  f.options.map(o => h('option', { key:o.v, value:o.v }, o.label))
-                )
-                :
-                h('input', { type:'text', value:values[f.k], onChange:e=>setValues({...values, [f.k]:e.target.value}),
-                  // 🆕 code ว่างของรายที่ import → โชว์ extCode เป็น placeholder ให้รู้ว่าใช้รหัส Ecount อยู่
-                  placeholder: (f.k === 'code' && party?.extCode) ? `ใช้รหัส Ecount: ${party.extCode}` : undefined,
-                  className: cls('w-full px-3 py-2 border-2 rounded text-sm', f.mono && 'font-mono') })
-        )),
+          : renderLegacyField(f)),
+      _preview,
       h('div', { className:'flex gap-2 pt-2' },
         h(Button, { variant:'primary', onClick:save }, '💾 บันทึก'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
