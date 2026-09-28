@@ -13,9 +13,15 @@
  *
  * options: container? (element หรือ selector) · src (default 'weigh/index.html' — ต้องตรงชื่อโฟลเดอร์จริง)
  *          operator, lockOperator, branchId, role ('staff'|'manager'|'admin'|'viewer'), permissions, recipes, recipesMode ('replace' = รายการของแม่ทั้งชุด ไม่รวมกับสูตรในเครื่อง), settings
- *          onReady(info{version,features}) · onFinished(log) · onScale({connected,device}) · autoHeight (แบบ A เท่านั้น, default true) · minHeight (default 640)
- * คืน: { iframe, send(msg), selectRecipe({code|recipeId}), printLabel(log, copies), setOperator(name, lock), setRole(role, permissions), show(slotEl), hide(), destroy() }
- *   printLabel(log) = พิมพ์ฉลากซ้ำจาก log ที่แอปแม่เก็บไว้ ({recipeName, lot, total, operator, ts, note?, offSpec?}) — ไม่แตะสูตร/ชุดที่ชั่งค้าง (ระบบชั่ง ≥ 2026.09.18.1 · เช็ค info.features มี 'print-label')
+ *          onReady(info{version,features,activeJob,pendingJobLogs}) · onFinished(log) · onScale({connected,device}) · autoHeight (แบบ A เท่านั้น, default true) · minHeight (default 640)
+ *          onJobStarted({reqId,jobId,ok,error?,detail?}) · onJobCancelled({reqId?,jobId,reason}) · onCancelRefused({reqId,jobId,reason,detail?}) · onMessage(msg) = ทุกข้อความจากระบบชั่ง (เช่น printed / printer / reprinted)
+ * คืน: { iframe, send(msg), selectRecipe({code|recipeId}), printLabel(log, copies), setOperator(name, lock), setRole(role, permissions),
+ *        startJob(job, reqId?), cancelJob(jobId, reason?, reqId?), ackFinished(log|{deviceId,id}, status?), show(slotEl), hide(), destroy() }
+ *   printLabel(log) = พิมพ์ฉลากซ้ำจาก log ที่แอปแม่เก็บไว้ ({recipeName, lot, total, operator, ts, note?, offSpec?, job?, portion?}) — ไม่แตะสูตร/ชุดที่ชั่งค้าง (ระบบชั่ง ≥ 2026.09.18.1 · เช็ค info.features มี 'print-label')
+ *   🆕 งานใบสั่ง (ระบบชั่ง ≥ 2026.09.25 · เช็ค info.features มี 'job' · งานชั่งแยกชิ้น job.recipe.portion ต้องมี 'portion' ด้วย):
+ *     startJob(job) → คืน reqId · คำตอบมาทาง onJobStarted (ok:false error 'bad_job'+detail | 'busy') · ระบบชั่งไม่เปิด dialog ตอนรับงาน
+ *     cancelJob(jobId, 'parent'|'parent-invalid') → onJobCancelled (หรือ onCancelRefused ถ้าคนหน้าเครื่องไม่ยืนยัน) · log ของงานมาทาง onFinished (log.job) → บันทึกแล้วต้อง ackFinished(log)
+ *     ไม่ ack = log ค้างในกล่องขาออกของเครื่อง และถูกส่งซ้ำใน info.pendingJobLogs ทุกครั้งที่โหลด (dedupe ด้วย deviceId|id)
  *
  * ⚠️ iframe ต้องมี allow="usb; bluetooth; serial; screen-wake-lock" (ใส่ให้แล้ว) · หน้าแม่ต้องเป็น HTTPS/localhost
  * ⚠️ ถ้า onReady ไม่ถูกเรียกภายใน ~3 วิ = path src ผิด (iframe ได้หน้า 404/SPA fallback แทน)
@@ -58,11 +64,18 @@
         ['operator','lockOperator','branchId','role','permissions','recipes','recipesMode','settings'].forEach(function(k){ if(opts[k] != null) cfg[k] = opts[k]; });
         if(Object.keys(cfg).length) post(Object.assign({ type:'config' }, cfg));
         queue.splice(0).forEach(function(m){ try { iframe.contentWindow.postMessage(m, '*'); } catch(e){} });
-        opts.onReady && opts.onReady({ version: d.version, features: Array.isArray(d.features) ? d.features : [] });
+        opts.onReady && opts.onReady({ version: d.version, features: Array.isArray(d.features) ? d.features : [],
+          activeJob: d.activeJob || null, pendingJobLogs: Array.isArray(d.pendingJobLogs) ? d.pendingJobLogs : [] });   // 🆕 แม่รุ่นเก่าไม่สนใจ 2 ตัวนี้
       } else if(d.type === 'finished'){ opts.onFinished && opts.onFinished(d.log); }
+      else if(d.type === 'job-started'){ opts.onJobStarted && opts.onJobStarted(d); }        // 🆕
+      else if(d.type === 'job-cancelled'){ opts.onJobCancelled && opts.onJobCancelled(d); }  // 🆕
+      else if(d.type === 'cancel-refused'){ opts.onCancelRefused && opts.onCancelRefused(d); }  // 🆕 คนหน้าเครื่องกด "ไม่ยกเลิก"
       else if(d.type === 'scale'){ opts.onScale && opts.onScale({ connected: d.connected, device: d.device }); }
       else if(d.type === 'height'){ if(!detached && opts.autoHeight !== false && d.px > 0) iframe.style.height = Math.max(opts.minHeight || 640, d.px + 8) + 'px'; }
+      opts.onMessage && opts.onMessage(d);
     }
+    var reqSeq = 0;
+    function newReq(){ reqSeq++; return 'wr' + Date.now().toString(36) + reqSeq; }
     global.addEventListener('message', onMsg);
     if(!detached) container.appendChild(iframe);
 
@@ -93,6 +106,10 @@
       printLabel: function(log, copies){ if(log && typeof log === 'object') post({ type:'print-label', log:log, copies: copies || 1 }); },
       setOperator: function(name, lock){ post({ type:'config', operator:name, lockOperator: lock !== false }); },
       setRole: function(role, permissions){ post({ type:'config', role:role, permissions:permissions }); },
+      // 🆕 งานใบสั่ง
+      startJob: function(job, reqId){ var r = reqId || newReq(); post({ type:'start-job', reqId:r, job:job }); return r; },
+      cancelJob: function(jobId, reason, reqId){ var r = reqId || newReq(); post({ type:'cancel-job', reqId:r, jobId:jobId, reason: reason === 'parent-invalid' ? 'parent-invalid' : 'parent' }); return r; },
+      ackFinished: function(log, status){ if(log && log.id) post({ type:'finished-ack', deviceId: log.deviceId || null, id: log.id, status: status || 'applied' }); },
       show: show, hide: hide, isDetached: detached,
       destroy: function(){ hide(); global.removeEventListener('message', onMsg); try { (host || iframe).remove(); } catch(e){} },
     };

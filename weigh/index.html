@@ -12,9 +12,9 @@
 <script>
 (function(){
 'use strict';
-const WEIGH_VERSION = '2026.09.21.1';
+const WEIGH_VERSION = '2026.09.27';
 // ความสามารถของรุ่นนี้ — ส่งไปกับ ready ให้แอปแม่เช็คได้ตรง ๆ ไม่ต้องเทียบเลขเวอร์ชัน
-const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode'];
+const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode', 'job', 'portion'];   // 🆕 'job' = รับงานใบสั่ง start-job/cancel-job · 'portion' = งานชั่งแยกชิ้น (job.recipe.portion)
 const h = React.createElement;
 const { useState, useEffect, useRef, useMemo } = React;
 const cls = (...a)=>a.filter(Boolean).join(' ');
@@ -56,6 +56,34 @@ try { navigator.storage && navigator.storage.persist && navigator.storage.persis
 const SESSION_KEY = KEY + '__session';
 const loadSession = () => { try { return JSON.parse(localStorage.getItem(SESSION_KEY)||'null') || null; } catch(e){ return null; } };
 const saveSession = (x) => { try { x ? localStorage.setItem(SESSION_KEY, JSON.stringify(x)) : localStorage.removeItem(SESSION_KEY); } catch(e){} };
+// 🆕 กล่องขาออกของ log งานใบสั่ง — finish() เขียนก่อนส่ง finished · ออกจากกล่องเมื่อแม่ตอบ finished-ack เท่านั้น
+//    (แม่รีโหลด/เน็ตหลุดระหว่างส่ง → log ไม่หาย: ส่งซ้ำใน ready.pendingJobLogs ทุกครั้งที่โหลด · แม่ dedupe ด้วย deviceId|id)
+const OUTBOX_KEY = KEY + '__jobOutbox';
+const OUTBOX_CAP = 50, PENDING_SEND_CAP = 20;
+// 🆕 เขียนลงเครื่องไม่ได้ (พื้นที่เต็ม) → ถือกล่องไว้ในหน่วยความจำแทน (ยังขึ้นป้าย "ยังไม่ถึง ERP" + ส่งซ้ำหลัง ack ได้จนกว่าจะปิดหน้า) · เขียนสำเร็จครั้งถัดไป = กลับไปใช้ของในเครื่อง
+let _outboxMem = null, _outboxWarned = false;
+const loadOutbox = () => { if(_outboxMem) return _outboxMem.slice(); try { const a = JSON.parse(localStorage.getItem(OUTBOX_KEY)||'[]'); return Array.isArray(a) ? a : []; } catch(e){ return []; } };
+const saveOutbox = (a) => {
+  try { a && a.length ? localStorage.setItem(OUTBOX_KEY, JSON.stringify(a)) : localStorage.removeItem(OUTBOX_KEY); _outboxMem = null; return true; }
+  catch(e){
+    _outboxMem = (a || []).slice();
+    if(!_outboxWarned){ _outboxWarned = true;
+      alert('⚠️ เก็บผลชั่งงานใบสั่งลงเครื่องไม่ได้ (' + (e && e.name || 'error') + ')\nอย่าปิด/รีโหลดหน้านี้จนกว่าระบบหลักจะได้รับผลชั่ง — ไปที่ ตั้งค่า → Export ข้อมูล แล้วแจ้งผู้ดูแล'); }
+    return false;
+  }
+};
+// ไม่ตัดตัวเก่าทิ้ง (ตัดแล้ว log หายจาก ERP เงียบ ๆ) — กล่องเต็ม OUTBOX_CAP → start-job ตอบ busy/outbox_full จนกว่าแม่จะ ack
+const outboxAdd = (log) => { const a = loadOutbox().filter(x => x && x.id !== log.id); a.push(log); return saveOutbox(a); };
+const outboxFull = () => loadOutbox().length >= OUTBOX_CAP;
+// 🆕 ready ส่ง pendingJobLogs ได้ ≤ 20 → ตัวที่เหลือส่งทีละตัว (เป็น finished) ทุกครั้งที่แม่ ack · จำว่าส่งอะไรไปแล้วในรอบนี้ (ไม่ส่งซ้ำรัว ๆ)
+const outboxSent = new Set();
+const outboxNextUnsent = () => loadOutbox().find(x => x && x.id && !outboxSent.has(x.id)) || null;
+const outboxAck = (id, deviceId) => {
+  const a = loadOutbox();
+  const b = a.filter(x => !(x && x.id === id && (!deviceId || !x.deviceId || x.deviceId === deviceId)));
+  if(b.length !== a.length) saveOutbox(b);
+  return b.length !== a.length;
+};
 // รหัสเครื่อง 2 ตัว (ใช้ต่อท้ายเลข LOT กันชนกันระหว่างแท็บเล็ตหลายจุด)
 const getDeviceId = () => {
   try {
@@ -107,16 +135,98 @@ const resolvePerms = (settings) => {
 //                  { target:'weigh-system', type:'select-recipe', code | recipeId }
 //                  { target:'weigh-system', type:'print-label', log:{ recipeName, lot, total, operator, ts, note?, offSpec? }, copies? }
 //                    ← พิมพ์ฉลากซ้ำจากข้อมูลที่แอปแม่เก็บไว้ทันที (เครื่องพิมพ์ที่ต่ออยู่ → ตรง · ไม่มี → หน้าจอพิมพ์) ไม่แตะสูตร/ชุดที่ชั่งค้างอยู่
+//                  { target:'weigh-system', type:'start-job', reqId, job:{ id, label, orderNumber?, batchNo?, batchCount?, lockMult:true, recipe:{ id, code, name, items:[…] } } }
+//                    ← 🆕 งานใบสั่ง 1 batch (สูตรของงานเอง ไม่เข้ารายการสูตร) · ไม่เปิด dialog เด็ดขาด · ตอบ job-started
+//                    ← 🆕 recipe.portion:{ count, target, tol, unitLabel? } = ชั่งแยกชิ้น (feature 'portion') — วางทีละชิ้น ระบบนับเอง
+//                  { target:'weigh-system', type:'cancel-job', reqId?, jobId, reason? }   ← 🆕 ล้างงาน (ถาม confirm เมื่อมีค่าล็อก ยกเว้น reason 'parent-invalid') · ตอบ job-cancelled
+//                  { target:'weigh-system', type:'finished-ack', deviceId, id, status }  ← 🆕 แม่รับ log งานใบสั่งแล้ว → เอาออกจากกล่องขาออก (jobOutbox)
 //   เรา → แอปแม่ : { source:'weigh-system', type:'ready', version, features:[…] }   ← features = ความสามารถของรุ่น เช่น 'print-label','fixed-items'
 //                  { source:'weigh-system', type:'finished', log }        ← ชั่งครบ 1 ชุด (log เดียวกับที่เก็บในประวัติ · มี deviceId ให้แม่ dedupe · สูตรจาก BOM → log.bomId/lineId + items[].itemId)
 //                  { source:'weigh-system', type:'reprinted', log:{id,deviceId,lot} }  ← พิมพ์ฉลากซ้ำจาก 📜 ประวัติ ในเครื่อง (แม่บันทึกร่องรอย)
 //                  { source:'weigh-system', type:'scale', connected, device }
 //                  { source:'weigh-system', type:'height', px }           ← ให้แอปแม่ปรับความสูง iframe
+//                  { source:'weigh-system', type:'job-started', reqId, jobId, ok, error?, detail? }   ← 🆕 error: 'bad_job' (+detail จาก jobInvalid) | 'busy' (มีค่าล็อก/ชิ้นที่นับค้าง)
+//                  { source:'weigh-system', type:'job-cancelled', reqId?, jobId, reason }             ← 🆕 reason: parent | parent-invalid | operator | operator-switch | recipe-changed | stale-session
+//                  ready มี activeJob:{id}|null + pendingJobLogs:[log…] (≤20 · log งานที่แม่ยังไม่ ack) เพิ่ม (แม่รุ่นเก่าไม่สนใจ)
+//                  finished ของงานใบสั่ง: log.job = { id, label, orderNumber, batchNo, batchCount } · recipeId 'job:…' · multiplier 1
+//                    ชั่งแยกชิ้น: + log.portion = { count, planned, target, tol, stoppedEarly?, reason?, startedAt, operators?, pieces:[{g,ts,by}] } · items[].alloc
+//                    (ประวัติในเครื่องเก็บแบบย่อ portion.pieceG:[g…]) — รายละเอียด README.md
 const EMBED = (()=>{ try { return window.parent && window.parent !== window && /[?&]embed=1/.test(location.search); } catch(e){ return false; } })();
 // 🆕 โหมดเครื่องพิมพ์อย่างเดียว (ERP ฝังไว้ที่หน้ารับของ/ประวัติ GR): แสดงแค่แถบต่อเครื่องพิมพ์ + รับคำสั่ง print-lot-labels (ฉลากล็อตทั่วไป) — ไม่มีสูตร/ชั่ง
 const PRINTER_MODE = EMBED && /[?&]mode=printer/.test(location.search);
 const embedPost = (msg) => { if(!EMBED) return; try { window.parent.postMessage({ source:'weigh-system', version:WEIGH_VERSION, ...msg }, '*'); } catch(e){} };
 const embedListeners = new Set();
+// 🆕 งานใบสั่ง (start-job) — ตรวจรูปร่างก่อนรับ · คืน null = ใช้ได้ · ไม่งั้นคืน detail (ส่งกลับใน bad_job)
+//    settings = ตั้งค่าเครื่องนี้ (minTolG/zeroTol) — ใช้ตรวจงานชั่งแยกชิ้นว่าชิ้นไม่เล็กจนแยกกับจานเปล่าไม่ออก
+const PORTION_MAX = 200;   // ชิ้นต่อ batch สูงสุด (ตรงกับฝั่ง ERP)
+const jobInvalid = (job, settings) => {
+  if(!job || typeof job !== 'object') return 'no_job';
+  if(typeof job.id !== 'string' || !job.id.trim()) return 'no_id';
+  if(job.label != null && typeof job.label !== 'string') return 'bad_label';
+  const r = job.recipe;
+  if(!r || typeof r !== 'object' || !r.id || !r.name) return 'no_recipe';
+  if(!Array.isArray(r.items) || !r.items.length) return 'no_items';
+  for(const it of r.items){
+    if(!it || typeof it !== 'object' || !it.name) return 'item_name';
+    const t = Number(it.target);
+    if(!isFinite(t) || t <= 0) return 'item_target';
+    if(it.unit != null && !WEIGH_UNITS.includes(it.unit)) return 'item_unit';
+    if(it.tol != null && !(isFinite(Number(it.tol)) && Number(it.tol) >= 0)) return 'item_tol';
+  }
+  // 🆕 ชั่งแยกชิ้น (portion) — วางทีละชิ้น ระบบนับเอง · count จำนวนเต็ม 1..200 · target/tol เป็นกรัมต่อชิ้น
+  if(r.portion != null){
+    const p = r.portion;
+    if(typeof p !== 'object') return 'portion_bad';
+    const n = Number(p.count);
+    if(!Number.isInteger(n) || n < 1 || n > PORTION_MAX) return 'portion_count';
+    const t = Number(p.target);
+    if(!isFinite(t) || t <= 0) return 'portion_target';
+    const tol = Number(p.tol);
+    if(!isFinite(tol) || tol <= 0) return 'portion_tol';
+    const st = settings || {};
+    const tolEff = Math.max(tol, Math.max(0, Number(st.minTolG ?? 1) || 0));
+    if(!(t - tolEff > (Number(st.zeroTol) || 2))) return 'portion_too_small';   // ชิ้นเบาสุดที่ยอมรับต้องหนักกว่าช่วง "ศูนย์" ของเครื่อง
+    if(r.items.some(it => it.fixed)) return 'portion_fixed';                     // ปริมาณตายตัว = ขนาดชิ้นเปลี่ยนตาม batch
+  }
+  return null;
+};
+// 🆕 ชุดที่ชั่งค้างมี "ค่าล็อก" ไหม (อ่านจาก session ใน localStorage — WeighTab เขียนทุกครั้งที่เปลี่ยน · อ่านได้แม้อยู่แท็บอื่น)
+//    session ของคนก่อน (ชื่อผู้ชั่งจากแม่เปลี่ยนคน) = จะถูกทิ้งตอนเปิดหน้าชั่งอยู่แล้ว → ไม่นับว่าล็อก
+const sessionHasLocked = (settings) => {
+  const ss = loadSession(); const st = settings || {};
+  if(!ss || !ss.entries) return false;
+  if(Array.isArray(ss.pieces) && ss.pieces.length > 0) return true;   // 🆕 ชิ้นที่นับแล้ว (แม้เป็นของคนก่อน — รอคนใหม่เลือก ทำต่อ/ยกเลิก) = ล็อก
+  if(ss.job && Object.values(ss.entries).some(e => e && e.locked)) return true;   // 🆕 (2026.09.27) วัตถุดิบงานใบสั่งที่ล็อกแล้ว = เทลงชามแล้ว → ไม่ทิ้งแม้เป็นของคนก่อน (ถามคนใหม่ ทำต่อ/ยกเลิก)
+  if(EMBED && st.operatorLocked && ss.operator && ss.operator !== (st.lastOperator||'')) return false;
+  return Object.values(ss.entries).some(e => e && e.locked) || (Array.isArray(ss.pieces) && ss.pieces.length > 0);   // 🆕 ชิ้นที่นับแล้ว = ล็อก
+};
+// 🆕 ready.activeJob — บอกแม่ว่างานที่ค้างมีของทำไปแล้วแค่ไหน (แม่ตัดสินได้ว่าจะเก็บงานไว้ไหม แม้ claim เป็นของคนก่อน — G.5)
+//    pieces = ชิ้นที่นับแล้ว (ชั่งแยกชิ้น) · locked = วัตถุดิบที่ล็อกแล้ว · awaitingSwitch/from = เปลี่ยนคนกลาง batch รอคนใหม่เลือก ทำต่อ/ยกเลิก
+const activeJobInfo = (j) => {
+  if(!j) return null;
+  const ss = loadSession(); const same = !!(ss && ss.job && ss.job.id === j.id);
+  const pieces = same && Array.isArray(ss.pieces) ? ss.pieces.length : 0;
+  const locked = same && ss.entries ? Object.values(ss.entries).filter(e => e && e.locked).length : 0;
+  const sw = same && ss.pSwitch ? ss.pSwitch : null;
+  return { id: j.id, pieces, locked, awaitingSwitch: !!sw, ...(sw ? { from: sw.from || '' } : {}) };
+};
+// 🆕 (2026.09.27) ของที่ทำไปแล้วของงานที่กำลังถูกยกเลิก → แนบไปกับ job-cancelled.abandoned ให้แม่บันทึกเป็นของเสีย/ไม่ได้ใช้ (ไม่หายเงียบ)
+//    วัตถุดิบ: { items:[{name, itemId?, value, unit:'g', lockedAt?, by?, offSpec?, reason?}] } · ชั่งแยกชิ้น: { pieces:K, totalG } · ไม่มีอะไรทำไป → null
+const sessionAbandoned = (jobId) => {
+  const ss = loadSession();
+  if(!ss || !ss.job || ss.job.id !== jobId) return null;
+  if(Array.isArray(ss.pieces) && ss.pieces.length > 0)
+    return { pieces: ss.pieces.length, totalG: Math.round(ss.pieces.reduce((a, p) => a + (Number(p && p.g) || 0), 0) * 10) / 10 };
+  const its = (ss.job.recipe && Array.isArray(ss.job.recipe.items)) ? ss.job.recipe.items : [];
+  const out = [];
+  Object.keys(ss.entries || {}).sort((a, b) => Number(a) - Number(b)).forEach(k => {
+    const e = ss.entries[k]; if(!e || !e.locked) return;
+    const it = its[Number(k)] || {};
+    out.push({ name: it.name || '', ...(it.itemId ? { itemId: it.itemId } : {}), value: Number(e.value) || 0, unit:'g',
+      ...(e.lockedAt ? { lockedAt: e.lockedAt } : {}), ...(e.by ? { by: e.by } : {}), ...(e.offSpec ? { offSpec: true, reason: e.reason || '' } : {}) });
+  });
+  return out.length ? { items: out } : null;
+};
 if(EMBED){
   window.addEventListener('message', (ev) => {
     if(ev.source !== window.parent) return;   // รับเฉพาะจากหน้าแม่ (ไม่รับจาก frame อื่นในหน้าเดียวกัน)
@@ -194,7 +304,26 @@ function useScale(){
     };
   };
 
-  const connectMock = () => {
+  const connectMock = (kind) => {
+    // 🆕 'manual' (เฉพาะ ?debug=1) = ค่าที่ e2e สั่งเอง: __weighTest.scaleSet(w, stable?) ส่งซ้ำทุก 300 ms (packetAge สด)
+    //    ค่าเปลี่ยน > 0.5 g = แพ็กเก็ตนั้น "ไม่นิ่ง" เหมือนเครื่องจริง · แพ็กเก็ตถัดไปค่าเดิม = นิ่ง (ยกเว้น stable === false)
+    //    __weighTest.scaleFreeze() = หยุดส่ง (สัญญาณค้าง) · ระหว่างหยุด scaleSet ส่งครั้งเดียว · scaleFreeze(false) = ส่งซ้ำต่อ
+    if(kind === 'manual' && DEBUG){
+      setMode('mock'); setDevice({ name:'🎭 Mock (manual)' }); setConnected(true);
+      const m = { w:0, st:true, last:null, frozen:false };
+      const emit = () => {
+        const changed = m.last == null || Math.abs(m.last - m.w) > 0.5;
+        m.last = m.w; lastPacketRef.current = Date.now();
+        setLiveWeight(m.w); setStable(!changed && m.st !== false);
+      };
+      const iv = setInterval(() => { if(!m.frozen) emit(); }, 300);
+      const T = window.__weighTest || (window.__weighTest = {});
+      T.scaleSet = (w, stable) => { m.w = Number(w) || 0; m.st = stable; emit(); };
+      T.scaleFreeze = (on) => { m.frozen = on !== false; };
+      emit();
+      cleanupRef.current = () => { clearInterval(iv); m.frozen = true; };
+      return;
+    }
     setMode('mock'); setDevice({ name:'🎭 Mock Scale' }); setConnected(true);
     // 🆕 จำลองเหมือนคนใช้จริง (ผ่าน zero-gate ที่ ERP บังคับ requireZero): 0 นิ่ง ~3.6 วิ → เทขึ้น → นิ่งที่ 500–600 g ค้าง ~8 วิ (พอให้ล็อก) → ยกออกกลับ 0 → วนใหม่
     //    (เดิมเริ่มขึ้นทันทีไม่เคยส่ง 0 → ต้องปิด zero-gate ถึงจะทดสอบได้)
@@ -368,6 +497,25 @@ function useScale(){
     connectMock, connectSerial, connectBLE, disconnect, packetAge, onDropRef };
 }
 
+// 🆕 ชั่งแยกชิ้น — สรุปจาก log.portion ได้ทุกแบบ: เต็ม (pieces) · ย่อในประวัติ (pieceG) · แม่พิมพ์ซ้ำ (count/total/avg/planned/reason)
+//    คืน { K, N, total, avg, min, max, early, reason } | null
+function portionInfo(p, total){
+  if(!p || typeof p !== 'object') return null;
+  const gs = Array.isArray(p.pieces) ? p.pieces.map(x => Number(x && x.g) || 0) : Array.isArray(p.pieceG) ? p.pieceG.map(x => Number(x) || 0) : [];
+  const K = p.count != null && isFinite(Number(p.count)) ? Number(p.count) : gs.length;
+  const T = total != null && isFinite(Number(total)) ? Number(total) : p.total != null && isFinite(Number(p.total)) ? Number(p.total) : gs.reduce((a, b) => a + b, 0);
+  const avg = p.avg != null && isFinite(Number(p.avg)) ? Number(p.avg) : K ? T / K : 0;
+  const N = Number(p.planned) || null;
+  return { K, N, total: T, avg: Math.round(avg * 10) / 10, min: gs.length ? Math.min(...gs) : null, max: gs.length ? Math.max(...gs) : null,
+    early: !!(p.stoppedEarly || (N && K < N)), reason: p.reason ? String(p.reason) : '' };
+}
+// log เต็ม → แบบย่อสำหรับประวัติในเครื่อง (pieces [{g,ts,by}] → pieceG [g] ≈ 5 ไบต์/ชิ้น)
+function portionCompact(p){
+  const { pieces, ...rest } = p || {};
+  return { ...rest, pieceG: (pieces || []).map(x => Number(x && x.g) || 0) };
+}
+const escHTML = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+
 // ==================== LABEL (100x75mm — แนวนอน) ====================
 // rotate: false = @page 100×75 ตรง · true = หมุนเนื้อหา 90° (กล่อง 75×100 เข้ากรอบ 100×75)
 function buildLabel(data, copies, rotate){
@@ -375,19 +523,29 @@ function buildLabel(data, copies, rotate){
   const dateStr = d.toLocaleDateString('th-TH',{ day:'2-digit', month:'2-digit', year:'numeric' });
   const timeStr = d.toLocaleTimeString('th-TH',{ hour:'2-digit', minute:'2-digit' });
   // 🆕 ไม่แสดงรายการ — เน้นน้ำหนักรวมใหญ่ · เพิ่มวันที่ผลิต · เนื้อหาพอดี 100×75 (แนวนอน)
+  // 🆕 ชั่งแยกชิ้น → ตัวเลขใหญ่ "K ชิ้น" แทนน้ำหนัก · ใต้ตัวเลข = รวม/เฉลี่ย · จบก่อนครบ → ท้ายดวง "จบที่ K/N · เหตุผล"
+  const pi = portionInfo(data.portion, data.total);
+  const bigBlock = pi
+    ? `<div style="font-size:8pt;color:#444">จำนวน</div>
+        <div data-portion-big style="font-size:30pt;font-weight:bold;line-height:1">${pi.K}<span style="font-size:13pt;font-weight:bold;color:#333"> ชิ้น</span></div>
+        <div style="font-size:8pt;white-space:nowrap">รวม ${fmt(pi.total)} ก. · เฉลี่ย ${fmt(pi.avg)} ก./ชิ้น</div>`
+    : `<div style="font-size:8pt;color:#444">น้ำหนักรวม</div>
+        <div style="font-size:30pt;font-weight:bold;line-height:1">${fmt(data.total||0)}<span style="font-size:11pt;font-weight:bold;color:#333"> ก.</span></div>`;
+  const earlyTxt = pi && pi.early ? `จบที่ ${pi.K}${pi.N ? '/' + pi.N : ''}${pi.reason ? ' · ' + escHTML(pi.reason) : ''}` : '';
   const inner = `
     <div class="lbl">
-      <div style="font-size:12pt;font-weight:bold;text-align:center;border-bottom:1px solid #000;padding-bottom:0.8mm;margin-bottom:1mm;white-space:nowrap;overflow:hidden">${data.recipeName||''}</div>
+      <div style="font-size:12pt;font-weight:bold;text-align:center;border-bottom:1px solid #000;padding-bottom:0.8mm;margin-bottom:1mm;white-space:nowrap;overflow:hidden">${escHTML(data.recipeName||'')}</div>
+      ${data.job && data.job.label ? `<div data-job-line style="font-size:9pt;font-weight:bold;text-align:center;margin-bottom:0.6mm;white-space:nowrap;overflow:hidden">${escHTML(data.job.label)}</div>` : ''}
       <div style="display:flex;justify-content:space-between;font-size:7.5pt;margin-bottom:0.3mm">
         <span>📅 <b>${dateStr}</b></span><span>${timeStr} น.</span>
       </div>
-      <div style="font-size:7pt;margin-bottom:0.8mm">LOT: <b>${data.lot||'-'}</b></div>
+      <div style="font-size:7pt;margin-bottom:0.8mm">LOT: <b>${escHTML(data.lot||'-')}</b></div>
       <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.5mm;text-align:center">
-        <div style="font-size:8pt;color:#444">น้ำหนักรวม</div>
-        <div style="font-size:30pt;font-weight:bold;line-height:1">${fmt(data.total||0)}<span style="font-size:11pt;font-weight:bold;color:#333"> ก.</span></div>
+        ${bigBlock}
       </div>
+      ${earlyTxt ? `<div data-portion-early style="font-size:8pt;font-weight:bold;text-align:center;white-space:nowrap;overflow:hidden">${earlyTxt}</div>` : ''}
       <div style="padding-top:0.8mm;border-top:1px solid #999;font-size:7pt;color:#444;text-align:center;white-space:nowrap;overflow:hidden">
-        ผู้ชั่ง: ${data.operator||'-'}${data.note?' · '+data.note:''}
+        ผู้ชั่ง: ${escHTML(data.operator||'-')}${data.note?' · '+escHTML(data.note):''}
       </div>
     </div>`;
   // 🆕 2 โหมด — ดวง 100×75 แนวนอน · ใช้ wrapper + absolute positioning ให้ robust
@@ -505,7 +663,7 @@ function renderLabelCanvas(data, opt){
   const innerW = W - pad*2;
   // ตัดบรรทัดทีละอักขระ (ภาษาไทยไม่มีช่องว่างคั่นคำ) · คืน array บรรทัด
   const wrap = (txt, maxW, maxLines) => {
-    const lines=[]; let cur='';
+    const lines=[]; let cur=''; let cut=false;
     // ถ้ามีช่องว่าง ให้ลองตัดที่ช่องว่างก่อน (เช่น "ขนมปัง V.2") ไม่งั้นตัดทีละอักขระ (ไทยไม่มีช่องว่างคั่นคำ)
     const words = String(txt||'').split(' ');
     const units = words.length > 1 ? words.flatMap((w,i)=> i<words.length-1 ? [w,' '] : [w]) : Array.from(String(txt||''));
@@ -513,14 +671,19 @@ function renderLabelCanvas(data, opt){
       const t = cur+ch;
       if(ctx.measureText(t).width > maxW && cur.trim()){
         if(ctx.measureText(ch).width > maxW){   // คำเดียวยาวเกินบรรทัด → แตกทีละอักขระ
-          for(const c2 of Array.from(ch)){ const t2=cur+c2; if(ctx.measureText(t2).width > maxW && cur){ lines.push(cur); cur=c2; if(lines.length>=maxLines) break; } else cur=t2; }
-          if(lines.length>=maxLines) break;
-        } else { lines.push(cur.trimEnd()); cur = ch===' ' ? '' : ch; if(lines.length>=maxLines) break; }
+          for(const c2 of Array.from(ch)){ const t2=cur+c2; if(ctx.measureText(t2).width > maxW && cur){ lines.push(cur); cur=c2; if(lines.length>=maxLines){ cut=true; break; } } else cur=t2; }
+          if(lines.length>=maxLines){ cut=true; break; }
+        } else { lines.push(cur.trimEnd()); cur = ch===' ' ? '' : ch; if(lines.length>=maxLines){ cut=true; break; } }
       } else cur = t;
     }
     cur = cur.trim();
-    if(cur && lines.length<maxLines) lines.push(cur);
-    if(lines.length>=maxLines && ctx.measureText(lines[maxLines-1]).width > maxW - 1) lines[maxLines-1] = lines[maxLines-1].slice(0,-1)+'…';
+    if(cur && lines.length<maxLines) lines.push(cur); else if(cur) cut = true;
+    // 🆕 ข้อความถูกตัด → "…" ต้องอยู่ในกรอบด้วย (เดิมตัดแค่ 1 ตัวอักษร → ชื่อยาวบรรทัดเดียวล้นขอบดวง)
+    if(lines.length>=maxLines && (cut || ctx.measureText(lines[maxLines-1]).width > maxW - 1)){
+      const c = Array.from(lines[maxLines-1]);
+      while(c.length > 1 && ctx.measureText(c.join('') + '…').width > maxW) c.pop();
+      lines[maxLines-1] = c.join('').trimEnd() + '…';
+    }
     return lines;
   };
   const setFont = (px, bold) => { ctx.font = (bold?'bold ':'') + Math.max(8,Math.round(px)) + 'px ' + FONT; };
@@ -536,11 +699,19 @@ function renderLabelCanvas(data, opt){
   const timeStr = d.toLocaleTimeString('th-TH',{ hour:'2-digit', minute:'2-digit' });
   const small = H < 300;                                      // ดวง 50×30 (240 จุด) — ย่อทุกอย่าง
   // 1) ชื่อสูตร (ใหญ่ หนา ≤2 บรรทัด) — เว้นหัวดวงเพิ่ม ไม่งั้นวรรณยุกต์ไทยบรรทัดแรกโดนตัด
-  const nameFs = Math.round(H * (small ? 0.16 : 0.13));
+  const pi = portionInfo(data.portion, data.total);   // 🆕 ชั่งแยกชิ้น → "K ชิ้น" ใหญ่แทนน้ำหนัก (ชื่อสูตรเล็กลงหน่อย ให้ตัวเลขชิ้นใหญ่สุดบนดวง)
+  const nameFs = Math.round(H * (small ? 0.16 : pi ? 0.10 : 0.13));
   let y = pad + Math.round(nameFs*0.22);
   setFont(nameFs, true);
-  const nameLines = wrap(data.recipeName||'', innerW, small ? 1 : 2);
+  const hasJobLine = !!(data.job && data.job.label);   // 🆕 มีบรรทัดงานใบสั่ง → ชื่อสูตร 1 บรรทัด (เหลือที่ให้น้ำหนักรวม)
+  const nameLines = wrap(data.recipeName||'', innerW, (small || hasJobLine) ? 1 : 2);
   for(const ln of nameLines) y = line(ln, nameFs, true, y, 'center');
+  // 🆕 งานใบสั่ง: บรรทัดเลขใบสั่ง · batch (เช่น "PROD-6909-0006 · B1/4") ใต้ชื่อสูตร
+  if(hasJobLine){
+    const jobFs = Math.round(H * (small ? 0.085 : 0.075));
+    setFont(jobFs, true);
+    y = line(wrap(String(data.job.label), innerW, 1)[0] || '', jobFs, true, y, 'center');
+  }
   ctx.fillRect(pad, Math.round(y), innerW, Math.max(2, Math.round(dpmm*0.25))); y += dpmm*0.8;
   // 2) วันที่ · เวลา · ผู้ชั่ง
   const infoFs = Math.round(H * (small ? 0.085 : 0.07));
@@ -565,10 +736,34 @@ function renderLabelCanvas(data, opt){
   ctx.font = 'bold ' + lotFs + 'px "Courier New",monospace';
   ctx.fillText('LOT ' + (data.lot||'-'), pad, y); y += lotFs*1.3;
   // 4) น้ำหนักรวม (ใหญ่สุด) · ปรับขนาดให้พอที่เหลือ
-  const barcodeH = small ? 0 : Math.round(H*0.16);
+  let barcodeH = small ? 0 : Math.round(H*0.16);
+  if(pi && barcodeH){   // 🆕 ดวงแคบ (60×40) บาร์โค้ด LOT ไม่พอกว้างอยู่แล้ว → ไม่ต้องกันที่ไว้ ให้ตัวเลขชิ้นใหญ่ขึ้น
+    const wd = code128Widths(data.lot||'');
+    const mods = wd ? wd.split('').reduce((a,b)=>a+Number(b),0) : 0;
+    const md = mods ? Math.max(2, Math.min(4, Math.floor((innerW - 40) / mods))) : 0;
+    if(!mods || md*mods + 40 > innerW) barcodeH = 0;
+  }
   const footFs = Math.round(H * (small ? 0.075 : 0.06));
-  const reserve = barcodeH + (barcodeH ? dpmm*2 : 0) + footFs*1.4 + pad;
+  const earlyTxt = pi && pi.early ? `จบที่ ${pi.K}${pi.N ? '/' + pi.N : ''}${pi.reason ? ' · ' + pi.reason : ''}` : '';
+  const reserve = barcodeH + (barcodeH ? dpmm*2 : 0) + footFs*1.4 + pad + (earlyTxt ? footFs*1.3 : 0);
   const avail = H - y - reserve;
+  if(pi){
+    const subFs = small ? infoFs : footFs;
+    const avail2 = avail - subFs*1.3;
+    let bFs = Math.max(infoFs, Math.min(Math.round(H*0.30), Math.round(avail2*0.85)));
+    const nTxt = String(pi.K), uTxt = ' ชิ้น';
+    const measureBig = () => { setFont(bFs, true); const a = ctx.measureText(nTxt).width; setFont(Math.round(bFs*0.45), true); return [a, ctx.measureText(uTxt).width]; };
+    let [nW, uW2] = measureBig();
+    while(nW + uW2 > innerW && bFs > infoFs){ bFs -= 2; [nW, uW2] = measureBig(); }
+    const bx = (W - nW - uW2)/2, by = y + Math.max(0, (avail2 - bFs*1.1)/2);
+    setFont(bFs, true); ctx.fillText(nTxt, bx, by);
+    setFont(Math.round(bFs*0.45), true); ctx.fillText(uTxt, bx + nW, by + (bFs - Math.round(bFs*0.45))*0.9);
+    y = by + bFs*1.1;
+    setFont(subFs, false);
+    let sub = `รวม ${fmt(pi.total)} ก. · เฉลี่ย ${fmt(pi.avg)} ก./ชิ้น`;
+    if(ctx.measureText(sub).width > innerW){ const c = Array.from(sub); while(c.length > 1 && ctx.measureText(c.join('') + '…').width > innerW) c.pop(); sub = c.join('') + '…'; }
+    ctx.fillText(sub, (W - ctx.measureText(sub).width)/2, y); y += subFs*1.3 + dpmm*0.5;
+  } else {
   const wFs = Math.max(infoFs, Math.min(Math.round(H*0.34), Math.round(avail*0.85)));
   setFont(wFs, true);
   const wTxt = fmt(data.total||0);
@@ -578,6 +773,7 @@ function renderLabelCanvas(data, opt){
   setFont(wFs, true); ctx.fillText(wTxt, wx, wy);
   setFont(unitFs, true); ctx.fillText(' g', wx + wW, wy + (wFs - unitFs)*0.9);
   y = wy + wFs*1.1 + dpmm;
+  }
   // 5) บาร์โค้ด LOT (เฉพาะเมื่อเป็น ASCII ล้วน — เข้ารหัส Code128 ได้ครบทุกตัว)
   if(barcodeH){
     const widths = code128Widths(data.lot||'');
@@ -592,7 +788,8 @@ function renderLabelCanvas(data, opt){
       }
     }
   }
-  // 6) ท้ายดวง: นอกเกณฑ์ / หมายเหตุ
+  // 6) ท้ายดวง: 🆕 จบก่อนครบ (ชั่งแยกชิ้น) / นอกเกณฑ์ / หมายเหตุ
+  if(earlyTxt){ setFont(footFs, true); const el = wrap(earlyTxt, innerW, 1)[0]||''; ctx.fillText(el, pad, Math.min(y, H - footFs*2.5 - pad)); y += footFs*1.3; }
   setFont(footFs, !!data.offSpec);
   const foot = (data.offSpec ? '⚠ นอกเกณฑ์ ' : '') + (data.note || '');
   if(foot.trim()){ const fl = wrap(foot, innerW, 1)[0]||''; ctx.fillText(fl, pad, Math.min(y, H - footFs*1.2 - pad)); }
@@ -952,6 +1149,49 @@ function App(){
   const scale = useScale();
   const printer = useUSBPrinter({ isScaleDevice: (dev) => !!(dev && scale.device && scale.device.id && scale.device.id === dev.id) });   // 🆕 เครื่องพิมพ์ USB/Bluetooth — อยู่ระดับแอปเช่นกัน
   const [embedSelect, setEmbedSelect] = useState(null);   // คำสั่งเลือกสูตรจากแอปแม่
+  // 🆕 งานใบสั่งจากแอปแม่ (start-job) — { id, label, orderNumber, batchNo, batchCount, lockMult, recipe } | null
+  //    อ่านค่าเริ่มจาก session (ถ้ามี job ค้างจากก่อนรีโหลด) · ref ไว้ให้ listener (สมัครครั้งเดียว) อ่านค่าล่าสุด
+  //    โหมดเครื่องพิมพ์ (?mode=printer) ใช้ session ร่วมกับหน้าชั่ง → ห้ามกู้งาน (ไม่งั้น ready.activeJob รายงานงานของอีก iframe)
+  //    กู้แล้วตรวจแค่ "รูปร่าง" (settings = null) — ตั้งค่า minTolG/zeroTol เปลี่ยนหลังเริ่มงานต้องไม่ทิ้งชิ้นที่นับไปแล้ว
+  const restored = useMemo(() => {
+    const ss = (EMBED && !PRINTER_MODE) ? loadSession() : null;
+    if(!ss || !ss.job) return { job: null, dropped: null };
+    return jobInvalid(ss.job, null) ? { job: null, dropped: (ss.job && typeof ss.job.id === 'string') ? ss.job.id : null } : { job: ss.job, dropped: null };
+  }, []);
+  const [embedJob, setEmbedJob] = useState(restored.job);
+  const embedJobRef = useRef(embedJob);
+  // 🆕 cancel-job จากแม่ตอนนับชิ้นไปแล้ว → รอพนักงานตอบใน dialog ของแอป { reqId, jobId, reason, at } | null
+  const [parentCancel, setParentCancelS] = useState(null);
+  const parentCancelRef = useRef(null);
+  const setParentCancel = (x) => { parentCancelRef.current = x; setParentCancelS(x); };
+  const setJob = (j) => {
+    embedJobRef.current = j; setEmbedJob(j);
+    const pc = parentCancelRef.current;   // งานจบ/ถูกแทนระหว่างรอตอบ → ตอบแม่ว่าไม่ได้ยกเลิกตามคำขอ (งานจบด้วยทางอื่น)
+    if(pc && (!j || j.id !== pc.jobId)){ setParentCancel(null); embedPost({ type:'cancel-refused', reqId: pc.reqId, jobId: pc.jobId, reason: pc.reason, detail:'job_ended' }); }
+  };
+  if(DEBUG && window.__weighTest){
+    window.__weighTest.job = () => embedJobRef.current;   // ให้ e2e อ่านงานปัจจุบัน
+    window.__weighTest.connectMock = scale.connectMock;   // 🆕 connectMock('manual') = เครื่องชั่งจำลองที่ e2e สั่งค่าเอง (scaleSet/scaleFreeze)
+    window.__weighTest.disconnect = scale.disconnect;     // 🆕 ตัดเครื่องชั่งโดยไม่ผ่าน confirm (e2e: ตัดแล้วต้องปลด arm)
+  }
+  // 🆕 WeighTab ยกเลิกงานเอง (ปุ่ม "ยกเลิกงานนี้" / เปลี่ยนคน / session ค้างของคนก่อน / สูตรเปลี่ยน) → แจ้งแม่ job-cancelled
+  const cancelJobLocal = (reason) => {
+    const cur = embedJobRef.current; if(!cur) return;
+    const pc = parentCancelRef.current && parentCancelRef.current.jobId === cur.id ? parentCancelRef.current : null;
+    if(pc) setParentCancel(null);   // แม่ขอยกเลิกค้างอยู่ + พนักงานยกเลิกเอง → ตอบ reqId ของแม่ไปพร้อมกัน
+    const ab = sessionAbandoned(cur.id);   // 🆕 อ่านก่อน setJob(null) (session ยังเป็นของงานนี้)
+    setJob(null); embedPost({ type:'job-cancelled', jobId: cur.id, reason, ...(pc ? { reqId: pc.reqId } : {}), ...(ab ? { abandoned: ab } : {}) });
+  };
+  // 🆕 พนักงานตอบ dialog "ระบบหลักขอยกเลิกงาน" (ชั่งแยกชิ้น) — ✔ ล้างงาน + job-cancelled{reqId} · ✖ งานอยู่ต่อ + cancel-refused{reqId}
+  const resolveParentCancel = (ok) => {
+    const pc = parentCancelRef.current; if(!pc) return;
+    setParentCancel(null);
+    if(ok){ const ab = sessionAbandoned(pc.jobId);
+      const cur = embedJobRef.current; if(cur && cur.id === pc.jobId){ embedJobRef.current = null; setEmbedJob(null); }
+      embedPost({ type:'job-cancelled', reqId: pc.reqId, jobId: pc.jobId, reason: pc.reason, ...(ab ? { abandoned: ab } : {}) }); }
+    else embedPost({ type:'cancel-refused', reqId: pc.reqId, jobId: pc.jobId, reason: pc.reason });
+  };
+  const [outboxVer, setOutboxVer] = useState(0);   // 🆕 กล่องขาออกเปลี่ยน (ack) → 📜 ประวัติวาดป้าย "ยังไม่ถึง ERP" ใหม่
   // 🆕 listener ข้างล่างสมัครครั้งเดียว (deps=[]) → ต้องอ่าน printer/state ล่าสุดผ่าน ref (ไม่งั้นได้ค่าตอน mount ค้าง)
   const printerRef = useRef(printer), stateRef = useRef(state);
   printerRef.current = printer; stateRef.current = state;
@@ -1002,6 +1242,48 @@ function App(){
           const ok = printHTML(buildLotLabelsHTML(labels, opt));
           reply(!!ok, { via:'screen' });
         } else reply(false, { error:'ยังไม่ได้ต่อเครื่องพิมพ์' });
+      } else if(d.type === 'start-job'){
+        // 🆕 งานใบสั่ง — ห้ามเปิด dialog (แม่รอคำตอบ 5 วิ) · ตอบ job-started เสมอ
+        const job = d.job, jid = (job && typeof job.id === 'string') ? job.id : null;
+        const reply = (ok, extra) => embedPost({ type:'job-started', reqId: d.reqId || null, jobId: jid, ok, ...(extra||{}) });
+        const bad = PRINTER_MODE ? 'printer_mode' : jobInvalid(job, stateRef.current.settings);
+        if(bad) return reply(false, { error:'bad_job', detail: bad });
+        const cur = embedJobRef.current;
+        if(cur && cur.id === jid) return reply(true);                       // id เดิมซ้ำ → ไม่ทำอะไร (แม่ส่งซ้ำตอนโหลดใหม่ได้)
+        if(sessionHasLocked(stateRef.current.settings)) return reply(false, { error:'busy' });   // มีค่าล็อกค้าง (สูตรไหน/งานไหนก็ตาม) → ไม่ทับ
+        if(outboxFull()) return reply(false, { error:'busy', detail:'outbox_full' });   // 🆕 log งานค้างส่ง ≥ 50 → รับงานใหม่ไม่ได้จนกว่าแม่จะ ack (ไม่ตัด log ทิ้ง)
+        const next = JSON.parse(JSON.stringify(job));
+        next.lockMult = true;
+        setJob(next);
+        if(cur) embedPost({ type:'job-cancelled', jobId: cur.id, reason:'parent' });   // งานเก่าถูกแทน
+        reply(true);
+      } else if(d.type === 'cancel-job'){
+        // 🆕 ยกเลิกงานจากแอปแม่ · มีค่าล็อก (วัตถุดิบที่เทลงชามแล้ว หรือชิ้นที่นับแล้ว) → ถามใน dialog ของแอปเสมอ
+        //    รวม parent-invalid (2026.09.27: ERP ส่งทุกครั้งที่ claim ไม่ใช่ของเครื่องนี้ — ผจก.ปล่อยงาน/↩ ทำที่หน้างาน/จองใหม่ → ห้ามล้างของที่ชั่งแล้วเงียบ ๆ)
+        //    ไม่ใช้ confirm (หลุด ⛶ เต็มจอ) · ✔ → job-cancelled{reqId, abandoned} · ✖ → cancel-refused{reqId} (แม่ไม่ต้องรอเงียบ)
+        if(PRINTER_MODE) return;   // iframe เครื่องพิมพ์ไม่มีงาน — ไม่ตอบแทนหน้าชั่ง
+        const cur = embedJobRef.current;
+        const reason = d.reason === 'parent-invalid' ? 'parent-invalid' : 'parent';
+        const jobId = d.jobId || (cur && cur.id) || null;
+        const reqId = d.reqId || null;
+        if(cur && (!d.jobId || d.jobId === cur.id)){
+          const locked = sessionHasLocked(stateRef.current.settings);
+          if(locked){
+            const old = parentCancelRef.current;
+            if(old && old.reqId !== reqId) embedPost({ type:'cancel-refused', reqId: old.reqId, jobId: old.jobId, reason: old.reason, detail:'superseded' });
+            setParentCancel({ reqId, jobId: cur.id, reason, at: Date.now() });
+            setTab('weigh');
+            return;   // ตอบเมื่อพนักงานเลือกใน dialog
+          }
+          setJob(null);
+        }
+        embedPost({ type:'job-cancelled', reqId, jobId, reason });   // ไม่มีงานนั้นอยู่แล้ว → ตอบว่ายกเลิกแล้ว (idempotent)
+      } else if(d.type === 'finished-ack'){
+        // 🆕 แม่รับ log แล้ว (ผลใดก็ได้ — applied/duplicate/rejected ก็คือถึงแม่แล้ว) → เอาออกจากกล่องขาออก
+        if(d.id && outboxAck(String(d.id), d.deviceId ? String(d.deviceId) : null)) setOutboxVer(v => v + 1);
+        // 🆕 ยังมี log ค้างที่รอบนี้ยังไม่เคยส่ง (ready ส่งได้แค่ 20) → ส่งตัวถัดไปเป็น finished · แม่ dedupe deviceId|id แล้ว ack → วนจนหมด
+        const nx = PRINTER_MODE ? null : outboxNextUnsent();
+        if(nx){ outboxSent.add(nx.id); embedPost({ type:'finished', log: nx }); }
       } else if(d.type === 'print-label' && d.log && typeof d.log === 'object'){
         // 🆕 พิมพ์ซ้ำจากข้อมูลของแอปแม่ (ERP มี lot/ชื่อสูตร/total/operator/ts ครบ) — logic เดียวกับ LogsTab.reprint
         //    ไม่ผ่าน select-recipe → ไม่มี confirm "เปลี่ยนสูตรจะล้างทิ้ง" · LOT ที่ชั่งจากเครื่องอื่น/ล้างข้อมูลแล้วก็พิมพ์ได้
@@ -1012,7 +1294,11 @@ function App(){
       }
     };
     embedListeners.add(fn);
-    embedPost({ type:'ready', features: WEIGH_FEATURES });
+    const pend = PRINTER_MODE ? [] : loadOutbox().slice(0, PENDING_SEND_CAP);   // 🆕 log งานที่แม่ยังไม่ ack (เก่าสุดก่อน) — แม่ dedupe แล้ว ack ทีละตัว
+    pend.forEach(x => x && x.id && outboxSent.add(x.id));
+    embedPost({ type:'ready', features: WEIGH_FEATURES, activeJob: PRINTER_MODE ? null : activeJobInfo(embedJobRef.current), pendingJobLogs: pend });
+    // 🆕 งานใน session รูปร่างเสีย กู้ไม่ได้ → แจ้งแม่ให้ปล่อยงาน (ไม่หายเงียบ)
+    if(restored.dropped) embedPost({ type:'job-cancelled', jobId: restored.dropped, reason:'stale-session' });
     // ความสูงเนื้อหา → แอปแม่ปรับ iframe
     let ro = null;
     let lastH = 0;
@@ -1081,9 +1367,11 @@ function App(){
                 tab===k ? 'bg-white text-indigo-700' : 'bg-indigo-500/50 hover:bg-indigo-500') }, lbl))))),
     h('div', { className:'max-w-5xl mx-auto p-3' },
       // WeighTab ไม่ถูก unmount ตอนสลับแท็บ (ซ่อนแทน) → ชุดที่ชั่งอยู่ไม่หาย
-      h('div', { hidden: tab!=='weigh' }, h(WeighTab, { state, update, scale, printer, perms, replaceMode, visible: tab==='weigh', embedSelect, onEmbedSelected: ()=>setEmbedSelect(null) })),
+      h('div', { hidden: tab!=='weigh' }, h(WeighTab, { state, update, scale, printer, perms, replaceMode, visible: tab==='weigh', embedSelect, onEmbedSelected: ()=>setEmbedSelect(null),
+        job: embedJob, onJobCancel: cancelJobLocal, onJobDone: ()=>{ setJob(null); setOutboxVer(v => v + 1); },
+        parentCancel, onParentCancel: resolveParentCancel })),
       tab==='recipes'  && perms.recipesView && h(RecipesTab, { state, update, perms, replaceMode }),
-      tab==='logs'     && perms.logsView && h(LogsTab, { state, printer }),
+      tab==='logs'     && perms.logsView && h(LogsTab, { state, printer, outboxVer }),
       tab==='settings' && perms.settingsEdit && h(SettingsTab, { state, update, printer }))
   );
 }
@@ -1258,32 +1546,84 @@ function RecipesTab({ state, update, perms, replaceMode }){
               Array.isArray(r.skipped) && r.skipped.length>0 && h('div', { className:'text-amber-700' }, '⚠️ ไม่ชั่ง (ไม่ใช่หน่วยน้ำหนัก): ', r.skipped.join(', ')))))));
 }
 
+// 🆕 เสียงบี๊บ (WebAudio) — แท็บเล็ตบนขาตั้ง/iPad/คอมไม่มี vibrate · คนมองอาหารไม่ได้มองจอ → ต้อง "ได้ยิน" ว่านับชิ้นแล้ว
+//    AudioContext สร้าง/resume ตอนแตะจอครั้งแรก (นโยบาย autoplay ของเบราว์เซอร์) · kind: 'piece' สั้น · 'last' สองเสียงยาว (ชิ้นสุดท้าย) · 'warn' ต่ำสองครั้ง (เกิน/ติดลบ)
+let _actx = null;
+const audioUnlock = () => { try { const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return; if(!_actx) _actx = new AC(); if(_actx.state === 'suspended') _actx.resume(); } catch(e){} };
+['pointerdown', 'touchstart', 'keydown'].forEach(ev => { try { window.addEventListener(ev, audioUnlock, { capture:true, passive:true }); } catch(e){} });
+const beep = (kind) => {
+  if(DEBUG) (window.__beeps = window.__beeps || []).push(kind);   // ให้ e2e ตรวจว่าเรียกเสียงอะไร
+  try {
+    const c = _actx; if(!c || c.state !== 'running') return;
+    const tones = kind === 'last' ? [[880, 0, 0.15], [1320, 0.17, 0.3]] : kind === 'warn' ? [[220, 0, 0.12], [220, 0.18, 0.12]] : [[1000, 0, 0.08]];
+    const t0 = c.currentTime;
+    tones.forEach(([f, at, dur]) => {
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = 'square'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t0 + at); g.gain.exponentialRampToValueAtTime(0.25, t0 + at + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur);
+      o.connect(g); g.connect(c.destination); o.start(t0 + at); o.stop(t0 + at + dur + 0.02);
+    });
+  } catch(e){}
+};
+
 // ==================== WEIGH TAB ====================
-function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, embedSelect, onEmbedSelected }){
+// 🆕 job = งานใบสั่งจากแอปแม่ (start-job) | null — มีงาน: ใช้สูตรของงาน (ปริมาณ 1 batch) · ล็อกตัวคูณ ×1 · เลือกสูตรอื่นไม่ได้
+//    onJobCancel(reason) = WeighTab ยกเลิกงานเอง (แจ้งแม่ job-cancelled) · onJobDone() = ชั่งครบแล้ว ล้างงาน (ไม่ใช่การยกเลิก)
+//    🆕 parentCancel = แม่ขอยกเลิกงานตอนนับชิ้นไปแล้ว { reqId, jobId, reason, at } → dialog ในแอป · onParentCancel(ok) = คำตอบของพนักงาน
+function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, embedSelect, onEmbedSelected, job, onJobCancel, onJobDone, parentCancel, onParentCancel }){
   const canOffSpec = !perms || perms.offSpec;
   const recipes = activeRecipes(state);   // 🆕 ฝัง+replace → สูตรของแอปแม่ · อื่น ๆ → สูตรในเครื่อง
   const settings = state.settings||{};
   // 🆕 กู้ชุดที่ชั่งค้างไว้ (refresh/จอดับ/เผลอสลับแท็บ) — ค่าที่ล็อกแล้วอยู่ครบ ตัวที่ยังไม่ล็อกต้องตั้ง 0 ใหม่
   const sess = useMemo(loadSession, []);
   const [recipeId, setRecipeId] = useState(sess && recipes.some(r=>r.id===sess.recipeId) ? sess.recipeId : '');
-  const [mult, setMult] = useState(sess && Number(sess.mult)>0 ? Number(sess.mult) : 1);
+  const [mult, setMult] = useState(!job && sess && Number(sess.mult)>0 ? Number(sess.mult) : 1);   // งานใบสั่ง = ×1 เสมอ
   const operatorLocked = EMBED && !!settings.operatorLocked;   // ล็อกเฉพาะตอนฝังในแอปแม่
   const [operator, setOperator] = useState(operatorLocked ? (settings.lastOperator||'') : (sess?.operator ?? (settings.lastOperator||'')));
   // 🆕 แท็บเล็ตใช้ร่วมกัน: ชุดที่ค้างเป็นของ "คนก่อน" (sess.operator) แต่ชื่อผู้ชั่งที่ล็อกจากแอปแม่เป็นอีกคน → ไม่กู้ค่าที่ล็อกไว้
   //    (ไม่งั้น LOT/ค่านอกเกณฑ์+เหตุผลของ A กลายเป็นของ B — ขัดกับเหตุผลที่เลือก "ล็อกอินรายคน")
   const sessStale = !!(operatorLocked && sess && sess.operator && sess.operator !== (settings.lastOperator||''));
-  const [note, setNote] = useState(sessStale ? '' : (sess?.note || ''));
+  // 🆕 ชั่งแยกชิ้น (portion) — งานใบสั่งที่มี recipe.portion (ตรวจแล้วตอน start-job) · วางทีละชิ้น นิ่ง+เข้าเกณฑ์ = นับเอง
+  const portion = (job && job.recipe && job.recipe.portion) ? job.recipe.portion : null;
+  const sessJobMatch = !!(job && sess && sess.job && sess.job.id === job.id);
+  const sessSameJob = sessJobMatch && !sessStale;
+  const sessLockedN = sess && sess.entries ? Object.values(sess.entries).filter(e => e && e.locked).length : 0;
+  // 🆕 session ค้างของคนก่อน แต่เป็นงานใบสั่งที่ทำไปแล้ว (ชิ้นที่นับแล้ว / วัตถุดิบที่เทลงชามแล้ว) → ไม่ทิ้งเงียบ ๆ · เก็บไว้แล้วถามคนใหม่ (ทำต่อ / ยกเลิกชุดนี้)
+  const staleKeep = !!(sessStale && sessJobMatch && (portion ? (Array.isArray(sess.pieces) && sess.pieces.length > 0) : sessLockedN > 0));
+  const dropStale = sessStale && !staleKeep;
+  const [note, setNote] = useState(dropStale ? '' : (sess?.note || ''));
   const [entries, setEntries] = useState(()=>{
-    if(sessStale) return {};
+    if(dropStale) return {};
     const e = (sess && sess.entries) || {};
     const out = {};
     Object.keys(e).forEach(k=>{ const x=e[k]||{}; out[k] = x.locked ? x : {}; });   // ตัวที่ยังไม่ล็อก → เริ่ม zero-gate ใหม่
     return out;
   });
-  const [activeIdx, setActiveIdx] = useState(sess ? (sessStale ? 0 : (sess.activeIdx!=null ? sess.activeIdx : null)) : null);
+  const [activeIdx, setActiveIdx] = useState(sess ? (dropStale ? 0 : (sess.activeIdx!=null ? sess.activeIdx : null)) : null);
   const [toast, setToast] = useState('');
   const [dropNotice, setDropNotice] = useState('');
-  const recipe = recipes.find(r=>r.id===recipeId);
+  // 🆕 มีงานใบสั่ง → สูตรของงาน (ไม่อยู่ในรายการสูตร · ไม่หายตอน recipesMode 'replace' ส่งรายการใหม่)
+  const recipe = job ? job.recipe : recipes.find(r=>r.id===recipeId);
+  const effRecipeId = job ? job.recipe.id : recipeId;
+  const pCount = portion ? Number(portion.count) : 0;
+  const pTarget = portion ? Number(portion.target) : 0;
+  const pTolEff = portion ? Math.max(Number(portion.tol) || 0, Math.max(0, Number(settings.minTolG ?? 1) || 0)) : 0;
+  // pieces = ชิ้นที่นับแล้ว [{g, ts, by}] · armed = เห็น 0 นิ่ง (สด) หลังยกชิ้นก่อนแล้ว · zeroRef = ค่าศูนย์ตอน arm (เศษบนจานไม่ถูกนับเข้าชิ้น)
+  //    กู้จาก session ได้เฉพาะ pieces — armed/zeroRef เริ่มใหม่เสมอ (ชิ้นที่ยังวางค้างบนเครื่องตอนรีโหลดจะไม่ถูกนับซ้ำ)
+  const [pieces, setPieces] = useState(() => ((sessSameJob || staleKeep) && Array.isArray(sess.pieces)) ? sess.pieces : []);
+  const [portionStartedAt, setPortionStartedAt] = useState(() => ((sessSameJob || staleKeep) && sess.portionStartedAt) || (portion ? Date.now() : null));
+  // 🆕 pSwitch = { from, reason } — เปลี่ยนคนกลาง batch (มีชิ้นที่นับแล้ว) รอคนใหม่เลือก · เก็บใน session (รีโหลดแล้วยังถามอยู่)
+  const pSwitch0 = staleKeep ? { from: sess.operator, reason:'stale-session' }
+    : (sessSameJob && sess.pSwitch && (portion ? (Array.isArray(sess.pieces) && sess.pieces.length) : sessLockedN) ? sess.pSwitch : null);   // 🆕 วัตถุดิบด้วย
+  const [armed, setArmed] = useState(false);
+  const [zeroRef, setZeroRef] = useState(null);
+  const [pSwitch, setPSwitch] = useState(pSwitch0);
+  const [pModal, setPModal] = useState(pSwitch0 ? 'switch' : null);   // null | 'undo' | 'stop' | 'cancel' | 'switch' | 'pcancel' (+ งานวัตถุดิบ: 'offspec' | 'reweigh' | 'activate') — เปิดอยู่ = หยุดนับ/หยุดล็อก
+  const [pArg, setPArg] = useState(null);       // 🆕 ข้อมูลประกอบ dialog งานวัตถุดิบ { idx, v, dir, from, live }
+  const [pStatus, setPStatus] = useState('');
+  const pDwellRef = useRef(null);               // { v, since } — ชิ้นนี้นิ่งในเกณฑ์มาตั้งแต่เมื่อไหร่
+  const pWarnRef = useRef(false);               // บี๊บเตือน (เกิน/ติดลบ) ครั้งเดียวต่อครั้งที่เข้าสถานะนั้น
+  if(DEBUG && window.__weighTest) window.__weighTest.portion = () => ({ pieces, armed, zeroRef, status: pStatus, modal: pModal, pSwitch, operator });   // ให้ e2e อ่านสถานะตัวนับ
   const autoPrint = settings.autoPrint !== false;
   const autoFinish = settings.autoFinish !== false;
   const copies = Number(settings.copies)||1;
@@ -1296,29 +1636,57 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
 
   const showToast = (m) => { setToast(m); setTimeout(()=>setToast(''), 2500); };
   const buzz = (pat) => { try { navigator.vibrate && navigator.vibrate(pat); } catch(e){} };
+  // 🆕 เปิด dialog ในแอป (ชั่งแยกชิ้น) — หยุดนับ (portionTick ขั้น 0) + หยุดนับถอยหลังบันทึกอัตโนมัติ (ปิด dialog แล้วเริ่มนับถอยหลังใหม่ถ้ายังครบ)
+  const openPModal = (kind, arg) => { pDwellRef.current = null; dwellRef.current = null; setCountdown(0); finishedRef.current = false; setPArg(arg || null); setPModal(kind); };
+  // ปิด dialog → ถ้ายังรอคนใหม่เลือก (เปลี่ยนคน) ต้องกลับไปที่ dialog เปลี่ยนคน ห้ามข้ามเงียบ ๆ
+  const closePModal = () => setPModal(pSwitch ? 'switch' : null);
+  // 🆕 แม่ขอยกเลิกงาน (ชั่งแยกชิ้นที่นับแล้ว) → เปิด dialog ในแอป · คำขอหายไป (งานจบทางอื่น) → ปิด dialog
+  useEffect(()=>{
+    if(parentCancel && job && parentCancel.jobId === job.id) openPModal('pcancel');   // 🆕 งานวัตถุดิบที่มีค่าล็อกด้วย (ไม่ใช่แค่ชั่งแยกชิ้น)
+    else if(!parentCancel && pModal === 'pcancel') closePModal();
+  }, [parentCancel ? parentCancel.at : null]);
 
   // 🆕 ลายเซ็นเนื้อหาสูตร (ชื่อ/เป้า/หน่วย/fixed ตามลำดับ) — entries คีย์ด้วยตำแหน่ง idx: ถ้าผจก.แก้ BOM ระหว่างชั่ง (ERP ส่ง recipes ชุดใหม่) ค่าที่ล็อกจะเลื่อนไปผูกผิดตัว
-  const recipeSig = recipe ? JSON.stringify((recipe.items||[]).map(it => [it.name, Number(it.target)||0, it.unit||'g', !!it.fixed])) : '';
-  const sigRef = useRef(sess && sess.recipeId === recipeId ? (sess.recipeSig || recipeSig) : recipeSig);
+  const recipeSig = recipe ? JSON.stringify((recipe.items||[]).map(it => [it.name, Number(it.target)||0, it.unit||'g', !!it.fixed])) + (recipe.portion ? JSON.stringify(recipe.portion) : '') : '';
+  const sigRef = useRef(sess && sess.recipeId === effRecipeId ? (sess.recipeSig || recipeSig) : recipeSig);
+  // 🆕 งานใบสั่งเริ่ม/จบ/ถูกแทน → เริ่มชุดใหม่ของสูตรนั้น (start-job รับเฉพาะตอนไม่มีค่าล็อก · cancel-job ที่ยืนยันแล้วล้างได้)
+  //    ต้องอยู่ก่อน effect ลายเซ็นสูตรข้างล่าง — ตั้ง sigRef ให้ตรงสูตรใหม่ ไม่ให้ขึ้น "สูตรนี้ถูกแก้ไขระหว่างชั่ง"
+  const jobId = job ? job.id : null;
+  const jobIdRef = useRef(jobId);
+  useEffect(()=>{
+    if(jobIdRef.current === jobId) return;
+    jobIdRef.current = jobId;
+    if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current = null; }
+    dwellRef.current = null; maxSeenRef.current = null;
+    setEntries({}); setCountdown(0); setMult(1); setNote('');
+    pDwellRef.current = null; setPieces([]); setArmed(false); setZeroRef(null); setPModal(null); setPSwitch(null); setPStatus('');
+    setPortionStartedAt(portion ? Date.now() : null);
+    if(job) setRecipeId('');   // จบงานแล้วกลับมาหน้า "เลือกสูตร" ไม่ใช่สูตรที่เปิดค้างก่อนเริ่มงาน
+    setActiveIdx(job && !portion && job.recipe.items.length ? 0 : null);   // ชั่งแยกชิ้นไม่มีตัวที่กำลังชั่ง
+    sigRef.current = recipeSig;
+  }, [jobId]);
   useEffect(()=>{
     if(!recipe) { sigRef.current = ''; return; }
-    if(sigRef.current && sigRef.current !== recipeSig && Object.values(entries).some(e => e && e.locked)){
+    if(sigRef.current && sigRef.current !== recipeSig && (Object.values(entries).some(e => e && e.locked) || pieces.length > 0)){
       if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current = null; }
       dwellRef.current = null; maxSeenRef.current = null;
       setEntries({}); setCountdown(0);
       setActiveIdx(items.length ? items[0].idx : null);
       showToast('สูตรนี้ถูกแก้ไขระหว่างชั่ง — ค่าที่ล็อกไว้ถูกยกเลิก เริ่มชุดใหม่ตามสูตรล่าสุด');
       buzz([60,60,60]);
+      if(job) onJobCancel && onJobCancel('recipe-changed');
     }
     sigRef.current = recipeSig;
   }, [recipeSig]);
   // เก็บ session ทุกครั้งที่เปลี่ยน (ไม่มีสูตร = ล้าง)
   useEffect(()=>{
-    if(!recipeId){ saveSession(null); return; }
-    saveSession({ recipeId, mult, operator, note, entries, activeIdx, recipeSig });
-  }, [recipeId, mult, operator, note, entries, activeIdx, recipeSig]);
+    if(!effRecipeId){ saveSession(null); return; }
+    saveSession({ recipeId: effRecipeId, mult, operator, note, entries, activeIdx, recipeSig, ...(job ? { job } : {}),   // 🆕 job อยู่ใน session → รีโหลดแล้วงานยังอยู่
+      ...(job && pSwitch ? { pSwitch } : {}),   // รอเลือกหลังเปลี่ยนคน (ชั่งแยกชิ้น + วัตถุดิบ)
+      ...(portion ? { pieces, portionStartedAt } : {}) });   // 🆕 ชิ้นที่นับแล้ว (armed/zeroRef ไม่เก็บ) + รอเลือกหลังเปลี่ยนคน
+  }, [effRecipeId, mult, operator, note, entries, activeIdx, recipeSig, job, pieces, portionStartedAt, pSwitch]);
   // เตือนก่อนปิด/รีเฟรชถ้ามีค่าที่ชั่งไปแล้ว
-  const hasAny = Object.values(entries).some(e=>e && e.locked);
+  const hasAny = portion ? pieces.length > 0 : Object.values(entries).some(e=>e && e.locked);
   useEffect(()=>{
     if(!hasAny) return;
     const f = (ev)=>{ ev.preventDefault(); ev.returnValue=''; };
@@ -1348,16 +1716,29 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   useEffect(()=>{
     if(!operatorLocked) return;
     const nextOp = settings.lastOperator || '';
+    const lockedAny = Object.values(entries).some(e => e && e.locked);
+    // 🆕 งานใบสั่งที่ทำไปแล้ว (ชิ้นที่นับแล้ว / วัตถุดิบที่เทลงชามแล้ว) → ไม่ยกเลิกทันที ถามคนใหม่ในแอป: ทำต่อ (ตัว/ชิ้นถัดไป by = คนใหม่) / ยกเลิกชุดนี้
+    //    (2026.09.27) เดิมงานวัตถุดิบถูกยกเลิก + ให้ "เริ่มชั่งใหม่" ทั้งที่ของอยู่ในชามแล้ว → เสี่ยงใส่ซ้ำ
+    if(nextOp && operator !== nextOp && job && (portion ? pieces.length > 0 : lockedAny)){
+      setPSwitch(ps => ps || { from: operator, reason:'operator-switch' });
+      if(pModal !== 'pcancel') openPModal('switch');   // dialog คำขอยกเลิกของแม่เปิดอยู่ → ตอบอันนั้นก่อน แล้วค่อยกลับมาที่เปลี่ยนคน
+      setOperator(nextOp);
+      return;
+    }
+    // 🆕 งานใบสั่งเป็นของคนก่อน (แม่จองไว้ในชื่อเขา) → ยกเลิกงานเสมอเมื่อเปลี่ยนคน แม้ยังไม่มีค่าล็อก
+    if(nextOp && operator !== nextOp && job) onJobCancel && onJobCancel('operator-switch');
     if(nextOp && operator !== nextOp && Object.values(entries).some(e => e && e.locked)){
       if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current = null; }
       dwellRef.current = null; maxSeenRef.current = null;
       setEntries({}); setNote(''); setCountdown(0);
       setActiveIdx(items.length ? items[0].idx : null);
-      showToast(`ชุดที่ค้างของ ${operator || 'คนก่อน'} ถูกยกเลิก — เริ่มชั่งใหม่`);
+      showToast(`ชุดที่ค้างของ ${operator || 'คนก่อน'} ถูกยกเลิก — ของที่เทลงชามแล้วยังอยู่ในชาม ให้หัวหน้าตัดสินก่อนเริ่มใหม่`);
     }
     setOperator(nextOp);
   }, [operatorLocked, settings.lastOperator]);
-  useEffect(()=>{ if(sessStale) showToast(`ชุดที่ค้างของ ${sess.operator} ถูกยกเลิก — เริ่มชั่งใหม่`); }, []);
+  useEffect(()=>{ if(dropStale){ showToast(`ชุดที่ค้างของ ${sess.operator} ถูกยกเลิก` + (sessLockedN ? ' — ของที่เทลงชามแล้วยังอยู่ในชาม ให้หัวหน้าตัดสินก่อนเริ่มใหม่' : ' — เริ่มชั่งใหม่')); if(job) onJobCancel && onJobCancel('stale-session'); } }, []);
+  // 🆕 งานใน session กู้ไม่ได้ (รูปร่างเสีย — App แจ้งแม่ job-cancelled{stale-session} แล้ว) → บอกคนหน้าเครื่อง
+  useEffect(()=>{ if(EMBED && !PRINTER_MODE && !job && sess && sess.job) showToast('งานใบสั่งที่ค้างอยู่กู้ต่อไม่ได้ — ยกเลิกแล้ว (แจ้งระบบหลักแล้ว)'); }, []);
 
   const zeroTol = Number(settings.zeroTol) || 2;
   const requireZero = settings.requireZero !== false;
@@ -1367,10 +1748,10 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
 
   // ticker
   useEffect(()=>{
-    if(activeIdx==null || !scale.connected) return;
+    if((activeIdx==null && !portion) || !scale.connected) return;   // 🆕 ชั่งแยกชิ้นต้องเช็คตลอด (ไม่มี activeIdx)
     const iv = setInterval(()=>setTick(t=>(t+1)%100000), 400);
     return ()=>clearInterval(iv);
-  }, [activeIdx, scale.connected]);
+  }, [activeIdx, scale.connected, !!portion]);
 
   // 🆕 เปลี่ยนตัวที่ชั่ง — ถ้าตัวเดิมยังไม่ล็อกแต่ผ่านตั้ง 0 ไปแล้ว ต้องล้าง zero-gate (เดิมค้างไว้ → กลับมาเทซ้ำโดยไม่รู้)
   //    ถ้าบนเครื่องยังมีของค้างอยู่ให้ถามก่อน
@@ -1381,6 +1762,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       const live = scale.connected && scale.liveWeight!=null ? Number(scale.liveWeight) : 0;
       if(Math.abs(live) > zeroTol){
         const nm = items.find(x=>x.idx===activeIdx)?.name || '';
+        if(job){ if(!pModal) openPModal('activate', { idx, from: activeIdx, live }); return; }   // 🆕 งานใบสั่ง: ถามในแอป (confirm หลุด ⛶ เต็มจอ)
         if(!confirm(`"${nm}" เทค้างอยู่บนเครื่อง ${fmt(live)} g ยังไม่ได้ล็อก\n\nจะสลับไปตัวอื่นจริงไหม? (ต้องเอาของออก/ตั้ง 0 ใหม่ก่อนกลับมาชั่ง "${nm}")`)) return;
       }
     }
@@ -1401,6 +1783,11 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   // 🆕 สัญญาณหลุดกลางคัน → ล้าง zero-gate ของตัวที่ชั่งอยู่ + แจ้ง (เครื่องชั่งดับเอง tare หาย = น้ำหนักที่เห็นต่อจากนี้คือทั้งชาม)
   useEffect(()=>{
     scale.onDropRef.current = () => {
+      if(portion){   // 🆕 ชั่งแยกชิ้น: เครื่องหลุด = tare อาจหาย → ต้องเห็น 0 สดใหม่ก่อนนับชิ้นถัดไป
+        pDwellRef.current = null; setArmed(false); setZeroRef(null);
+        setDropNotice('เครื่องชั่งหลุด — ตั้ง 0 ใหม่ก่อนวางชิ้นถัดไป (ชิ้นที่นับแล้วยังอยู่ครบ)'); buzz([60,60,60]);
+        return;
+      }
       setEntries(p=>{
         if(activeIdx==null) return p;
         const e = p[activeIdx]||{}; if(e.locked || !e.zeroOk) return p;
@@ -1412,11 +1799,12 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       buzz([60,60,60]);
     };
     return ()=>{ scale.onDropRef.current = null; };
-  }, [activeIdx, items]);
+  }, [activeIdx, items, !!portion]);
   useEffect(()=>{ if(scale.connected && dropNotice) setTimeout(()=>setDropNotice(''), 6000); }, [scale.connected]);
 
   // Zero-gate: ต้องเห็น 0 นิ่ง ก่อนเริ่มเทตัวนี้ (deps มี tick — เดิมค่า 0 ซ้ำ ๆ ไม่ re-render → ค้างที่ "ตั้ง 0 ก่อน")
   useEffect(()=>{
+    if(portion) return;   // 🆕 ชั่งแยกชิ้นมี arming ของตัวเอง (portionTick) — กลับ 0 ระหว่างชิ้นเป็นเรื่องปกติ
     if(!requireZero) return;
     if(!scale.connected || activeIdx==null || scale.liveWeight==null) return;
     const e = entries[activeIdx]||{};
@@ -1432,6 +1820,8 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
 
   // Auto-lock: นิ่ง + เข้าเกณฑ์ + ผ่าน zero gate + นิ่งค้างครบเวลา + สัญญาณสด → ล็อก + ไปตัวถัดไป
   useEffect(()=>{
+    if(portion) return;   // 🆕 ชั่งแยกชิ้นไม่ล็อกรายวัตถุดิบ
+    if(pModal){ dwellRef.current=null; return; }   // 🆕 dialog ในแอปเปิดอยู่ (นอกเกณฑ์/ชั่งใหม่/เปลี่ยนคน …) → ไม่ล็อกเองระหว่างรอตอบ
     if(!scale.connected){ dwellRef.current=null; return; }
     if(activeIdx==null || scale.liveWeight==null) return;
     const it = items.find(x=>x.idx===activeIdx); if(!it) return;
@@ -1475,14 +1865,73 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     }
   }, [scale.stable, scale.liveWeight, activeIdx, tick]);
 
+  // 🆕 ชั่งแยกชิ้น — ตัวนับ (วางทีละชิ้น → นิ่ง+เข้าเกณฑ์ค้าง portionDwell = นับ 1 → ยกออก → กลับ 0 → ชิ้นถัดไป)
+  //    ห้ามนับซ้ำ: ต้องเห็น 0 นิ่งจากแพ็กเก็ตสดก่อนทุกชิ้น (armed) · ห้ามนับเกิน N · ระหว่างมี dialog ไม่นับ
+  const portionDwellMs = Math.max(1000, (Number(settings.portionDwellSec ?? 1) || 0) * 1000);
+  useEffect(()=>{
+    if(!portion) return;
+    const clear = () => { pDwellRef.current = null; };
+    if(!scale.connected || scale.liveWeight == null){
+      clear();
+      if(!scale.connected && armed){ setArmed(false); setZeroRef(null); }   // 🆕 ตัด/ต่อใหม่/สลับเครื่อง = tare อาจหาย → ต้องเห็น 0 สดใหม่ (เหมือน onDropRef)
+      setPStatus(scale.connected ? 'รอค่าจากเครื่องชั่ง…' : '🔌 ต่อเครื่องชั่งก่อน'); return;
+    }
+    if(pModal != null){ clear(); return; }                                 // 0) มี dialog เปิด → หยุดนับ
+    if(pieces.length >= pCount){ clear(); setPStatus(''); return; }       // 1) ครบแล้ว → รอบันทึก
+    const v = Number(scale.liveWeight), st = scale.stable;
+    if(scale.packetAge() >= STALE_MS){                                     // 2) สัญญาณค้าง → ไม่ arm (0 ค้างห้ามเปิดนับ) + ต้องเห็น 0 สดใหม่
+      clear(); if(armed){ setArmed(false); setZeroRef(null); }
+      setPStatus('📵 เครื่องชั่งไม่ส่งค่า — เช็คเครื่องชั่ง'); return;
+    }
+    const NEG = '⚠️ ค่าติดลบ — วางจาน/ถาดคืน หรือกด TARE ใหม่';
+    const warn = () => { if(!pWarnRef.current){ pWarnRef.current = true; beep('warn'); } };
+    if(!st){ clear(); setPStatus('รอนิ่ง…'); return; }                     // 5) ยังไม่นิ่ง
+    if(Math.abs(v) <= zeroTol){                                            // 3) arm: 0 นิ่ง สด → ศูนย์ของชิ้นถัดไป (เศษในช่วงนี้หักออกจากชิ้นถัดไป)
+      clear(); pWarnRef.current = false;
+      if(!armed) setArmed(true);
+      if(zeroRef !== v) setZeroRef(v);
+      setPStatus(`วางชิ้นที่ ${pieces.length + 1} ได้เลย`); return;
+    }
+    if(!armed){                                                            // 4) ยังไม่ arm — บอกเหตุ ไม่นับเด็ดขาด
+      clear();
+      if(v < -zeroTol) warn();
+      setPStatus(v < -zeroTol ? NEG
+        : !pieces.length ? '⏳ ตั้ง 0 ก่อนเริ่ม — ยกของออก หรือกด TARE ที่เครื่อง'
+        : v < pTarget - pTolEff ? `🧽 มีเศษค้างบนจาน ${fmt(v)} ก. — เช็ดจานหรือกด TARE`
+        : '✋ ยกชิ้นเดิมออกก่อน');
+      return;
+    }
+    const d = v - (zeroRef || 0);                                          // 6) armed — ไม่เข้าเกณฑ์ = ไม่นับ
+    if(d < pTarget - pTolEff){ clear(); if(v < -zeroTol) warn(); setPStatus(v < -zeroTol ? NEG : `⬆️ ขาด ${fmt(pTarget - d)} ก.`); return; }
+    if(d > pTarget + pTolEff){ clear(); warn();
+      // หนักเกินชิ้นเดียวมาก (วางจานคืนหลัง TARE ตอนไม่มีจาน / วางสองชิ้นพร้อมกัน) → บอกให้ยกออก ไม่ใช่ "ปรับ" อาหาร
+      setPStatus(d > pTarget * 1.5 + pTolEff ? '⚠️ ของบนเครื่องหนักเกินชิ้นเดียว — ยกออก หรือกด TARE' : `⚠️ เกิน ${fmt(d - pTarget)} ก. — ปรับก่อน`); return; }
+    pWarnRef.current = false;
+    const now = Date.now(), dw = pDwellRef.current;                        // 7) ในเกณฑ์ค้างครบเวลา → นับ
+    if(!dw || Math.abs(dw.v - v) > Math.min(3, Math.max(0.5, pTolEff))){ pDwellRef.current = { v, since: now }; setPStatus('🟢 นิ่งแล้ว — กำลังนับ…'); return; }
+    if(now - dw.since < portionDwellMs){ setPStatus('🟢 นิ่งแล้ว — กำลังนับ…'); return; }
+    clear();
+    const k = pieces.length + 1;
+    setPieces(p => p.length >= pCount ? p : [...p, { g: Math.round(d * 10) / 10, ts: now, by: operator }]);
+    setArmed(false); setZeroRef(null); setPStatus('');
+    buzz(k >= pCount ? [300] : [80]);
+    beep(k >= pCount ? 'last' : 'piece');   // 🆕 เสียงด้วย (ไม่มี vibrate บนแท็บเล็ตตั้งขา/iPad/คอม)
+    showToast(`✅ ชิ้นที่ ${k} — ยกออก`);
+  }, [scale.stable, scale.liveWeight, scale.connected, tick, armed, zeroRef, pieces.length, pModal, !!portion]);
+
   // 🆕 บันทึกแบบ "นอกเกณฑ์" — ของเหลว/เทเกินแล้วตักออกไม่ได้ ต้องใส่เหตุผล บันทึกค่าจริง ติดธง ⚠️ (เดิมไม่มีทางออก → คนไปขยาย tol ในสูตรหรือไม่บันทึกเลย)
-  const lockOffSpec = (it) => {
+  //    🆕 (2026.09.27) งานใบสั่ง: ถามเหตุผลใน dialog ของแอป (prompt หลุด ⛶ เต็มจอ) + ใช้ได้ทั้ง "เกิน" และ "ขาด" (ของหมด/ไม่พอ — ของตัวอื่นเทลงชามไปแล้ว)
+  const lockOffSpec = (it, dir) => {
     if(!scale.connected || scale.liveWeight==null) return;
     if(!scale.stable){ showToast('รอให้เครื่องชั่งนิ่งก่อน'); return; }
     const v = Number(scale.liveWeight);
+    if(job){ if(!pModal) openPModal('offspec', { idx: it.idx, v, dir: dir || 'over' }); return; }
     const reason = prompt(`บันทึก "${it.name}" = ${fmt(v)} g ทั้งที่เป้า ${fmt(it.target)} ± ${fmt(it.tol)} g\n\nใส่เหตุผล (จำเป็น) — จะติดธง ⚠️ นอกเกณฑ์ ในประวัติและเลข LOT`);
     if(reason == null) return;
     if(!reason.trim()){ showToast('ต้องใส่เหตุผล'); return; }
+    commitOffSpec(it, v, reason);
+  };
+  const commitOffSpec = (it, v, reason) => {
     dwellRef.current = null; maxSeenRef.current = null;
     setEntries(p=>({ ...p, [it.idx]:{ ...(p[it.idx]||{}), value:String(v), source:'scale', locked:true,
       offSpec:true, reason:reason.trim(), lockedAt:Date.now(), by:operator } }));
@@ -1490,10 +1939,11 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     if(nxt) setTimeout(()=>setActiveIdx(nxt.idx), 400);
   };
 
-  const allDone = items.length>0 && items.every(it=>entries[it.idx]?.locked);
-  const lockedCount = items.filter(it=>entries[it.idx]?.locked).length;
-  const offSpecCount = items.filter(it=>entries[it.idx]?.offSpec).length;
-  const totalG = items.reduce((s,it)=>s+(Number(entries[it.idx]?.value)||0),0);
+  // 🆕 ชั่งแยกชิ้น: ครบ = นับครบ N ชิ้น · รวม = Σ น้ำหนักชิ้น
+  const allDone = portion ? pieces.length >= pCount : (items.length>0 && items.every(it=>entries[it.idx]?.locked));
+  const lockedCount = portion ? pieces.length : items.filter(it=>entries[it.idx]?.locked).length;
+  const offSpecCount = portion ? 0 : items.filter(it=>entries[it.idx]?.offSpec).length;
+  const totalG = portion ? pieces.reduce((a,x)=>a+(Number(x.g)||0),0) : items.reduce((s,it)=>s+(Number(entries[it.idx]?.value)||0),0);
 
   const labelRotate = !!settings.labelRotate;
   // 🆕 เส้นทางพิมพ์: มีเครื่องพิมพ์ต่ออยู่ (USB/Bluetooth) → ส่ง TSPL/ESC-POS ตรง · ไม่มี → หน้าจอพิมพ์ของระบบ (คอม/PDF)
@@ -1533,9 +1983,30 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     setActiveIdx(items.length ? items[0].idx : null);
   };
 
-  const finish = () => {
+  // opts.early = เหตุผลที่จบก่อนครบ (ชั่งแยกชิ้นเท่านั้น) · ถูกเรียกจาก onClick ได้ (opts = event → ไม่มี .early)
+  const finish = (opts) => {
+    let resultItems, portionLog = null;
+    if(portion){
+      // 🆕 ชั่งแยกชิ้น: รวม = Σ น้ำหนักชิ้น · แบ่งให้วัตถุดิบตามสัดส่วนเป้า (เศษปัดไปตัวสุดท้าย → Σ value = รวมพอดี) · ไม่มีค่านอกเกณฑ์ (ชิ้นนอกเกณฑ์ไม่ถูกนับ)
+      const early = opts && typeof opts.early === 'string' ? opts.early.trim().slice(0, 120) : '';
+      const K = Math.min(pieces.length, pCount);
+      if(!K) return showToast('ยังไม่มีชิ้นที่นับ');
+      if(K < pCount && !early) return showToast(`นับให้ครบ ${pCount} ชิ้นก่อน หรือกด "⏹ จบที่ ${K} ชิ้น"`);
+      const ps = pieces.slice(0, K).map(p => ({ g: Math.round((Number(p.g)||0) * 10) / 10, ts: p.ts, by: p.by || operator }));
+      const tot = Math.round(ps.reduce((a, p) => a + p.g, 0) * 10) / 10;
+      const sumT = items.reduce((a, it) => a + (Number(it.target)||0), 0);
+      let acc = 0;
+      resultItems = items.map((it, i) => {
+        const v = i === items.length - 1 ? Math.round((tot - acc) * 100) / 100 : Math.round((sumT > 0 ? tot * it.target / sumT : 0) * 100) / 100;
+        acc += v;
+        return { name:it.name, ...(it.itemId ? { itemId: it.itemId } : {}), value:v, unit:'g', target:it.target, tol:it.tol, pass:true, alloc:true };
+      });
+      const ops = []; ps.forEach(p => { if(p.by && !ops.includes(p.by)) ops.push(p.by); });
+      portionLog = { count:K, planned:pCount, target:pTarget, tol:pTolEff, ...(early ? { stoppedEarly:true, reason:early } : {}),
+        startedAt: portionStartedAt || (ps[0] && ps[0].ts) || Date.now(), ...(ops.length > 1 ? { operators: ops } : {}), pieces: ps };
+    } else {
     if(!allDone) return showToast('ชั่งให้ครบทุกตัวก่อน');
-    const resultItems = items.map(it=>{
+    resultItems = items.map(it=>{
       const e = entries[it.idx]||{}; const v = Number(e.value)||0;
       return { name:it.name, value:v, unit:'g', target:it.target, tol:it.tol,
         pass: !e.offSpec && Math.abs(v-it.target)<=it.tol,
@@ -1544,31 +2015,42 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
         ...(e.lockedAt ? { lockedAt:e.lockedAt } : {}), ...(e.by ? { by:e.by } : {}),   // 🆕 ใครล็อกตัวไหนเมื่อไหร่
         ...(e.offSpec ? { offSpec:true, reason:e.reason||'' } : {}) };
     });
+    }
     const anyOff = resultItems.some(r=>!r.pass);
     const lot = genLot(recipe, anyOff);
-    const total = resultItems.reduce((s,r)=>s+r.value,0);
-    const data = { recipeName:recipe.name, recipeId:recipe.id, recipeCode:recipeCode(recipe), lot, items:resultItems, total, operator, note, ts:Date.now(),
-      multiplier: mult, scaleMode: scale.mode, scaleDevice: scale.device?.name||'', deviceId: getDeviceId(),
+    const total = portionLog ? Math.round(portionLog.pieces.reduce((a, p) => a + p.g, 0) * 10) / 10 : resultItems.reduce((s,r)=>s+r.value,0);
+    // 🆕 งานใบสั่ง → ส่ง job กลับไปกับ log · recipeId 'job:…' · ตัวคูณ 1 เสมอ
+    const jobEcho = job ? { id: job.id, label: job.label || '', orderNumber: job.orderNumber || '',
+      batchNo: job.batchNo != null ? job.batchNo : null, batchCount: job.batchCount != null ? job.batchCount : null } : null;
+    const rid = job ? (String(recipe.id).startsWith('job:') ? recipe.id : 'job:' + job.id) : recipe.id;
+    const data = { recipeName:recipe.name, recipeId:rid, recipeCode:recipeCode(recipe), lot, items:resultItems, total, operator, note, ts:Date.now(),
+      multiplier: job ? 1 : mult, ...(jobEcho ? { job: jobEcho } : {}), scaleMode: scale.mode, scaleDevice: scale.device?.name||'', deviceId: getDeviceId(),
       ...(settings.branchId ? { branchId: settings.branchId } : {}),
       // 🆕 field จากแอปแม่ (สูตรที่สร้างจาก BOM ของ ERP) ส่งกลับไปกับ log ตรง ๆ — แม่ dedupe ด้วย deviceId+id
       ...(recipe.bomId ? { bomId: recipe.bomId } : {}),
       ...(recipe.lineId ? { lineId: recipe.lineId } : {}),
-      ...(anyOff ? { offSpec:true } : {}) };
+      ...(anyOff ? { offSpec:true } : {}),
+      ...(portionLog ? { portion: portionLog } : {}) };   // 🆕 ชั่งแยกชิ้น (ส่งแม่/กล่องขาออก = แบบเต็ม มี pieces)
     const logEntry = { ...data, id:'log_'+Date.now().toString(36) };
-    update({ logs:[logEntry, ...(state.logs||[])].slice(0,LOG_CAP),
+    // 🆕 ประวัติในเครื่องเก็บแบบย่อ: pieces → pieceG (กันโควตา localStorage ~5 MB · LOG_CAP 3000)
+    const stored = portionLog ? { ...logEntry, portion: portionCompact(portionLog) } : logEntry;
+    update({ logs:[stored, ...(state.logs||[])].slice(0,LOG_CAP),
       settings:{ ...settings, lastOperator:operator } });
+    if(job){ outboxAdd(logEntry); outboxSent.add(logEntry.id); }   // 🆕 เข้ากล่องขาออกก่อนส่ง — ออกเมื่อแม่ตอบ finished-ack เท่านั้น (เขียนลงเครื่องไม่ได้ → ถือไว้ในหน่วยความจำ + เตือน)
     embedPost({ type:'finished', log: logEntry });
     if(willPrint) doPrint(data);
     resetForNext();
-    showToast(willPrint ? `✅ บันทึก ${lot} แล้ว · ส่งพิมพ์ Label${usbReady ? ' (USB)' : ''}` : `✅ บันทึก ${lot} แล้ว`);
+    if(job) onJobDone && onJobDone();   // งานนี้จบ (1 batch = 1 งาน) → กลับเป็นชั่งอิสระ
+    const pcs = portionLog ? ` · ${portionLog.count} ชิ้น` : '';
+    showToast(willPrint ? `✅ บันทึก ${lot}${pcs} แล้ว · ส่งพิมพ์ Label${usbReady ? ' (USB)' : ''}` : `✅ บันทึก ${lot}${pcs} แล้ว`);
     buzz([100,50,100]);
   };
 
   // Auto-finish countdown
   useEffect(()=>{
-    if(allDone && autoFinish && !finishedRef.current){ finishedRef.current = true; setCountdown(3); }
+    if(allDone && autoFinish && !finishedRef.current && !pModal){ finishedRef.current = true; setCountdown(3); }   // 🆕 dialog ชั่งแยกชิ้นเปิดอยู่ = ยังไม่นับถอยหลัง
     if(!allDone){ finishedRef.current = false; if(countdown>0) setCountdown(0); }
-  }, [allDone, autoFinish]);
+  }, [allDone, autoFinish, pModal]);
   useEffect(()=>{
     if(countdown<=0) return;
     if(countdown===1){ const t = setTimeout(()=>{ setCountdown(0); finish(); }, 1000); return ()=>clearTimeout(t); }
@@ -1578,6 +2060,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   const cancelAuto = ()=>{ setCountdown(0); };
 
   const pickRecipe = (id) => {
+    if(job) return showToast('กำลังชั่งงานใบสั่ง — กด "ยกเลิกงานนี้" ก่อนเลือกสูตรอื่น');
     if(hasAny && !confirm('มีค่าที่ชั่งไว้แล้วในชุดนี้ — เปลี่ยนสูตรจะล้างทิ้งทั้งหมด ยืนยัน?')) return;
     if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current=null; }
     dwellRef.current = null; maxSeenRef.current = null;
@@ -1587,6 +2070,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   };
   const pickMult = (m) => {
     if(m === mult) return;
+    if(job) return showToast('งานใบสั่ง — ปริมาณของ 1 batch ล็อกตัวคูณ ×1');
     if(hasAny && !confirm(`เปลี่ยนตัวคูณเป็น ×${m} จะล้างค่าที่ชั่งไว้แล้ว (${lockedCount} ตัว) ยืนยัน?`)) return;
     setEntries({}); setMult(m); setActiveIdx(items.length ? items[0].idx : null);
     dwellRef.current = null; maxSeenRef.current = null;
@@ -1594,11 +2078,21 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
 
   useEffect(()=>{
     if(!embedSelect) return;
+    if(job){ onEmbedSelected && onEmbedSelected(); return; }   // 🆕 มีงานใบสั่งอยู่ → ไม่เปลี่ยนสูตร
     const r = recipes.find(x => (embedSelect.recipeId && x.id===embedSelect.recipeId) || (embedSelect.code && recipeCode(x)===cleanCode(embedSelect.code)));
     if(r && r.id !== recipeId) pickRecipe(r.id);
     onEmbedSelected && onEmbedSelected();
   }, [embedSelect]);
   // 🆕 ปุ่มทดสอบ: USB-Serial ต้องมีบนคอม (เครื่องชั่งสายจริง) · 🎭 Mock ออก LOT/ฉลากจริงได้โดยไม่มีเครื่องชั่ง → ตอนฝังใน ERP ให้เฉพาะ ?debug=1 (ทดสอบอัตโนมัติ) ไม่โชว์ให้พนักงาน/ผจก.บนคอม
+  // 🆕 พนักงานยกเลิกงานใบสั่งเอง → แม่ปล่อยคิว (RELEASE_WEIGH_JOB reason operator)
+  const cancelJobByOperator = () => {
+    if(!job) return;
+    if(pModal) return;   // 🆕 มี dialog เปิดอยู่ (เปลี่ยนคน/คำขอของแม่ ฯลฯ) → ตอบอันนั้นก่อน (dialog เปลี่ยนคนมีปุ่มยกเลิกชุดนี้พร้อมเหตุผลที่ถูกของมันเอง)
+    if(hasAny) return openPModal('cancel');   // 🆕 มีชิ้นที่นับแล้ว / วัตถุดิบที่ล็อกแล้ว → ถามใน dialog ของแอป (confirm ของเบราว์เซอร์ทำหลุดเต็มจอ)
+    onJobCancel && onJobCancel('operator');
+    showToast('ยกเลิกงานใบสั่งแล้ว');
+  };
+  const reweigh = (idx) => { setEntries(p=>{const c={...p};delete c[idx];return c;}); activate(idx, { silent:true }); };
   const showDebugBtns = !IS_MOBILE || DEBUG;
   const showMockBtn = DEBUG || (!IS_MOBILE && !EMBED);
   const todayLogs = recipe ? (state.logs||[]).filter(l => l.recipeName === recipe.name && new Date(l.ts).toDateString() === new Date().toDateString()) : [];
@@ -1663,13 +2157,18 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     h('div', { className:'bg-white rounded-lg shadow p-3 space-y-2' },
       h('div', { className:'flex gap-2 items-center flex-wrap' },
         h('span', { className:'text-sm font-medium' }, '📋 สูตร:'),
-        h('select', { value:recipeId, onChange:e=>pickRecipe(e.target.value),
-          className:'flex-1 min-w-[180px] px-3 py-2 border-2 rounded text-base' },
-          h('option', { value:'' }, '— เลือกสูตร —'),
-          recipes.map(r=>h('option',{key:r.id,value:r.id},r.name))),
+        h('select', { value: job ? '__job' : recipeId, onChange:e=>pickRecipe(e.target.value), disabled: !!job, 'data-recipe-select':'1',
+          className:cls('flex-1 min-w-[180px] px-3 py-2 border-2 rounded text-base', job && 'bg-gray-100 text-gray-600') },
+          job ? h('option', { value:'__job' }, recipe.name) : h('option', { value:'' }, '— เลือกสูตร —'),
+          !job && recipes.map(r=>h('option',{key:r.id,value:r.id},r.name))),
         h('input', { type:'text', value:operator, onChange:e=>setOperator(e.target.value), readOnly:operatorLocked,
           placeholder:'ชื่อผู้ชั่ง', className:cls('w-32 px-2 py-2 border rounded text-sm', operatorLocked && 'bg-gray-100 text-gray-600') })),
-      recipe && h('div', { className:'flex gap-2 items-center flex-wrap' },
+      // 🆕 แถบงานใบสั่ง — แทนแถวตัวคูณ (ซ่อนปุ่ม ×)
+      job && h('div', { 'data-job-banner':'1', className:'rounded-lg p-2 bg-violet-50 border-2 border-violet-400 flex items-center gap-2 flex-wrap' },
+        h('span', { className:'text-lg font-bold text-violet-900' }, '📦 ', job.label || job.id),
+        h('span', { className:'text-sm text-violet-800' }, 'ปริมาณของ 1 batch — ล็อกตัวคูณ'),
+        h('button', { onClick:cancelJobByOperator, disabled: !!pModal, 'data-job-cancel':'1', className:'ml-auto px-3 py-1.5 bg-white border border-red-300 text-red-700 hover:bg-red-50 rounded text-sm disabled:opacity-50' }, 'ยกเลิกงานนี้')),
+      recipe && !job && h('div', { className:'flex gap-2 items-center flex-wrap' },
         h('span', { className:'text-sm font-medium' }, '× ตัวคูณ:'),
         [0.5,1,2,3].map(m=>h('button', { key:m, onClick:()=>pickMult(m),
           className: cls('px-3 py-1.5 rounded border-2 text-sm font-bold',
@@ -1690,6 +2189,30 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       : h('div', { className:'space-y-2' },
           h('div', { className:'text-2xl font-bold text-gray-800 px-1' }, recipe.name,
             mult!==1 && h('span', { className:'ml-2 text-orange-600' }, '×', mult)),
+          portion ? h(PortionPanel, { pCount, pTarget, pTolEff, pieces, armed, zeroRef, status: pStatus, scale, items, totalG, countdown,
+              stale: scale.connected && scale.mode!=='mock' && scale.packetAge() > STALE_MS,
+              modal: pModal, pSwitch, openModal: openPModal, closeModal: closePModal, parentCancel, jobLabel: job ? (job.label || job.id) : '',
+              onUndo: () => { setPieces(p => p.slice(0, -1)); closePModal(); showToast('ลบชิ้นล่าสุดแล้ว — วางชั่งใหม่'); },   // armed ไม่เปลี่ยน → ต้องยกออก/กลับ 0 ก่อนวางใหม่
+              onStop: (reason) => { setPModal(null); finish({ early: reason }); },
+              onParentCancelOk: () => { setPModal(null); onParentCancel && onParentCancel(true); showToast('ยกเลิกงานตามที่ระบบหลักขอแล้ว'); },
+              onParentCancelNo: () => { closePModal(); onParentCancel && onParentCancel(false); showToast('ทำต่อ — แจ้งระบบหลักแล้วว่าไม่ยกเลิก'); },
+              onCancelJob: () => { setPModal(null); onJobCancel && onJobCancel('operator'); showToast('ยกเลิกงานใบสั่งแล้ว'); },
+              onSwitchContinue: () => { setPSwitch(null); setPModal(null); showToast(`ทำต่อจาก ${pieces.length} ชิ้น — ชิ้นถัดไปเป็นของ ${operator || 'คนนี้'}`); },
+              onSwitchCancel: () => { const r = (pSwitch && pSwitch.reason) || 'operator-switch'; setPSwitch(null); setPModal(null);
+                onJobCancel && onJobCancel(r); showToast('ยกเลิกชุดนี้แล้ว — เริ่มชั่งใหม่'); } }) :
+          h('div', { 'data-items-list':'1', className:'space-y-2', style:{ position:'relative', minHeight: pModal ? 420 : undefined } },
+          // 🆕 (2026.09.27) dialog ในแอปของงานวัตถุดิบ — ชั้นเดียวกับชั่งแยกชิ้น (ไม่ใช้ confirm/prompt → ไม่หลุด ⛶ เต็มจอ)
+          job && pModal && h(JobDialog, { modal: pModal, arg: pArg, items, entries, jobLabel: job.label || job.id, lockedCount, pSwitch, parentCancel, operator,
+            onClose: closePModal,
+            onOffSpec: (reason) => { const it = items.find(x => pArg && x.idx === pArg.idx); setPModal(null); if(it && pArg) commitOffSpec(it, pArg.v, reason); },
+            onReweigh: () => { const i = pArg && pArg.idx; setPModal(null); if(i != null) reweigh(i); },
+            onActivate: () => { const i = pArg && pArg.idx; setPModal(null); if(i != null) activate(i, { silent:true }); },
+            onCancelJob: () => { setPModal(null); onJobCancel && onJobCancel('operator'); showToast('ยกเลิกงานใบสั่งแล้ว — ของที่เทลงชามแล้วต้องเททิ้ง/แจ้งหัวหน้า'); },
+            onParentCancelOk: () => { setPModal(null); onParentCancel && onParentCancel(true); showToast('ยกเลิกงานตามที่ระบบหลักขอแล้ว — ของที่เทลงชามแล้วต้องเททิ้ง/แจ้งหัวหน้า'); },
+            onParentCancelNo: () => { closePModal(); onParentCancel && onParentCancel(false); showToast('ทำต่อ — แจ้งระบบหลักแล้วว่าไม่ยกเลิก'); },
+            onSwitchContinue: () => { setPSwitch(null); setPModal(null); showToast(`ทำต่อจาก ${lockedCount} รายการ — ตัวถัดไปเป็นของ ${operator || 'คนนี้'}`); },
+            onSwitchCancel: () => { const r = (pSwitch && pSwitch.reason) || 'operator-switch'; setPSwitch(null); setPModal(null);
+              onJobCancel && onJobCancel(r); showToast('ยกเลิกชุดนี้แล้ว — ของที่เทลงชามแล้วต้องเททิ้ง/แจ้งหัวหน้า'); } }),
           items.map(it=>{
             const e = entries[it.idx]||{};
             const v = Number(e.value);
@@ -1768,7 +2291,15 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
                         ? h('button', { onClick:(ev)=>{ ev.stopPropagation(); lockOffSpec(it); },
                             className:'px-3 py-1.5 bg-orange-100 hover:bg-orange-200 border border-orange-400 text-orange-900 rounded text-sm' },
                             'ตักออกไม่ได้ → บันทึกค่านี้แบบ "นอกเกณฑ์" (ต้องใส่เหตุผล)')
-                        : h('div', { className:'text-sm text-orange-800' }, 'ตักออกไม่ได้ → แจ้งผู้จัดการ (สิทธิ์นี้บันทึกค่านอกเกณฑ์ไม่ได้)')))
+                        : h('div', { className:'text-sm text-orange-800' }, 'ตักออกไม่ได้ → แจ้งผู้จัดการ (สิทธิ์นี้บันทึกค่านอกเกณฑ์ไม่ได้)')),
+                    // 🆕 (2026.09.27) งานใบสั่ง: ของหมด/ไม่พอ (ขาดเป้า) → บันทึกค่าจริงแบบนอกเกณฑ์ได้ — ตัวอื่นเทลงชามไปแล้ว ยกเลิกทั้ง batch = ทิ้งของ
+                    //    ต้องผ่านตั้ง 0 แล้ว (ของบนเครื่อง = ของที่เทจริง) · ERP ตรวจเกณฑ์ซ้ำเอง + ตัดสต๊อกตามกรัมจริง → batch ปิดพร้อม ⚠️ ให้หัวหน้าตรวจ
+                    job && stt==='under' && scale.stable && !stale && (e.zeroOk || !requireZero) && h('div', { className:'text-center mt-2' },
+                      canOffSpec
+                        ? h('button', { 'data-offspec-under':'1', onClick:(ev)=>{ ev.stopPropagation(); lockOffSpec(it, 'under'); },
+                            className:'px-3 py-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-400 text-amber-900 rounded text-sm' },
+                            '⬇️ ของหมด/ไม่พอ → บันทึกค่านี้ (ขาด) + เหตุผล')
+                        : h('div', { className:'text-sm text-amber-800' }, 'ของหมด/ไม่พอ → แจ้งผู้จัดการ (สิทธิ์นี้บันทึกค่านอกเกณฑ์ไม่ได้)')))
               : e.locked
                 ? h('div', { className:'flex items-center justify-between mt-1 flex-wrap gap-2' },
                     h('div', { className:'flex items-end gap-2 flex-wrap' },
@@ -1776,48 +2307,230 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
                       h('span', { className:'text-lg text-gray-500 mb-1' }, 'g'),
                       h('span', { className: cls('text-sm mb-1.5', e.offSpec ? 'text-orange-700' : 'text-green-700') },
                         e.offSpec ? '⚠️ นอกเกณฑ์ · ' + (e.reason||'') : '✓ ต่างจากเป้า ' + fmt(Math.abs((Number(e.value)||0)-it.target)) + ' g')),
-                    h('button', { onClick:(ev)=>{ ev.stopPropagation();
+                    h('button', { 'data-reweigh': it.idx, onClick:(ev)=>{ ev.stopPropagation();
+                        if(job){ if(!pModal) openPModal('reweigh', { idx: it.idx }); return; }   // 🆕 งานใบสั่ง: ถามในแอป
                         if(!confirm(`ชั่ง "${it.name}" ใหม่? — ต้องเอาของที่เทไปแล้วออกจากชาม แล้วตั้ง 0 ใหม่`)) return;
-                        setEntries(p=>{const c={...p};delete c[it.idx];return c;}); activate(it.idx, { silent:true }); },
+                        reweigh(it.idx); },
                       className:'px-3 py-1.5 bg-amber-100 hover:bg-amber-200 rounded text-sm font-medium' }, '🔓 ชั่งใหม่'))
                 : h('div', { className:'flex items-center justify-between mt-1 text-gray-400' },
                     h('span', { className:'text-base' }, 'ยังไม่ได้ชั่ง'),
                     h('span', { className:'text-sm' }, scale.connected ? '👆 แตะเพื่อชั่งตัวนี้' : '🔌 ต่อเครื่องชั่งก่อน')));
-          }),
+          })),
           // ===== Summary + finish =====
           countdown > 0
             ? h('div', { className:'bg-green-100 border-2 border-green-500 rounded-lg p-4 sticky bottom-2 text-center' },
                 h('div', { className:'text-lg font-bold text-green-900' },
                   '✅ ชั่งครบแล้ว — ', willPrint ? 'บันทึก + พิมพ์ Label' : 'บันทึก', 'อัตโนมัติใน ',
                   h('span', { className:'text-3xl' }, countdown), ' วิ...'),
-                h('div', { className:'text-sm text-green-700 mt-1' }, 'รวม ', h('b', null, fmt(totalG)), ' g',
+                h('div', { className:'text-sm text-green-700 mt-1' }, 'รวม ', h('b', null, fmt(totalG)), portion ? ' ก.' : ' g',
                   offSpecCount>0 && h('span', { className:'text-orange-700 font-bold' }, ' · มี ', offSpecCount, ' ตัวนอกเกณฑ์ ⚠️')),
                 h('div', { className:'flex gap-2 justify-center mt-3' },
-                  h('button', { onClick:()=>{ setCountdown(0); finish(); },
-                    className:'px-5 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold' }, willPrint ? '🖨️ บันทึก+พิมพ์เลย' : '✅ บันทึกเลย'),
-                  h('button', { onClick:cancelAuto, className:'px-5 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg' }, '✋ รอก่อน (แก้ค่า)')))
+                  h('button', { onClick:()=>{ if(pModal) return; setCountdown(0); finish(); }, disabled: !!pModal,
+                    className:'px-5 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold disabled:opacity-50' }, willPrint ? '🖨️ บันทึก+พิมพ์เลย' : '✅ บันทึกเลย'),
+                  h('button', { onClick:cancelAuto, className:'px-5 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg' }, portion ? '✋ รอก่อน' : '✋ รอก่อน (แก้ค่า)')))
             : h('div', { className:'bg-indigo-50 border-2 border-indigo-300 rounded-lg p-3 sticky bottom-2' },
                 h('div', { className:'flex justify-between items-center flex-wrap gap-2' },
                   h('div', null,
-                    h('div', { className:'text-sm' }, 'ชั่งแล้ว: ', h('b', null, lockedCount, '/', items.length),
-                      ' · รวม: ', h('b', { className:'text-lg text-indigo-800' }, fmt(totalG), ' g'),
+                    h('div', { className:'text-sm' }, portion ? 'นับแล้ว: ' : 'ชั่งแล้ว: ', h('b', null, lockedCount, '/', portion ? pCount : items.length, portion ? ' ชิ้น' : ''),
+                      ' · รวม: ', h('b', { className:'text-lg text-indigo-800' }, fmt(totalG), portion ? ' ก.' : ' g'),
                       offSpecCount>0 && h('span', { className:'ml-2 text-orange-700 font-bold' }, '⚠️ นอกเกณฑ์ ', offSpecCount)),
                     autoFinish
                       ? h('div', { className:'text-xs text-green-700' }, '⚡ ชั่งครบ → ', willPrint ? 'บันทึก+พิมพ์ Label' + (usbReady ? ' (USB)' : '') : 'บันทึก', 'อัตโนมัติ (ไม่ต้องกด)')
                       : willPrint && h('div', { className:'text-xs text-green-700' }, '⚡ พิมพ์ Label อัตโนมัติเมื่อกดเสร็จ'),
                     printer && printer.busy && h('div', { className:'text-xs text-blue-700 animate-pulse' }, '🖨️ ', printer.busy),
                     printer && printer.lastErr && !printer.busy && h('div', { className:'text-xs text-red-700' }, '🖨️ ', printer.lastErr)),
-                  h('button', { onClick:finish, disabled:!allDone,
+                  // 🆕 dialog ชั่งแยกชิ้นเปิดอยู่ → กดเสร็จไม่ได้ (เช่น กำลังจะลบชิ้นล่าสุดที่ N/N แล้วมือไปโดนปุ่มนี้ = ส่งชิ้นที่ตั้งใจลบไปด้วย)
+                  h('button', { onClick:()=>{ if(pModal) return; finish(); }, disabled:!allDone || !!pModal, 'data-finish-btn':'1',
                     className: cls('px-6 py-3 rounded-lg font-bold text-base',
-                      allDone ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-gray-200 text-gray-400 cursor-not-allowed') },
-                    allDone ? (willPrint ? '✅ เสร็จ + พิมพ์ Label' : '✅ เสร็จ (บันทึก)') : 'ชั่งให้ครบก่อน')),
+                      allDone && !pModal ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-gray-200 text-gray-400 cursor-not-allowed') },
+                    allDone ? (willPrint ? '✅ เสร็จ + พิมพ์ Label' : '✅ เสร็จ (บันทึก)') : portion ? `นับให้ครบ ${pCount} ชิ้นก่อน` : 'ชั่งให้ครบก่อน')),
                 h('input', { type:'text', value:note, onChange:e=>setNote(e.target.value),
                   placeholder:'หมายเหตุ (optional)', className:'w-full mt-2 px-2 py-1 border rounded text-sm' }))));
 }
 
+// ==================== IN-APP DIALOG (ใช้ร่วม: ชั่งแยกชิ้น + งานวัตถุดิบ) ====================
+// 🆕 ไม่ใช้ confirm/prompt ของเบราว์เซอร์ (หลุด ⛶ เต็มจอของ ERP — แท็บเล็ตไม่มี Esc/F11) · ปุ่ม ✔/✖ สูง ≥ 64 px (มือเปียก/ใส่ถุงมือ)
+//    ชั้นทับ position:absolute ในกล่องที่ห่อ (ต้อง position:relative + minHeight ~420 ตอนเปิด) · การ์ด sticky → อยู่ในจอเสมอ
+const DLG_BIG = { minHeight:64, fontSize:'1.25rem' };
+const dlgOk = (label, onClick, disabled, danger) => h('button', { 'data-modal-ok':'1', onClick, disabled: !!disabled, style: DLG_BIG,
+  className: cls('flex-1 px-4 rounded-lg font-bold text-white disabled:opacity-50', danger ? 'bg-red-600 hover:bg-red-700' : 'bg-green-600 hover:bg-green-700') }, '✔ ', label);
+const dlgNo = (label, onClick, primary) => h('button', { 'data-modal-no':'1', onClick, style: DLG_BIG,
+  className: cls('flex-1 px-4 rounded-lg font-bold', primary ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-gray-200 hover:bg-gray-300 text-gray-800') }, '✖ ', label);
+function DialogLayer({ attr, kind, children }){
+  const cardRef = useRef(null);
+  useEffect(()=>{ if(cardRef.current) try { cardRef.current.scrollIntoView({ block:'center' }); } catch(e){} }, [kind]);   // จอแท็บเล็ต/iframe สูง → dialog ต้องอยู่ในจอ
+  return h('div', { [attr]: kind, style:{ position:'absolute', inset:0, zIndex:20, background:'rgba(17,24,39,0.55)', borderRadius:8,
+      display:'flex', alignItems:'flex-start', justifyContent:'center', padding:12 } },
+    h('div', { ref: cardRef, role:'dialog', className:'bg-white rounded-lg shadow-lg p-4 space-y-3', style:{ width:'100%', maxWidth:560, position:'sticky', top:12 } }, children));
+}
+// 🆕 เหตุผลนอกเกณฑ์ (งานวัตถุดิบ) — ชิปตามทิศ + "อื่น ๆ" พิมพ์เอง
+const OFFSPEC_REASONS = { under: ['ของหมด', 'ของไม่พอ', 'อื่น ๆ'], over: ['เทเกิน ตักออกไม่ได้', 'อื่น ๆ'] };
+// 🆕 (2026.09.27) dialog ในแอปของงานใบสั่งแบบวัตถุดิบ (batch-by-batch) — modal: 'offspec' | 'reweigh' | 'activate' | 'cancel' | 'pcancel' | 'switch'
+function JobDialog({ modal, arg, items, entries, jobLabel, lockedCount, pSwitch, parentCancel, operator,
+                     onClose, onOffSpec, onReweigh, onActivate, onCancelJob, onParentCancelOk, onParentCancelNo, onSwitchContinue, onSwitchCancel }){
+  const [chip, setChip] = useState('');
+  const [text, setText] = useState('');
+  useEffect(()=>{ setChip(''); setText(''); }, [modal, arg && arg.idx]);
+  const it = arg && arg.idx != null ? items.find(x => x.idx === arg.idx) : null;
+  const BOWL = `ค่าที่ชั่งไว้แล้ว ${lockedCount} รายการจะถูกล้าง — ของที่เทลงชามแล้วต้องเททิ้ง/แจ้งหัวหน้า (ระบบหลักได้รับรายการนี้ไว้)`;
+  const from = (pSwitch && pSwitch.from) || 'คนก่อน';
+  let body = null;
+  if(modal === 'offspec' && it){
+    const dir = arg.dir === 'under' ? 'under' : 'over', v = Number(arg.v) || 0;
+    const reason = chip === 'อื่น ๆ' ? text.trim() : chip;
+    body = [
+      h('div', { key:'t', className:'text-2xl font-extrabold text-gray-900' }, `บันทึก "${it.name}" = ${fmt(v)} g แบบนอกเกณฑ์?`),
+      h('div', { key:'s', className:'text-base text-gray-700' }, `เป้า ${fmt(it.target)} ± ${fmt(it.tol)} g · `,
+        h('b', { className: dir === 'under' ? 'text-amber-700' : 'text-red-700' }, dir === 'under' ? `ขาด ${fmt(Math.max(0, it.target - v))} g` : `เกิน ${fmt(Math.max(0, v - it.target))} g`)),
+      h('div', { key:'c', className:'flex gap-2 flex-wrap' }, OFFSPEC_REASONS[dir].map(r => h('button', { key:r, 'data-reason': r, onClick: () => setChip(r), style:{ minHeight:56 },
+        className: cls('px-4 rounded-full border-2 text-lg font-bold', chip === r ? 'bg-violet-600 text-white border-violet-700' : 'bg-white border-gray-300 text-gray-800') }, r))),
+      chip === 'อื่น ๆ' && h('input', { key:'x', type:'text', value: text, onChange: e => setText(e.target.value), maxLength:120, 'data-reason-text':'1',
+        placeholder:'ระบุเหตุผล', className:'w-full px-3 py-3 border-2 rounded-lg text-lg' }),
+      h('div', { key:'d', className:'text-sm text-gray-600' }, 'ติดธง ⚠️ นอกเกณฑ์ ในประวัติและเลข LOT · ระบบหลักตัดของตามกรัมจริง แล้วให้หัวหน้าตรวจ'),
+      h('div', { key:'b', className:'flex gap-2' }, dlgOk(`บันทึก ${fmt(v)} g`, () => onOffSpec(reason), !reason), dlgNo('กลับไปชั่งต่อ', onClose)) ];
+  } else if(modal === 'reweigh' && it){
+    body = [
+      h('div', { key:'t', className:'text-2xl font-extrabold text-gray-900' }, `ชั่ง "${it.name}" ใหม่?`),
+      h('div', { key:'d', className:'text-lg text-gray-800' }, `ค่าเดิม ${fmt(Number((entries[it.idx]||{}).value) || 0)} g จะถูกล้าง — ต้องเอาของที่เทไปแล้วออกจากชาม แล้วตั้ง 0 ใหม่`),
+      h('div', { key:'b', className:'flex gap-2' }, dlgOk('ชั่งใหม่', onReweigh, false, true), dlgNo('ไม่', onClose)) ];
+  } else if(modal === 'activate' && it){
+    const cur = items.find(x => x.idx === arg.from); const nm = cur ? cur.name : '';
+    body = [
+      h('div', { key:'t', className:'text-2xl font-extrabold text-gray-900' }, `"${nm}" เทค้างอยู่บนเครื่อง ${fmt(Number(arg.live) || 0)} g ยังไม่ได้ล็อก`),
+      h('div', { key:'d', className:'text-lg text-gray-800' }, `สลับไป "${it.name}" จริงไหม? ต้องเอาของออก/ตั้ง 0 ใหม่ก่อนกลับมาชั่ง "${nm}"`),
+      h('div', { key:'b', className:'flex gap-2' }, dlgOk(`สลับไป "${it.name}"`, onActivate, false, true), dlgNo(`ชั่ง "${nm}" ต่อ`, onClose, true)) ];
+  } else if(modal === 'cancel'){
+    body = [
+      h('div', { key:'t', className:'text-2xl font-extrabold text-red-800' }, `ยกเลิกงาน "${jobLabel}"?`),
+      h('div', { key:'d', className:'text-lg text-gray-800' }, BOWL),
+      h('div', { key:'b', className:'flex gap-2' }, dlgOk('ยกเลิกงานนี้', onCancelJob, false, true), dlgNo('ไม่ยกเลิก', onClose)) ];
+  } else if(modal === 'pcancel'){
+    body = [
+      h('div', { key:'t', className:'text-2xl font-extrabold text-red-800' },
+        parentCancel && parentCancel.reason === 'parent-invalid' ? `ระบบหลักแจ้งว่างาน "${jobLabel}" ใช้ต่อไม่ได้แล้ว` : `ระบบหลักขอยกเลิกงาน "${jobLabel}"`),
+      h('div', { key:'d', className:'text-lg text-gray-800' }, BOWL, ' — ยกเลิกชุดนี้?'),
+      h('div', { key:'b', className:'flex gap-2' }, dlgOk('ยกเลิกชุดนี้', onParentCancelOk, false, true), dlgNo('ไม่ยกเลิก ทำต่อ', onParentCancelNo)) ];
+  } else if(modal === 'switch'){
+    body = [
+      h('div', { key:'t', className:'text-2xl font-extrabold text-gray-900' }, `มีวัตถุดิบที่ชั่งไว้แล้ว ${lockedCount} รายการ ของ ${from}`),
+      h('div', { key:'b', className:'flex flex-col gap-2' },
+        dlgOk(`ทำต่อจาก ${lockedCount} รายการของ ${from}`, onSwitchContinue),
+        h('button', { 'data-modal-no':'1', onClick: onSwitchCancel, style: DLG_BIG, className:'px-4 rounded-lg font-bold bg-white border-2 border-red-400 text-red-700 hover:bg-red-50' },
+          '✖ ยกเลิกชุดนี้ (ของในชามต้องเททิ้ง/แจ้งหัวหน้า)')),
+      h('div', { key:'d', className:'text-sm text-gray-600' }, `ทำต่อ = ของ ${lockedCount} รายการอยู่ในชามแล้ว ห้ามเทซ้ำ · ตัวที่เหลือบันทึกเป็นชื่อ ${operator || 'คนนี้'}`) ];
+  }
+  if(!body) return null;
+  return h(DialogLayer, { attr:'data-job-modal', kind: modal }, body);
+}
+
+// ==================== PORTION PANEL (ชั่งแยกชิ้น) ====================
+// 🆕 แทนรายการวัตถุดิบเมื่องานใบสั่งเป็นแบบชั่งแยกชิ้น — ตัวนับใหญ่ "นับแล้ว K / N ชิ้น" · น้ำหนักชิ้นบนเครื่อง (หักศูนย์แล้ว) · สถานะ · ช่องสี่เหลี่ยม N ช่อง
+//    ใช้ class ที่มีอยู่แล้ว + inline style (ไม่เพิ่ม class ใหม่ให้ weigh.css) · ไม่ใช้ min-h-screen (ต้องพอดีทั้งตอนฝังและ ⛶ เต็มจอ)
+const PORTION_HINT = 'วางจานรองบนเครื่อง กด TARE · วางชิ้น → รอนับ → ยกชิ้นไปวางถาดข้างนอก ทุกชิ้น';
+// 🆕 dialog ในแอป (ไม่ใช้ confirm/prompt ของเบราว์เซอร์ — ทำหลุด ⛶ เต็มจอ และใส่ปุ่มเลือกเหตุผลไม่ได้) · ปุ่ม ✔/✖ สูง ≥ 64 px (มือเปียก/ใส่ถุงมือ)
+//    modal: 'undo' | 'stop' | 'cancel' | 'switch' · ระหว่างเปิด WeighTab หยุดนับ (portionTick ขั้น 0)
+const PORTION_STOP_REASONS = ['เนื้อหมด', 'เครื่องมีปัญหา', 'อื่น ๆ'];
+function PortionPanel({ pCount, pTarget, pTolEff, pieces, armed, zeroRef, status, scale, items, totalG, countdown, stale,
+                        modal, pSwitch, openModal, closeModal, onUndo, onStop, onCancelJob, onSwitchContinue, onSwitchCancel,
+                        parentCancel, jobLabel, onParentCancelOk, onParentCancelNo }){
+  const K = pieces.length, done = K >= pCount;
+  const [reasonChip, setReasonChip] = useState('');
+  const [reasonText, setReasonText] = useState('');
+  const cardRef = useRef(null);
+  useEffect(()=>{
+    if(modal === 'stop'){ setReasonChip(''); setReasonText(''); }
+    if(modal && cardRef.current) try { cardRef.current.scrollIntoView({ block:'center' }); } catch(e){}   // จอแท็บเล็ต/iframe สูง → dialog ต้องอยู่ในจอ
+  }, [modal]);
+  const stopReason = reasonChip === 'อื่น ๆ' ? reasonText.trim() : reasonChip;
+  const last = K ? pieces[K - 1] : null;
+  const BIG = DLG_BIG, okBtn = dlgOk, noBtn = dlgNo;
+  const machine = reasonChip === 'เครื่องมีปัญหา';   // 🆕 เครื่องมีปัญหากู้ได้ (ชิ้นไม่หายตอนต่อใหม่/รีโหลด) — การจบกู้ไม่ได้ → ✖ เป็นปุ่มหลัก
+  const RESET_TXT = `ชิ้นที่นับแล้ว ${K} ชิ้นต้องวางชั่งใหม่ทั้งหมด`;
+  const modalBody = !modal ? null
+    : modal === 'undo' ? [
+        h('div', { key:'t', className:'text-2xl font-extrabold text-gray-900' }, last ? `ลบชิ้นที่ ${K} (${fmt(last.g)} ก.)?` : 'ไม่มีชิ้นให้ลบ'),
+        h('div', { key:'d', className:'text-base text-gray-700' }, 'ลบแล้วต้องยกชิ้นนี้ออก ให้เครื่องกลับ 0 แล้ววางชั่งใหม่'),
+        h('div', { key:'b', className:'flex gap-2' }, okBtn('ลบชิ้นนี้', onUndo, !last, true), noBtn('ไม่ลบ', closeModal)) ]
+    : modal === 'stop' ? [
+        h('div', { key:'t', className:'text-2xl font-extrabold text-gray-900' }, `จบที่ ${K} / ${pCount} ชิ้น — เพราะอะไร?`),
+        h('div', { key:'c', className:'flex gap-2 flex-wrap' }, PORTION_STOP_REASONS.map(r => h('button', { key:r, 'data-reason': r, onClick: () => setReasonChip(r), style:{ minHeight:56 },
+          className: cls('px-4 rounded-full border-2 text-lg font-bold', reasonChip === r ? 'bg-violet-600 text-white border-violet-700' : 'bg-white border-gray-300 text-gray-800') }, r))),
+        reasonChip === 'อื่น ๆ' && h('input', { key:'x', type:'text', value: reasonText, onChange: e => setReasonText(e.target.value), maxLength:120, 'data-reason-text':'1',
+          placeholder:'ระบุเหตุผล', className:'w-full px-3 py-3 border-2 rounded-lg text-lg' }),
+        machine && h('div', { key:'m', 'data-stop-machine':'1', className:'rounded-lg p-3 bg-green-50 border-2 border-green-500 text-green-900 text-lg font-bold' },
+          '🔌 ต่อเครื่องชั่งใหม่แล้วกด ✖ กลับไปนับต่อ — ชิ้นที่นับไว้ไม่หาย'),
+        h('div', { key:'w', 'data-stop-warn':'1', className:'rounded-lg p-2 bg-red-50 border border-red-300 text-red-800 text-base font-bold' },
+          `⚠️ จบแล้วนับต่อไม่ได้ — ที่เหลือ ${Math.max(0, pCount - K)} ชิ้นต้องเปิดใบสั่งใหม่`),
+        h('div', { key:'d', className:'text-sm text-gray-600' }, `บันทึก ${K} ชิ้น (ไม่ครบ ${pCount}) · ส่งเข้าระบบหลักตามจริง`),
+        h('div', { key:'b', className:'flex gap-2' }, machine
+          ? [h(React.Fragment, { key:'n' }, noBtn('กลับไปนับต่อ', closeModal, true)), h(React.Fragment, { key:'o' }, okBtn(`จบที่ ${K} ชิ้น`, () => onStop(stopReason), !stopReason, true))]
+          : [h(React.Fragment, { key:'o' }, okBtn(`บันทึก ${K} ชิ้น`, () => onStop(stopReason), !stopReason)), h(React.Fragment, { key:'n' }, noBtn('กลับไปนับต่อ', closeModal))]) ]
+    : modal === 'cancel' ? [
+        h('div', { key:'t', className:'text-2xl font-extrabold text-red-800' }, 'ยกเลิกชุดนี้?'),
+        h('div', { key:'d', className:'text-lg text-gray-800' }, RESET_TXT, ' — ยกเลิกชุดนี้?'),
+        h('div', { key:'b', className:'flex gap-2' }, okBtn('ยกเลิกชุดนี้', onCancelJob, false, true), noBtn('ไม่ยกเลิก', closeModal)) ]
+    : modal === 'pcancel' ? [   // 🆕 แม่ขอยกเลิก (cancel-job) ตอนมีชิ้นแล้ว — ✔ = job-cancelled{reqId} · ✖ = cancel-refused{reqId}
+        h('div', { key:'t', className:'text-2xl font-extrabold text-red-800' },
+          parentCancel && parentCancel.reason === 'parent-invalid' ? `ระบบหลักแจ้งว่างาน "${jobLabel}" ใช้ต่อไม่ได้แล้ว` : `ระบบหลักขอยกเลิกงาน "${jobLabel}"`),
+        h('div', { key:'d', className:'text-lg text-gray-800' }, RESET_TXT, ' — ยกเลิกชุดนี้?'),
+        h('div', { key:'b', className:'flex gap-2' }, okBtn('ยกเลิกชุดนี้', onParentCancelOk, false, true), noBtn('ไม่ยกเลิก ทำต่อ', onParentCancelNo)) ]
+    : modal === 'switch' ? [
+        h('div', { key:'t', className:'text-2xl font-extrabold text-gray-900' }, `มีชิ้นที่นับไว้แล้ว ${K} ชิ้น ของ ${(pSwitch && pSwitch.from) || 'คนก่อน'}`),
+        h('div', { key:'b', className:'flex flex-col gap-2' },
+          okBtn(`ทำต่อจาก ${K} ชิ้นของ ${(pSwitch && pSwitch.from) || 'คนก่อน'}`, onSwitchContinue),
+          h('button', { 'data-modal-no':'1', onClick: onSwitchCancel, style: BIG, className:'px-4 rounded-lg font-bold bg-white border-2 border-red-400 text-red-700 hover:bg-red-50' }, '✖ ยกเลิกชุดนี้')),
+        h('div', { key:'d', className:'text-sm text-gray-600' }, 'ยกเลิกชุดนี้ = ', RESET_TXT) ]
+    : null;
+  const live = scale.connected && scale.liveWeight != null ? Number(scale.liveWeight) : null;
+  const dispV = live == null ? null : armed ? live - (zeroRef || 0) : live;   // armed → น้ำหนักชิ้น (หักเศษ/ศูนย์) · ไม่ armed → ค่าบนเครื่องตรง ๆ
+  const gMax = Math.max(1, pTarget + pTolEff * 2);
+  const P = x => Math.max(0, Math.min(100, (x / gMax) * 100));
+  const lowP = P(pTarget - pTolEff), highP = P(pTarget + pTolEff), tgtP = P(pTarget), valP = dispV == null ? 0 : P(dispV);
+  const stt = dispV == null || !armed ? 'none' : dispV < pTarget - pTolEff ? 'under' : dispV > pTarget + pTolEff ? 'over' : 'in';
+  const cTxt = stt==='over' ? 'text-red-600' : stt==='in' ? 'text-green-600' : stt==='under' ? 'text-amber-600' : 'text-gray-400';
+  const cFill = stt==='over' ? 'bg-red-400' : stt==='in' ? 'bg-green-500' : 'bg-amber-300';
+  const avg = K ? totalG / K : 0;
+  return h('div', { 'data-portion-panel':'1', className:'space-y-2', style:{ position:'relative', minHeight: modal ? 420 : undefined } },
+    modalBody && h('div', { 'data-portion-modal': modal, style:{ position:'absolute', inset:0, zIndex:20, background:'rgba(17,24,39,0.55)', borderRadius:8,
+        display:'flex', alignItems:'flex-start', justifyContent:'center', padding:12 } },
+      h('div', { ref: cardRef, role:'dialog', className:'bg-white rounded-lg shadow-lg p-4 space-y-3', style:{ width:'100%', maxWidth:560, position:'sticky', top:12 } }, modalBody)),
+    h('div', { className:'rounded-lg p-3 border-2 bg-violet-50 border-violet-400 text-center' },
+      h('div', { 'data-portion-counter':'1', className:'font-extrabold text-violet-900', style:{ fontSize:'2.75rem', lineHeight:1.1 } },
+        done ? `ครบ ${pCount}/${pCount} ชิ้น` + (countdown > 0 ? ` — กำลังบันทึก (${countdown})` : '') : `นับแล้ว ${K} / ${pCount} ชิ้น`),
+      h('div', { className:'text-sm text-violet-800 mt-1' }, '🎯 ชิ้นละ ', h('b', null, fmt(pTarget)), ' ± ', fmt(pTolEff), ' ก. · วางทีละชิ้น ระบบนับเอง'),
+      h('div', { className:'flex flex-wrap gap-1 justify-center mt-2' },
+        Array.from({ length: pCount }, (_, i) => h('span', { key:i, title: i < K ? fmt(pieces[i].g) + ' ก.' : '',
+          style:{ width:14, height:14, borderRadius:3, display:'inline-block',
+            background: i < K ? '#16a34a' : (i === K && !done ? '#a78bfa' : '#e5e7eb') } })))),
+    K === 0 && h('div', { 'data-portion-hint':'1', className:'rounded-lg p-3 bg-amber-50 border-2 border-amber-400 text-amber-900 text-base font-bold' }, '💡 ', PORTION_HINT),
+    !done && h('div', { className:'rounded-lg p-3 border-2 bg-white border-gray-200' },
+      h('div', { className:'flex items-end justify-center gap-2 mt-1 mb-2' },
+        h('span', { className: cls('font-mono font-extrabold leading-none', cTxt), style:{ fontSize:'4.25rem' } }, dispV == null ? '—' : fmt(dispV)),
+        h('span', { className:'text-2xl text-gray-500 font-bold mb-2' }, 'ก.')),
+      h('div', { className:'relative h-9 rounded-full bg-gray-200 overflow-hidden' },
+        h('div', { className:'absolute inset-y-0 bg-green-300', style:{ left:lowP+'%', width:Math.max(0, highP-lowP)+'%' } }),
+        h('div', { className: cls('absolute inset-y-0 left-0', cFill), style:{ width:valP+'%', opacity:0.55 } }),
+        h('div', { className:'absolute inset-y-0 bg-gray-800', style:{ left:'calc('+tgtP+'% - 1px)', width:'2px' } }),
+        h('div', { className:'absolute inset-y-0 bg-black', style:{ left:'calc('+valP+'% - 2px)', width:'4px' } })),
+      h('div', { 'data-portion-status':'1', className: cls('text-center font-extrabold text-xl mt-1', stt === 'in' ? 'text-green-600' : 'text-gray-800') },
+        stale ? '📵 สัญญาณค้าง — เช็คเครื่องชั่ง' : (status || '…'))),
+    h('div', { className:'text-sm text-gray-700 px-1' }, 'รวม ', h('b', null, fmt(totalG)), ' ก.', K ? [' · เฉลี่ย ', h('b', { key:'a' }, fmt(Math.round(avg * 10) / 10)), ' ก./ชิ้น'] : ''),
+    // 🆕 ลบชิ้นล่าสุด / จบก่อนครบ (K ≥ 1) — เปิด dialog ในแอป
+    K > 0 && h('div', { className:'flex gap-2 flex-wrap' },
+      h('button', { 'data-portion-undo':'1', onClick: () => openModal('undo'), style:{ minHeight:56 },
+        className:'flex-1 px-4 rounded-lg font-bold bg-amber-100 hover:bg-amber-200 border-2 border-amber-400 text-amber-900 text-lg' }, '↩️ ลบชิ้นล่าสุด'),
+      !done && h('button', { 'data-portion-stop':'1', onClick: () => openModal('stop'), style:{ minHeight:56 },
+        className:'flex-1 px-4 rounded-lg font-bold bg-white hover:bg-gray-50 border-2 border-gray-400 text-gray-800 text-lg' }, `⏹ จบที่ ${K} ชิ้น`)),
+    h('div', { className:'rounded-lg p-2 bg-gray-50 border border-gray-200 text-sm text-gray-600' },
+      h('div', { className:'font-medium text-gray-700' }, 'วัตถุดิบของ batch นี้ (ตัดตามน้ำหนักจริงที่นับได้):'),
+      items.map(it => h('div', { key:it.idx }, '· ', it.name, ' ', fmt(it.target), ' g'))));
+}
+
 // ==================== LOGS TAB ====================
-function LogsTab({ state, printer }){
+function LogsTab({ state, printer, outboxVer }){
   const logs = state.logs||[];
+  // 🆕 log งานใบสั่งที่แม่ยังไม่ ack (อยู่ในกล่องขาออก) → ป้าย "ยังไม่ถึง ERP" · outboxVer เปลี่ยน = อ่านใหม่
+  const pendingIds = useMemo(() => new Set(loadOutbox().map(x => x && x.id)), [outboxVer, logs]);
   const reprint = (log) => {
     // 🆕 ฝังใน ERP → แจ้งแอปแม่ว่าพิมพ์ซ้ำ (ERP บันทึกร่องรอยบน log/audit) · ฉลากซ้ำมีคำว่า "พิมพ์ซ้ำ" ที่หมายเหตุ
     if(EMBED) embedPost({ type:'reprinted', log:{ id: log.id, deviceId: log.deviceId || getDeviceId(), lot: log.lot } });
@@ -1835,7 +2548,9 @@ function LogsTab({ state, printer }){
               h('div', { className:'font-bold' }, log.recipeName,
                 log.multiplier && log.multiplier!==1 && h('span', { className:'ml-1 text-orange-600' }, '×', log.multiplier),
                 h('span', { className:'ml-2 text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded' }, log.lot),
-                log.offSpec && h('span', { className:'ml-1 text-xs bg-orange-500 text-white px-1.5 py-0.5 rounded font-bold' }, '⚠️ นอกเกณฑ์')),
+                log.offSpec && h('span', { className:'ml-1 text-xs bg-orange-500 text-white px-1.5 py-0.5 rounded font-bold' }, '⚠️ นอกเกณฑ์'),
+                log.job && h('span', { className:'ml-1 text-xs bg-violet-100 text-violet-900 px-1.5 py-0.5 rounded' }, '📦 ', log.job.label || log.job.id),
+                log.job && pendingIds.has(log.id) && h('span', { 'data-outbox':'1', className:'ml-1 text-xs bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded font-bold' }, '⏳ ยังไม่ถึง ERP')),
               h('div', { className:'text-xs text-gray-500' },
                 new Date(log.ts).toLocaleString('th-TH'), ' · ', log.operator||'-',
                 ' · รวม ', fmt(log.total), ' g',
@@ -1843,6 +2558,12 @@ function LogsTab({ state, printer }){
                 log.note ? ' · ' + log.note : '')),
             h('button', { onClick:()=>reprint(log),
               className:'px-3 py-1.5 bg-blue-100 hover:bg-blue-200 rounded text-sm' }, '🖨️ พิมพ์ซ้ำ', printer && printer.connected ? ' (' + printer.transportLabel + ')' : '')),
+          // 🆕 ชั่งแยกชิ้น: "K ชิ้น · เฉลี่ย · min–max" แทนกรัมรายวัตถุดิบ (น้ำหนักวัตถุดิบเป็นการแบ่งตามสัดส่วน ไม่ได้ชั่งแยก)
+          log.portion ? (pi => h('div', { 'data-log-portion':'1', className:'mt-1 text-xs text-gray-700 flex flex-wrap gap-x-2 items-center' },
+              h('b', { className:'text-violet-900' }, pi.K, ' ชิ้น'),
+              h('span', null, '· เฉลี่ย ', fmt(pi.avg), ' ก.', pi.min != null ? ' · ' + fmt(pi.min) + '–' + fmt(pi.max) + ' ก.' : ''),
+              pi.early && h('span', { className:'bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded font-bold' }, 'จบที่ ', pi.K, pi.N ? '/' + pi.N : '', pi.reason ? ' · ' + pi.reason : ''),
+              Array.isArray(log.portion.operators) && log.portion.operators.length > 1 && h('span', { className:'text-gray-500' }, '· ผู้ชั่ง ', log.portion.operators.join(', '))))(portionInfo(log.portion, log.total)) :
           h('div', { className:'mt-1 text-xs text-gray-600 flex flex-wrap gap-x-3' },
             log.items.map((it,i)=>h('span',{key:i, className: it.pass?'':'text-orange-600 font-bold', title: it.reason||'' },
               it.name,': ',fmt(it.value),'g',it.pass?'':' ⚠️'+(it.reason?' ('+it.reason+')':'')))))));
@@ -2017,6 +2738,12 @@ function SettingsTab({ state, update, printer }){
           className:'w-24 px-3 py-2 border-2 rounded text-center' }),
         h('span', { className:'ml-2 text-xs text-gray-500' }, '· ค่าต้องนิ่ง "ในเกณฑ์" ค้างเท่านี้ก่อน ถึงจะล็อก+ไปตัวถัดไป (กันล็อกตอนเทยังไม่พอ) · ขั้นต่ำ 1 วิ')),
       h('div', null,
+        h('label', { className:'block text-sm font-medium mb-1' }, 'ชั่งแยกชิ้น: เวลานิ่งค้างก่อนนับ 1 ชิ้น (วินาที)'),
+        h('input', { type:'number', value: s.portionDwellSec ?? 1, min:1, step:0.5,
+          onChange:e=>set({portionDwellSec:Math.max(1,Number(e.target.value)||1)}),
+          className:'w-24 px-3 py-2 border-2 rounded text-center' }),
+        h('span', { className:'ml-2 text-xs text-gray-500' }, '· ใช้กับงานใบสั่งแบบวางทีละชิ้น · ขั้นต่ำ 1 วิ')),
+      h('div', null,
         h('label', { className:'block text-sm font-medium mb-1' }, 'ค่า ± ต่ำสุดที่ยอมรับ (กรัม)'),
         h('input', { type:'number', value: s.minTolG ?? 1, min:0, step:0.5,
           onChange:e=>set({minTolG:Math.max(0,Number(e.target.value)||0)}),
@@ -2088,7 +2815,7 @@ function SettingsTab({ state, update, printer }){
 
 ReactDOM.createRoot(document.getElementById('root')).render(h(App));
 // เปิดเผยตัวช่วยสำหรับทดสอบอัตโนมัติ (เฉพาะ ?debug=1)
-if(DEBUG) window.__weighTest = { renderLabelCanvas, renderLotLabelCanvas, buildLotLabelsHTML, buildTSPL, buildESCPOS, canvasToBits, code128Widths, printerOpts, buildTestText, WEIGH_VERSION };
+if(DEBUG) window.__weighTest = { buildLabel, portionInfo, renderLabelCanvas, renderLotLabelCanvas, buildLotLabelsHTML, buildTSPL, buildESCPOS, canvasToBits, code128Widths, printerOpts, buildTestText, WEIGH_VERSION };
 })();
 </script>
 </body></html>
