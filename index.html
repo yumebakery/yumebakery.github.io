@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="12bca23577e1";window.__ERP_BUILT_AT__="2026-09-29T01:52:16";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="cded1d5cacdc";window.__ERP_BUILT_AT__="2026-09-29T11:39:14";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -3388,16 +3388,115 @@ function nextPartyCode(list, prefix){
   }
   return `${pre}-${String(max+1).padStart(4,'0')}`;
 }
+// ---------- 💎 FIXED_ASSET §B3.1 เกณฑ์ทรัพย์สิน (ต่อหน่วย ไม่รวม VAT หลังส่วนลด) ----------
+//   ใช้ชุดเดียวทุกที่: autoPostINV · AutoPostModal (ผ่าน buildInvDrLines) · คิวรอลงทะเบียน · ป้ายเตือน PO · งานค้าง
+//   เกณฑ์ = settings.capitalizeThreshold (บาท/ชิ้น) · 0/ว่าง = ติ๊กแล้วเป็นทรัพย์สินทุกบรรทัด (พฤติกรรมเดิม)
+function capexThreshold(state){
+  const t = Number(state && state.settings && state.settings.capitalizeThreshold);
+  return t > 0 ? t : 0;
+}
+// ยอดทั้งบรรทัด ไม่รวม VAT หลังส่วนลด (= ยอด Dr 16xx · แก้ F11)
+//   GR line: lineTotal = หลังส่วนลดบรรทัด+ท้ายบิลแล้ว (BILL-DISC) · ราคาตาม priceMode ของเอกสาร
+//   PO line (ฟอร์ม/บันทึกแล้ว): qty×unitPrice − discount − billDiscAlloc · อื่น ๆ (PI) ใช้ lineExVat
+function capexLineExVat(doc, line){
+  const l = line || {}, d = doc || {};
+  if(l.isFreebie) return 0;
+  const isGr = !!(d.grNumber || d.grDate);
+  let gross;
+  if(isGr){
+    if(l.lineExVat != null && isFinite(Number(l.lineExVat))) return bdR2(Math.max(0, Number(l.lineExVat)));
+    gross = l.lineTotal != null ? Number(l.lineTotal) || 0 : (Number(l.unitPrice) || 0) * (Number(l.qty) || 0);
+  } else if(l.unitPrice != null){
+    gross = (Number(l.qty) || 0) * (Number(l.unitPrice) || 0) - (Number(l.discount) || 0) - (Number(l.billDiscAlloc) || 0);
+  } else if(l.lineExVat != null){
+    return bdR2(Math.max(0, Number(l.lineExVat) || 0));
+  } else {
+    gross = Number(l.lineTotal) || 0;
+  }
+  gross = Math.max(0, gross);
+  const r = Number(l.vatRate) || 0;
+  if(d.priceMode === 'inclusive' && r > 0) return bdR2(gross * 100 / (100 + r));
+  return bdR2(gross);
+}
+// ราคาต่อหน่วย ไม่รวม VAT หลังส่วนลด
+function capexUnitExVat(doc, line){
+  const q = Number(line && line.qty) || 0;
+  const t = capexLineExVat(doc, line);
+  return q > 0 ? t / q : t;
+}
+// ติ๊ก 💎 (isAsset | capMode) และถึงเกณฑ์ · capMode 'add_to' (งานซ่อม qty=1 งาน) เทียบยอดทั้งงาน
+function isCapexLine(state, doc, line){
+  const l = line || {};
+  if(!(l.isAsset || l.capMode)) return false;
+  const thr = capexThreshold(state);
+  if(!(thr > 0)) return true;
+  const v = l.capMode === 'add_to' ? capexLineExVat(doc, l) : capexUnitExVat(doc, l);
+  return v >= thr - 0.005;
+}
+// GR line เป็นทรัพย์สินไหม — มี noStock (ตั้งตอนรับ · freeze) ใช้ค่านั้น
+//   ไม่มี noStock = บรรทัดเก่า (ก่อน FA-S2) → freeze ตามกฎเดิม = ติ๊ก 💎 คือทรัพย์สิน (เกณฑ์เดิม 0 · ลง Dr 16xx ไปแล้ว)
+//   ห้ามเทียบเกณฑ์ปัจจุบัน (UAT M1: ตั้งเกณฑ์ 10,000 ทีหลัง → บรรทัดเก่าหลุดคิวลงทะเบียน/ล้างสต๊อก ทั้งที่ 16xx ลงแล้ว)
+function grLegacyLineIsCapex(line){ return !!(line && line.isAsset); }
+function grLineIsCapex(state, gr, line){
+  const l = line || {};
+  if(l.noStock != null) return l.noStock === true;
+  return grLegacyLineIsCapex(l);
+}
+// 💎 FA-S2: ทรัพย์สินในทะเบียนที่ลงจาก GR นี้ — ผูกตรง (acquireFromGrId) หรือผูกผ่าน PI แบบเก่า (acquireFromInvId · F27)
+//   ใช้กัน VOID_GR / RTV ของเครื่องที่ลงทะเบียนแล้ว (ต้องลบทะเบียน/จำหน่ายก่อน)
+function grRegisteredAssets(state, gr){
+  if(!gr) return [];
+  const invIds = [gr.invoiceId, gr.prevInvoiceId].filter(Boolean);
+  return ((state && state.assets) || []).filter(a => a && !a.deleted && (a.acquireFromGrId === gr.id
+    || (a.acquireFromGrId == null && a.acquireFromInvId && invIds.includes(a.acquireFromInvId))));
+}
+// 💎 FA-S3: GR 💎 เก่า (ก่อน S2 · ไม่มี noStock · ติ๊ก 💎 = ทรัพย์สินตามกฎเดิม) แต่เข้าสต๊อกไปแล้ว → ให้คลัง/บัญชีล้างด้วย CLEAR_ASSET_STOCK
+//   clearable = ล็อตของบรรทัดนี้ยังเหลือเต็ม (ไม่ถูกเบิก/โอน/ใช้ล้างติดลบ) · ไม่เต็ม = ต้องปรับสต๊อก + JE ด้วยมือ
+// verify: GR ก่อน 2026-09-09 เก็บ line.lot = '' แต่ชั้น FIFO ได้ล็อตอัตโนมัติ `${grNumber}-NN` → ใช้ล็อตจริงแบบเดียวกันทั้งแผง/reducer
+function assetStockEffLot(gr, line, idx){ return (line && line.lot) || `${gr.grNumber}-${String(idx + 1).padStart(2, '0')}`; }
+function getAssetInStockLines(state){
+  const out = [];
+  const byRef = new Map();
+  ((state && state.fifoLayers) || []).forEach(l => { if(l && l.grRef){ const a = byRef.get(l.grRef); if(a) a.push(l); else byRef.set(l.grRef, [l]); } });
+  ((state && state.grs) || []).forEach(gr => {
+    if(!gr || gr.voided) return;
+    (gr.lines || []).forEach((l, idx) => {
+      if(!l || !l.isAsset || l.noStock != null || l.clearedAssetStockAt) return;
+      if(!grLegacyLineIsCapex(l)) return;   // UAT M1: บรรทัดเก่า freeze ตามกฎเดิม ไม่เทียบเกณฑ์ปัจจุบัน
+      const lys = (byRef.get(gr.grNumber) || []).filter(x => x.itemId === l.itemId && (x.lot || '') === assetStockEffLot(gr, l, idx));
+      const clearable = lys.length > 0 && lys.every(x => Math.abs((Number(x.remaining) || 0) - (Number(x.qty) || 0)) < 1e-6 && !(Number(x.nettedQty) > 0));
+      const remainingQty = lys.reduce((t, x) => t + Math.max(0, Number(x.remaining) || 0), 0);   // verify: ส่วนที่ยังค้างในสต๊อก (ล้างบางส่วนได้)
+      out.push({ gr, line: l, lineIdx: idx, layers: lys, clearable, remainingQty, noLayer: lys.length === 0 });
+    });
+  });
+  return out;
+}
+// PO ที่ยังเปิดอยู่ และมีบรรทัดราคาต่อหน่วยถึงเกณฑ์แต่ไม่ติ๊ก 💎 (ข้อมูลให้จัดซื้อทบทวน · ไม่บล็อก)
+function getCapexUntickedPOLines(state){
+  const thr = capexThreshold(state);
+  if(!(thr > 0)) return [];
+  const out = [];
+  (state.pos || []).forEach(po => {
+    if(!po || !['draft','pending','approved','partial'].includes(po.status)) return;
+    (po.lines || []).forEach((l, idx) => {
+      if(!l || l.isAsset || l.isFreebie) return;
+      if((Number(l.receivedQty) || 0) >= (Number(l.qty) || 0)) return;
+      const u = capexUnitExVat(po, l);
+      if(u >= thr - 0.005) out.push({ po, line: l, lineIdx: idx, unitExVat: bdR2(u) });
+    });
+  });
+  return out;
+}
+
 // 💎 ทรัพย์สินรอบันทึก — GR line ที่ติ๊ก isAsset แต่ยังไม่มี asset ในทะเบียนผูก (derived — ไม่มี state แยก)
 function getPendingAssetLines(state){
   const assets = state.assets || [];
-  const thr = Number(state.settings?.capitalizeThreshold) || 0;   // ให้ตรงกับ autoPostINV
   const out = [];
   (state.grs||[]).forEach(gr => {
     if(gr.voided) return;
     (gr.lines||[]).forEach((l, idx) => {
       if(!l.isAsset) return;
-      if(thr > 0 && (Number(l.lineExVat ?? l.lineTotal)||0) < thr) return;
+      if(!grLineIsCapex(state, gr, l)) return;   // 🆕 FA-S1: เกณฑ์ต่อหน่วยผ่าน helper เดียวกับ autoPostINV
       const done = assets.some(a => (a.acquireFromGrId === gr.id && a.acquireFromGrLine === idx)
         // legacy: ผูกผ่าน INV — นับเฉพาะ asset ที่ไม่มี link ราย line และเป็นสินค้าเดียวกัน (ไม่งั้นลงทะเบียน 1 บรรทัดแล้วทั้ง GR หาย)
         || (!!gr.invoiceId && a.acquireFromInvId === gr.invoiceId && a.acquireFromGrId == null
@@ -3406,6 +3505,255 @@ function getPendingAssetLines(state){
     });
   });
   return out;
+}
+
+// ---------- 💎 FA-S5 (§B5.3): คิวรอลงทะเบียน = GR (เดิม) + บิลซ่อมใหญ่ที่ติ๊ก "เพิ่มเข้าเครื่อง" (exp_add) · exp_new = S6 ----------
+//   ข้าม: ใบ void · ต่ำกว่าเกณฑ์ (capBelowThreshold) · ลงทะเบียนเป็นส่วนเพิ่มแล้ว (component ไม่ void ที่ source ตรง)
+//   เครื่องเป้าหมายถูกจำหน่ายแล้ว → ยังอยู่ในคิวแต่ติดธง disposed (ให้บัญชีโอนด้วย JE)
+function getPendingCapexLines(state){
+  const out = getPendingAssetLines(state).map(r => ({ kind:'gr', ...r }));
+  const assets = state.assets || [];
+  const used = new Set();
+  assets.forEach(a => (a.components||[]).forEach(c => {
+    if(c && !c.voided && c.source && c.source.invId) used.add(c.source.invId + '|' + c.source.expLineId); }));
+  (state.invoices||[]).forEach(inv => {
+    if(!inv || inv.voided) return;
+    (inv.expenseLines||[]).forEach(l => {
+      if(!expLineIsCapex(l) || l.capMode !== 'add_to') return;
+      if(used.has(inv.id + '|' + l.id)) return;
+      const asset = assets.find(a => a.id === l.capAssetId) || null;
+      out.push({ kind:'exp_add', inv, line:l, asset, disposed: !!asset && ['disposed','sold'].includes(asset.status) });
+    });
+  });
+  return out;
+}
+// 💎 FA-S5 (D14): ประวัติซ่อมรายเครื่อง = derived จากบรรทัดบิล (ลิงก์ assetId = ซ่อมปกติ · capAssetId = ซ่อมใหญ่ 💎)
+function assetRepairHistory(state, assetId){
+  const rows = [];
+  (state.invoices||[]).forEach(inv => {
+    if(!inv || inv.voided) return;
+    (inv.expenseLines||[]).forEach(l => {
+      if(!l || !(l.assetId === assetId || l.capAssetId === assetId)) return;
+      rows.push({ inv, line:l, date: inv.invDate || '', capex: l.capAssetId === assetId && expLineIsCapex(l), amount: Number(l.lineTotal)||0 });
+    });
+  });
+  return rows.sort((a,b) => String(b.date).localeCompare(String(a.date)));
+}
+// 💎 FA-S5 (B4.1 ข้อ 4-5 · D5 · D12): แผนส่วนเพิ่ม — ใช้ทั้ง ComponentModal (ตัวอย่าง) และ reducer (ตรวจ)
+//   คืน { lifeMonths, mainRemaining, revision|null, rateWarn, error|null }
+function componentPlan(state, asset, startYM, basis, extendMonths, customMonths){
+  const b = basis || 'extended';
+  const ext = Math.max(0, Math.round(Number(extendMonths)||0));
+  const mainRemaining = mainRemainingMonths(asset, startYM);
+  const lifeMonths = componentLifeMonths(asset, b, ext, customMonths, startYM);
+  let error = null;
+  if(!['extended','main_remaining','custom'].includes(b)) error = 'แบบอายุส่วนเพิ่มไม่ถูกต้อง';
+  else if(mainRemaining <= 0 && (b === 'main_remaining' || (b === 'extended' && ext < 1))) error = 'เครื่องนี้ตัดค่าเสื่อมครบแล้ว — ใส่จำนวนปี/เดือนที่ซ่อมแล้วใช้ได้ต่อ';
+  else if(!(lifeMonths >= 1 && lifeMonths <= 600)) error = 'อายุส่วนเพิ่มต้อง 1–600 เดือน';
+  const revision = (!error && b === 'extended' && ext > 0) ? buildLifeRevision(asset, startYM, ext) : null;
+  const cat = (state && state.assetCategories || []).find(c => c.id === (asset && asset.categoryId));
+  const catRate = Number(cat && cat.rate) || Number(asset && asset.rate) || 0;
+  const rateWarn = lifeMonths > 0 && catRate > 0 && (1200 / lifeMonths) > catRate + 0.005;
+  return { lifeMonths, mainRemaining, revision, rateWarn, error };
+}
+
+// 💎 verify: บรรทัด GR 💎 ในมุมของใบตั้งหนี้ inv — ให้ผลเท่ากันทั้งก่อน/หลัง patch ส่วนลด PI ลง GR
+//   (autoPostINV ถูกเรียกด้วย state ก่อนบันทึก → GR ยังไม่มี piDiscAlloc · AutoPostModal เห็น GR ที่ patch แล้ว)
+//   ฐาน = lineTotalBeforePiDisc (ถ้ามี) หรือ lineTotal · หักส่วนลด PI ของใบนี้ (allocs ตาม priceMode) · หักมูลค่าคืน (RTV) ที่หักในใบนี้
+function invCapexRtvIds(state, inv){
+  if(Array.isArray(inv && inv.rtvDeductIds)) return inv.rtvDeductIds;
+  return ((state && state.returns) || []).filter(r => r && inv && r.linkedINV === inv.id && r.decideJeId === 'DEDUCTED_IN_PI').map(r => r.id);
+}
+function invCapexGrLine(state, inv, gr, l, idx){
+  const bd = inv && inv.billDiscount;
+  const piOn = !!(bd && bd.source === 'pi' && bd.grId === gr.id);
+  const rtvIds = invCapexRtvIds(state, inv);
+  let rtvAmt = 0;
+  if(rtvIds.length){
+    ((state && state.returns) || []).forEach(r => {
+      if(!r || r.grId !== gr.id || !rtvIds.includes(r.id)) return;
+      (r.lines || []).forEach(rl => {
+        if(!rl || rl.noStock !== true) return;
+        const hit = rl.grLineIdx != null ? rl.grLineIdx === idx : rl.itemId === l.itemId;
+        if(hit) rtvAmt += Number(rl.lineTotal) || 0;
+      });
+    });
+  }
+  if(!piOn && !(rtvAmt > 0)) return l;
+  const hasPatch = l.lineTotalBeforePiDisc != null;
+  let base = hasPatch ? Number(l.lineTotalBeforePiDisc) || 0 : Number(l.lineTotal) || 0;
+  if(piOn){
+    const al = (bd.allocs || []).find(a => a && a.lineIdx === idx);
+    base -= Number(al && al.amount) || 0;
+  } else if(hasPatch){
+    base -= Number(l.piDiscAlloc) || 0;   // patch ของใบอื่น (ไม่ใช่ใบนี้) → คงตามที่ patch ไว้
+  }
+  base -= rtvAmt;
+  return { ...l, lineTotal: bdR2(Math.max(0, base)) };
+}
+// ---------- 💎 FIXED_ASSET §B5.1 ตัวสร้าง Dr ตอนตั้งหนี้ (ตัวเดียว · autoPostINV + AutoPostModal ใช้ร่วมกัน · ปิด F13) ----------
+//   คืน { lines, baseAcc } · lines = Dr ฝั่งสินค้า/ค่าใช้จ่าย/ทรัพย์สิน (ยังไม่รวม VAT/AP/WHT/ปัดเศษ) · ไม่มี baseAcc → lines ว่าง
+//   opts.desc: คำอธิบายบรรทัด Dr หลัก (AutoPostModal ส่ง "บันทึกตั้งหนี้ …" · ไม่ส่ง = inv.description ตามเดิมของ autoPostINV)
+//   ยอดทรัพย์สิน = capexLineExVat (ไม่รวม VAT หลังส่วนลด) · เลือกบรรทัดด้วย grLineIsCapex (noStock freeze / เกณฑ์ต่อหน่วย)
+function buildInvDrLines(inv, state, opts){
+  const o = opts || {};
+  const accounts = state.chartOfAccounts || [];
+  const find = (type, hint) => accounts.find(a => a.type===type && (a.name||'').includes(hint)) || accounts.find(a => a.type===type);
+  const invAcc = find('asset', 'สินค้า');
+  const expAcc = find('expense', 'ค่าใช้จ่าย') || accounts.find(a => a.type==='expense');
+  const accByCode = code => code ? accounts.find(a => a.code === code && a.type === 'expense') : null;
+  const baseAcc = inv.source === 'direct_expense' ? (accByCode(inv.accountCode) || expAcc) : (invAcc || expAcc);
+  const lines = [];
+  if(!baseAcc || !(inv.amount > 0)) return { lines, baseAcc: baseAcc || null };
+  const br0 = inv.branch || state.currentBranch;
+  const mainDesc = o.desc != null ? o.desc : (inv.description || '');
+  // A9: GR line ทรัพย์สิน → Dr บัญชีหมวด (1610/1620/1635/1660 → 1600)
+  const grIds = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+  const assetByAcc = {}; let assetTotalRaw = 0;
+  grIds.forEach(gid => {
+    const gr = (state.grs||[]).find(g => g.id === gid);
+    if(!gr) return;
+    (gr.lines||[]).forEach((l, idx) => {
+      if(!l || !l.isAsset || !grLineIsCapex(state, gr, l)) return;
+      const lex = capexLineExVat(gr, invCapexGrLine(state, inv, gr, l, idx));
+      if(!(lex > 0)) return;
+      const cat = (state.assetCategories||[]).find(c => c.id === l.assetCategoryId);
+      const acc = accounts.find(a => a.code === (cat?.code || '1600')) || accounts.find(a => a.code === '1600');
+      if(!acc) return;
+      assetByAcc[acc.code] = assetByAcc[acc.code] || { acc, amount:0 };
+      assetByAcc[acc.code].amount += lex;
+      assetTotalRaw += lex;
+    });
+  });
+  const canSplitAsset = Object.keys(assetByAcc).length > 0 && assetTotalRaw > 0 && assetTotalRaw <= (Number(inv.amount)||0) + 0.01;
+  const expLines = inv.source === 'direct_expense' && Array.isArray(inv.expenseLines)
+    ? inv.expenseLines.filter(l => l && (Number(l.lineTotal)||0) > 0) : [];
+  const expSum = expLines.reduce((t,l) => t + (Number(l.lineTotal)||0), 0);
+  // 💎 FA-S5 (§B5.1 ข้อ 2): บรรทัดค่าใช้จ่ายที่ติ๊ก 💎 (capMode · ถึงเกณฑ์ ณ ตอนตั้งหนี้) → Dr capAccountCode 1 บรรทัดต่อ expense line
+  //   ยอด = lineTotal (ไม่รวม VAT หลังส่วนลด) · สาขา = สาขาของเครื่อง (add_to) · ไม่มีบรรทัด 💎 = ผลเดิมทุกไบต์
+  const capLines = expLines.filter(expLineIsCapex);
+  const capSum = capLines.reduce((t,l) => t + (Number(l.lineTotal)||0), 0);
+  if(!canSplitAsset && capLines.length > 0 && capSum <= (Number(inv.amount)||0) + 0.01){
+    const anyAcc = code => accounts.find(a => a.code === code);
+    let pushed = 0;
+    const rest = expLines.filter(l => !expLineIsCapex(l));
+    const restSum = rest.reduce((t,l) => t + (Number(l.lineTotal)||0), 0);
+    const groups = {}; const order = [];
+    if(Math.abs(restSum + capSum - inv.amount) <= 0.01){
+      for(const l of rest){
+        const code = l.accountCode || inv.accountCode || '5300';
+        const br = l.branch || br0;
+        const k = code + '|' + br;
+        if(!groups[k]){ groups[k] = { acc: accByCode(code) || expAcc, br, amt:0 }; order.push(k); }
+        groups[k].amt += Number(l.lineTotal)||0;
+      }
+    }
+    for(const k of order){
+      const g = groups[k];
+      if(!g.acc) continue;
+      const amt = Number(g.amt.toFixed(2));
+      lines.push({ accountId:g.acc.id, accountCode:g.acc.code, accountName:g.acc.name,
+        debit: amt, credit: 0, branchId: g.br, description: inv.description || o.desc || '' });
+      pushed += amt;
+    }
+    for(const l of capLines){
+      const acc = anyAcc(l.capAccountCode) || anyAcc('1600') || baseAcc;
+      const as = l.capAssetId ? (state.assets||[]).find(a => a.id === l.capAssetId) : null;
+      const amt = Number((Number(l.lineTotal)||0).toFixed(2));
+      lines.push({ accountId:acc.id, accountCode:acc.code, accountName:acc.name,
+        debit: amt, credit: 0, branchId: (as && as.branch) || l.branch || br0,
+        description: (l.capMode === 'add_to' && as ? `ทรัพย์สิน (เพิ่มเข้า ${as.code || as.name}): ` : 'ทรัพย์สิน: ') + (l.description || inv.invNumber || ''),
+        ...(l.capAssetId ? { assetId: l.capAssetId } : {}), expLineId: l.id, capMode: l.capMode });
+      pushed += amt;
+    }
+    const left = Number(((Number(inv.amount)||0) - pushed).toFixed(2));
+    if(left > 0.005) lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name,
+      debit: left, credit:0, branchId: br0, description: mainDesc });
+    return { lines, baseAcc };
+  }
+  if(capLines.length > 0 && !canSplitAsset){ try { console.warn('[ERP] บรรทัด 💎 รวมเกินยอดใบ — ลงแบบเดิม', inv.invNumber); } catch(_e){} }
+  if(canSplitAsset){
+    let pushed = 0;
+    for(const code in assetByAcc){
+      const a = assetByAcc[code];
+      const amt = Number(a.amount.toFixed(2));
+      lines.push({ accountId:a.acc.id, accountCode:a.acc.code, accountName:a.acc.name,
+        debit: amt, credit:0, branchId: br0, description: 'ทรัพย์สิน: ' + (inv.description||inv.invNumber||'') });
+      pushed += amt;
+    }
+    const nonAsset = Number(((Number(inv.amount)||0) - pushed).toFixed(2));
+    if(nonAsset > 0.005) lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name,
+      debit: nonAsset, credit:0, branchId: br0, description: mainDesc });
+  } else if(expLines.length > 0 && Math.abs(expSum - inv.amount) <= 0.01){
+    const groups = {}; const order = [];
+    for(const l of expLines){
+      const code = l.accountCode || inv.accountCode || '5300';
+      const br = l.branch || br0;
+      const k = code + '|' + br;
+      if(!groups[k]){ groups[k] = { acc: accByCode(code) || expAcc, br, amt:0, desc: l.description || '' }; order.push(k); }
+      groups[k].amt += Number(l.lineTotal)||0;
+    }
+    for(const k of order){
+      const g = groups[k];
+      if(!g.acc) continue;
+      lines.push({ accountId:g.acc.id, accountCode:g.acc.code, accountName:g.acc.name,
+        debit: Number(g.amt.toFixed(2)), credit: 0, branchId: g.br, description: inv.description || o.desc || g.desc || '' });
+    }
+  } else {
+    lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name,
+      debit: inv.amount, credit: 0, branchId: br0, description: mainDesc });
+  }
+  return { lines, baseAcc };
+}
+
+// 💎 FA-S5: บรรทัดค่าใช้จ่ายใน PI เป็นทรัพย์สินไหม — ใช้ค่าที่ freeze ตอนตั้งหนี้ (capBelowThreshold) ไม่คำนวณเกณฑ์ใหม่
+function expLineIsCapex(line){ return !!(line && line.capMode && !line.capBelowThreshold && (Number(line.lineTotal)||0) > 0); }
+
+// 💎 FA-S1 การ์ดเกณฑ์ทรัพย์สิน (ใช้ทั้ง ตั้งค่า → นโยบาย และ บัญชี → ทะเบียนทรัพย์สิน)
+//   แก้ได้: ผจก.บัญชี (ตำแหน่ง ≥ ผู้จัดการ + แผนกบัญชี) / GM / Admin · คนอื่นอ่านอย่างเดียว
+//   บันทึกเมื่อออกจากช่อง/กด Enter (ไม่ dispatch ทุกตัวอักษร) · UPDATE_SETTINGS จด auditLog (_WATCH)
+function canEditCapexThreshold(user){
+  if(!user) return false;
+  if(isSuperUser(user)) return true;
+  if(user.active === false) return false;
+  if(['gm','admin'].includes(user.role) || ['gm','admin','owner'].includes(user.position)) return true;
+  // ผจก.บัญชี = ตำแหน่ง ≥ ผู้จัดการ + แผนกบัญชี (นิยามเดียวกับ taxInvOverrideApprover) · role accounting ตำแหน่งผู้จัดการ นับด้วย
+  const mgr = (POSITION_RANK[user.position] || 0) >= POSITION_RANK.manager;
+  return mgr && ((user.departmentIds || []).includes('accounting') || user.role === 'accounting');
+}
+function CapexThresholdCard({ state, dispatch, user }){
+  const cur = capexThreshold(state);
+  const u = user || state.currentUser;
+  const canEdit = canEditCapexThreshold(u);
+  const [draft, setDraft] = useState(String(cur || 0));
+  useEffect(() => { setDraft(String(cur || 0)); }, [cur]);
+  const commit = (v) => {
+    const n = Math.max(0, Math.round((Number(String(v).replace(/,/g, '')) || 0) * 100) / 100);
+    setDraft(String(n));
+    if(n === cur) return;
+    if(!confirm(`💎 เปลี่ยนเกณฑ์ทรัพย์สินเป็น ${n > 0 ? n.toLocaleString('th-TH') + ' บาท/ชิ้น' : '0 (ติ๊กแล้วเป็นทรัพย์สินทุกบรรทัด)'}?\n\nมีผลกับการตั้งหนี้ครั้งต่อไป (ใบที่ลงบัญชีแล้วไม่เปลี่ยน) · ระบบบันทึกประวัติว่าใครเปลี่ยน`)){ setDraft(String(cur || 0)); return; }
+    dispatch({ type:'UPDATE_SETTINGS', data:{ capitalizeThreshold: n } });
+  };
+  return h('div', { className:'bg-cyan-50 border-2 border-cyan-300 rounded p-4 space-y-2', 'data-testid':'policy-capex-threshold' },
+    h('div', { className:'font-bold text-cyan-900' }, '💎 เกณฑ์ทรัพย์สิน (บาท/ชิ้น ไม่รวม VAT หลังส่วนลด)'),
+    h('div', { className:'flex flex-wrap items-center gap-2' },
+      h('input', { type:'number', min:0, step:'any', value: draft, disabled: !canEdit, 'data-testid':'capex-threshold-input',
+        className:'w-40 px-2 py-1.5 border-2 rounded text-right font-mono disabled:bg-gray-100',
+        onChange: e => setDraft(e.target.value), onBlur: e => canEdit && commit(e.target.value),
+        onKeyDown: e => { if(e.key === 'Enter'){ e.preventDefault(); e.target.blur(); } } }),
+      h('span', { className:'text-sm text-cyan-900' }, 'บาท/ชิ้น'),
+      canEdit && cur !== 10000 && h('button', { type:'button', 'data-testid':'capex-threshold-recommend',
+        className:'min-h-[36px] px-3 rounded border-2 border-cyan-500 bg-white text-cyan-800 text-sm font-medium hover:bg-cyan-100',
+        onClick: () => commit(10000) }, 'ตั้งตามที่แนะนำ 10,000')),
+    !(cur > 0) && h('div', { className:'text-xs text-amber-800 bg-amber-100 rounded p-2', 'data-testid':'capex-threshold-unset' },
+      '⚠️ ยังไม่ได้ตั้งเกณฑ์ — ตอนนี้ของที่ติ๊ก 💎 ทุกบรรทัดเป็นทรัพย์สิน (ถึงจะราคาถูก) · แนะนำตั้ง 10,000 บาท/ชิ้น'),
+    h('div', { className:'text-xs text-cyan-900 space-y-0.5' },
+      h('div', null, '• เป็นทรัพย์สินเมื่อ ', h('b', null, 'ราคาต่อชิ้นไม่รวม VAT หลังหักส่วนลด ≥ เกณฑ์'), ' และใช้งานได้เกิน 1 ปี'),
+      h('div', null, '• ต่ำกว่าเกณฑ์ = ลงค่าใช้จ่าย/สินค้า ตามปกติ แม้ติ๊ก 💎 ไว้ · ใส่ 0 = ติ๊กแล้วเป็นทรัพย์สินทุกบรรทัด'),
+      // UAT S4: บิลซ่อมไม่มี PO (บันทึกบิลค่าใช้จ่ายตรง) ไม่ผ่านขั้นอนุมัติ PO — ห้ามเขียนว่าอนุมัติแล้วทุกทาง
+      h('div', { 'data-testid':'capex-card-approval-note' }, '• ส่วนเพิ่ม/ซ่อมใหญ่ที่สั่งผ่าน PO ผ่านการอนุมัติที่ขั้น PO แล้ว ไม่ต้องอนุมัติซ้ำตอนลงทะเบียน · บิลซ่อมที่บันทึกตรง (ไม่มี PO) ไม่มีขั้นอนุมัติ — บัญชีควรตรวจก่อนลงทะเบียนเพิ่มเข้าเครื่อง'),
+      h('div', { className:'text-amber-800' }, '• ตัวเลขเกณฑ์ต้องให้ผู้สอบบัญชียืนยันก่อนใช้จริง'),
+      !canEdit && h('div', { className:'text-gray-500' }, '🔒 แก้ได้เฉพาะ ผจก.บัญชี / GM / Admin')));
 }
 
 // ==================== DYNAMIC MODULE LOADER ====================
@@ -6702,7 +7050,7 @@ const _ACT_LABEL = {
   DECIDE_RTV:'ตัดสินใจวิธีจัดการของคืน', ADD_REPLACEMENT_GR:'รับของชดเชย',
   APPLY_CN_MEMO:'ใช้เครดิตหักบิล', RECEIVE_CN_DOC:'บันทึกได้รับใบลดหนี้',
   MANUAL_CLEAR_CN:'ปิดใบลดหนี้โดยไม่มีเอกสาร', SETTLE_REFUND:'รับเงินคืนจาก supplier',
-  POST_DEPRECIATION:'ลงค่าเสื่อมประจำงวด', DISPOSE_ASSET:'จำหน่ายทรัพย์สิน',
+  POST_DEPRECIATION:'ลงค่าเสื่อมประจำงวด', DISPOSE_ASSET:'จำหน่ายทรัพย์สิน', ADD_ASSET_COMPONENT:'เพิ่มส่วนเพิ่มทรัพย์สิน', VOID_ASSET_COMPONENT:'ยกเลิกส่วนเพิ่มทรัพย์สิน',
   IMPORT_STATE:'โหลด/กู้คืนข้อมูลทั้งชุด', ADD_APPROVAL_REQUEST:'ส่งคำขออนุมัติ',
   UPDATE_APPROVAL_REQUEST:'ตัดสินคำขออนุมัติ', ADJUST_STOCK:'ปรับสต๊อกเอง',
   DEDUCT_FIFO_LAYERS:'ตัดต้นทุนสินค้า', CONSUME_PRODUCTION_MATERIALS:'เบิกวัตถุดิบเข้าผลิต',
@@ -7203,45 +7551,46 @@ function FavoritesEditorModal({ state, dispatch, user, scope, scopeId, scopeLabe
 
 // ==================== Asset Depreciation (MES R3) ====================
 
-// Calculate cumulative depreciation up to (and including) a target month — does NOT include posted history
-// asset: { acquireCost, residualValue, usefulLifeYears, rate, method, startDepDate, status }
-// targetMonthYYYYMM: '2026-04'
-// Returns { totalShouldBe, monthsElapsed, perMonth }
-function calcAssetDepreciation(asset, targetMonthYYYYMM){
-  if(!asset || asset.method === 'none') return { totalShouldBe:0, monthsElapsed:0, perMonth:0 };
-  if(asset.status && !['active','warranty_claimed'].includes(asset.status))
-    return { totalShouldBe:0, monthsElapsed:0, perMonth:0 };
-  const cost = Number(asset.acquireCost)||0;
-  const residual = Number(asset.residualValue)||0;
+// 🆕 FA-S4 (FIXED_ASSET_CONTRACT B3.2 · D12 · D13): ค่าเสื่อมแยกก้อน = เครื่องเดิม (componentId null) + ส่วนเพิ่ม (components[])
+//   · สถานะที่คิดค่าเสื่อม = active / warranty_claimed / maintenance (D13 · ซ่อมอยู่ก็คิดต่อ) · disposed/sold = 0 ทุกก้อน
+//   · เครื่องที่ไม่มี components/lifeRevisions ได้ผลเท่าเดิมทุกสตางค์ (ตรรกะ _calcDepBase = calcAssetDepreciation เดิมทุกบรรทัด)
+const DEP_ACTIVE_STATUSES = ['active', 'warranty_claimed', 'maintenance'];
+function assetDepStatusOk(asset){ return !!asset && (!asset.status || DEP_ACTIVE_STATUSES.includes(asset.status)); }
+function _ymIdx(ym){ const p = String(ym||'').slice(0,7).split('-').map(Number); return (p[0]||0)*12 + ((p[1]||1)-1); }
+function _ymOfIdx(i){ return Math.floor(i/12) + '-' + String(i%12 + 1).padStart(2,'0'); }
+// เดือนเริ่ม (ใช้ new Date แบบเดิม → ผลเท่าเดิม)
+function _partStartIdx(startStr){
+  if(!startStr) return null;
+  const d = new Date(startStr);
+  if(isNaN(d.getTime())) return null;
+  return d.getFullYear()*12 + d.getMonth();
+}
+function _sumDep(list){ return (list||[]).reduce((t,e) => t + (Number(e.depAmount)||0), 0); }
+
+// ตารางพื้นฐานของก้อน (ไม่มี revision) — ตรรกะเดิมของ calcAssetDepreciation
+function _calcDepBase(part, ym){
+  const zero = { totalShouldBe:0, monthsElapsed:0, perMonth:0 };
+  if(!part || part.method === 'none') return zero;
+  const cost = part.cost, residual = part.residual;
   const depreciable = Math.max(0, cost - residual);
-  if(depreciable <= 0) return { totalShouldBe:0, monthsElapsed:0, perMonth:0 };
-
-  const startStr = asset.startDepDate || asset.acquireDate;
-  if(!startStr) return { totalShouldBe:0, monthsElapsed:0, perMonth:0 };
-  const startD = new Date(startStr);
-  const [ty, tm] = targetMonthYYYYMM.split('-').map(Number);
-  const targetD = new Date(ty, tm-1, 1);
-  const startMonthD = new Date(startD.getFullYear(), startD.getMonth(), 1);
-  if(targetD < startMonthD) return { totalShouldBe:0, monthsElapsed:0, perMonth:0 };
-  const monthsElapsed = (targetD.getFullYear() - startMonthD.getFullYear()) * 12
-    + (targetD.getMonth() - startMonthD.getMonth()) + 1;
-
-  if(asset.method === 'straight-line'){
-    const lifeMonths = (Number(asset.usefulLifeYears)||1) * 12;
-    const perMonth = depreciable / lifeMonths;
-    const totalShouldBe = Math.min(depreciable, perMonth * monthsElapsed);
-    return { totalShouldBe, monthsElapsed, perMonth };
+  if(depreciable <= 0) return zero;
+  const sIdx = _partStartIdx(part.startDepDate);
+  if(sIdx == null) return zero;
+  const tIdx = _ymIdx(ym);
+  if(tIdx < sIdx) return zero;
+  const monthsElapsed = tIdx - sIdx + 1;
+  if(part.method === 'straight-line'){
+    const perMonth = depreciable / part.lifeMonths;
+    return { totalShouldBe: Math.min(depreciable, perMonth * monthsElapsed), monthsElapsed, perMonth };
   }
-  if(asset.method === 'declining'){
+  if(part.method === 'declining'){
     // simple declining: NBV × rate ÷ 12 per month — approximate
-    const ratePct = (Number(asset.rate)||0) / 100;
-    let nbv = cost;
-    let total = 0;
+    const ratePct = (Number(part.rate)||0) / 100;
+    let nbv = cost, total = 0;
     for(let i=0; i<monthsElapsed; i++){
       const m = (nbv - residual) * ratePct / 12;
       if(m <= 0) break;
-      total += m;
-      nbv -= m;
+      total += m; nbv -= m;
       if(nbv <= residual) break;
     }
     return { totalShouldBe: total, monthsElapsed, perMonth: depreciable * ratePct / 12 };
@@ -7249,28 +7598,132 @@ function calcAssetDepreciation(asset, targetMonthYYYYMM){
   return { totalShouldBe:0, monthsElapsed, perMonth:0 };
 }
 
-// Calculate depreciation amount for a SPECIFIC month (incremental from history)
-function calcMonthlyDepreciation(asset, monthYYYYMM){
-  if(!asset || asset.method === 'none') return 0;
-  if(asset.status && !['active','warranty_claimed'].includes(asset.status)) return 0;
-  // Already posted this month?
-  const already = (asset.depreciationHistory||[]).find(h => h.period === monthYYYYMM);
-  if(already) return 0;
-  const cost = Number(asset.acquireCost)||0;
-  const residual = Number(asset.residualValue)||0;
-  const accumulated = (asset.depreciationHistory||[]).reduce((s,e) => s + (Number(e.depAmount)||0), 0);
-  const depreciableLeft = (cost - residual) - accumulated;
-  if(depreciableLeft <= 0.01) return 0;
-  const calc = calcAssetDepreciation(asset, monthYYYYMM);
-  const total = calc.totalShouldBe;
-  const thisMonth = Math.max(0, Math.min(depreciableLeft, total - accumulated));
-  return Math.round(thisMonth * 100) / 100;
+// revision ล่าสุดที่มีผล ณ เดือน ym (fromPeriod ≤ ym)
+function _activeRevision(part, ym){
+  const t = _ymIdx(ym);
+  const rs = (part && part.revisions || []).filter(r => r && !r.voided && _ymIdx(r.fromPeriod) <= t)
+    .sort((a,b) => (_ymIdx(a.fromPeriod) - _ymIdx(b.fromPeriod)) || ((Number(a.at)||0) - (Number(b.at)||0)));
+  return rs[rs.length-1] || null;
 }
 
+// ยอด "ควรสะสม" ของก้อน ณ สิ้นเดือน ym · D12: มี revision → baseAccum + (ฐาน − baseAccum) ÷ remainingMonths × เดือนตั้งแต่ fromPeriod
+function calcPartShouldBe(part, ym){
+  const rv = _activeRevision(part, ym);
+  if(!rv || part.method === 'none') return _calcDepBase(part, ym);
+  const depreciable = Math.max(0, part.cost - part.residual);
+  const base = Math.min(depreciable, Math.max(0, Number(rv.baseAccum)||0));
+  const rm = Math.max(1, Math.round(Number(rv.remainingMonths)||1));
+  const perMonth = (depreciable - base) / rm;
+  const n = _ymIdx(ym) - _ymIdx(rv.fromPeriod) + 1;
+  return { totalShouldBe: Math.min(depreciable, base + perMonth * n), monthsElapsed: n, perMonth, revision: rv };
+}
+
+// ก้อนทั้งหมดของเครื่อง: [เครื่องเดิม, ...ส่วนเพิ่มที่ไม่ void]
+function assetParts(asset){
+  if(!asset) return [];
+  const main = {
+    componentId: null, seq: 0, name: asset.name || '',
+    cost: Number(asset.acquireCost)||0, residual: Number(asset.residualValue)||0,
+    method: asset.method, rate: asset.rate,
+    startDepDate: asset.startDepDate || asset.acquireDate,
+    lifeMonths: (Number(asset.usefulLifeYears)||1) * 12,
+    revisions: (asset.lifeRevisions||[]).filter(r => r && !r.voided),
+  };
+  const comps = (asset.components||[]).filter(c => c && !c.voided).map(c => ({
+    componentId: c.id, seq: c.seq, name: c.name || '',
+    cost: Number(c.cost)||0, residual: Number(c.residualValue)||0,
+    method: 'straight-line', rate: null,
+    startDepDate: c.startDepDate || c.acquireDate,
+    lifeMonths: Math.max(1, Math.round(Number(c.lifeMonths)||1)),
+    revisions: [],
+  }));
+  return [main, ...comps];
+}
+function partHistory(asset, compId){
+  const k = compId || null;
+  return (asset && asset.depreciationHistory || []).filter(h => (h.componentId || null) === k);
+}
+
+// ค่าเสื่อมเดือน ym ต่อก้อน → [{ componentId, seq, name, amount, accumulated, cost, residual, alreadyPosted }]
+function calcMonthlyDepreciationParts(asset, ym){
+  if(!assetDepStatusOk(asset)) return [];
+  return assetParts(asset).map(p => {
+    const hist = partHistory(asset, p.componentId);
+    const accumulated = _sumDep(hist);
+    const alreadyPosted = hist.some(h => h.period === ym);
+    let amount = 0;
+    if(p.method !== 'none' && !alreadyPosted){
+      const left = (p.cost - p.residual) - accumulated;
+      if(left > 0.01){
+        const t = calcPartShouldBe(p, ym).totalShouldBe;
+        amount = Math.round(Math.max(0, Math.min(left, t - accumulated)) * 100) / 100;
+      }
+    }
+    return { componentId: p.componentId, seq: p.seq, name: p.name, amount, accumulated, cost: p.cost, residual: p.residual, alreadyPosted };
+  });
+}
+
+// Calculate cumulative depreciation (เครื่องเดิม) up to (and including) a target month — does NOT include posted history
+// Returns { totalShouldBe, monthsElapsed, perMonth } · คง signature เดิม
+function calcAssetDepreciation(asset, targetMonthYYYYMM){
+  if(!assetDepStatusOk(asset)) return { totalShouldBe:0, monthsElapsed:0, perMonth:0 };
+  return calcPartShouldBe(assetParts(asset)[0], targetMonthYYYYMM);
+}
+
+// ค่าเสื่อมเดือนนั้นทั้งเครื่อง = Σ ทุกก้อน (คง signature · ตารางค่าเสื่อม/แบนเนอร์ค้างใช้ต่อ)
+function calcMonthlyDepreciation(asset, monthYYYYMM){
+  const parts = calcMonthlyDepreciationParts(asset, monthYYYYMM);
+  if(parts.length === 0) return 0;
+  if(parts.length === 1) return parts[0].amount;
+  return _r2(parts.reduce((t,p) => t + p.amount, 0));
+}
+
+// ราคาทุนรวมทั้งเครื่อง (เครื่องเดิม + ส่วนเพิ่มไม่ void · asOf = นับเฉพาะที่ acquireDate ≤ asOf)
+function assetTotalCost(asset, asOfISO){
+  if(!asset) return 0;
+  const base = Number(asset.acquireCost)||0;
+  return base + (asset.components||[]).filter(c => c && !c.voided && (!asOfISO || !c.acquireDate || String(c.acquireDate) <= String(asOfISO)))
+    .reduce((t,c) => t + (Number(c.cost)||0), 0);
+}
+// ค่าเสื่อมสะสมรวมทุกก้อน (uptoPeriod = นับงวด ≤ เดือนนั้น)
+function assetAccumDep(asset, uptoPeriod){
+  const hist = (asset && asset.depreciationHistory || []).filter(e => !uptoPeriod || String(e.period) <= String(uptoPeriod));
+  return _sumDep(hist);
+}
 function getAssetNBV(asset){
-  const cost = Number(asset?.acquireCost)||0;
-  const accum = (asset?.depreciationHistory||[]).reduce((s,e) => s + (Number(e.depAmount)||0), 0);
-  return Math.max(0, cost - accum);
+  return Math.max(0, assetTotalCost(asset) - assetAccumDep(asset));
+}
+
+// เดือนที่เหลือของเครื่องเดิม ณ ต้นเดือน ym (รวมเดือน ym) · มี revision → remainingMonths − เดือนที่ผ่านตั้งแต่ fromPeriod
+function mainRemainingMonths(asset, ym){
+  const p = assetParts(asset)[0];
+  if(!p) return 0;
+  const t = _ymIdx(ym);
+  const rv = _activeRevision(p, ym);
+  if(rv) return Math.max(0, Math.round(Number(rv.remainingMonths)||0) - (t - _ymIdx(rv.fromPeriod)));
+  const s = _partStartIdx(p.startDepDate);
+  if(s == null) return p.lifeMonths;
+  return Math.max(0, p.lifeMonths - Math.max(0, t - s));
+}
+// อายุส่วนเพิ่ม (เดือน) · basis: 'extended' (เหลือ + ยืด · ค่าตั้งต้น) | 'main_remaining' | 'custom'
+function componentLifeMonths(asset, basis, extendMonths, customMonths, startYM){
+  const ext = Math.max(0, Math.round(Number(extendMonths)||0));
+  if(basis === 'custom') return Math.max(0, Math.round(Number(customMonths)||0));
+  const rem = mainRemainingMonths(asset, startYM);
+  return basis === 'main_remaining' ? rem : rem + ext;
+}
+// revision ของเครื่องเดิมเมื่อยืดอายุ (D12) · fromPeriod = max(เดือนเริ่มส่วนเพิ่ม, เดือนถัดจาก history เครื่องเดิมล่าสุด)
+//   baseAccum = ยอดควรสะสมของเครื่องเดิม ณ สิ้นเดือนก่อน fromPeriod ตามตารางก่อนหน้า (freeze)
+function buildLifeRevision(asset, startYM, extendMonths){
+  const main = assetParts(asset)[0];
+  if(!main) return null;
+  let from = _ymIdx(startYM);
+  partHistory(asset, null).forEach(h => { const i = _ymIdx(h.period) + 1; if(i > from) from = i; });
+  const fromPeriod = _ymOfIdx(from);
+  const prevYM = _ymOfIdx(from - 1);
+  const remainingMonths = mainRemainingMonths(asset, fromPeriod) + Math.max(0, Math.round(Number(extendMonths)||0));
+  const baseAccum = _r2(calcPartShouldBe(main, prevYM).totalShouldBe);
+  return { fromPeriod, remainingMonths, baseAccum };
 }
 
 // Compute batch allocations — distribute sub orders across master batches FIFO
@@ -7463,7 +7916,9 @@ Object.assign(global.ERP, {
   partySnapshot, piVendor, whtPayee,
   findDupSupInv, consumeSupplierCredit,
   // Helpers
-  genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines, readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
+  genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines,
+  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
+  readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, unitUsage, unitUsageAdvice, getBaseUnit, findItemUnit, toBaseQty, rtvReturnBaseQty, rtvLineBaseQty, rtvReplaceBaseQty, unitsForPurpose,
   bdR2, allocProRata, billDiscWeight, normBillDiscount, allocBillDiscount, applyBillDiscount, billDiscVatGroup, billDiscScope, vatEnterFactor, lineDiscToBasis, lineDiscFromBasis, lineVatLabel, billDiscByVatGroup, recvDiscTotal, recvDiscAppliedLive, recvDiscPortion, shortNetAmount, grEffective,   // 🆕 BILL-DISC S1
@@ -7507,6 +7962,11 @@ Object.assign(global.ERP, {
   calculateTrayPlan, canEditProdTime, calculatePlanShortage, findActiveMaster, resolveOperationParams,
   computeBatchAllocations,
   calcAssetDepreciation, calcMonthlyDepreciation, getAssetNBV,
+  // 🆕 FA-S4 ค่าเสื่อมแยกก้อน (FIXED_ASSET_CONTRACT B3.2)
+  DEP_ACTIVE_STATUSES, assetDepStatusOk, assetParts, partHistory, calcPartShouldBe, calcMonthlyDepreciationParts,
+  assetTotalCost, assetAccumDep, mainRemainingMonths, componentLifeMonths, buildLifeRevision,
+  // 💎 FA-S5 ส่วนเพิ่ม/คิว/ประวัติซ่อม
+  expLineIsCapex, getPendingCapexLines, assetRepairHistory, componentPlan,
   // Production permissions (Phase 2A)
   getUserAssignedLines, getUserAssignedStations, userCanQC, getStationsForLine, opStateRecordOnly, orderRecordOnly,
   canSeeOrder, canActOnOperation, getMyOperations,
@@ -12113,6 +12573,33 @@ function _accLine(s, code, dr, cr, desc){
   if(!a) return null;
   return { ...a, debit:+(dr||0), credit:+(cr||0), description:desc };
 }
+// 💎 verify: แยกยอด "สินค้า 1300" กับ "ทรัพย์สิน 16xx" ของใบคืน/ของชดเชย — บรรทัด noStock (💎 ไม่เข้าสต๊อก · ลง 16xx ตอนตั้งหนี้)
+//   ไปบัญชีหมวดของบรรทัด GR (assetCategoryId → cat.code · ไม่มี = 1600) · ที่เหลือ 1300 · ไม่มีบรรทัด noStock = 1300 บรรทัดเดียวเหมือนเดิม
+//   docLines: บรรทัดของ rtv/gr ({ noStock, lineTotal, grLineIdx?, itemId, assetCategoryId? }) · srcGr: GR ต้นทางไว้หาหมวด
+function _stockAssetLines(s, docLines, srcGr, total, isDebit, desc1300, descAsset){
+  const amt = Number(total) || 0;
+  const mk = (code, v, d) => _accLine(s, code, isDebit ? v : 0, isDebit ? 0 : v, d);
+  const ls = (docLines || []).filter(Boolean);
+  const all = ls.reduce((t, l) => t + (Number(l.lineTotal) || 0), 0);
+  const ns = ls.filter(l => l.noStock === true && (Number(l.lineTotal) || 0) > 0);
+  if(!ns.length || !(all > 0) || !(amt > 0)) return [mk('1300', amt, desc1300)];
+  const byCode = {}; const order = [];
+  ns.forEach(l => {
+    const gl = srcGr ? ((l.grLineIdx != null ? (srcGr.lines || [])[l.grLineIdx] : null)
+      || (srcGr.lines || []).find(g => g && g.itemId === l.itemId && g.noStock === true)) : null;
+    const catId = l.assetCategoryId || (gl && gl.assetCategoryId);
+    const cat = (s.assetCategories || []).find(c => c.id === catId);
+    let code = (cat && cat.code) || '1600';
+    if(!_acc(s, code)) code = '1600';
+    if(byCode[code] == null){ byCode[code] = 0; order.push(code); }
+    byCode[code] += (Number(l.lineTotal) || 0) * amt / all;
+  });
+  const out = []; let used = 0;
+  order.forEach(code => { const v = +Math.min(amt - used, byCode[code]).toFixed(2); if(v > 0.005){ out.push(mk(code, v, descAsset)); used += v; } });
+  const rest = +(amt - used).toFixed(2);
+  if(rest > 0.005) out.unshift(mk('1300', rest, desc1300));
+  return out;
+}
 
 function _blockIfPendingRtv(s, invId){
   const pend = _pendingRtvForInv(s, invId);
@@ -12439,6 +12926,8 @@ const _ADD_DUP = {
   RECEIVE_CN_DOC:       (s, d) => { if(!d || !d.memoId) return false; const m = (s.supplierMemos || []).find(x => x && x.id === d.memoId);
                           return !!m && m.status !== 'await_doc' && !!m.supMemoNumber && m.supMemoNumber === d.supCnNumber && _vatPeriodLocked(s, m.vatClaimDate || m.supMemoDate); },
   UNLOCK_VAT_PERIOD:    (s, d) => !!(d && d.ym && d.at != null) && (s.vatFilings || []).some(f => f && f.ym === d.ym && f.status === 'unlocked' && f.unlockedAt === d.at),
+  // 💎 FA-S5: ส่วนเพิ่ม id เดิมมีอยู่แล้ว (เครื่องไหนก็ได้) = ส่งซ้ำ
+  ADD_ASSET_COMPONENT:  (s, d) => !!(d && d.component && d.component.id) && (s.assets || []).some(x => x && (x.components || []).some(k => k && k.id === d.component.id)),
 };
 // action สร้างเอกสารที่ "ส่งซ้ำได้ปลอดภัยเมื่อมี id" — ชั้น commit/replay (คลื่น 2) ใช้เป็น allowlist ตั้งต้น (ที่เหลือ default-deny)
 const ADD_REPLAY_SAFE = Object.freeze(Object.keys(_ADD_DUP).filter(t => /^ADD_/.test(t)).concat(['ADD_STORAGE_LOCATION', 'ADD_ITEM_TAG']));
@@ -13160,7 +13649,7 @@ function reducer(s, a){
       }
       const _old = s.settings || {}, _new = { ..._old, ...(a.data || {}) };
       const _WATCH = ['posBackflushPhantomOnly','productionLive','periodLockUntil','futureDateLimit','siRequirePrice','stockValueRoles','allowNegativeStock',
-        'weighOrderJobs', 'vatLockUntil'];   // 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
+        'weighOrderJobs', 'vatLockUntil', 'capitalizeThreshold'];   // 💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
       const _chg = _WATCH.filter(k => a.data && Object.prototype.hasOwnProperty.call(a.data, k) && JSON.stringify(_old[k]) !== JSON.stringify(a.data[k]));
       if(!_chg.length) return { ...s, settings:_new };
       const _by = (s.currentUser && s.currentUser.username) || (a.data && a.data._by) || 'system', _now = Date.now();
@@ -15877,6 +16366,22 @@ function reducer(s, a){
       const inv = (s.invoices||[]).find(i => i.id === invId);
       if(!inv) return s;
       if(inv.voided) { alert('INV นี้ยกเลิกไปแล้ว'); return s; }
+      // 💎 FA-S5 (B4.10 บางส่วน): บิลนี้ลงทะเบียนเป็นส่วนเพิ่มของเครื่องแล้ว → ยกเลิกส่วนเพิ่มก่อน (ลงค่าเสื่อมแล้ว = ใช้ CN + JE)
+      {
+        const _cp = []; (s.assets||[]).forEach(x => (x.components||[]).forEach(c => { if(c && !c.voided && c.source && c.source.invId === invId) _cp.push({ x, c }); }));
+        if(_cp.length){
+          const _dep = _cp.some(({ x, c }) => (x.depreciationHistory||[]).some(hh => hh.componentId === c.id));
+          alert('⛔ บิลนี้ลงทะเบียนเป็นส่วนเพิ่มของ ' + _cp.map(({ x, c }) => (x.code||x.name) + ' #' + c.seq).join(', ') + ' แล้ว — '
+            + (_dep ? 'ส่วนเพิ่มลงค่าเสื่อมแล้ว ยกเลิกไม่ได้ → ขอใบลดหนี้ (CN) จากผู้ขาย + ให้บัญชีปรับด้วย JE' : 'ยกเลิกส่วนเพิ่มที่หน้าทรัพย์สินก่อน'));
+          return s;
+        }
+        // 💎 verify (B4.10): ทรัพย์สินที่ลงทะเบียนผูกบิลนี้ (acquireFromInvId · บิลค่าใช้จ่าย/GR แบบเก่า) → ลบทะเบียนก่อน (ไม่งั้น Dr 16xx ถูกกลับแต่เครื่องยังคิดค่าเสื่อม)
+        const _ra = (s.assets||[]).filter(x => x && !x.deleted && !['disposed','sold'].includes(x.status) && x.acquireFromInvId === invId);
+        if(_ra.length){
+          alert('⛔ บิลนี้ลงทะเบียนทรัพย์สินแล้ว: ' + _ra.map(x => x.code || x.name).join(', ') + ' — ลบทะเบียนก่อน แล้วค่อยยกเลิกบิล');
+          return s;
+        }
+      }
       // 🆕 PV-GROUP: ใบนี้อยู่ใน PV รวมหลายใบที่จ่ายแล้ว → ต้องยกเลิก PV รวมทั้งใบก่อน (chain reverse ต่อใบเดียวจะทำให้ PV กับ JE ไม่ตรง)
       {
         const _grp = (s.payments||[]).find(p => !p.invId && (p.invoiceIds||[]).length > 1 && (p.invoiceIds||[]).includes(invId) && p.approvalStatus === 'approved' && !p.reversed);
@@ -16428,6 +16933,12 @@ function reducer(s, a){
     // a.data: { rtv, stockUpdates, movements, invAdjust? }
     case 'ADD_RTV': {
       const { rtv, stockUpdates, movements, invAdjust } = a.data;
+      // 💎 FA-S2: คืนบรรทัดทรัพย์สิน (noStock) ของ GR ที่ลงทะเบียนแล้ว = จำหน่ายทรัพย์สิน + ใบลดหนี้ ไม่ใช่ RTV
+      if(rtv && (rtv.lines||[]).some(l => l && l.noStock === true)){
+        const _g = (s.grs||[]).find(g => g.id === rtv.grId);
+        const _regd = (_g && global.ERP && global.ERP.grRegisteredAssets) ? global.ERP.grRegisteredAssets(s, _g) : [];
+        if(_regd.length){ alert('คืนเครื่องที่ลงทะเบียนแล้ว = จำหน่ายทรัพย์สิน (ขาย) + ใบลดหนี้ — ทำที่ทะเบียนทรัพย์สิน'); return s; }
+      }
       let items = s.items;
       let layers = s.fifoLayers.map(l => ({...l}));
       // 🆕 PRODUCTION-LIVE UAT must_fix 4: ตัดจากคลังกลาง+ของไม่มีคลัง (ไม่หยิบคลังไลน์) · ตัด byLoc ตรงคลังที่ FIFO ตัดจริง
@@ -16523,7 +17034,7 @@ function reducer(s, a){
       const vat = Math.max(0, Number(vatShare)||0);
       const lines = [
         _accLine(s, '1311', base + vat, 0, `เครดิตค้างรับจาก supplier (RTV ${rtv.rtvNumber})`),
-        _accLine(s, '1300', 0, base, `คืนสินค้า ${rtv.rtvNumber}`),
+        ..._stockAssetLines(s, rtv.lines, (s.grs||[]).find(g => g.id === rtv.grId), base, false, `คืนสินค้า ${rtv.rtvNumber}`, `คืนทรัพย์สิน ${rtv.rtvNumber}`),   // 💎 verify: บรรทัด 💎 → 16xx
         vat > 0.005 ? _accLine(s, '1151', 0, vat, `พักภาษีซื้อรอใบลดหนี้ (RTV ${rtv.rtvNumber})`) : null,
       ].filter(Boolean);
       const _td = lines.reduce((t,l)=>t+l.debit,0), _tc = lines.reduce((t,l)=>t+l.credit,0);
@@ -16710,7 +17221,7 @@ function reducer(s, a){
         const _lines = [
           _accLine(s, _drCode, netValue, 0,
             _apDirect ? `คืนของ ลดหนี้ ${inv.invNumber}` : `เครดิตค้างรับจาก supplier (RTV ${rtv.rtvNumber})`),
-          _accLine(s, '1300', 0, totalValue, `คืนสินค้า ${rtv.rtvNumber}`),
+          ..._stockAssetLines(s, rtv.lines, (s.grs||[]).find(g => g.id === rtv.grId), totalValue, false, `คืนสินค้า ${rtv.rtvNumber}`, `คืนทรัพย์สิน ${rtv.rtvNumber}`),   // 💎 verify: บรรทัด 💎 → 16xx
           // ⚠️ ม.82/10: ยังไม่ตัด 1150 — ภาษีซื้อกลับได้เมื่อ "ได้รับใบลดหนี้" (ทำที่ RECEIVE_CN_DOC)
           vatPortion > 0.005 ? _accLine(s, '1151', 0, vatPortion, `พักภาษีซื้อรอใบลดหนี้ (RTV ${rtv.rtvNumber})`) : null,
         ].filter(Boolean);
@@ -16932,7 +17443,7 @@ function reducer(s, a){
         const _vatPart = Math.max(0, Math.min(_vatWant, _vatAll - _vatUsed));
         _vatClearedNow = _vatPart;
         const _l = [
-          _accLine(s, '1300', _repBase, 0, `รับของชดเชย ${gr.grNumber}`),
+          ..._stockAssetLines(s, gr.lines, gr, _repBase, true, `รับของชดเชย ${gr.grNumber}`, `รับทรัพย์สินชดเชย ${gr.grNumber}`),   // 💎 verify: บรรทัด noStock → Dr 16xx
           _vatPart > 0.005 ? _accLine(s, '1151', _vatPart, 0, `ล้างภาษีซื้อพัก (ได้ของชดเชย)`) : null,
           _accLine(s, _parkAcc2, 0, _repBase + _vatPart, `ล้างเครดิตค้างรับ (RTV ${_rtvSrc.rtvNumber})`),
         ].filter(Boolean);
@@ -17041,6 +17552,11 @@ function reducer(s, a){
       if(gr.isReplacement && gr.invoiceId){
         alert('GR ชดเชยใบนี้ถูกตั้งหนี้แล้ว — ต้องยกเลิกใบตั้งหนี้ก่อน'); return s;
       }
+      // 💎 FA-S2: GR ที่ลงทะเบียนทรัพย์สินแล้ว (ผูกตรง หรือผ่าน PI แบบเก่า) → ต้องลบทะเบียนก่อน
+      {
+        const _regd = (global.ERP && global.ERP.grRegisteredAssets) ? global.ERP.grRegisteredAssets(s, gr) : [];
+        if(_regd.length){ alert(`GR นี้ลงทะเบียนทรัพย์สินแล้ว (${_regd.map(x => x.assetCode || x.code || x.id).join(', ')}) — ลบทะเบียนก่อน`); return s; }
+      }
       // ตรวจว่า FIFO layer ของ GR นี้ถูกเบิกไปใช้บางส่วนหรือยัง
       const layersFromGR = (s.fifoLayers||[]).filter(l => l.grRef === gr.grNumber);
       // 🆕 GO-LIVE UAT: ส่วนที่ถูกใช้ "ล้างสต๊อกติดลบ" (nettedQty) นับเป็นใช้ไปแล้วเช่นกัน — ยกเลิก GR ไม่ได้ (NEG ถูกปิดไปแล้ว ย้อนไม่ได้) → ใช้ RTV
@@ -17058,13 +17574,14 @@ function reducer(s, a){
       }
       // คืน stock + ลบ FIFO + counter movements
       let items = s.items;
-      (gr.lines||[]).forEach(l => {
+      const _stkLines = (gr.lines||[]).filter(l => l.noStock !== true);   // 💎 FA-S2: บรรทัดทรัพย์สินไม่เคยเข้าสต๊อก (หรือถูกล้างแล้ว) → ข้าม
+      _stkLines.forEach(l => {
         const baseQty = Number(l.baseQty||l.qty)||0;
         items = items.map(it => it.id === l.itemId
           ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, gr.branch, null, -baseQty) } : it);  // 🆕 FT shape-safe
       });
       const fifoLayers = (s.fifoLayers||[]).filter(l => l.grRef !== gr.grNumber);
-      const counterMovements = (gr.lines||[]).map(l => ({
+      const counterMovements = _stkLines.map(l => ({
         id: 'mv_void_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
         type:'gr_void', itemId:l.itemId, qty:-(Number(l.baseQty||l.qty)||0),
         branch:gr.branch, date:getToday(), ref:gr.grNumber,
@@ -17250,6 +17767,75 @@ function reducer(s, a){
         ...(journalEntries !== s.journalEntries ? { journalEntries, seq: { ...s.seq, je: _seqRa } } : {}) };
     }
 
+    // 💎 FA-S3 (สัญญา B4.9): ล้างสต๊อกของ GR 💎 เก่า (ก่อน S2) ที่เข้าสต๊อกเพราะบั๊ก · ไม่ void GR · ไม่สร้าง JE (PI ลง 16xx ไม่เคย Dr 1300)
+    //   payload { grId, lineIdx, id, at, date, by, byName, note } · id/at/date จาก payload (deterministic) · ส่งซ้ำ (ล้างแล้ว) = no-op
+    case 'CLEAR_ASSET_STOCK': {
+      const d = a.data || {};
+      const gr = (s.grs||[]).find(g => g && g.id === d.grId);
+      if(!gr || gr.voided){ alert('ไม่พบ GR (หรือถูกยกเลิกแล้ว)'); return s; }
+      const li = Number(d.lineIdx);
+      const line = (gr.lines||[])[li];
+      if(!line){ alert('ไม่พบบรรทัดใน GR'); return s; }
+      if(line.clearedAssetStockAt) return s;   // T3: ล้างไปแล้ว
+      const u = _actorOf(s, d.by), _E = global.ERP || {};
+      if(!u || !((_E.isSuperUser && _E.isSuperUser(u)) || (_E.hasPerm && _E.hasPerm(u, 'stock', 'list', 'adjust')))){ alert('⛔ ไม่มีสิทธิ์ปรับสต๊อก (stock.list.adjust)'); return s; }
+      if(!line.isAsset || line.noStock != null){ alert('บรรทัดนี้ไม่ได้เข้าสต๊อกแบบของเก่า — ไม่ต้องล้าง'); return s; }
+      // UAT M1: บรรทัดเก่า (ไม่มี noStock) freeze ตามกฎเดิม = ติ๊ก 💎 คือทรัพย์สิน · ไม่เทียบเกณฑ์ปัจจุบัน (เช็ค isAsset แล้วข้างบน)
+      { const locked = _checkDateLock(s, d.date, 'ล้างสต๊อกทรัพย์สิน'); if(locked) return locked; }
+      // verify: GR ก่อน 2026-09-09 line.lot = '' แต่ชั้น FIFO ได้ล็อต `${grNumber}-NN` → เทียบล็อตจริง
+      const _effLot = line.lot || `${gr.grNumber}-${String(li + 1).padStart(2, '0')}`;
+      const lys = (s.fifoLayers||[]).filter(l => l && l.grRef === gr.grNumber && l.itemId === line.itemId && (l.lot||'') === _effLot);
+      const full = lys.length > 0 && lys.every(l => Math.abs((Number(l.remaining)||0) - (Number(l.qty)||0)) < 1e-6 && !(Number(l.nettedQty) > 0));
+      const _mode = d.mode === 'remaining' || d.mode === 'handled' ? d.mode : 'full';
+      const _stamp = { noStock:true, clearedAssetStockAt:d.at, clearedAssetStockBy:d.by, ...(_mode !== 'full' ? { clearedAssetStockMode:_mode, clearedAssetStockNote:String(d.note||'').trim() } : {}) };
+      // verify: ถูกเบิก/โอนไปบางส่วน → 'remaining' ล้างส่วนที่ค้าง · ไม่พบล็อต/ค้าง 0 → 'handled' ปิดรายการ (ปรับมือแล้ว · ต้องมีหมายเหตุ)
+      if(_mode === 'handled'){
+        if(!String(d.note||'').trim()){ alert('ใส่หมายเหตุว่าปรับสต๊อกไปแล้วอย่างไร'); return s; }
+        return { ...s,
+          grs: s.grs.map(g => g.id !== gr.id ? g : { ...g, lines: g.lines.map((l, i) => i !== li ? l : { ...l, ..._stamp }) }),
+          auditLog: [...(s.auditLog||[]), { id:'al_cas_' + d.id, ts:d.at, type:'asset_stock_clear', by:d.by, byName:d.byName || d.by,
+            entityId:gr.id, entityRef:gr.grNumber, refType:'gr', refId:gr.id, refLabel:gr.grNumber,
+            summary:`ปิดรายการทรัพย์สินค้างสต๊อก ${gr.grNumber} บรรทัด ${li + 1} (จัดการแล้ว/ปรับมือ · ไม่เปลี่ยนสต๊อก)`, note:String(d.note).trim() }] };
+      }
+      if(_mode === 'remaining'){
+        const _rq = lys.reduce((t, l) => t + Math.max(0, Number(l.remaining)||0), 0);
+        if(!(_rq > 1e-9)){ alert('ไม่มีของค้างในสต๊อกแล้ว — ใช้ "จัดการแล้ว (ปรับมือ)"'); return s; }
+        let items = s.items;
+        const _lyr = lys.filter(l => (Number(l.remaining)||0) > 1e-9);
+        const mvs = _lyr.map((l, k) => {
+          const q = Number(l.remaining)||0;
+          items = items.map(it => it.id === line.itemId ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, l.branch || gr.branch, l.locId||null, -q) } : it);
+          return { id: k ? d.id + '_' + k : d.id, type:'asset_out', itemId:line.itemId, qty:-q, branch:l.branch || gr.branch, locId:l.locId||null,
+            date:d.date, ref:gr.grNumber, note:`💎 ล้างสต๊อกทรัพย์สินส่วนที่ค้าง (ถูกเบิก/โอนไปบางส่วน) ${d.note||''}`.trim(), by:d.by };
+        });
+        const _rids = new Set(_lyr.map(l => l.id));
+        return { ...s, items,
+          grs: s.grs.map(g => g.id !== gr.id ? g : { ...g, lines: g.lines.map((l, i) => i !== li ? l : { ...l, ..._stamp, clearedAssetStockQty:_rq }) }),
+          fifoLayers: (s.fifoLayers||[]).map(l => _rids.has(l.id) ? { ...l, remaining:0 } : l),
+          movements: [...(s.movements||[]), ...mvs],
+          auditLog: [...(s.auditLog||[]), { id:'al_cas_' + d.id, ts:d.at, type:'asset_stock_clear', by:d.by, byName:d.byName || d.by,
+            entityId:gr.id, entityRef:gr.grNumber, refType:'gr', refId:gr.id, refLabel:gr.grNumber,
+            summary:`ล้างสต๊อกทรัพย์สินส่วนที่ค้าง ${gr.grNumber} บรรทัด ${li + 1} จำนวน ${_rq} (ไม่สร้าง JE · ส่วนที่ถูกเบิกไปให้บัญชีตรวจ)`, note:d.note || '' }] };
+      }
+      if(!full){ alert('ล้างทั้งบรรทัดไม่ได้ — ไม่พบล็อต หรือถูกเบิก/โอนไปแล้ว · ใช้ "ล้างส่วนที่ค้าง" หรือ "จัดการแล้ว (ปรับมือ)"'); return s; }
+      const _ids = new Set(lys.map(l => l.id));
+      let items = s.items;
+      const mvs = lys.map((l, k) => {
+        const q = Number(l.qty)||0;
+        items = items.map(it => it.id === line.itemId ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, l.branch || gr.branch, l.locId||null, -q) } : it);
+        return { id: k ? d.id + '_' + k : d.id, type:'asset_out', itemId:line.itemId, qty:-q, branch:l.branch || gr.branch, locId:l.locId||null,
+          date:d.date, ref:gr.grNumber, note:`💎 ล้างสต๊อกทรัพย์สิน (ของเก่าเข้าสต๊อกผิด) ${d.note||''}`.trim(), by:d.by };
+      });
+      const grs = s.grs.map(g => g.id !== gr.id ? g : { ...g, lines: g.lines.map((l, i) => i !== li ? l
+        : { ...l, ..._stamp }) });
+      const qty = mvs.reduce((t, m) => t - m.qty, 0);
+      return { ...s, items, grs,
+        fifoLayers: (s.fifoLayers||[]).filter(l => !_ids.has(l.id)),
+        movements: [...(s.movements||[]), ...mvs],
+        auditLog: [...(s.auditLog||[]), { id:'al_cas_' + d.id, ts:d.at, type:'asset_stock_clear', by:d.by, byName:d.byName || d.by,
+          entityId:gr.id, entityRef:gr.grNumber, refType:'gr', refId:gr.id, refLabel:gr.grNumber,
+          summary:`ล้างสต๊อกทรัพย์สิน ${gr.grNumber} บรรทัด ${li + 1} จำนวน ${qty} (ไม่สร้าง JE)`, note:d.note || '' }] };
+    }
     case 'RECEIVE_PO': {
       const { gr, updatedPO, stockUpdates, movements, fifoLayers } = a.data;
       // 🆕 Y2: period-lock — กันรับของย้อนวันเข้างวดปิด (split-brain กับ GL)
@@ -18505,6 +19091,23 @@ function reducer(s, a){
     };
     case 'UPDATE_ASSET': {
       const _oldAs = (s.assets||[]).find(x => x.id===a.data.id);
+      // 🆕 FA-S4 (B4.5): ส่วนเพิ่ม/ประวัติอายุ/ประวัติค่าเสื่อม/ข้อมูลจำหน่าย ใช้ของ state ปัจจุบันเสมอ (ไม่เชื่อ payload · แก้ F8)
+      if(_oldAs){
+        const _hasDep = (_oldAs.depreciationHistory||[]).length > 0;
+        if(_hasDep && (
+          (_oldAs.usefulLifeYears != null && (Number(_oldAs.usefulLifeYears)||0) !== (Number(a.data.usefulLifeYears)||0)) ||
+          String(_oldAs.startDepDate||_oldAs.acquireDate||'') !== String(a.data.startDepDate||a.data.acquireDate||'') ||
+          (Number(_oldAs.residualValue)||0) !== (Number(a.data.residualValue)||0) ||
+          String(_oldAs.method||'straight-line') !== String(a.data.method||'straight-line'))){
+          alert('เปลี่ยนอายุ/วันเริ่ม/มูลค่าซาก/วิธีคิด หลังลงค่าเสื่อมแล้ว = ย้อนแก้ของเก่า — ใช้ "เพิ่มต้นทุน/ยืดอายุ" แทน');
+          return s;
+        }
+        const _nd = { ...a.data };
+        ['components','lifeRevisions','openingAccumDep','openingAsOf','depreciationHistory',
+         'disposedAt','disposedReason','disposeMethod','salvageProceeds','disposeVat','disposeGainLoss','disposeJeId'].forEach(k => {
+          if(_oldAs[k] !== undefined) _nd[k] = _oldAs[k]; else delete _nd[k]; });
+        a = { ...a, data: _nd };
+      }
       const _ch = [];
       if(_oldAs){
         if((Number(_oldAs.acquireCost)||0) !== (Number(a.data.acquireCost)||0)) _ch.push(`ราคาทุน ${_oldAs.acquireCost}→${a.data.acquireCost}`);
@@ -18526,6 +19129,9 @@ function reducer(s, a){
       const _delId = (a.data && typeof a.data === 'object') ? a.data.id : a.data;   // รองรับทั้ง id-string (เดิม) + {id,by,byName}
       const _delAs = (s.assets||[]).find(x => x.id===_delId);
       const _delBy = (a.data && typeof a.data === 'object') ? a.data.by : (_delAs?.updatedBy||_delAs?.createdBy);
+      // 🆕 FA-S4 (B4.6): ลบไม่ได้ถ้ามีส่วนเพิ่ม (ไม่ void) หรือลงค่าเสื่อมแล้ว
+      if(_delAs && (_delAs.components||[]).some(c => c && !c.voided)){ alert('เครื่องนี้มีส่วนเพิ่ม — ยกเลิกส่วนเพิ่มก่อนลบ'); return s; }
+      if(_delAs && (_delAs.depreciationHistory||[]).length > 0){ alert('ทรัพย์สินนี้ลงค่าเสื่อมแล้ว — ลบไม่ได้ (ใช้จำหน่าย/ตัดจำหน่ายแทน)'); return s; }
       return { ...s,
         assets:(s.assets||[]).filter(x => x.id!==_delId),
         auditLog:[...(s.auditLog||[]), {
@@ -18533,6 +19139,94 @@ function reducer(s, a){
           refType:'asset', refId:_delId, refLabel:_delAs?`${_delAs.code||''} ${_delAs.name||''}`.trim():_delId,
           by:_delBy, byName:_delBy,
           summary:`ลบทรัพย์สิน ${_delAs?`${_delAs.code||''} ${_delAs.name||''} (ราคาทุน ${(Number(_delAs.acquireCost)||0).toLocaleString()})`:_delId}`,
+        }],
+      };
+    }
+
+    // ---------- 💎 FA-S5 (B4.1): ส่วนเพิ่ม/ซ่อมใหญ่ เข้าเครื่องเดิม (ไม่สร้าง JE — Dr 16xx เกิดตอนตั้งหนี้แล้ว D7) ----------
+    // a.data: { assetId, component:{ id, name, cost, acquireDate, startDepDate, lifeBasis, extendMonths, lifeMonths, source, note }, at, by, byName }
+    //   เจ้าของ 2026-09-29: ยอดสูงอนุมัติที่ขั้น PO แล้ว → ไม่มีขั้นอนุมัติซ้ำตอนลงทะเบียน (ตัด asset_addition)
+    case 'ADD_ASSET_COMPONENT': {
+      const d = a.data || {}, c = d.component || {};
+      const _E = global.ERP || {};
+      if(!c.id) return s;
+      if((s.assets||[]).some(x => (x.components||[]).some(k => k && k.id === c.id))) return s;   // ส่งซ้ำ = no-op (T3)
+      const u = _actorOf(s, d.by);
+      if(!u || !((_E.isSuperUser && _E.isSuperUser(u)) || (_E.hasPerm && _E.hasPerm(u, 'accounting', 'assets', 'edit')))){ alert('⛔ ไม่มีสิทธิ์แก้ทะเบียนทรัพย์สิน (accounting.assets.edit)'); return s; }
+      const _as = (s.assets||[]).find(x => x.id === d.assetId);
+      if(!_as){ alert('ไม่พบทรัพย์สิน'); return s; }
+      if(['disposed','sold'].includes(_as.status)){ alert('เครื่องนี้จำหน่ายแล้ว — เพิ่มส่วนเพิ่มไม่ได้ (ให้บัญชีโอนด้วย JE)'); return s; }
+      const _cost = Math.round((Number(c.cost)||0) * 100) / 100;
+      if(!(_cost > 0)){ alert('ยอดส่วนเพิ่มต้องมากกว่า 0'); return s; }
+      const _ym = String(c.startDepDate||'').slice(0,7);
+      const _mainYM = String(_as.startDepDate || _as.acquireDate || '').slice(0,7);
+      if(!/^\d{4}-\d{2}$/.test(_ym) || (_mainYM && _ym < _mainYM)){ alert('เดือนเริ่มคิดค่าเสื่อมของส่วนเพิ่มต้องไม่ก่อนเดือนเริ่มของเครื่อง'); return s; }
+      const src = c.source || {};
+      if(src.kind !== 'pi_expense_line'){ alert('ส่วนเพิ่มต้องมาจากบรรทัดบิล (PI)'); return s; }
+      const _inv = (s.invoices||[]).find(i => i.id === src.invId);
+      if(!_inv || _inv.voided){ alert('ไม่พบบิล หรือบิลถูกยกเลิกแล้ว'); return s; }
+      const _ln = (_inv.expenseLines||[]).find(l => l && l.id === src.expLineId);
+      if(!_ln || _ln.capMode !== 'add_to' || _ln.capAssetId !== _as.id || _ln.capBelowThreshold){ alert('บรรทัดบิลนี้ไม่ได้ติ๊ก 💎 เพิ่มเข้าเครื่องนี้'); return s; }
+      if(Math.abs(_cost - (Number(_ln.lineTotal)||0)) > 0.01){ alert(`ยอดส่วนเพิ่มต้องเท่ากับบรรทัดบิล ${(Number(_ln.lineTotal)||0).toLocaleString()} บาท (ไม่รวม VAT)`); return s; }
+      if((s.assets||[]).some(x => (x.components||[]).some(k => k && !k.voided && k.source && k.source.invId === _inv.id && k.source.expLineId === _ln.id))){ alert('บรรทัดบิลนี้ลงทะเบียนเป็นส่วนเพิ่มไปแล้ว'); return s; }
+      const _plan = _E.componentPlan(s, _as, _ym, c.lifeBasis, c.extendMonths, c.lifeMonths);
+      if(_plan.error){ alert(_plan.error); return s; }
+      if(Math.round(Number(c.lifeMonths)||0) !== _plan.lifeMonths){ alert(`อายุส่วนเพิ่มไม่ตรงกับที่ระบบคำนวณ (${_plan.lifeMonths} เดือน) — เปิดหน้าต่างใหม่แล้วลองอีกครั้ง`); return s; }
+      { const _dl = _checkDateLock(s, c.acquireDate || _inv.invDate, 'เพิ่มส่วนเพิ่มทรัพย์สิน'); if(_dl) return _dl; }
+      const _seq = (_as.components||[]).reduce((m,k) => Math.max(m, Number(k && k.seq)||0), 0) + 1;
+      const _comp = {
+        id: c.id, seq: _seq, name: String(c.name||'').trim() || `ส่วนเพิ่ม #${_seq}`, cost: _cost,
+        acquireDate: c.acquireDate || _inv.invDate, startDepDate: _ym + '-01',
+        lifeBasis: c.lifeBasis || 'extended', extendMonths: Math.max(0, Math.round(Number(c.extendMonths)||0)), lifeMonths: _plan.lifeMonths,
+        mainRemainingAtStart: _plan.mainRemaining, residualValue: 0, method: 'straight-line',
+        source: { kind:'pi_expense_line', invId:_inv.id, invNumber:_inv.invNumber || '', expLineId:_ln.id, ...(_inv.poId ? { poId:_inv.poId } : {}) },
+        ...(_plan.rateWarn ? { rateWarn: true } : {}),
+        note: c.note || '', createdAt: d.at, createdBy: d.by, createdByName: d.byName || d.by,
+      };
+      const _rev = _plan.revision ? { ..._plan.revision, componentId: c.id, at: d.at, by: d.by } : null;
+      return { ...s,
+        assets: (s.assets||[]).map(x => x.id !== _as.id ? x : { ...x,
+          components: [...(x.components||[]), _comp],
+          ...(_rev ? { lifeRevisions: [...(x.lifeRevisions||[]), _rev] } : {}) }),
+        auditLog: [...(s.auditLog||[]), {
+          id: 'al_acp_' + c.id, ts: d.at, type: 'asset_component_add',
+          refType: 'asset', refId: _as.id, refLabel: `${_as.code||''} ${_as.name||''}`.trim(), by: d.by, byName: d.byName || d.by,
+          summary: `เพิ่มส่วนเพิ่ม #${_seq} ${_cost.toLocaleString()} เข้า ${_as.code||_as.name} · ${_plan.lifeMonths} เดือน · จาก ${_inv.invNumber||''}`
+            + (_rev ? ` · ยืดอายุเครื่องเดิม: เหลือ ${_rev.remainingMonths} เดือน ตั้งแต่ ${_rev.fromPeriod}` : ''),
+        }],
+      };
+    }
+    // ---------- 💎 FA-S5 (B4.2): ยกเลิกส่วนเพิ่ม (เฉพาะที่ยังไม่ลงค่าเสื่อม) ----------
+    // a.data: { assetId, componentId, reason, at, by, byName }
+    case 'VOID_ASSET_COMPONENT': {
+      const d = a.data || {};
+      const _E = global.ERP || {};
+      const _as = (s.assets||[]).find(x => x.id === d.assetId);
+      const _c = _as && (_as.components||[]).find(k => k && k.id === d.componentId);
+      if(!_as || !_c){ alert('ไม่พบส่วนเพิ่ม'); return s; }
+      if(_c.voided) return s;   // ยกเลิกแล้ว = no-op
+      const u = _actorOf(s, d.by);
+      if(!u || !((_E.isSuperUser && _E.isSuperUser(u)) || (_E.hasPerm && _E.hasPerm(u, 'accounting', 'assets', 'delete')))){ alert('⛔ ไม่มีสิทธิ์ยกเลิกส่วนเพิ่ม (accounting.assets.delete)'); return s; }
+      if(!String(d.reason||'').trim()){ alert('ใส่เหตุผลการยกเลิก'); return s; }
+      if(['disposed','sold'].includes(_as.status)){ alert('เครื่องนี้จำหน่ายแล้ว — ยกเลิกส่วนเพิ่มไม่ได้'); return s; }
+      const _n = (_as.depreciationHistory||[]).filter(hh => hh.componentId === _c.id).length;
+      if(_n > 0){ alert(`ส่วนเพิ่มนี้ลงค่าเสื่อมแล้ว ${_n} งวด — ยกเลิกไม่ได้ ให้บัญชีปรับด้วย JE`); return s; }
+      const _revs = (_as.lifeRevisions||[]).filter(r => r && !r.voided && r.componentId === _c.id);
+      if(_revs.some(r => (_as.depreciationHistory||[]).some(hh => !hh.componentId && String(hh.period) >= String(r.fromPeriod)))){
+        alert('เครื่องเดิมลงค่าเสื่อมตามอายุใหม่ (หลังยืดอายุ) ไปแล้ว — ยกเลิกส่วนเพิ่มไม่ได้ ให้บัญชีปรับด้วย JE'); return s; }
+      // 💎 verify: ส่วนเพิ่ม/ยืดอายุที่ใหม่กว่าคิดอายุคงเหลือต่อจากก้อนนี้ → ยกเลิกก้อนนี้ก่อนจะทำให้ตัวเลขก้อนใหม่ผิด
+      const _newerComp = (_as.components||[]).some(k => k && !k.voided && k.id !== _c.id && (Number(k.seq)||0) > (Number(_c.seq)||0));
+      const _newerRev = _revs.length > 0 && (_as.lifeRevisions||[]).some(r => r && !r.voided && r.componentId && r.componentId !== _c.id
+        && _revs.some(rv => String(r.fromPeriod) >= String(rv.fromPeriod)));
+      if(_newerComp || _newerRev){ alert('ยกเลิกส่วนเพิ่มที่ใหม่กว่าก่อน'); return s; }
+      return { ...s,
+        assets: (s.assets||[]).map(x => x.id !== _as.id ? x : { ...x,
+          components: (x.components||[]).map(k => k && k.id === _c.id ? { ...k, voided:true, voidedAt:d.at, voidedBy:d.by, voidReason:String(d.reason).trim() } : k),
+          ...(_revs.length ? { lifeRevisions: (x.lifeRevisions||[]).map(r => r && r.componentId === _c.id ? { ...r, voided:true } : r) } : {}) }),
+        auditLog: [...(s.auditLog||[]), {
+          id: 'al_acpv_' + _c.id, ts: d.at, type: 'asset_component_void',
+          refType: 'asset', refId: _as.id, refLabel: `${_as.code||''} ${_as.name||''}`.trim(), by: d.by, byName: d.byName || d.by,
+          summary: `ยกเลิกส่วนเพิ่ม #${_c.seq} ${(Number(_c.cost)||0).toLocaleString()} ของ ${_as.code||_as.name} · ${String(d.reason).trim()}` + (_revs.length ? ' · ยกเลิกการยืดอายุเครื่องเดิมด้วย' : ''),
         }],
       };
     }
@@ -18547,8 +19241,12 @@ function reducer(s, a){
       if(!_as){ alert('ไม่พบทรัพย์สิน'); return s; }
       if(_as.status === 'disposed' || _as.status === 'sold'){ alert('ทรัพย์สินนี้จำหน่ายไปแล้ว'); return s; }
 
-      const _cost     = Number(_as.acquireCost) || 0;
-      const _accumDep = (_as.depreciationHistory||[]).reduce((t,e) => t + (Number(e.depAmount)||0), 0);
+      // 🆕 FA-S4 (B4.4 · D9): จำหน่ายทั้งเครื่อง = เครื่องเดิม + ส่วนเพิ่มทุกก้อน
+      const _E4 = global.ERP || {};
+      const _cost     = _E4.assetTotalCost ? _E4.assetTotalCost(_as) : (Number(_as.acquireCost) || 0);
+      const _accumDep = _E4.assetAccumDep ? _E4.assetAccumDep(_as) : (_as.depreciationHistory||[]).reduce((t,e) => t + (Number(e.depAmount)||0), 0);
+      const _compLive = (_as.components||[]).filter(c => c && !c.voided);
+      const _compCost = _compLive.reduce((t,c) => t + (Number(c.cost)||0), 0);
       const _nbv      = Math.max(0, _cost - _accumDep);
       const _isScrap  = dd.method === 'scrap' || dd.method === 'donate';
       const _gross    = _isScrap ? 0 : (Number(dd.proceeds) || 0);
@@ -18600,85 +19298,114 @@ function reducer(s, a){
           id:'al_'+Date.now().toString(36), ts:Date.now(), type:'asset_dispose',
           refType:'asset', refId:_as.id, refLabel:`${_as.code||''} ${_as.name||''}`.trim(),
           by:dd.by, byName:dd.byName,
-          summary:`จำหน่าย(${dd.method}) ${_as.code||''} · NBV ${_nbv.toLocaleString()} · รับ ${_gross.toLocaleString()}` + (_gl>=0?` · กำไร ${_gl.toFixed(2)}`:` · ขาดทุน ${(-_gl).toFixed(2)}`),
+          summary:`จำหน่าย(${dd.method}) ${_as.code||''} · NBV ${_nbv.toLocaleString()} · รับ ${_gross.toLocaleString()}` + (_gl>=0?` · กำไร ${_gl.toFixed(2)}`:` · ขาดทุน ${(-_gl).toFixed(2)}`)
+            + (_compLive.length ? ` (รวมส่วนเพิ่ม ${_compLive.length} รายการ ทุน ${_compCost.toLocaleString()})` : ''),
         }],
       };
     }
 
     // ---------- Post Asset Depreciation (compound: history entry + JE) ----------
-    // a.data: { entries:[{assetId, period, depAmount, bookValueBefore, accumulatedAfter, accExpenseAcct, accAccumDepAcct}], by, byName, period }
+    // a.data: { entries:[{assetId, componentId?, period, depAmount, accExpenseAcct, accAccumDepAcct, branch?}], period, id?, jeId?, at?, by, byName }
+    // 🆕 FA-S4 (B4.3): แยกก้อน (componentId) · กันซ้ำต่อ asset|ก้อน|งวด ทุกครั้ง · ลงเฉพาะตัวใหม่ (_newOnes · แก้ F4 ลงซ้ำทั้งชุด)
+    //   · id/jeId/at จาก payload (deterministic) · ไม่มี = fallback แบบเดิมให้หน้าเก่าที่ค้าง · ยอดต่อก้อน ≤ ที่เหลือตัดได้ + 0.01
     case 'POST_DEPRECIATION': {
-      const { entries, by, byName, period } = a.data;
+      const _pd = a.data || {};
+      const { entries, by, byName, period } = _pd;
       if(!entries || entries.length === 0) return s;
       // 🆕 FIX(risk): เดิมไม่เช็ค period lock → ลงค่าเสื่อมย้อนเข้างวดที่ปิด/ยื่นภาษีไปแล้วได้
       { const _dl = _checkDateLock(s, period + '-01', 'บันทึกค่าเสื่อม'); if(_dl) return _dl; }
-      // 🆕 กันลง JE ค่าเสื่อมงวดเดียวกันซ้ำ (UI กันรายตัวแล้ว แต่ reducer ต้องกันด้วย)
-      if((s.journalEntries||[]).some(j => j.source === 'depreciation' && j.sourceId === period && j.status === 'posted' && !j.voided)){
-        const _dupAssets = new Set();
-        (s.assets||[]).forEach(x => (x.depreciationHistory||[]).forEach(hh => { if(hh.period === period) _dupAssets.add(x.id); }));
-        const _newOnes = entries.filter(e => !_dupAssets.has(e.assetId));
-        if(_newOnes.length === 0){ alert(`งวด ${period} ลงค่าเสื่อมไปแล้ว`); return s; }
+      const _pdKey = (aid, cid) => aid + '|' + (cid || 'main') + '|' + period;
+      const _have = new Set();
+      (s.assets||[]).forEach(x => (x.depreciationHistory||[]).forEach(hh => { if(hh.period === period) _have.add(_pdKey(x.id, hh.componentId)); }));
+      const _newOnes = [];
+      for(const e of entries){
+        const k = _pdKey(e.assetId, e.componentId);
+        if(_have.has(k)) continue;
+        const _as = (s.assets||[]).find(x => x.id === e.assetId);
+        if(!_as){ alert('ไม่พบทรัพย์สินที่จะลงค่าเสื่อม'); return s; }
+        let _pc, _pr, _seq = 0;
+        if(e.componentId){
+          const _c = (_as.components||[]).find(c => c && c.id === e.componentId && !c.voided);
+          if(!_c){ alert(`ไม่พบส่วนเพิ่มของ ${_as.code||_as.name} (ถูกยกเลิกแล้ว?)`); return s; }
+          _pc = Number(_c.cost)||0; _pr = Number(_c.residualValue)||0; _seq = _c.seq;
+        } else { _pc = Number(_as.acquireCost)||0; _pr = Number(_as.residualValue)||0; }
+        const _acc = (_as.depreciationHistory||[]).filter(hh => (hh.componentId||null) === (e.componentId||null))
+          .reduce((t,hh) => t + (Number(hh.depAmount)||0), 0);
+        const _amt = Number(e.depAmount)||0;
+        if(_amt > (_pc - _pr - _acc) + 0.01){ alert(`ค่าเสื่อม ${_as.code||_as.name}${e.componentId?' ส่วนเพิ่ม #'+_seq:''} เกินยอดที่เหลือตัดได้`); return s; }
+        _have.add(k);
+        _newOnes.push({ ...e, _as, _seq, _acc, _pc });
       }
-      // Group entries into 1 JE
-      const jeId = 'je_dep_' + period.replace('-','') + '_' + Date.now().toString(36);
+      if(_newOnes.length === 0){ alert(`งวด ${period} ลงค่าเสื่อมไปแล้ว`); return s; }
+      const _at = _pd.at != null ? _pd.at : Date.now();
+      const jeId = _pd.jeId || ('je_dep_' + period.replace('-','') + '_' + Date.now().toString(36));
       const yymm = period.replace('-','').slice(2);
       const jeNum = `JE-DEP-${yymm}-${String((s.seq?.je||1)).padStart(3,'0')}`;
       const lines = [];
       let totalDep = 0;
-      // Dr: ค่าเสื่อมราคา / Cr: ค่าเสื่อมสะสม per asset
-      for(const e of entries){
-        totalDep += Number(e.depAmount)||0;
+      // Dr: ค่าเสื่อมราคา / Cr: ค่าเสื่อมสะสม ต่อก้อน
+      for(const e of _newOnes){
+        const _amt = Number(e.depAmount)||0;
+        totalDep += _amt;
         // 🆕 ติดสาขาของทรัพย์สินลงทุก line — เดิมไม่ใส่ branchId → P&L รายสาขาเทค่าเสื่อมลง HQ ทั้งก้อน (กำไรสาขาสูงเกินจริง)
-        const _br = e.branch || ((s.assets||[]).find(x => x.id === e.assetId)||{}).branch || null;
+        const _br = e.branch || e._as.branch || null;
+        const _cx = e.componentId ? { componentId: e.componentId, description: `ค่าเสื่อม ${e._as.code||''} ส่วนเพิ่ม #${e._seq}` } : {};
         lines.push({
           accountId: e.accExpenseAcct || '5410', accountCode: e.accExpenseAcct || '5410',
           account: e.accExpenseAcct || '5410',
           accountName: 'ค่าเสื่อมราคา',
-          debit: Number(e.depAmount)||0, credit: 0,
-          assetId: e.assetId, period, branchId: _br,
+          debit: _amt, credit: 0,
+          assetId: e.assetId, period, branchId: _br, ..._cx,
         });
         lines.push({
           accountId: e.accAccumDepAcct || '1659', accountCode: e.accAccumDepAcct || '1659',
           account: e.accAccumDepAcct || '1659',
           accountName: 'ค่าเสื่อมสะสม',
-          debit: 0, credit: Number(e.depAmount)||0,
-          assetId: e.assetId, period, branchId: _br,
+          debit: 0, credit: _amt,
+          assetId: e.assetId, period, branchId: _br, ..._cx,
         });
       }
+      totalDep = Math.round(totalDep * 100) / 100;
       const je = {
         id: jeId, jeNumber: jeNum,
         date: period + '-' + new Date(period+'-01').toISOString().slice(8,10),
         description: `บันทึกค่าเสื่อมประจำเดือน ${period}`,
         refType: 'depreciation', refId: period,
         source: 'depreciation', sourceId: period,
-        status: 'posted', postedBy: by, postedAt: Date.now(),
+        status: 'posted', postedBy: by, postedAt: _at,
         totalDebit: totalDep, totalCredit: totalDep,
         lines,
       };
-      // Update each asset.depreciationHistory
+      // history ต่อก้อน · bookValueBefore/accumulatedAfter = ของก้อนนั้น (คำนวณใน reducer)
       const assets = (s.assets||[]).map(asset => {
-        const e = entries.find(x => x.assetId === asset.id);
-        if(!e) return asset;
+        const mine = _newOnes.filter(x => x.assetId === asset.id);
+        if(mine.length === 0) return asset;
         return {
           ...asset,
-          depreciationHistory: [...(asset.depreciationHistory||[]), {
-            id: 'dh_' + Date.now().toString(36) + Math.random().toString(36).slice(2,5),
-            period, depAmount: Number(e.depAmount)||0,
-            bookValueBefore: Number(e.bookValueBefore)||0,
-            accumulatedAfter: Number(e.accumulatedAfter)||0,
-            jeId, postedAt: Date.now(), postedBy: by,
-          }],
+          depreciationHistory: [...(asset.depreciationHistory||[]), ...mine.map(e => {
+            const _amt = Number(e.depAmount)||0;
+            const row = {
+              id: jeId + '_' + asset.id + '_' + (e.componentId || 'main'),
+              period, depAmount: _amt,
+              bookValueBefore: Math.round((e._pc - e._acc) * 100) / 100,
+              accumulatedAfter: Math.round((e._acc + _amt) * 100) / 100,
+              jeId, postedAt: _at, postedBy: by,
+            };
+            if(e.componentId) row.componentId = e.componentId;
+            return row;
+          })],
         };
       });
+      const _nAssets = new Set(_newOnes.map(e => e.assetId)).size;
       return {
         ...s, assets,
         journalEntries: [...(s.journalEntries||[]), je],
         seq: { ...s.seq, je: (s.seq?.je||1) + 1 },
         auditLog: [...(s.auditLog||[]), {
-          id: 'al_' + Date.now().toString(36),
-          ts: Date.now(), type: 'depreciation_post',
-          refType: 'depreciation', refId: period, refLabel: `${period} (${entries.length} ทรัพย์สิน)`,
-          by, byName, summary: `ลงค่าเสื่อม ${entries.length} รายการ รวม ${totalDep.toFixed(2)} บาท`,
+          id: 'al_' + jeId,
+          ts: _at, type: 'depreciation_post',
+          refType: 'depreciation', refId: period, refLabel: `${period} (${_nAssets} ทรัพย์สิน)`,
+          by, byName, summary: `ลงค่าเสื่อม ${_newOnes.length} รายการ รวม ${totalDep.toFixed(2)} บาท` + (_newOnes.length < entries.length ? ` (ข้าม ${entries.length - _newOnes.length} รายการที่ลงไปแล้ว)` : ''),
         }],
       };
     }
@@ -20968,6 +21695,9 @@ const ACTION_MERGE = Object.freeze({
   UPDATE_WHT_CERT_INFO: { kind:'delta' },
   UPSERT_PRODUCTION_PLAN: { kind:'delta' },
   VOID_GR: { kind:'delta' },
+  ADD_ASSET_COMPONENT: { kind:'delta' },    // 💎 FA-S5: เพิ่มส่วนเพิ่มเข้าเครื่องเดิม · ส่ง id ซ้ำ = no-op (T3)
+  VOID_ASSET_COMPONENT: { kind:'delta' },   // 💎 FA-S5: ยกเลิกส่วนเพิ่ม (ยังไม่ลงค่าเสื่อม) · ยกเลิกแล้ว = no-op
+  CLEAR_ASSET_STOCK: { kind:'delta' },   // 💎 FA-S3: ล้างสต๊อก GR 💎 เก่า · ส่งซ้ำ = no-op (clearedAssetStockAt)
   VOID_INV: { kind:'delta' },
   VOID_POS_IMPORT: { kind:'delta' },
   VOID_QUICK_ISSUE: { kind:'delta' },
@@ -21040,10 +21770,13 @@ const ACTION_READS = Object.freeze({
   ADD_GR: ['grs'],
   UPDATE_GR: ['grs','invoices'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก invoiceId ที่ไม่มีอยู่จริง
   UPDATE_RTV: ['invoices','returns'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก linkedINV ที่ไม่มีอยู่จริง
-  ADD_RTV: ['boms','fifoLayers','invoices','items','movements','returns','suppliers'],   // boms: deductFromStore NEG @negUnitCost (prod-live รอบ 2)
+  ADD_RTV: ['assets','boms','fifoLayers','grs','invoices','items','movements','returns','suppliers'],   // 💎 FA-S2: assets+grs (กันคืนเครื่องที่ลงทะเบียนแล้ว) · boms: deductFromStore NEG @negUnitCost (prod-live รอบ 2)
   UPDATE_PAY: ['deposits','invoices','payments','returns','suppliers'],
-  VOID_INV: ['auditLog','bankAccounts','deposits','grs','invoices','journalEntries','payments','pettyTxns','pos','returns','supplierMemos'],
-  VOID_GR: ['auditLog','fifoLayers','grs','invoices','items','journalEntries','movements','pos','returns'],
+  VOID_INV: ['assets','auditLog','bankAccounts','deposits','grs','invoices','journalEntries','payments','pettyTxns','pos','returns','supplierMemos'],   // 💎 FA-S5: assets (บิลเป็นส่วนเพิ่มแล้ว บล็อก)
+  ADD_ASSET_COMPONENT: ['assetCategories','assets','auditLog','invoices'],   // 💎 FA-S5: ตรวจบรรทัดบิล + หมวด (เตือนอัตรา) · settings/users = หมวดคุม
+  VOID_ASSET_COMPONENT: ['assets','auditLog'],   // 💎 FA-S5
+  VOID_GR: ['assets','auditLog','fifoLayers','grs','invoices','items','journalEntries','movements','pos','returns'],   // 💎 FA-S2: assets (GR ลงทะเบียนแล้ว บล็อก)
+  CLEAR_ASSET_STOCK: ['auditLog','fifoLayers','grs','items','movements'],   // 💎 FA-S3: อ่าน/เขียนหมวดเหล่านี้ + settings/users (หมวดคุม)
   ADD_JE: ['auditLog','invoices','journalEntries'],   // DEPOSIT-VAT E-5 R5: JE ของใบตั้งหนี้ต้องมีใบจริง
   ADJUST_INV_VAT: ['auditLog','grs','invoices','journalEntries','payments','pos','returns'],
   SET_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],     // 🆕 DEPOSIT-VAT E-5 R1/R2 (งวดล็อกอยู่ใน settings = หมวดคุม)
@@ -26706,6 +27439,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         lot: '',
         expiryDate: '',
         // 🏷️ LOT-LABEL: แนะนำ = จำนวน "ลัง/ถุง" ที่รับ (1 ดวงต่อ 1 ลัง) · ผู้ใช้แก้เองได้
+        // 💎 UAT S2: แนะนำตามปกติทุกบรรทัด (💎 ต่ำกว่าเกณฑ์ = ของเข้าสต๊อก ต้องมีสติ๊กเกอร์) · ถึงเกณฑ์ = ซ่อนช่อง + ไม่พิมพ์ (_capUi/_isCap)
         labelQty: suggestLabelQty(_it, _rem, l.unit),
         _labelTouched: false,   // แก้เองแล้ว = หยุดวิ่งตามช่อง "รับตอนนี้"
       };
@@ -26749,7 +27483,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     const nl = { ...l, [k]: v };
     // 🏷️ ยังไม่ได้แก้จำนวนสติ๊กเกอร์เอง → ให้วิ่งตามจำนวนที่รับ (รับ 5 ลัง = 5 ดวง)
     //    ถ้าไม่ทำ: ลดจำนวนรับจาก 5 เหลือ 2 แต่ยังพิมพ์ 5 ดวง → สติ๊กเกอร์เกินไปแปะผิดลัง
-    if(k === 'receiveNow' && !l._labelTouched){
+    if(k === 'receiveNow' && !l._labelTouched){   // 💎 UAT S2: 💎 ต่ำกว่าเกณฑ์ก็วิ่งตาม (ถึงเกณฑ์ ช่องถูกซ่อน/ไม่พิมพ์)
       nl.labelQty = suggestLabelQty((state.items||[]).find(x => x.id === l.itemId), v, l.unit);
     }
     return nl;
@@ -26773,6 +27507,28 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     return d > 0 ? Math.max(0, global.ERP.bdR2(gross - d)) : gross;
   };
   const _poUi = (state.pos||[]).find(p => p.id === po.id) || po;
+  // 💎 UAT S1/S2: ผลเกณฑ์ทรัพย์สินต่อบรรทัด ณ ตอนนี้ — probe เดียวกับ _capMap ตอนบันทึก (ต่อหน่วย ไม่รวม VAT หลังส่วนลดรอบนี้)
+  //   true = ไม่เข้าสต๊อก (ทรัพย์สิน) · false = ติ๊ก 💎 แต่ต่ำกว่าเกณฑ์ → เข้าสต๊อกตามปกติ · null = ไม่ใช่ 💎 / ยังไม่รับ
+  //   ใช้บอกคนรับของ (ไม่เห็นราคา) แบบชัดเจน โดยไม่แสดงราคา
+  const _capUi = (l) => {
+    if(!l || !l.isAsset || !(Number(l.receiveNow) > 0)) return null;
+    const pl = (l._poLineIdx != null) ? ((_poUi.lines||[])[l._poLineIdx] || l) : l;
+    if(!pl.isAsset) return null;
+    const probe = { isAsset:true, qty:l.receiveNow, lineTotal: l.isFreebie ? 0 : _netOf(l, _poUi), vatRate:(pl.vatRate ?? 7), isFreebie:!!l.isFreebie };
+    return !!global.ERP.isCapexLine(state, { priceMode: _poUi.priceMode || 'exclusive' }, probe);
+  };
+  // ป้ายต่อบรรทัด (มือถือ + จอกว้าง) — ไม่มีราคา
+  const _capBadge = (l, i, small) => {
+    const c = _capUi(l);
+    if(c == null) return l.isAsset ? h('div', { className: cls(small ? 'text-[10px]' : 'text-[11px]', 'text-gray-500 mt-0.5') }, '💎 ทรัพย์สิน — ใส่จำนวนรับเพื่อดูว่าเข้าสต๊อกไหม') : null;
+    return c
+      ? h('div', { 'data-testid':'rcv-cap-badge-' + i, 'data-cap':'1', className: cls(small ? 'text-[10px]' : 'text-[11px]', 'mt-0.5 font-medium text-indigo-800') },
+          h('span', { className:'bg-indigo-100 border border-indigo-300 rounded px-1 mr-1' }, '💎 ไม่เข้าสต๊อก → บันทึก S/N'),
+          'หลังรับของ ไปที่ "💎 ทรัพย์สินรอบันทึก" · ไม่ต้องติดสติ๊กเกอร์ล็อต')
+      : h('div', { 'data-testid':'rcv-cap-badge-' + i, 'data-cap':'0', className: cls(small ? 'text-[10px]' : 'text-[11px]', 'mt-0.5 font-medium text-emerald-800') },
+          h('span', { className:'bg-emerald-50 border border-emerald-300 rounded px-1 mr-1' }, '📦 เข้าสต๊อก (ต่ำกว่าเกณฑ์)'),
+          'เก็บขึ้นชั้นตามปกติ + ติดสติ๊กเกอร์ล็อต');
+  };
   // 🆕 UAT N4: ป้ายส่วนลดรอบนี้ แยก "บรรทัด" กับ "ท้ายบิล" — ให้เห็นว่าทำไม ราคา×จำนวน ≠ มูลค่า
   const _discTxt = (l) => {
     const r = _discNowOf(l, _poUi);
@@ -26785,7 +27541,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
   const totalValue = rcvLines.reduce((s,l) => s + _netOf(l, _poUi), 0);
   // 🏷️ นับเฉพาะรายการที่รับจริง — ไม่รับ = ไม่ต้องมีสติ๊กเกอร์
   const totalLabels = rcvLines.reduce((s,l) =>
-    s + ((l.receiveNow||0) > 0 ? (Number(l.labelQty)||0) : 0), 0);
+    s + ((l.receiveNow||0) > 0 && _capUi(l) !== true ? (Number(l.labelQty)||0) : 0), 0);   // 💎 ทรัพย์สินไม่พิมพ์ (UAT S2)
   const hasAny = rcvLines.some(l => l.receiveNow > 0);
   const hasOverReceive = rcvLines.some(l => l.receiveNow > l.remainQty);
 
@@ -26814,7 +27570,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     catch(_e){ return []; }
   })();
   // 💎 รายการทรัพย์สินที่กำลังรับ — ไม่บังคับกรอก S/N ตอนนี้ (ไปคีย์ที่แท็บ "ทรัพย์สินรอบันทึก")
-  const assetReceiving = rcvLines.filter(l => l.isAsset && l.receiveNow > 0).length;
+  const assetReceiving = rcvLines.filter(l => _capUi(l) === true).length;   // UAT S1: นับเฉพาะที่ไม่เข้าสต๊อกจริง (ถึงเกณฑ์)
 
   // 🌊 UAT คลื่น 4 (must): เลข GR ออกจากข้อมูลในเครื่อง (รายวันร่วมทุกสาขา) → 2 เครื่องรับพร้อมกันได้เลขเดียวกัน
   //   เดิม dispatch แล้วพิมพ์สติ๊กเกอร์ทันที (ยังไม่รู้ว่า cloud รับเลขนี้ไหม) → ชน = ฉลากบนของเป็นเลขของใบอื่น
@@ -26887,14 +27643,26 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     // 🆕 BILL-DISC S5: ส่วนลดรอบนี้ต่อบรรทัด — คิดจาก PO สด (poLive) หลัง stale guard ไม่ใช่ snapshot ตอนเปิด modal
     const _discMap = new Map(receiving.map(l => [l, _discNowOf(l, poLive)]));
     const _discNow = l => (_discMap.get(l) || {}).discNow || 0;
+    // 💎 FA-S2: บรรทัด 💎 ที่ถึงเกณฑ์ (ต่อหน่วย ไม่รวม VAT หลังส่วนลดรอบนี้) = ทรัพย์สิน → ไม่เข้าสต๊อก/FIFO/ความเคลื่อนไหว
+    //   ผลเกณฑ์ ณ วันรับ freeze ไว้ที่ GR line (noStock true/false) · ตัวอ่านทุกตัวใช้ธงนี้ ไม่คำนวณใหม่
+    const _poLineOf = l => (l._poLineIdx != null) ? (poLive.lines||[])[l._poLineIdx]
+                          : (poLive.lines||[]).find(pl => pl.itemId === l.itemId);
+    const _capMap = new Map(receiving.map(l => {
+      const pl = _poLineOf(l);
+      if(!pl || !pl.isAsset) return [l, null];
+      const probe = { isAsset:true, qty:l.receiveNow, lineTotal: l.isFreebie ? 0 : _netOf(l, poLive), vatRate:(pl.vatRate ?? 7), isFreebie:!!l.isFreebie };
+      return [l, !!global.ERP.isCapexLine(state, { grNumber, priceMode: poLive.priceMode || 'exclusive' }, probe)];
+    }));
+    const _isCap = l => _capMap.get(l) === true;
+    const stockRecv = receiving.filter(l => !_isCap(l));   // บรรทัดที่เข้าคลังจริง
 
     // 🏷️ LOT-LABEL: คำนวณ "เลข LOT จริง" ครั้งเดียว แล้วใช้ตัวเดียวกันทุกที่
     //   (FIFO layer + GR line + สติ๊กเกอร์) — เดิม GR line เก็บ '' เมื่อ auto-gen
     //   ทำให้พิมพ์ซ้ำย้อนหลังไม่รู้ว่า LOT อะไร
     const resolvedLots = receiving.map((l, idx) =>
-      l.lot || `${grNumber}-${String(idx+1).padStart(2,'0')}`);
+      _isCap(l) ? '' : (l.lot || `${grNumber}-${String(idx+1).padStart(2,'0')}`));   // 💎 ทรัพย์สินไม่มีล็อต
 
-    const stockUpdates = receiving.map(l => {
+    const stockUpdates = stockRecv.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
       const baseQty = toBaseQty(item, l.receiveNow, l.unit);
       return { itemId: l.itemId, branch, delta: baseQty };
@@ -26904,7 +27672,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     //   ของแถม + ของหลัก = item เดียวกัน → unitCost = (sum paid value - discount) / (sum total qty)
     //   คนละ item → freebie ยังคง 0
     const _itemCostMap = new Map();
-    for(const l of receiving){
+    for(const l of stockRecv){
       if(!l.itemId) continue;
       const item2 = state.items.find(i => i.id === l.itemId);
       const baseQty = toBaseQty(item2, l.receiveNow, l.unit);
@@ -26925,6 +27693,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     };
 
     const fifoLayers = receiving.map((l,idx) => {
+      if(_isCap(l)) return null;   // 💎 FA-S2
       const item = state.items.find(i => i.id === l.itemId);
       const baseQty = toBaseQty(item, l.receiveNow, l.unit);
       // 🆕 DC-3: ใช้ allocated cost ถ้ามี freebie ของ item เดียวกัน
@@ -26951,9 +27720,9 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         isFreebie: !!l.isFreebie,  // 🆕 mark layer as freebie
         allocatedCost: allocCost !== null,  // 🆕 DC-3: flag ว่า cost ถูก allocate
       };
-    });
+    }).filter(Boolean);
 
-    const movements = receiving.map(l => {
+    const movements = stockRecv.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
       const baseQty = toBaseQty(item, l.receiveNow, l.unit);
       return {
@@ -27009,6 +27778,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
           assetWarrantyMonths: poLine?.isAsset ? (Number(poLine.assetWarrantyMonths)||0) : undefined,
           assetNotes: poLine?.isAsset ? (poLine.assetNotes||'') : undefined,
           assetSerial: poLine?.isAsset ? (poLine.assetSerial||'') : undefined,   // 🆕 S/N
+          // 💎 FA-S2: ผลเกณฑ์ ณ วันรับ (freeze) · true = ไม่เข้าสต๊อก ไม่มีล็อต/FIFO/ความเคลื่อนไหว
+          ...(poLine?.isAsset ? { noStock: _isCap(l) } : {}),
         };
       }),
       totalValue: receiving.reduce((t, l) => t + _netOf(l, poLive), 0),   // 🆕 BILL-DISC: คิดจาก poLive (สูตรเดียวกับ lineTotal)
@@ -27105,7 +27876,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     const _labelFrom = _supName ? `ผู้ส่ง: ${_supName}` : '';
     const labelJobs = receiving.map((l, idx) => {
       const n = Math.max(0, Math.min(99, Math.floor(Number(l.labelQty)||0)));
-      if(n <= 0) return null;
+      if(n <= 0 || _isCap(l)) return null;   // 💎 FA-S2: ทรัพย์สินไม่มีล็อต ไม่พิมพ์สติกเกอร์
       const item = state.items.find(i => i.id === l.itemId);
       return {
         count: n,
@@ -27131,14 +27902,17 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
           ? (_viaDock ? `\n\n🖨️ ส่งพิมพ์สติ๊กเกอร์ ${labelCount} ดวงเข้าเครื่องพิมพ์แล้ว` : `\n\n🏷️ เปิดหน้าพิมพ์สติ๊กเกอร์ ${labelCount} ดวงแล้ว`)
           : `\n\n⚠️ เปิดหน้าพิมพ์สติ๊กเกอร์ไม่ได้ (เบราว์เซอร์บล็อก popup)\n   ของรับเข้าคลังเรียบร้อยแล้ว — พิมพ์ได้ที่ ประวัติรับของ → 🏷️ สติ๊กเกอร์`);
 
+    // 💎 UAT S1: บอกในป๊อปอัปว่าบรรทัดไหน "ไม่เข้าสต๊อก" (ทรัพย์สิน) — คนรับของไม่เห็นราคา ต้องรู้ว่าไม่ต้องเก็บขึ้นชั้น
+    const _capNames = receiving.filter(l => _isCap(l)).map(l => (state.items.find(i => i.id === l.itemId)?.name || l.itemId) + ` ×${fmtNum(l.receiveNow)}`);
+    const _capMsg = _capNames.length ? `\n\n💎 ไม่เข้าสต๊อก (ทรัพย์สิน → บันทึก S/N ที่ "💎 ทรัพย์สินรอบันทึก"): ${_capNames.join(', ')}` : '';
     // 🆕 แจ้งว่าผูกกับ INV ล่วงหน้าแล้ว — ไม่ต้องตั้งหนี้อีก
     if(linkedAdvanceInvId){
       const advInv = state.invoices.find(i => i.id === linkedAdvanceInvId);
       alert((_numOk ? `✅ รับของเรียบร้อย\nGR: ${grNumber}` : `⏳ รับของแล้ว (รอยืนยันเลข)\nGR: ${grNumber} (อาจเปลี่ยน)\n${_pendMsg}`) + (showValue ? `\nมูลค่า: ${fmtCur(totalValue)} บาท` : '') + `\n\n` +
         `🔗 ผูกอัตโนมัติกับ INV ล่วงหน้า: ${advInv?.invNumber||linkedAdvanceInvId}\n` +
-        `→ ไม่ต้องตั้งหนี้อีก (กันจ่ายซ้ำ)` + labelMsg);
+        `→ ไม่ต้องตั้งหนี้อีก (กันจ่ายซ้ำ)` + _capMsg + labelMsg);
     } else {
-      alert((_numOk ? `✅ รับของเรียบร้อย\nGR: ${grNumber}` : `⏳ รับของแล้ว (รอยืนยันเลข)\nGR: ${grNumber} (อาจเปลี่ยน)\n${_pendMsg}`) + (showValue ? `\nมูลค่า: ${fmtCur(totalValue)} บาท` : '') + `\nฝ่ายจัดซื้อไปออก INV ต่อได้` + labelMsg);
+      alert((_numOk ? `✅ รับของเรียบร้อย\nGR: ${grNumber}` : `⏳ รับของแล้ว (รอยืนยันเลข)\nGR: ${grNumber} (อาจเปลี่ยน)\n${_pendMsg}`) + (showValue ? `\nมูลค่า: ${fmtCur(totalValue)} บาท` : '') + `\nฝ่ายจัดซื้อไปออก INV ต่อได้` + _capMsg + labelMsg);
     }
     onClose();
   };
@@ -27269,8 +28043,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
             done ? 'opacity-50 border-gray-200' : (l.receiveNow > 0 ? 'border-green-400' : 'border-gray-300')) },
             h('div', { className:'font-semibold text-base leading-tight' }, item?.name || l.itemId,
               l.isAsset && h('span', { className:'ml-1 text-[10px] align-middle bg-indigo-100 text-indigo-800 border border-indigo-200 rounded px-1' }, '💎 ทรัพย์สิน')),
-            l.isAsset && h('div', { className:'text-[11px] text-indigo-700 mb-1' },
-              'หลังรับของ ไปบันทึก S/N ที่แท็บ "💎 ทรัพย์สินรอบันทึก"'),
+            l.isAsset && h('div', { className:'mb-1' }, _capBadge(l, i, false)),   // 💎 UAT S1: ป้ายชัดเจนต่อบรรทัด (ไม่มีราคา)
             h('div', { className:'text-xs text-gray-500 font-mono mb-2' }, item?.code||'',
               eta && h('span', { className: cls('ml-2', isOverdue ? 'text-red-700 font-bold' : 'text-blue-700') },
                 isOverdue ? '⚠️ เกินกำหนด ' : '📅 ', fmtDate(eta))),
@@ -27291,7 +28064,9 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                 className:'px-2 py-2 text-xs bg-green-600 text-white rounded shrink-0 font-medium' }, 'รับครบ')),
             l.receiveNow > l.remainQty && h('div', { className:'text-xs text-purple-700 font-medium mb-2' },
               `🟣 รับเกินที่สั่ง +${fmtNum(l.receiveNow - l.remainQty)}`),
-            h('div', { className:'grid grid-cols-2 gap-2' },
+            _capUi(l) === true ? h('div', { 'data-testid':'rcv-cap-nolot-' + i, className:'text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1.5' },
+              '💎 ทรัพย์สินไม่ต้องติดสติ๊กเกอร์ล็อต · ไม่มี LOT/วันหมดอายุ')   // UAT S2
+            : h('div', { className:'grid grid-cols-2 gap-2' },
               h('div', null,
                 h('label', { className:'block text-[11px] text-gray-500 mb-0.5' }, 'LOT'),
                 h('input', { type:'text', value:l.lot, onChange:e=>updateLine(i,'lot',e.target.value),
@@ -27301,7 +28076,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                 h('input', { type:'date', value:l.expiryDate, onChange:e=>updateLine(i,'expiryDate',e.target.value),
                   className:'w-full px-2 py-1.5 border rounded text-sm' }))),
             // 🏷️ LOT-LABEL: จำนวนสติ๊กเกอร์ — โชว์เฉพาะรายการที่รับจริง · ปุ่ม +/- นิ้วโป้งกดได้
-            l.receiveNow > 0 && h('div', { className:'mt-2 pt-2 border-t flex items-center gap-1.5 flex-wrap' },
+            l.receiveNow > 0 && _capUi(l) !== true && h('div', { className:'mt-2 pt-2 border-t flex items-center gap-1.5 flex-wrap' },
               h('span', { className:'text-sm font-medium shrink-0' }, '🏷️ สติ๊กเกอร์'),
               h('button', { type:'button',
                 onClick:()=>setLabelQty(i, (Number(l.labelQty)||0) - 1),
@@ -27359,9 +28134,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                     isOverdue ? 'text-red-700 font-bold' : 'text-blue-700') },
                     isOverdue ? '⚠️ เกินกำหนด: ' : '📅 กำหนดส่ง: ', fmtDate(eta)),
                   // 💎 ทรัพย์สิน — ไม่บังคับกรอก S/N ตอนรับ
-                  l.isAsset && h('div', { className:'text-[10px] mt-0.5 text-indigo-700' },
-                    h('span', { className:'bg-indigo-100 border border-indigo-200 rounded px-1 mr-1' }, '💎 ทรัพย์สิน'),
-                    'หลังรับของ ไปบันทึก S/N ที่แท็บ "ทรัพย์สินรอบันทึก"')
+                  l.isAsset && _capBadge(l, i, true)   // 💎 UAT S1: ป้ายชัดเจนต่อบรรทัด (ไม่มีราคา)
                 ),
                 h('td', { className:'px-2 py-1.5 text-right text-xs' }, `${fmtNum(l.qty)} ${l.unit}`),
                 h('td', { className:'px-2 py-1.5 text-right text-xs text-green-700' }, fmtNum(l.receivedQty||0)),
@@ -27375,16 +28148,20 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                   l.receiveNow > l.remainQty && h('div', { className:'text-[10px] text-purple-700 font-medium text-right' },
                     `เกิน +${fmtNum(l.receiveNow - l.remainQty)}`)
                 ),
-                h('td', { className:'px-2 py-1.5' },
+                // 💎 UAT S2: บรรทัดทรัพย์สิน (ถึงเกณฑ์) ไม่มี LOT/หมดอายุ/สติ๊กเกอร์
+                _capUi(l) === true
+                  ? h('td', { colSpan:3, 'data-testid':'rcv-cap-nolot-d' + i, className:'px-2 py-1.5 text-center text-[11px] text-indigo-700' }, '💎 ทรัพย์สินไม่ต้องติดสติ๊กเกอร์ล็อต')
+                  : null,
+                _capUi(l) !== true && h('td', { className:'px-2 py-1.5' },
                   h('input', { type:'text', value:l.lot, onChange:e=>updateLine(i,'lot',e.target.value),
                     placeholder:'(auto)', className:'w-full px-2 py-1 border rounded text-xs font-mono' })
                 ),
-                h('td', { className:'px-2 py-1.5' },
+                _capUi(l) !== true && h('td', { className:'px-2 py-1.5' },
                   h('input', { type:'date', value:l.expiryDate, onChange:e=>updateLine(i,'expiryDate',e.target.value),
                     className:'w-full px-1 py-1 border rounded text-xs' })
                 ),
                 // 🏷️ LOT-LABEL: จำนวนสติ๊กเกอร์ (จอกว้าง)
-                h('td', { className:'px-2 py-1.5' },
+                _capUi(l) !== true && h('td', { className:'px-2 py-1.5' },
                   l.receiveNow > 0
                     ? h('div', { className:'flex items-center justify-center gap-1' },
                         h('button', { type:'button',
@@ -28804,6 +29581,7 @@ function EditLotModal({ layer, state, dispatch, onClose }){
 const MOVE_TYPE_LABEL = {
   gr_in: ['รับเข้า (GR)', 'bg-green-100 text-green-700'],
   gr_void: ['ยกเลิก GR', 'bg-red-200 text-red-800'],
+  asset_out: ['💎 ล้างสต๊อกทรัพย์สิน', 'bg-indigo-100 text-indigo-800'],   // FA-S3 CLEAR_ASSET_STOCK (ไม่ใช่เบิก/ขาย)
   transfer_out: ['โอนออก', 'bg-orange-100 text-orange-700'],
   transfer_in: ['โอนเข้า', 'bg-blue-100 text-blue-700'],
   mi_out: ['โอนภายใน-ออก', 'bg-amber-100 text-amber-700'],
@@ -30030,6 +30808,59 @@ function GRViewModal({ gr, state, onClose }){
 const GR_DOC_LABEL = { none:'ไม่มีเอกสาร (ซื้อสด/รายย่อย)', delivery_note:'ใบส่งของ', tax_invoice:'ใบกำกับภาษี' };
 
 // ================================================================
+// 💎 FA-S3: ของเก่าที่เข้าสต๊อกผิด (GR 💎 ก่อนระบบแยกทรัพย์สิน) → ปุ่มล้างออกจากสต๊อก (CLEAR_ASSET_STOCK · ไม่สร้าง JE)
+//   ล็อตยังเต็ม = ล้างได้ · ถูกเบิก/โอนไปแล้ว = ต้องปรับสต๊อก + JE ด้วยมือกับบัญชี
+// ================================================================
+function LegacyAssetStockPanel({ state, dispatch, user, branchIds }){
+  const rows = useMemo(() => (global.ERP.getAssetInStockLines ? global.ERP.getAssetInStockLines(state) : [])
+    .filter(x => isSuperUser(user) || branchIds.includes(x.gr.branch)), [state.grs, state.fifoLayers, state.settings, user, branchIds.join(',')]);
+  if(!rows.length) return null;
+  const canClear = isSuperUser(user) || hasPerm(user, 'stock', 'list', 'adjust');
+  const _send = (x, mode, note) => dispatch({ type:'CLEAR_ASSET_STOCK', data:{ grId:x.gr.id, lineIdx:x.lineIdx, id:genId('mv'), at:Date.now(), date:getToday(),
+    by:user.username, byName:user.name, note:note || '', ...(mode ? { mode } : {}) } });
+  const _nm = x => { const item = (state.items||[]).find(i => i.id === x.line.itemId); return item?.name || x.line.itemId; };
+  const clear = (x) => {
+    if(!confirm(`💎 ล้าง "${_nm(x)}" จำนวน ${fmtNum(x.line.qty)} ${x.line.unit||''} ออกจากสต๊อก (${x.gr.grNumber})?\n\nเครื่องนี้เป็นทรัพย์สิน ไม่ใช่ของในคลัง · ไม่กระทบบัญชี (บัญชีบันทึกเป็นทรัพย์สินไว้แล้ว) · ทำแล้วย้อนกลับไม่ได้`)) return;
+    _send(x, null, '');
+  };
+  // verify: ถูกเบิก/โอนไปบางส่วน → ล้างเฉพาะส่วนที่ยังค้าง (หน่วยฐานของสต๊อก) · ยืนยัน 2 ชั้น
+  const clearRemaining = (x) => {
+    const item = (state.items||[]).find(i => i.id === x.line.itemId);
+    const bu = (typeof getBaseUnit === 'function' && item) ? getBaseUnit(item) : '';
+    if(!confirm(`💎 "${_nm(x)}" (${x.gr.grNumber}) ถูกเบิก/โอนไปบางส่วนแล้ว\nยังค้างในสต๊อก ${fmtNum(x.remainingQty)} ${bu}\n\nล้างส่วนที่ค้างนี้ออกจากสต๊อก? · ไม่กระทบบัญชี · ทำแล้วย้อนกลับไม่ได้`)) return;
+    const note = prompt('หมายเหตุ (เช่น ส่วนที่ถูกเบิกไปใช้ที่ไหน) — แจ้งบัญชีตรวจต่อ', '');
+    if(note === null) return;
+    _send(x, 'remaining', note);
+  };
+  // verify: ไม่พบล็อต/ของออกหมดแล้ว และปรับสต๊อกด้วยมือไปแล้ว → ปิดรายการ (ไม่เปลี่ยนสต๊อก · ต้องมีหมายเหตุ)
+  const markHandled = (x) => {
+    const note = prompt(`ปิดรายการ "${_nm(x)}" (${x.gr.grNumber}) — ปรับสต๊อกไปแล้วอย่างไร? (ต้องกรอก · ระบบไม่เปลี่ยนสต๊อก)`, '');
+    if(note === null) return;
+    if(!note.trim()) return alert('ใส่หมายเหตุก่อน');
+    _send(x, 'handled', note.trim());
+  };
+  return h('div', { className:'bg-amber-50 border border-amber-300 rounded p-3 mb-4 text-sm', 'data-testid':'legacy-asset-stock' },
+    h('div', { className:'font-bold text-amber-900 mb-1' }, `⚠️ ทรัพย์สินเก่าที่ยังค้างในสต๊อก ${rows.length} รายการ`),
+    h('div', { className:'text-xs text-amber-800 mb-2' }, 'รับเข้าก่อนระบบแยกทรัพย์สินออกจากคลัง · กด "ล้างออกจากสต๊อก" (ไม่กระทบบัญชี) · ถ้าถูกเบิก/โอนไปบางส่วน ล้างส่วนที่ค้างได้ แล้วแจ้งบัญชี'),
+    h('table', { className:'w-full text-xs bg-white rounded' },
+      h('tbody', null, rows.map(x => {
+        const item = (state.items||[]).find(i => i.id === x.line.itemId);
+        const btn = (label, fn, tid) => canClear ? h(Button, { size:'sm', variant:'warning', onClick:()=>fn(x), 'data-testid':tid }, label) : h('span', { className:'text-gray-500' }, '🔒 ต้องมีสิทธิ์ปรับสต๊อก');
+        return h('tr', { key:x.gr.id + ':' + x.lineIdx, className:'border-t' },
+          h('td', { className:'px-2 py-1 font-mono' }, x.gr.grNumber),
+          h('td', { className:'px-2 py-1' }, fmtDate(x.gr.grDate)),
+          h('td', { className:'px-2 py-1' }, item?.name || x.line.itemId),
+          h('td', { className:'px-2 py-1 text-right' }, fmtNum(x.line.qty), ' ', x.line.unit || ''),
+          h('td', { className:'px-2 py-1 text-right' }, x.clearable
+            ? btn('💎 ล้างออกจากสต๊อก', clear, 'las-clear')
+            : (x.remainingQty > 1e-9
+              ? h('span', null, h('span', { className:'text-red-700 mr-1' }, '⚠️ ถูกเบิก/โอนไปบางส่วน'), btn('ล้างส่วนที่ค้าง', clearRemaining, 'las-remaining'))
+              : h('span', null, h('span', { className:'text-red-700 mr-1' }, x.noLayer ? '⚠️ ไม่พบล็อต/ถูกเบิกแล้ว' : '⚠️ ออกจากสต๊อกหมดแล้ว'), btn('จัดการแล้ว (ปรับมือ)', markHandled, 'las-handled')))));
+      })))
+  );
+}
+
+// ================================================================
 // 💎 PENDING ASSETS — ทรัพย์สินรอบันทึก (GR line ที่ติ๊ก isAsset แต่ยังไม่มีในทะเบียน)
 //   คลัง/จัดซื้อ: คีย์ S/N · วันเริ่มประกัน · ที่ตั้ง · ผู้รับผิดชอบ → UPDATE_GR_ASSET_INFO (ลง gr.lines[i])
 //   บัญชี: ลงทะเบียน+ค่าเสื่อม ใน mod-accounting (ปุ่ม 💎 โผล่เฉพาะเมื่อ accounting โหลด + export AssetEditModal)
@@ -30092,6 +30923,7 @@ function PendingAssetsTab({ state, dispatch, user }){
       h('b', null, 'S/N + วันเริ่มประกัน + ที่ตั้ง + ผู้รับผิดชอบ'), ' หลังรับของ · บัญชีนำไปลงทะเบียน+ตั้งค่าเสื่อม',
       h('div', { className:'text-xs text-indigo-700 mt-1' },
         '📌 รายการจะหลุดจากหน้านี้เมื่อบัญชีลงทะเบียนในทะเบียนทรัพย์สินแล้ว · ซื้อหลายเครื่องในบรรทัดเดียว ใส่ S/N หลายค่าคั่นด้วย , ได้')),
+    h(LegacyAssetStockPanel, { state, dispatch, user, branchIds }),   // 💎 FA-S3
 
     h('div', { className:'grid grid-cols-3 gap-3 mb-4' },
       h(StatCard, { label:'รอบันทึกทั้งหมด', value:allRows.length, color:'blue', icon:'💎' }),
@@ -30465,7 +31297,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
       // 🆕 BILL-DISC UAT M2: GR lineTotal หลังส่วนลด (บรรทัด+ท้ายบิล+PI) แล้ว → คืนของตามราคาสุทธิต่อหน่วย (lineTotal/qty)
       //   ไม่ใช่ราคาเต็ม unitPrice · GR เก่าไม่มีส่วนลด lineTotal = unitPrice×qty → ได้ค่าเดิม
       const _gE = global.ERP.grEffective ? global.ERP.grEffective(gr, state.invoices) : gr;
-      setLines((_gE.lines||[]).map(l => {
+      setLines((_gE.lines||[]).map((l, _li) => {
         const q = Number(l.qty)||0, lt = Number(l.lineTotal), gp = Number(l.unitPrice)||0;
         const net = q > 0 && isFinite(lt) && ((Number(l.discAmt)||0) > 0 || (Number(l.piDiscAlloc)||0) > 0 || Math.abs(lt - gp * q) > 0.005);
         return {
@@ -30474,6 +31306,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
           unitPrice: net ? Number((lt / q).toFixed(4)) : gp,
           netLineTotal: net ? lt : null,   // ใช้คิดยอดคืนให้ตรง lineTotal เมื่อคืนครบ (ไม่มีเศษปัดจากราคา 4 ตำแหน่ง)
           returnQty: 0,              // user enters how much to return (in original unit)
+          grLineIdx: _li,            // 💎 verify: ผูกบรรทัด GR (หักมูลค่า 💎 ตอนตั้งหนี้/JE คืนของ)
           maxQty: l.qty,             // can't return more than received
         };
       }));
@@ -30499,13 +31332,20 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
     // 🆕 §U U3: หน่วยฐานที่คืน = สัดส่วนจากที่ GR รับจริง (baseQty/qty ของบรรทัด GR) — ไม่ใช้ตัวคูณหน่วยปัจจุบัน
     //    (ถ้าแก้ตัวคูณหน่วยหลังรับของ ต้องคืนตามที่รับเข้าจริง) · กติกาอยู่ที่ ERP.rtvReturnBaseQty (00-core)
     const _rtvBase = (l) => global.ERP.rtvReturnBaseQty(state.items.find(i => i.id === l.itemId), l, l.returnQty);
+    // 💎 FA-S2: บรรทัดทรัพย์สิน (noStock) ไม่ได้เข้าสต๊อก → คืนไม่ตัดสต๊อก · ลงทะเบียนแล้ว = ต้องจำหน่ายทรัพย์สิน ไม่ใช่คืนผ่าน RTV
+    {
+      const _regd = global.ERP.grRegisteredAssets ? global.ERP.grRegisteredAssets(state, gr) : [];
+      if(returning.some(l => l.noStock === true) && _regd.length)
+        return alert(`⛔ GR นี้ลงทะเบียนทรัพย์สินแล้ว (${_regd.map(a => a.assetCode || a.code || a.id).join(', ')})\n\nคืนเครื่องที่ลงทะเบียนแล้ว = จำหน่ายทรัพย์สิน (ขาย) + ใบลดหนี้ — ให้บัญชีทำที่ ทะเบียนทรัพย์สิน`);
+    }
+    const stockRet = returning.filter(l => l.noStock !== true);
     // 🆕 UAT (จัดซื้อ): สาขาแยกคลัง — RTV ตัดจากคลังกลางเท่านั้น · ของที่ย้ายไปคลังไลน์แล้วต้องคืนเข้าคลังกลางก่อน (ไม่งั้นคลังกลางติดลบ ล็อตเสียค้างที่ไลน์)
     {
       const _E = global.ERP, _main = _E.getMainStorage ? _E.getMainStorage(state, gr.branch) : null;
       const _bo = getBranch(state, gr.branch);
       if(_main && _bo && _bo.warehouseMode !== 'simple' && _E.getLocStockFIFO){
         const _need = {};
-        returning.forEach(l => { const it = state.items.find(i => i.id === l.itemId); _need[l.itemId] = (_need[l.itemId] || 0) + _rtvBase(l); });
+        stockRet.forEach(l => { _need[l.itemId] = (_need[l.itemId] || 0) + _rtvBase(l); });
         const _atLine = [], _short = [];
         Object.keys(_need).forEach(iid => {
           const it = state.items.find(i => i.id === iid) || {};
@@ -30534,14 +31374,14 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
     const rtvNumber = `RTV-${String(d.getFullYear()+543).slice(-2)}${String(d.getMonth()+1).padStart(2,'0')}-${String(seq).padStart(4,'0')}`;
 
     // คำนวณ stock deduct (เป็น base unit)
-    const stockUpdates = returning.map(l => {
+    const stockUpdates = stockRet.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
       const baseQty = _rtvBase(l);
       return { itemId:l.itemId, branch: gr.branch, qty:baseQty, unit:getBaseUnit(item) };
     });
 
     // Movements
-    const movements = returning.map(l => {
+    const movements = stockRet.map(l => {
       const baseQty = _rtvBase(l);
       return {
         id: genId('mv'), type:'rtv_out',
@@ -30567,6 +31407,8 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
         baseQty: _rtvBase(l), baseUnit: getBaseUnit(state.items.find(i => i.id === l.itemId)),
         unitPrice: l.unitPrice,
         lineTotal: rtvLineValue(l),
+        ...(l.grLineIdx != null ? { grLineIdx: l.grLineIdx } : {}),
+        ...(l.noStock === true ? { noStock: true } : {}),   // 💎 FA-S2: ไม่ได้ตัดสต๊อก → ยกเลิก RTV/ของชดเชยไม่คืนสต๊อก
         ...(l.netLineTotal != null ? { grossUnitPrice: l.grossUnitPrice } : {}),   // 🆕 BILL-DISC M2: ราคาก่อนส่วนลด (อ้างอิง)
       })),
       totalValue,
@@ -31184,8 +32026,10 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
     const grNumber = global.ERP.genDocNumber('GRR', getToday(), state.grs||[], 'grNumber');
     const branch = rtv.branch;
 
+    // 💎 FA-S2: ชดเชยบรรทัดทรัพย์สิน (RTV line noStock) → noStock ด้วย ไม่สร้าง stock/FIFO/ความเคลื่อนไหว
+    const stockRecv = receiving.filter(l => l.noStock !== true);
     // stock + FIFO
-    const stockUpdates = receiving.map(l => {
+    const stockUpdates = stockRecv.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
       const baseQty = repBase(item, l);
       return { itemId:l.itemId, branch, qty:baseQty };
@@ -31193,6 +32037,7 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
 
     // 🆕 U12/U13: ของชดเชยมีมูลค่าเสมอ (ตามราคา RTV) → FIFO cost ปกติ + เข้าคิว GR→PI
     const fifoLayers = receiving.map((l,idx) => {
+      if(l.noStock === true) return null;
       const item = state.items.find(i => i.id === l.itemId);
       const baseQty = repBase(item, l);
       const costPerBase = baseQty > 0 ? ((l.unitPrice||0) * l.receiveNow) / baseQty : (l.unitPrice||0);
@@ -31206,9 +32051,9 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
         grRef: grNumber,
         sourceRTV: rtv.rtvNumber,
       };
-    });
+    }).filter(Boolean);
 
-    const movements = receiving.map(l => {
+    const movements = stockRecv.map(l => {
       const item = state.items.find(i => i.id === l.itemId);
       const baseQty = repBase(item, l);
       return {
@@ -31241,7 +32086,10 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
           baseQty, baseUnit: getBaseUnit(item),
           unitPrice: l.unitPrice||0, lineTotal: (l.unitPrice||0) * l.receiveNow,
           vatRate: poLine?.vatRate ?? 7,
-          lot: l.lot || '', expiryDate: l.expiryDate || '',
+          lot: l.noStock === true ? '' : (l.lot || ''), expiryDate: l.expiryDate || '',
+          // 💎 FA-S2: สืบทรัพย์สินจากบรรทัดเดิม (ตัวอ่านใช้ noStock ที่ freeze · ไม่คำนวณเกณฑ์ใหม่)
+          //   ไม่ติด isAsset — เครื่องที่ลงทะเบียนคือบรรทัด GR เดิม (กันคิวรอลงทะเบียนซ้ำ 2 แถว)
+          ...(l.noStock != null ? { noStock: l.noStock === true } : {}),
         };
       }),
       totalValue, note, photos,
@@ -31271,7 +32119,7 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
     dispatch({ type:'ADD_REPLACEMENT_GR', data:{ gr:replGR, stockUpdates, fifoLayers, movements, invRestore: null, rtvUpdate, numFree:true }});
 
     alert(`✅ รับชดเชยเรียบร้อย\nGR: ${grNumber} · มูลค่า ${fmtCur(totalValue)}\n\n` +
-      `✅ ของเข้าสต๊อกแล้ว\n\n` +
+      (stockRecv.length ? `✅ ของเข้าสต๊อกแล้ว\n\n` : `💎 ทรัพย์สิน — ไม่เข้าสต๊อก\n\n`) +
       (docWithGoods === 'tax_invoice'
         ? `📋 บันทึกไว้ว่ามีใบกำกับภาษีมาด้วย${supInvNoSeen.trim() ? ' เลขที่ ' + supInvNoSeen.trim() : ''}\n   ส่งให้จัดซื้อตัดสินว่าจะตั้งหนี้ใหม่หรือใช้บิลเดิม`
         : `📋 ส่งให้จัดซื้อตัดสินเรื่องเอกสาร/หนี้ต่อ\n   (ยังไม่สร้างหนี้ใหม่)`));
@@ -31417,6 +32265,7 @@ const MOVE_BUCKET = {
   sale_out:       { side:'out', bucket:'sale',      label:'ขาย' },
   adjust_out:     { side:'out', bucket:'adjust',    label:'ปรับ-' },
   rtv_out:        { side:'out', bucket:'return',    label:'คืน supplier' },
+  asset_out:      { side:'out', bucket:'adjust',    label:'ล้างสต๊อกทรัพย์สิน' },   // 💎 FA-S3 (ปรับ ไม่ใช่เบิก/ขาย)
 };
 
 const IN_BUCKETS  = ['transfer','purchase','production','adjust'];
@@ -31442,6 +32291,7 @@ const MTX_MOVE = {
   rtv_out:       { side:'out', b:'return',     label:'คืน supplier' },
   scrap:         { side:'out', b:'damage',     label:'เสีย/หาย' },
   adjust_out:    { side:'out', b:'count',      label:'นับ/ปรับ-' },
+  asset_out:     { side:'out', b:'count',      label:'ล้างสต๊อกทรัพย์สิน' },   // 💎 FA-S3
 };
 const MTX_IN  = [['production','ผลิต'],['purchase','ซื้อ'],['transfer','โอนเข้า'],['count','นับ']];
 const MTX_OUT = [['damage','เสีย/หาย'],['bom','เบิกผลิต'],['sale','ส่งออก'],['transferout','โอนออก'],['return','คืน'],['count','นับ']];
@@ -33899,7 +34749,7 @@ function InTransitModal({ state, user, onClose, side, branchId, branchIds, locId
 global.ERP.InTransitModal = InTransitModal;
 global.ERP.ItemMovementPopup = ItemMovementPopup;   // 🚚 S6 — ให้ test/โมดูลอื่นเปิด popup เคลื่อนไหวได้
 
-global.ERP.registerModule('stock', { main: StockModule, PendingAssetsTab, ReceiveFromTOModal, printRTV });   // 🆕 PendingAssetsTab ให้ mod-accounting ฝังในแท็บทรัพย์สินได้ · 🆕 ReceiveFromTOModal ให้ 📦 คลังไลน์ กดรับของเข้าไลน์ได้ · 🆕 printRTV ให้เทสต์ใบพิมพ์ (PARTY-FORM ขั้น 2) เรียกได้
+global.ERP.registerModule('stock', { main: StockModule, PendingAssetsTab, ReceiveFromTOModal, printRTV, NewRTVModal, ReplacementGRModal });   // 💎 FA-S2: NewRTVModal/ReplacementGRModal ให้เทสต์ fa_gr_nostock เปิดตรงได้   // 🆕 PendingAssetsTab ให้ mod-accounting ฝังในแท็บทรัพย์สินได้ · 🆕 ReceiveFromTOModal ให้ 📦 คลังไลน์ กดรับของเข้าไลน์ได้ · 🆕 printRTV ให้เทสต์ใบพิมพ์ (PARTY-FORM ขั้น 2) เรียกได้
 
 })(window);
 
@@ -57511,6 +58361,27 @@ function calcLine(line, priceMode, company){
   return { exVat: gross, vat, incVat: gross + vat, unitExVat: qty > 0 ? gross / qty : 0, discount, ...(billDiscAlloc ? { billDiscAlloc } : {}) };
 }
 
+// 💎 FA-S1 ป้ายเกณฑ์ทรัพย์สินต่อบรรทัด PO (ไม่บล็อก) · over = ถึงเกณฑ์แต่ไม่ติ๊ก 💎 · under = ติ๊กแต่ต่ำกว่าเกณฑ์ (จะลงค่าใช้จ่าย/สินค้า)
+//   ไม่ได้ตั้งเกณฑ์ (0) = ไม่แสดง · ราคาต่อหน่วยไม่รวม VAT หลังส่วนลด (capexUnitExVat ตัวเดียวกับตอนตั้งหนี้)
+function capexHintKind(state, doc, line){
+  const E = global.ERP, l = line || {};
+  const thr = E.capexThreshold ? E.capexThreshold(state) : 0;
+  if(!(thr > 0) || l.isFreebie || !l.itemId || !(Number(l.qty) > 0)) return null;
+  const u = E.capexUnitExVat(doc, l);
+  if(!l.isAsset && u >= thr - 0.005) return { kind:'over', unit:u, thr };
+  if(l.isAsset && u < thr - 0.005) return { kind:'under', unit:u, thr };
+  return null;
+}
+function capexHintEl(state, doc, line, tid){
+  const k = capexHintKind(state, doc, line);
+  if(!k) return null;
+  return k.kind === 'over'
+    ? h('div', { 'data-testid':'capex-hint-over' + (tid ? '-' + tid : ''), className:'text-[10px] text-cyan-800 bg-cyan-50 border border-cyan-300 rounded px-1 mt-0.5' },
+        `💎 ราคาถึงเกณฑ์ (${fmtCur(k.unit)}/ชิ้น ≥ ${fmtCur(k.thr)}) ควรติ๊ก 💎 ไหม?`)
+    : h('div', { 'data-testid':'capex-hint-under' + (tid ? '-' + tid : ''), className:'text-[10px] text-amber-800 bg-amber-50 border border-amber-300 rounded px-1 mt-0.5' },
+        `ต่ำกว่าเกณฑ์ทรัพย์สิน (${fmtCur(k.unit)}/ชิ้น < ${fmtCur(k.thr)}) → ตั้งหนี้จะลงเป็นสินค้า/ค่าใช้จ่าย`);
+}
+
 function calcPOTotals(lines, priceMode, company){
   let subtotal = 0, totalVat = 0, total = 0;
   for(const l of lines){
@@ -59014,6 +59885,19 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
         hint:'ถ้าตั้งใจสั่งเพิ่ม/สั่งคนละงวด กด "ยืนยันสร้าง PO" ได้เลย — ระบบไม่ได้ห้าม' });
     }
 
+    // 💎 FA-S1: เกณฑ์ทรัพย์สิน (ต่อชิ้น ไม่รวม VAT หลังส่วนลด) — เตือนสองทาง ไม่บล็อก
+    const _capx = linesA.filter(l => l.itemId && l.qty > 0).map(l => ({ l, k: capexHintKind(state, { priceMode }, l) })).filter(x => x.k);
+    const _nm = x => (state.items.find(i => i.id === x.l.itemId)?.name) || x.l.itemId;
+    const _over = _capx.filter(x => x.k.kind === 'over'), _under = _capx.filter(x => x.k.kind === 'under');
+    if(_over.length > 0) warnings.push({ key:'capex_over',
+      title:`มี ${_over.length} รายการราคาถึงเกณฑ์ทรัพย์สิน แต่ไม่ได้ติ๊ก 💎`,
+      detail: _over.map(x => `${_nm(x)} ${fmtCur(x.k.unit)}/ชิ้น`).join('\n'),
+      hint:`เกณฑ์ ${fmtCur(_over[0].k.thr)} บาท/ชิ้น (ไม่รวม VAT) และใช้งานได้เกิน 1 ปี = ทรัพย์สิน · ถ้าเป็นของใช้สิ้นเปลือง/วัตถุดิบ กดยืนยันได้เลย` });
+    if(_under.length > 0) warnings.push({ key:'capex_under',
+      title:`มี ${_under.length} รายการติ๊ก 💎 แต่ราคาต่ำกว่าเกณฑ์`,
+      detail: _under.map(x => `${_nm(x)} ${fmtCur(x.k.unit)}/ชิ้น`).join('\n'),
+      hint:`ต่ำกว่า ${fmtCur(_under[0].k.thr)} บาท/ชิ้น → ตอนตั้งหนี้จะลงเป็นสินค้า/ค่าใช้จ่าย ไม่ขึ้นทะเบียนทรัพย์สิน` });
+
     if(warnings.length > 0){ setPendingSave({ submit, warnings, zeroInfo }); return; }
     doCreate(submit, zeroInfo);
   };
@@ -59231,6 +60115,7 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
                               onChange:e=>{ const c=e.target.checked;
                                 setLines(ls => ls.map((x,xi) => xi===i ? { ...x, isAsset:c, isFreebie: c ? false : x.isFreebie } : x)); } }),
                             h('span', { className: l.isAsset?'text-indigo-700 font-medium':'text-gray-500' }, '💎 เป็นทรัพย์สิน')),
+                          capexHintEl(state, { priceMode }, linesA[i] || l, String(i)),   // 💎 FA-S1
                           l.isAsset && h('div', { className:'mt-0.5 space-y-0.5 bg-indigo-50 border border-indigo-200 rounded p-1' },
                             h('select', { value:l.assetCategoryId||'',
                               onChange:e=>updateLine(i,'assetCategoryId',e.target.value),
@@ -60897,7 +61782,8 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
                     !l.itemId && h('div', { className:'text-[10px] text-amber-700 mt-1' }, '⚠️ ยังไม่ได้เลือกสินค้า'),
                     l.itemId && !it && h('div', { className:'text-[10px] text-red-700 mt-1' }, `⚠️ ไม่พบสินค้า ${l.itemName || l.itemId} ในทะเบียน`),
                     l.isAsset && h('div', { className:'text-[10px] text-indigo-700 mt-0.5' }, '💎 ทรัพย์สิน',
-                      l.assetCategoryId ? ` · ${(state.assetCategories||[]).find(a => a.id === l.assetCategoryId)?.label || l.assetCategoryId}` : ' (ไม่มีหมวด!)')),
+                      l.assetCategoryId ? ` · ${(state.assetCategories||[]).find(a => a.id === l.assetCategoryId)?.label || l.assetCategoryId}` : ' (ไม่มีหมวด!)'),
+                    capexHintEl(state, { priceMode }, linesA[idx] || l, 'edit-' + idx)),   // 💎 FA-S1
                   h('td', { className:'px-2 py-1' },
                     h('input', { type:'number', step:'any', min:0, value:l.qty, onChange:e=>updateLine(idx,'qty',e.target.value),
                       className:'w-20 px-2 py-1 text-right border rounded' }),
@@ -62344,6 +63230,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
       // 🆕 supplier vat status snapshot (สะดวกตอน report)
       supplierVatRegistered: sup ? (sup.vatRegistered !== false) : ((vat||0) > 0),
       ...piDiscInvField,   // 🆕 BILL-DISC §B5 ข้อ 4: ส่วนลดท้ายบิลตามใบกำกับ (โชว์/พิมพ์/audit)
+      ...(rtvMode === 'deduct' && rtvsBeforeINV.length ? { rtvDeductIds: rtvsBeforeINV.map(r => r.id) } : {}),   // 💎 verify: ใบคืนที่หักในใบนี้ → buildInvDrLines หักมูลค่าบรรทัด 💎 (ก่อน UPDATE_RTV ผูก)
       createdBy: user.username, createdAt: Date.now(),
     };
     // 🆕 DEPOSIT-VAT UAT: ADD_INV ถูกปฏิเสธ (ใบกำกับซ้ำ/เกิน 6 เดือน/อนาคต/งวดล็อก) → หยุดก่อน UPDATE_GR/RTV/เครดิต/มัดจำ/PO
@@ -63400,74 +64287,10 @@ function autoPostINV(inv, state, dispatch, user){
     || accounts.find(a => (a.name||'').includes('ปัดทศนิยม') || (a.name||'').includes('Rounding'))
     || accounts.find(a => a.code === '5300');
 
-  const lines = [];
-  if(inv.amount > 0){
-    // 🆕 A9: แยกส่วนที่เป็น "ทรัพย์สิน" (GR line.isAsset) → DR บัญชีทรัพย์สินตามหมวด (1610/1620/1635/1660 → fallback 1600)
-    //   เดิมซื้อทรัพย์สินถูกลง 1300 (สินค้าคงเหลือ)/ค่าใช้จ่าย → PP&E ไม่เคยขึ้นงบ · ค่าเสื่อมคำนวณจากทะเบียนทรัพย์สินแยก
-    const _grIds = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
-    const _grLines = _grIds.flatMap(gid => ((state.grs||[]).find(g => g.id === gid)?.lines) || []);
-    const assetByAcc = {};      // accountCode → { acc, amount(exVat) }
-    let assetTotalRaw = 0;
-    // 🆕 A9 (audit UAT): เพดาน capitalize — ต่ำกว่านี้ปล่อยเป็นค่าใช้จ่าย (default 0 = capitalize ทุกชิ้นตามเดิม)
-    const _capThreshold = Number(state.settings?.capitalizeThreshold) || 0;
-    for(const l of _grLines){
-      if(!l.isAsset) continue;
-      const lex = Number(l.lineExVat != null ? l.lineExVat : l.lineTotal) || 0;
-      if(lex <= 0) continue;
-      if(_capThreshold > 0 && lex < _capThreshold) continue;   // ต่ำกว่าเพดาน → ไม่ตั้งเป็นทรัพย์สิน (ตกไป baseAcc)
-      const cat = (state.assetCategories||[]).find(c => c.id === l.assetCategoryId);
-      const code = cat?.code || '1600';
-      const acc = accounts.find(a => a.code === code) || accounts.find(a => a.code === '1600');
-      if(!acc) continue;
-      assetByAcc[acc.code] = assetByAcc[acc.code] || { acc, amount:0 };
-      assetByAcc[acc.code].amount += lex;
-      assetTotalRaw += lex;
-    }
-    // แยกได้ต่อเมื่อยอดทรัพย์สินไม่เกิน inv.amount (กัน JE ไม่บาลานซ์) — ไม่งั้นถอยไปพฤติกรรมเดิม
-    const canSplitAsset = Object.keys(assetByAcc).length > 0 && assetTotalRaw > 0 && assetTotalRaw <= (Number(inv.amount)||0) + 0.01;
-
-    // 🆕 B2 → 🆕 ACCT-V2 B3: direct_expense ที่มี expenseLines → แตก DR ตาม (บัญชี GL ของบรรทัด, สาขา) — Σ lineTotal ต้อง = inv.amount ±0.01
-    //   INV เก่า (ไม่มี accountCode ต่อบรรทัด) → key ใช้ inv.accountCode → 5300 = พฤติกรรมเดิม (แตกตามสาขาอย่างเดียว) · AutoPostModal ฝั่งบัญชีใช้กติกาเดียวกัน (§6-N1)
-    const expLines = inv.source === 'direct_expense' && Array.isArray(inv.expenseLines)
-      ? inv.expenseLines.filter(l => (Number(l.lineTotal)||0) > 0) : [];
-    const expBranchTotal = expLines.reduce((s,l) => s + (Number(l.lineTotal)||0), 0);
-
-    if(canSplitAsset){
-      // DR บัญชีทรัพย์สินตามหมวด + DR baseAcc (1300/ค่าใช้จ่าย) เฉพาะส่วนที่ไม่ใช่ทรัพย์สิน — รวม = inv.amount เป๊ะ
-      let pushed = 0;
-      for(const code in assetByAcc){
-        const a = assetByAcc[code];
-        const amt = Number(a.amount.toFixed(2));
-        lines.push({ accountId:a.acc.id, accountCode:a.acc.code, accountName:a.acc.name,
-          debit: amt, credit:0, branchId: inv.branch || state.currentBranch,
-          description: 'ทรัพย์สิน: ' + (inv.description||inv.invNumber||'') });
-        pushed += amt;
-      }
-      const nonAsset = Number(((Number(inv.amount)||0) - pushed).toFixed(2));
-      if(nonAsset > 0.005){
-        lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name,
-          debit: nonAsset, credit:0, branchId: inv.branch || state.currentBranch, description: inv.description||'' });
-      }
-    } else if(expLines.length > 0 && Math.abs(expBranchTotal - inv.amount) <= 0.01){
-      const groups = {}; const order = [];
-      for(const l of expLines){
-        const code = l.accountCode || inv.accountCode || '5300';
-        const br = l.branch || inv.branch || state.currentBranch;
-        const k = code + '|' + br;
-        if(!groups[k]){ groups[k] = { acc: accByCode(code) || expAcc, br, amt:0, desc: l.description || '' }; order.push(k); }
-        groups[k].amt += Number(l.lineTotal)||0;
-      }
-      for(const k of order){
-        const g = groups[k];
-        lines.push({ accountId:g.acc.id, accountCode:g.acc.code, accountName:g.acc.name,
-          debit: Number(g.amt.toFixed(2)), credit: 0, branchId: g.br, description: inv.description || g.desc || '' });
-      }
-    } else {
-      // 🆕 money-path branchId: DR ก้อนเดียว (ไม่มี expenseLines แตกสาขา) — tag branch จาก INV ต้นทาง
-      lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name,
-        debit: inv.amount, credit: 0, branchId: inv.branch || state.currentBranch, description: inv.description||'' });
-    }
-  }
+  // 💎 FA-S1 (§B5.1): Dr ฝั่งสินค้า/ค่าใช้จ่าย/ทรัพย์สิน สร้างจาก 00-core.buildInvDrLines ตัวเดียวกับ AutoPostModal (ปิด F13)
+  //   A9 ทรัพย์สิน: เกณฑ์ต่อหน่วย (isCapexLine/noStock) · ยอด Dr 16xx = ไม่รวม VAT หลังส่วนลด (capexLineExVat · แก้ F11)
+  //   B2/ACCT-V2 B3 ทะเบียนรายจ่าย: แตก Dr ตาม (บัญชี, สาขา) เมื่อ Σ lineTotal = inv.amount ±0.01 · ไม่งั้น Dr ก้อนเดียว (พฤติกรรมเดิม)
+  const lines = global.ERP.buildInvDrLines(inv, state).lines.slice();
   if(vatIn && (inv.vat||0) > 0){
     lines.push({ accountId:vatIn.id, accountCode:vatIn.code, accountName:vatIn.name,
       debit: inv.vat, credit: 0, description: 'VAT ซื้อ' });
@@ -64992,7 +65815,8 @@ function INVAssetLinker({ inv, state, dispatch, user }){
   const linkedAssets = (state.assets||[]).filter(a => a.acquireFromInvId === inv.id
     || (a.acquireFromGrId && _grIds.includes(a.acquireFromGrId)));
   // 🆕 ทุกบรรทัดที่ติ๊กเป็นทรัพย์สินตั้งแต่ PO (เดิม .find → PO ที่มีทรัพย์สินหลายบรรทัด seed ได้บรรทัดเดียว)
-  const assetLines = _grs.flatMap(gr => (gr.lines||[]).map((l, idx) => ({ gr, l, idx })).filter(x => x.l.isAsset));
+  //   💎 FA-S1: เฉพาะบรรทัดที่ถึงเกณฑ์ (ต่ำกว่าเกณฑ์ = ลงค่าใช้จ่าย ไม่ต้องลงทะเบียน · ตรงกับ autoPostINV)
+  const assetLines = _grs.flatMap(gr => (gr.lines||[]).map((l, idx) => ({ gr, l, idx })).filter(x => x.l.isAsset && global.ERP.grLineIsCapex(state, x.gr, x.l)));
   // บรรทัดที่ยังไม่ได้ลงทะเบียน (ผูกผ่าน acquireFromGrId+Line) — ถ้าลงผ่านทาง INV เดิมไว้แล้ว ถือว่าเสร็จทั้งใบ (legacy)
   const pendingLines = linkedAssets.some(a => a.acquireFromInvId === inv.id) ? []
     : assetLines.filter(x => !(state.assets||[]).some(a => a.acquireFromGrId === x.gr.id && a.acquireFromGrLine === x.idx));
@@ -70085,6 +70909,16 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
   const expAllocs = expBd.linesA.map(l => Number(l.billDiscAlloc) || 0);
   const linesBD = lines.map((l, i) => expAllocs[i] > 0 ? { ...l, billDiscAlloc: expAllocs[i] } : l);
   // เปลี่ยนสาขาหัว → บรรทัดที่ยังใช้สาขาเดิมเลื่อนตาม (บรรทัดที่ตั้งเองต่างจากหัว ไม่แตะ) — pattern changeDueDate ใน NewPOModal
+  // 💎 FA-S5: เครื่องที่ผูกบิลได้ (ยังไม่จำหน่าย) · เกณฑ์ทรัพย์สิน · บัญชีหมวดของเครื่อง
+  const _expAssets = useMemo(() => (state.assets||[]).filter(a => a && !['disposed','sold'].includes(a.status))
+    .slice().sort((a,b) => String(a.code||'').localeCompare(String(b.code||''))), [state.assets]);
+  // 💎 UAT S3: ผูกเครื่อง — กรองตามสาขาของบรรทัด (ไม่มี = สาขาหัว) · ติ๊ก "ดูทุกสาขา" ได้ · ชื่อสาขาในตัวเลือก (กันผูกเตาอบสาขาอื่น)
+  const [expAssetAllBr, setExpAssetAllBr] = useState(false);
+  const _expBrName = id => ((state.branches||[]).find(b => b.id === id) || {}).name || id || '';
+  const _expAssetsFor = (l) => { const br = (l && l.branch) || branch;
+    return _expAssets.filter(a => expAssetAllBr || a.branch === br || a.id === (l && l.assetId)); };
+  const _capThr = global.ERP.capexThreshold ? global.ERP.capexThreshold(state) : 0;
+  const _capAccOf = (assetId) => { const a = (state.assets||[]).find(x => x.id === assetId); const c = a && (state.assetCategories||[]).find(k => k.id === a.categoryId); return (c && c.code) || '1600'; };
   const changeBranch = (nb) => { const prev = branch; setBranch(nb); setLines(ls => ls.map(l => l.branch === prev ? { ...l, branch:nb } : l)); };
 
   // ---- คำนวณ (calcLine exclusive — ราคาที่กรอก = ก่อน VAT) ----
@@ -70214,6 +71048,11 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       wht: (l.wht && Number(l.wht.rate) > 0) ? { category:l.wht.category||'00017', sub5:l.wht.sub5||null, rate:Number(l.wht.rate)||0 } : null,
       accountCode: l.accountCode || '5300', branch: l.branch || branch, deductStock:false,
       ...(expAllocs[i] > 0 ? { billDiscAlloc: expAllocs[i] } : {}),   // 🆕 verify #3
+      // 💎 FA-S5: ผูกเครื่อง (ประวัติซ่อม) · ซ่อมใหญ่ 💎 = capMode add_to (freeze เกณฑ์/บัญชี ตอนตั้งหนี้)
+      ...(l.assetId ? { assetId: l.assetId } : {}),
+      ...(l.assetId && l.capMode === 'add_to' ? { capMode:'add_to', capAssetId: l.assetId, capLifeBasis:'extended',
+        capExtendMonths: Math.max(0, Math.round((Number(l.capExtendYears)||0) * 12)), capAccountCode: _capAccOf(l.assetId), capWorkDate: invDate,
+        ...(_capThr > 0 && r2(calcs[i].exVat) < _capThr - 0.005 ? { capBelowThreshold: true } : {}) } : {}),
     }));
     // Σ lineTotal ต้อง === amount (ปัดเศษทีละบรรทัดอาจต่างสตางค์ → ปรับบรรทัดหลักให้ตรง)
     const sumLT = r2(cleanLines.reduce((s,l) => s + l.lineTotal, 0));
@@ -70402,7 +71241,29 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
           ? h('div', { className:'bg-gray-50 border rounded p-6 text-center text-gray-500 text-sm' }, 'เลือกรายการจากทะเบียนรายจ่ายด้านบน')
           : h(Fragment, null,
               h(ExpenseLinesTable, { lines, calcs, branches: allowedBranches, accounts: expenseAccounts, unitNames, whtOpts, onUpdate: updateLine, onRemove: removeLine }),
-              h(ExpenseLinesMobile, { lines, calcs, branches: allowedBranches, accounts: expenseAccounts, unitNames, whtOpts, onUpdate: updateLine, onRemove: removeLine }))),
+              h(ExpenseLinesMobile, { lines, calcs, branches: allowedBranches, accounts: expenseAccounts, unitNames, whtOpts, onUpdate: updateLine, onRemove: removeLine }),
+              // 💎 FA-S5 (D14 · B5.2): ผูกเครื่อง (ซ่อมปกติ = ค่าใช้จ่าย → ประวัติซ่อม) · ติ๊ก 💎 ซ่อมใหญ่ = ลงบัญชีทรัพย์สิน แล้วบัญชีเพิ่มเข้าเครื่องเดิม
+              _expAssets.length > 0 && h('div', { className:'mt-2 border border-violet-200 bg-violet-50/60 rounded p-2 space-y-1.5', 'data-testid':'exp-asset-panel' },
+                h('div', { className:'flex flex-wrap items-center gap-2 text-xs font-medium text-violet-900' }, '🔧 ผูกเครื่อง (ถ้าเป็นค่าซ่อม) — ซ่อมปกติลงค่าใช้จ่ายตามเดิม · ซ่อมใหญ่ที่ทำให้ใช้ได้นานขึ้น ติ๊ก 💎',
+                  h('label', { className:'ml-auto flex items-center gap-1 font-normal cursor-pointer' },
+                    h('input', { type:'checkbox', checked: expAssetAllBr, 'data-testid':'exp-asset-allbr', onChange:e => setExpAssetAllBr(e.target.checked) }),
+                    'ดูเครื่องทุกสาขา')),
+                lines.map((l, i) => { const lt = r2(calcs[i] ? calcs[i].exVat : 0); const cap = l.capMode === 'add_to' && !!l.assetId;
+                  const below = cap && _capThr > 0 && lt < _capThr - 0.005;
+                  return h('div', { key: l.id || i, className:'flex flex-wrap items-center gap-2 text-xs' },
+                    h('span', { className:'min-w-0 truncate max-w-[14rem]', title:l.description }, `${i+1}. ${l.description || '-'}`),
+                    h('select', { value: l.assetId || '', 'data-testid':'exp-asset-link', onChange:e => updateLine(i, e.target.value ? { assetId: e.target.value } : { assetId: undefined, capMode: undefined, capExtendYears: undefined }),
+                      className:'px-1.5 py-1 border rounded text-xs max-w-[16rem]' },
+                      h('option', { value:'' }, '— ไม่ผูกเครื่อง —'),
+                      _expAssetsFor(l).map(a => h('option', { key:a.id, value:a.id }, `${a.code||''} ${a.name||''}${a.serial ? ' · S/N ' + a.serial : ''} · 📍${_expBrName(a.branch) || 'ไม่ระบุสาขา'}`))),
+                    l.assetId && h('label', { className:'flex items-center gap-1 cursor-pointer' },
+                      h('input', { type:'checkbox', checked: cap, 'data-testid':'inv-cap-chip', onChange:e => updateLine(i, { capMode: e.target.checked ? 'add_to' : undefined }) }),
+                      '💎 ซ่อมใหญ่ → เพิ่มต้นทุนเข้าเครื่อง'),
+                    cap && h('span', { className:'flex items-center gap-1' }, 'ใช้ได้นานขึ้น',
+                      h('input', { type:'number', min:0, step:'0.5', value: l.capExtendYears ?? '', placeholder:'0', 'data-testid':'exp-cap-extend',
+                        onChange:e => updateLine(i, { capExtendYears: e.target.value }), className:'w-14 px-1 py-0.5 border rounded text-right' }), 'ปี'),
+                    cap && h('span', { className: below ? 'text-amber-700' : 'text-violet-800', 'data-testid':'exp-cap-note' },
+                      below ? `ต่ำกว่าเกณฑ์ ${fmtCur(_capThr)} → ลงค่าใช้จ่าย` : `→ ลงเป็นต้นทุนของเครื่องนี้ ${fmtCur(lt)} (บัญชี ${_capAccOf(l.assetId)} ทรัพย์สิน)`)); })))),   // UAT N7: คำง่าย
 
       // Totals
       h('div', { className:'bg-gray-50 rounded p-3 space-y-1.5' },
@@ -72228,6 +73089,8 @@ const {
   BEDateInput,
   // MES R3
   calcAssetDepreciation, calcMonthlyDepreciation, getAssetNBV,
+  // 🆕 FA-S4 ค่าเสื่อมแยกก้อน (FIXED_ASSET_CONTRACT B3.2)
+  calcMonthlyDepreciationParts, assetTotalCost, assetAccumDep, assetDepStatusOk, partHistory,
   // 🆕 ACCT-V2: helper กลางจาก 00-core — Combobox supplier (filter/picker) · ป้าย ⛔ ต้องห้าม
   supplierComboProps, isDisallowedExpense,
   ymOf,   // 🆕 VAT-CLAIM V2
@@ -73291,6 +74154,7 @@ function AssetRegisterTab({ state, dispatch, user }){
   const [disposeAsset, setDisposeAsset] = useState(null);   // 🆕 B5 — ทรัพย์สินที่กำลังจำหน่าย
   const [seedFromInv, setSeedFromInv] = useState(null);
   const [seedFromLine, setSeedFromLine] = useState(null);   // 🆕 asset line (แบรนด์/รุ่น/ขนาด/สี/ประกัน/หมวด) จาก GR/PO
+  const [compReg, setCompReg] = useState(null);             // 💎 FA-S5 { inv, line, asset } บิลซ่อมใหญ่ → ส่วนเพิ่ม
   const [seedFromGr, setSeedFromGr] = useState(null);       // 🆕 { gr, lineIdx } จาก "รอลงทะเบียนจาก GR"
   const [showPendingAll, setShowPendingAll] = useState(false);   // 🆕 โชว์บรรทัดที่คลังยังไม่คีย์ S/N ด้วย
 
@@ -73335,7 +74199,7 @@ function AssetRegisterTab({ state, dispatch, user }){
   const pg = usePaged(filtered, 50);
 
   // KPIs
-  const totalCost = assets.reduce((s,a) => s + (Number(a.acquireCost)||0), 0);
+  const totalCost = assets.reduce((s,a) => s + assetTotalCost(a), 0);   // 🆕 FA-S4 รวมส่วนเพิ่ม
   const activeCount = assets.filter(a => (a.status||'active') === 'active').length;
   // Calc accumulated depreciation across all assets — POSTED จริง
   const today = new Date();
@@ -73392,6 +74256,13 @@ function AssetRegisterTab({ state, dispatch, user }){
             ` (เหลือ ${fmtDurDays(days)})`);
         }))),
 
+    // 💎 FA-S1: เกณฑ์ทรัพย์สิน — ผจก.บัญชีตั้งได้ที่นี่ (บัญชีไม่มีสิทธิ์เข้า ตั้งค่า → นโยบาย) · ยังไม่ตั้ง = เปิดค้างไว้
+    global.ERP.CapexThresholdCard && h('details', { className:'mb-3', open: !(global.ERP.capexThreshold(state) > 0), 'data-testid':'asset-capex-threshold' },
+      h('summary', { className:'cursor-pointer text-sm text-cyan-900 font-medium select-none' },
+        '💎 เกณฑ์ทรัพย์สิน: ', global.ERP.capexThreshold(state) > 0
+          ? fmtCur(global.ERP.capexThreshold(state)) + ' บาท/ชิ้น (ไม่รวม VAT)' : h('span', { className:'text-amber-700' }, 'ยังไม่ได้ตั้ง')),
+      h('div', { className:'mt-2 max-w-2xl' }, h(global.ERP.CapexThresholdCard, { state, dispatch, user }))),
+
     // 🆕 💎 รอลงทะเบียนจาก GR — จัดซื้อติ๊ก "เป็นทรัพย์สิน" ตั้งแต่ PO → คลังรับของ+คีย์ S/N → บัญชีกดลงทะเบียนตรงนี้
     pendingAssetRows.length > 0 && h('div', { className:'bg-indigo-50 border-2 border-indigo-300 rounded p-3 mb-3' },
       h('div', { className:'flex items-center justify-between gap-2 flex-wrap mb-2' },
@@ -73432,7 +74303,7 @@ function AssetRegisterTab({ state, dispatch, user }){
                     h('td', { className:'px-2 py-1 text-xs' }, line.assetWarrantyStart ? fmtDate(line.assetWarrantyStart)
                       : (line.assetWarrantyMonths ? h('span', { className:'text-gray-400' }, `ประกัน ${line.assetWarrantyMonths} ด.`) : '-')),
                     h('td', { className:'px-2 py-1 text-xs' }, [line.assetLocation, line.assetAssignedTo].filter(Boolean).join(' · ') || '-'),
-                    h('td', { className:'px-2 py-1 text-right font-mono text-xs' }, fmtCur(line.lineTotal||0)),
+                    h('td', { className:'px-2 py-1 text-right font-mono text-xs', title:'ไม่รวม VAT หลังส่วนลด' }, fmtCur(global.ERP.capexLineExVat(gr, line))),   // 💎 FA-S1
                     h('td', { className:'px-2 py-1 text-right whitespace-nowrap' },
                       canAsset('create')
                         ? h(Button, { variant:'primary', size:'sm', onClick:()=>{
@@ -73442,6 +74313,23 @@ function AssetRegisterTab({ state, dispatch, user }){
                             '💎 ลงทะเบียน')
                         : h('span', { className:'text-gray-300 text-xs' }, '—')));
                 }))))),
+
+    // 💎 FA-S5: บิลซ่อมใหญ่ที่ติ๊ก "เพิ่มเข้าเครื่อง" (ลง 16xx ตอนตั้งหนี้แล้ว) → รอบัญชีลงทะเบียนเป็นส่วนเพิ่ม
+    (() => { const rows = global.ERP.getPendingCapexLines ? global.ERP.getPendingCapexLines(state).filter(r => r.kind === 'exp_add') : [];
+      if(rows.length === 0) return null;
+      return h('div', { className:'bg-violet-50 border-2 border-violet-300 rounded p-3 mb-3', 'data-testid':'acp-queue' },
+        h('div', { className:'font-bold text-violet-900 mb-1' }, `🔧 บิลซ่อมใหญ่รอเพิ่มเข้าเครื่องเดิม: ${rows.length} รายการ`),
+        h('div', { className:'text-xs text-violet-800 mb-2' }, 'ตั้งหนี้ลงบัญชีทรัพย์สิน (16xx) แล้ว — กด "เพิ่มเข้าเครื่อง" เพื่อเริ่มคิดค่าเสื่อมของส่วนเพิ่ม'),
+        h('div', { className:'overflow-x-auto bg-white rounded border border-violet-200' }, h('table', { className:'w-full text-sm' },
+          h('tbody', { className:'divide-y' }, rows.map(r => h('tr', { key: r.inv.id + '_' + r.line.id },
+            h('td', { className:'px-2 py-1 font-mono text-xs' }, r.inv.invNumber, h('div', { className:'text-[10px] text-gray-500' }, fmtDate(r.inv.invDate))),
+            h('td', { className:'px-2 py-1 text-xs' }, r.line.description),
+            h('td', { className:'px-2 py-1 text-xs' }, r.asset ? `→ ${r.asset.code||''} ${r.asset.name||''}` : h('span', { className:'text-red-700' }, '⚠️ ไม่พบเครื่อง'),
+              r.disposed && h('div', { className:'text-[10px] text-red-700' }, '⚠ เครื่องถูกจำหน่ายแล้ว — ให้บัญชีโอนด้วย JE')),
+            h('td', { className:'px-2 py-1 text-right font-mono text-xs' }, fmtCur(r.line.lineTotal)),
+            h('td', { className:'px-2 py-1 text-right' }, r.asset && !r.disposed && canAsset('edit')
+              ? h(Button, { size:'sm', onClick:()=>setCompReg(r), 'data-testid':'acp-register' }, '🔧 เพิ่มเข้าเครื่อง') : '—')))))));
+    })(),
 
     // Filters
     h('div', { className:'flex flex-wrap gap-2 mb-3' },
@@ -73487,7 +74375,8 @@ function AssetRegisterTab({ state, dispatch, user }){
                   const cat = cats.find(c => c.id === a.categoryId);
                   const branch = state.branches.find(b => b.id === a.branch);
                   const dep = computeAccumulatedDep(a, today);
-                  const nbv = (Number(a.acquireCost)||0) - dep;
+                  const nbv = assetTotalCost(a) - dep;   // 🆕 FA-S4 รวมส่วนเพิ่ม
+                  const _nComp = (a.components||[]).filter(c => c && !c.voided).length;
                   const warrantyDays = a.warrantyEnd
                     ? Math.ceil((new Date(a.warrantyEnd) - today) / 86400000) : null;
                   const warrantyClr = warrantyDays === null ? 'text-gray-400' :
@@ -73505,7 +74394,8 @@ function AssetRegisterTab({ state, dispatch, user }){
                     h('td', { className:'px-3 py-2 text-xs' }, cat?.label || '-'),
                     h('td', { className:'px-3 py-2 text-center text-xs' }, branch?.name || '-'),
                     h('td', { className:'px-3 py-2 text-center text-xs' }, fmtDate(a.acquireDate)),
-                    h('td', { className:'px-3 py-2 text-right font-mono text-xs' }, fmtCur(a.acquireCost||0)),
+                    h('td', { className:'px-3 py-2 text-right font-mono text-xs' }, fmtCur(assetTotalCost(a)),
+                      _nComp > 0 && h('div', { className:'text-[10px] text-indigo-700', 'data-testid':'asset-comp-chip' }, `🔧 +${_nComp} ส่วนเพิ่ม`)),
                     h('td', { className:'px-3 py-2 text-right font-mono text-xs text-orange-700' },
                       dep > 0 ? fmtCur(dep) : '-'),
                     h('td', { className:'px-3 py-2 text-right font-mono text-xs font-bold text-green-700' },
@@ -73544,7 +74434,8 @@ function AssetRegisterTab({ state, dispatch, user }){
       onDispose:(a)=>{ setDisposeAsset(a); setDetail(null); } }),
     disposeAsset && h(DisposeAssetModal, { key:disposeAsset.id, asset:disposeAsset, state, dispatch, user,
       onClose:()=>setDisposeAsset(null) }),
-    showBulkDep && h(BulkDepreciationModal, { state, dispatch, user, onClose:()=>setShowBulkDep(false) })
+    showBulkDep && h(BulkDepreciationModal, { state, dispatch, user, onClose:()=>setShowBulkDep(false) }),
+    compReg && h(ComponentModal, { key: compReg.inv.id + compReg.line.id, state, dispatch, user, inv: compReg.inv, line: compReg.line, asset: compReg.asset, onClose:()=>setCompReg(null) })
   );
 }
 
@@ -73561,21 +74452,26 @@ function BulkDepreciationModal({ state, dispatch, user, onClose }){
   const assets = state.assets || [];
 
   // Compute proposed entries
+  // 🆕 FA-S4 (B8): 1 แถวต่อก้อน (เครื่องเดิม + ส่วนเพิ่ม) · ลงแล้ว/รอลง ต่อก้อน
   const proposed = useMemo(() => {
-    return assets.map(asset => {
-      const depAmount = calcMonthlyDepreciation(asset, period);
+    const out = [];
+    assets.forEach(asset => {
       const cat = cats.find(c => c.id === asset.categoryId);
-      const accBefore = (asset.depreciationHistory||[]).reduce((s,e) => s + (Number(e.depAmount)||0), 0);
-      return {
-        asset, cat, depAmount,
-        bookValueBefore: (Number(asset.acquireCost)||0) - accBefore,
-        accumulatedAfter: accBefore + depAmount,
-        accExpenseAcct: '5410',
-        accAccumDepAcct: '1659',   // 🆕 B5 BUG-A fix: เดิม cat.code+9 (เช่น 1639) ไม่มีใน COA → ค่าเสื่อม post ลงบัญชีผี · ใช้ 1659 (มีจริง)
-        // Already posted check
-        alreadyPosted: (asset.depreciationHistory||[]).some(h => h.period === period),
-      };
-    }).filter(e => e.depAmount > 0 || e.alreadyPosted);
+      calcMonthlyDepreciationParts(asset, period).forEach(p => {
+        if(!(p.amount > 0 || p.alreadyPosted)) return;
+        out.push({
+          asset, cat, componentId: p.componentId, seq: p.seq, partName: p.name,
+          rowKey: asset.id + '_' + (p.componentId || 'main'),
+          depAmount: p.alreadyPosted ? 0 : p.amount,
+          bookValueBefore: p.cost - p.accumulated,
+          accumulatedAfter: p.accumulated + (p.alreadyPosted ? 0 : p.amount),
+          accExpenseAcct: '5410',
+          accAccumDepAcct: '1659',   // 🆕 B5 BUG-A fix: เดิม cat.code+9 (เช่น 1639) ไม่มีใน COA → ค่าเสื่อม post ลงบัญชีผี · ใช้ 1659 (มีจริง)
+          alreadyPosted: p.alreadyPosted,
+        });
+      });
+    });
+    return out;
   }, [assets, period]);
 
   const toPost = proposed.filter(e => e.depAmount > 0 && !e.alreadyPosted);
@@ -73587,10 +74483,12 @@ function BulkDepreciationModal({ state, dispatch, user, onClose }){
     if(!confirm(`บันทึกค่าเสื่อม ${toPost.length} รายการ\nรวม ${fmtCur(totalDep)} บาท\nงวด: ${period}\n\nระบบจะสร้าง JE 1 ใบ`)) return;
     setPosting(true);
     try {
+      const _at = Date.now();
       dispatch({ type:'POST_DEPRECIATION', data:{
-        period,
+        period, at: _at, jeId: 'je_dep_' + period.replace('-','') + '_' + _at.toString(36),
         entries: toPost.map(e => ({
           assetId: e.asset.id,
+          ...(e.componentId ? { componentId: e.componentId } : {}),
           period,
           depAmount: e.depAmount,
           bookValueBefore: e.bookValueBefore,
@@ -73638,10 +74536,12 @@ function BulkDepreciationModal({ state, dispatch, user, onClose }){
                     h('th', { className:'px-2 py-1 text-right' }, 'ค่าเสื่อม'),
                     h('th', { className:'px-2 py-1 text-center' }, 'สถานะ'))),
                 h('tbody', { className:'divide-y' },
-                  proposed.map(e => h('tr', { key:e.asset.id,
+                  proposed.map(e => h('tr', { key:e.rowKey, 'data-testid':'dep-row-' + (e.componentId ? 'comp' : 'main'),
                     className: cls(e.alreadyPosted ? 'bg-gray-100 text-gray-500' : 'hover:bg-amber-50') },
-                    h('td', { className:'px-2 py-1 font-mono' }, e.asset.code||'-'),
-                    h('td', { className:'px-2 py-1 font-medium' }, e.asset.name),
+                    h('td', { className:'px-2 py-1 font-mono' }, e.componentId ? '' : (e.asset.code||'-')),
+                    h('td', { className:'px-2 py-1 font-medium' }, e.componentId
+                      ? h('span', { className:'pl-3 italic text-gray-600' }, `└ ส่วนเพิ่ม #${e.seq} ${e.partName||''}`)
+                      : e.asset.name),
                     h('td', { className:'px-2 py-1' }, e.cat?.label || '-'),
                     h('td', { className:'px-2 py-1 text-center' },
                       e.asset.method === 'straight-line' ? '📏 SL' :
@@ -73675,6 +74575,13 @@ function BulkDepreciationModal({ state, dispatch, user, onClose }){
 
 // คำนวณค่าเสื่อมสะสม ณ วันที่ (straight-line · prorate รายเดือน)
 function computeAccumulatedDep(asset, asOfDate){
+  // 🆕 FA-S4: เครื่องที่มีส่วนเพิ่ม/ยืดอายุ → รวมทุกก้อนด้วย helper กลาง (ถึงสิ้นเดือนก่อน asOf · แบบเดียวกับตัวเดิม) · เครื่องทั่วไปใช้สูตรเดิม
+  if(asset && global.ERP.assetParts && ((asset.components||[]).some(c => c && !c.voided) || (asset.lifeRevisions||[]).some(r => r && !r.voided))){
+    const _asOf = (asOfDate instanceof Date) ? asOfDate : new Date(asOfDate);
+    const _pm = new Date(_asOf.getFullYear(), _asOf.getMonth() - 1, 1);
+    const _ym = `${_pm.getFullYear()}-${String(_pm.getMonth()+1).padStart(2,'0')}`;
+    return global.ERP.assetParts(asset).reduce((t,p) => t + global.ERP.calcPartShouldBe(p, _ym).totalShouldBe, 0);
+  }
   if(!asset || !asset.method || asset.method === 'none') return 0;
   const cost = Number(asset.acquireCost) || 0;
   const residual = Number(asset.residualValue) || 0;
@@ -73732,7 +74639,9 @@ function AssetDepreciationScheduleReport({ state }){
       if(!periodMap.has(e.period)) periodMap.set(e.period, { period:e.period, posted:0, scheduled:0, count:0 });
       const p = periodMap.get(e.period);
       p.posted += Number(e.depAmount)||0;
-      p.count++;
+      // 🆕 FA-S4: นับเครื่อง ไม่นับก้อน (ส่วนเพิ่มงวดเดียวกัน = เครื่องเดิม)
+      if(!p._ids) p._ids = new Set();
+      if(!p._ids.has(asset.id)){ p._ids.add(asset.id); p.count++; }
     }
   }
   // Add upcoming scheduled (next 12 months from today) — based on calc
@@ -73812,8 +74721,8 @@ function AssetRegisterReport({ state }){
     const k = cat?.id || 'other';
     if(!grouped.has(k)) grouped.set(k, { cat, assets:[], totalCost:0, totalDep:0, totalNbv:0 });
     const g = grouped.get(k);
-    const cost = Number(a.acquireCost)||0;
-    const dep = (a.depreciationHistory||[]).reduce((s,e)=>s+(Number(e.depAmount)||0),0);
+    const cost = assetTotalCost(a);   // 🆕 FA-S4 รวมส่วนเพิ่ม
+    const dep = assetAccumDep(a);
     g.assets.push({ ...a, _cost:cost, _dep:dep, _nbv:cost-dep });
     g.totalCost += cost; g.totalDep += dep; g.totalNbv += cost - dep;
   }
@@ -73823,16 +74732,19 @@ function AssetRegisterReport({ state }){
   const grandNbv = sorted.reduce((s,g) => s+g.totalNbv, 0);
 
   const exportCsv = () => {
-    const rows = [['หมวด','รหัส','ชื่อ','สาขา','รับเข้า','ราคาทุน','ค่าเสื่อมสะสม','NBV','สถานะ','รับประกันถึง']];
+    // 💎 FA-S5: คอลัมน์ "ส่วนประกอบ" — เครื่องที่มีส่วนเพิ่ม = 1 แถวต่อก้อน (main/#1/#2) + แถวรวม · เครื่องทั่วไป 1 แถวเท่าเดิม
+    const rows = [['หมวด','รหัส','ชื่อ','ส่วนประกอบ','สาขา','รับเข้า','ราคาทุน','ค่าเสื่อมสะสม','NBV','สถานะ','รับประกันถึง']];
+    const _acc = (a, cid) => (a.depreciationHistory||[]).filter(e => (e.componentId||null) === cid).reduce((t,e) => t + (Number(e.depAmount)||0), 0);
     for(const g of sorted){
       for(const a of g.assets){
         const branch = (state.branches||[]).find(b => b.id === a.branch);
-        rows.push([
-          g.cat?.label||'-', a.code||'', a.name,
-          branch?.name||'-', a.acquireDate||'',
-          a._cost, a._dep, a._nbv,
-          a.status || 'active', a.warrantyEnd||'',
-        ]);
+        const comps = (a.components||[]).filter(c => c && !c.voided);
+        const row = (part, date, cost, dep) => rows.push([ g.cat?.label||'-', a.code||'', a.name, part, branch?.name||'-', date||'',
+          cost, dep, Math.round((cost - dep) * 100) / 100, a.status || 'active', a.warrantyEnd||'' ]);
+        if(comps.length === 0){ row('', a.acquireDate, a._cost, a._dep); continue; }
+        const mc = Number(a.acquireCost)||0; row('main', a.acquireDate, mc, _acc(a, null));
+        comps.forEach(c => row('#' + c.seq + ' ' + (c.name||''), c.acquireDate, Number(c.cost)||0, _acc(a, c.id)));
+        row('รวม', a.acquireDate, a._cost, a._dep);
       }
     }
     exportCSV('asset-register-' + new Date().toISOString().slice(0,10), rows);
@@ -73899,6 +74811,9 @@ function AssetEditModal({ asset, state, dispatch, user, onClose, seedFromInv, se
   const isEdit = !!asset;
   // 🔒 SoD: ล็อกราคาทุนเมื่อมีค่าเสื่อม post แล้ว/จำหน่ายแล้ว — กันลดทุนก่อน dispose เพื่อเลี่ยงเกณฑ์อนุมัติ (audit P2-A · SAP: acquisition value ของ asset ที่ posted แก้ field ตรงไม่ได้)
   const costLocked = isEdit && ((asset.depreciationHistory||[]).length > 0 || asset.status==='disposed' || asset.status==='sold');
+  // 🆕 FA-S4 (B4.5): ลงค่าเสื่อมแล้ว → ล็อกอายุ/วันเริ่ม/ซาก/วิธีคิด (ไม่มีการคำนวณย้อน · ยืดอายุผ่าน "เพิ่มต้นทุน/ยืดอายุ")
+  const depLocked = isEdit && (asset.depreciationHistory||[]).length > 0;
+  const _lockCls = depLocked ? ' bg-gray-100 text-gray-500 cursor-not-allowed' : '';
   const cats = state.assetCategories || [];
   const branches = state.branches || [];
   const seedGr = (!isEdit && seedFromGr?.gr) ? seedFromGr.gr : null;   // 🆕 GR ที่มาจากหน้า 'รอลงทะเบียนจาก GR' (เฉพาะตอนเพิ่มใหม่)
@@ -73928,7 +74843,9 @@ function AssetEditModal({ asset, state, dispatch, user, onClose, seedFromInv, se
   // ราคาทุน: ถ้ามี asset line จาก PO/GR → ใช้มูลค่าบรรทัดนั้น (กันตั้งเกินเมื่อ INV มีหลายบรรทัด) · ไม่มีค่อย fallback ยอดรวม INV
   const [acquireCost, setAcquireCost] = useState(
     asset?.acquireCost ||
-    (seedLine && Number(seedLine.lineTotal) ? Number(seedLine.lineTotal) : (seed ? Number(seed.amount)||0 : 0))
+    // 💎 FA-S1: ใช้ยอดไม่รวม VAT หลังส่วนลด (ตรงกับ Dr 16xx) · เดิม lineTotal = รวม VAT เมื่อ PO ราคารวม VAT
+    ((seedLine && (seedGr ? global.ERP.capexLineExVat(seedGr, seedLine) : Number(seedLine.lineTotal)))
+      ? (seedGr ? global.ERP.capexLineExVat(seedGr, seedLine) : Number(seedLine.lineTotal)) : (seed ? Number(seed.amount)||0 : 0))
   );
   const [supplierId, setSupplierId]   = useState(asset?.supplierId || seedGr?.supplierId || seed?.supplierId || '');
   const [supplierName, setSupplierName] = useState(asset?.supplierName || seed?.supplierNameFreeform || '');
@@ -73957,7 +74874,7 @@ function AssetEditModal({ asset, state, dispatch, user, onClose, seedFromInv, se
   const onCatChange = (cid) => {
     setCategoryId(cid);
     const c = cats.find(x => x.id === cid);
-    if(c){
+    if(c && !depLocked){
       setMethod(c.method);
       setRate(c.rate);
       setUsefulLife(c.usefulLifeYears);
@@ -74116,16 +75033,16 @@ function AssetEditModal({ asset, state, dispatch, user, onClose, seedFromInv, se
         h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-2' },
           h(Field, { label:'วันที่ได้มา' },
             h('input', { type:'date', value:acquireDate,
-              onChange:e=>{ setAcquireDate(e.target.value); if(!asset?.startDepDate) setStartDepDate(e.target.value); },
+              onChange:e=>{ setAcquireDate(e.target.value); if(!asset?.startDepDate && !depLocked) setStartDepDate(e.target.value); },
               className:'w-full px-3 py-2 border-2 rounded text-sm' })),
           h(Field, { label:'ราคาทุน *' + (costLocked?' 🔒':''), hint: costLocked ? 'ล็อก — มีค่าเสื่อม/จำหน่ายแล้ว (แก้ต้อง reverse ค่าเสื่อม/จำหน่ายก่อน)' : undefined },
             h('input', { type:'number', value:acquireCost, min:0, step:0.01, disabled: costLocked,
               onChange:e=>setAcquireCost(Number(e.target.value)||0),
               className:'w-full px-3 py-2 border-2 rounded text-sm text-right font-mono' + (costLocked?' bg-gray-100 text-gray-500 cursor-not-allowed':'') })),
           h(Field, { label:'มูลค่าซาก (Residual)', hint:'มูลค่าหลังหมดอายุใช้งาน' },
-            h('input', { type:'number', value:residualValue, min:0, step:0.01,
+            h('input', { type:'number', value:residualValue, min:0, step:0.01, disabled: depLocked,
               onChange:e=>setResidualValue(Number(e.target.value)||0),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right font-mono' })),
+              className:'w-full px-3 py-2 border-2 rounded text-sm text-right font-mono' + _lockCls })),
         ),
         h('div', { className:'grid grid-cols-2 gap-2' },
           // 🆕 ACCT-V2 (C): เลือก supplier แบบพิมพ์ค้นหา (แถว '' = ใส่ชื่ออิสระ → เงื่อนไข !supplierId ด้านล่างเหมือนเดิม)
@@ -74151,23 +75068,25 @@ function AssetEditModal({ asset, state, dispatch, user, onClose, seedFromInv, se
         h('div', { className:'font-bold text-orange-900 text-sm' }, '📉 ค่าเสื่อมราคา'),
         h('div', { className:'grid grid-cols-1 md:grid-cols-4 gap-2' },
           h(Field, { label:'วิธีคิด' },
-            h('select', { value:method, onChange:e=>setMethod(e.target.value),
-              className:'w-full px-3 py-2 border-2 rounded text-sm' },
+            h('select', { value:method, onChange:e=>setMethod(e.target.value), disabled: depLocked, 'data-testid':'asset-method',
+              className:'w-full px-3 py-2 border-2 rounded text-sm' + _lockCls },
               h('option', { value:'straight-line' }, 'เส้นตรง (Straight-line)'),
               h('option', { value:'declining' }, 'อัตราคงที่ (Declining)'),
               h('option', { value:'none' }, 'ไม่คิด (None)'))),
           h(Field, { label:'อายุใช้งาน (ปี)' },
-            h('input', { type:'number', value:usefulLifeYears, min:0, step:1,
+            h('input', { type:'number', value:usefulLifeYears, min:0, step:1, disabled: depLocked, 'data-testid':'asset-life-years',
               onChange:e=>setUsefulLife(Number(e.target.value)||0),
-              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
+              className:'w-full px-3 py-2 border-2 rounded text-sm text-right' + _lockCls })),
           h(Field, { label:'อัตรา %' },
             h('input', { type:'number', value:rate, min:0, max:100, step:0.01,
               onChange:e=>setRate(Number(e.target.value)||0),
               className:'w-full px-3 py-2 border-2 rounded text-sm text-right' })),
           h(Field, { label:'เริ่มคิดค่าเสื่อม' },
-            h(BEDateInput, { value:startDepDate, onChange:setStartDepDate,
-              className:'w-full px-3 py-2 border-2 rounded text-sm' })),
+            h(BEDateInput, { value:startDepDate, onChange:setStartDepDate, disabled: depLocked,
+              className:'w-full px-3 py-2 border-2 rounded text-sm' + _lockCls })),
         ),
+        depLocked && h('div', { className:'text-xs text-orange-800', 'data-testid':'asset-dep-locked-hint' },
+          '🔒 ลงค่าเสื่อมแล้ว — อายุ/วันเริ่ม/มูลค่าซาก/วิธีคิด แก้ไม่ได้ (กันย้อนแก้ของเก่า) · ซ่อมใหญ่/ยืดอายุ ใช้ "เพิ่มต้นทุนจากบิล"'),
         // Preview
         method !== 'none' && Number(acquireCost) > 0 && Number(usefulLifeYears) > 0 &&
           h('div', { className:'bg-white border border-orange-300 rounded p-2 text-xs' },
@@ -74233,12 +75152,160 @@ function AssetEditModal({ asset, state, dispatch, user, onClose, seedFromInv, se
             className:'w-full px-3 py-2 border-2 rounded text-sm' })),
       ),
 
+      // 💎 FA-S5: ส่วนเพิ่ม/ซ่อมใหญ่ + ประวัติอายุ + ประวัติซ่อม (โหมดแก้ไข · อ่านจาก state สด)
+      isEdit && h(AssetComponentsPanel, { state, dispatch, user, assetId: asset.id }),
       h('div', { className:'flex gap-2 pt-3 border-t' },
         h(Button, { variant:'primary', onClick:save, disabled:uploading }, '💾 บันทึก'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
       )
     )
   );
+}
+
+// ================================================================
+// 💎 FA-S5: ส่วนเพิ่ม (ซ่อมใหญ่) เข้าเครื่องเดิม — ComponentModal + แผงในหน้าแก้ไขทรัพย์สิน (FIXED_ASSET_CONTRACT B8)
+// ================================================================
+const _ymAddN = (ym, n) => { const [y, m] = String(ym).split('-').map(Number); const i = y*12 + (m-1) + n; return Math.floor(i/12) + '-' + String(i%12 + 1).padStart(2,'0'); };
+const _ymTh = (ym) => { const [y, m] = String(ym||'').split('-').map(Number); if(!y || !m) return ym || '-'; const TH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.']; return `${TH[m-1]} ${y + 543}`; };
+
+function ComponentModal({ state, dispatch, user, inv, line, asset, onClose }){
+  const E = global.ERP;
+  const live = (state.assets||[]).find(a => a.id === asset.id) || asset;
+  const cost = Number(line.lineTotal) || 0;
+  const [startYM, setStartYM] = useState(String(line.capWorkDate || inv.invDate || getToday()).slice(0,7));
+  const [basis, setBasis] = useState(line.capLifeBasis || 'extended');
+  const [extYears, setExtYears] = useState(String(Math.round((Number(line.capExtendMonths)||0) / 12 * 100) / 100));
+  const [customMonths, setCustomMonths] = useState(String(line.capLifeMonths || 60));
+  const [name, setName] = useState(`ซ่อมใหญ่ ${_ymTh(String(line.capWorkDate || inv.invDate || '').slice(0,7))} — ${line.description || ''}`.trim());
+  const [busy, setBusy] = useState(false);
+  const extMonths = Math.max(0, Math.round((Number(extYears)||0) * 12));
+  const plan = E.componentPlan(state, live, startYM, basis, extMonths, Number(customMonths)||0);
+  const main = E.assetParts(live)[0];
+  const prevYM = _ymAddN(startYM, -1);
+  const oldPer = main ? (E.calcPartShouldBe(main, startYM).totalShouldBe - E.calcPartShouldBe(main, prevYM).totalShouldBe) : 0;
+  const dep = main ? Math.max(0, main.cost - main.residual) : 0;
+  const newPer = plan.revision ? (dep - plan.revision.baseAccum) / Math.max(1, plan.revision.remainingMonths) : (plan.mainRemaining > 0 ? oldPer : 0);
+  const compPer = plan.lifeMonths > 0 ? cost / plan.lifeMonths : 0;
+  const endYM = plan.lifeMonths > 0 ? _ymAddN(startYM, plan.lifeMonths - 1) : startYM;
+  const mainEndYM = plan.revision ? _ymAddN(plan.revision.fromPeriod, plan.revision.remainingMonths - 1) : (plan.mainRemaining > 0 ? _ymAddN(startYM, plan.mainRemaining - 1) : null);
+  const canEdit = isSuperUser(user) || hasPerm(user, 'accounting', 'assets', 'edit');
+  const warrantyActive = live.warrantyEnd && live.warrantyEnd >= getToday();
+  const save = () => {
+    if(!canEdit) return alert('⛔ ไม่มีสิทธิ์แก้ทะเบียนทรัพย์สิน');
+    if(plan.error) return alert(plan.error);
+    if(!confirm(`เพิ่มส่วนเพิ่ม ${fmtCur(cost)} เข้า ${live.code || live.name}\nอายุ ${plan.lifeMonths} เดือน (${_ymTh(startYM)} – ${_ymTh(endYM)})`
+      + (plan.revision ? `\nเครื่องเดิมยืดอายุ: เฉลี่ยใหม่ ${fmtCur(newPer)}/เดือน ถึง ${_ymTh(mainEndYM)}` : '') + '\n\nไม่สร้าง JE (ลง 16xx ตอนตั้งหนี้แล้ว)')) return;
+    setBusy(true);
+    const at = Date.now();
+    dispatch({ type:'ADD_ASSET_COMPONENT', data:{ assetId: live.id, at, by: user.username, byName: user.name || user.username,
+      component:{ id: 'acp_' + at.toString(36) + Math.random().toString(36).slice(2,6), name: name.trim(), cost,
+        acquireDate: inv.invDate, startDepDate: startYM + '-01', lifeBasis: basis, extendMonths: basis === 'extended' ? extMonths : 0,
+        lifeMonths: plan.lifeMonths, source:{ kind:'pi_expense_line', invId: inv.id, invNumber: inv.invNumber, expLineId: line.id } } } });
+    onClose();
+  };
+  const radio = (v, label, disabled) => h('label', { className: cls('flex items-center gap-1.5 text-sm', disabled ? 'text-gray-400' : 'cursor-pointer') },
+    h('input', { type:'radio', name:'acp-basis', checked: basis === v, disabled, 'data-testid':'acp-basis-' + v, onChange:()=>setBasis(v) }), label);
+  return h(Modal, { isOpen:true, title:'🔧 เพิ่มต้นทุนเข้าเครื่องเดิม (ส่วนเพิ่ม)', onClose, size:'lg' },
+    h('div', { className:'space-y-3', 'data-testid':'component-modal' },
+      h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-2 text-sm grid grid-cols-2 md:grid-cols-4 gap-2' },
+        h('div', null, h('div', { className:'text-xs text-gray-500' }, 'เครื่อง'), h('b', null, `${live.code||''} ${live.name||''}`)),
+        h('div', null, h('div', { className:'text-xs text-gray-500' }, 'มูลค่าคงเหลือตอนนี้'), h('b', null, fmtCur(E.getAssetNBV(live)))),
+        h('div', null, h('div', { className:'text-xs text-gray-500' }, 'อายุเครื่องเหลือ (ณ เดือนเริ่ม)'), h('b', { 'data-testid':'acp-main-remaining' }, `${plan.mainRemaining} เดือน`)),
+        h('div', null, h('div', { className:'text-xs text-gray-500' }, 'จากบิล'), h('b', null, inv.invNumber), h('div', { className:'text-xs' }, line.description))),
+      warrantyActive && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900', 'data-testid':'cap-warranty' },
+        `⚠️ เครื่องยังอยู่ในประกันถึง ${fmtDate(live.warrantyEnd)} — ตรวจว่าเคลมประกันได้ไหมก่อน`),
+      h(Field, { label:'ชื่อส่วนเพิ่ม' }, h('input', { type:'text', value:name, onChange:e=>setName(e.target.value), className:'w-full px-3 py-2 border-2 rounded text-sm' })),
+      h('div', { className:'grid grid-cols-2 gap-2' },
+        h(Field, { label:'ยอด (ไม่รวม VAT · ตามบรรทัดบิล) 🔒' }, h('input', { type:'text', value: fmtCur(cost), disabled:true, className:'w-full px-3 py-2 border-2 rounded text-sm text-right font-mono bg-gray-100' })),
+        h(Field, { label:'เริ่มคิดค่าเสื่อม (เดือนที่ซ่อมเสร็จ)' }, h('input', { type:'month', value:startYM, onChange:e=>setStartYM(e.target.value), 'data-testid':'acp-start', className:'w-full px-3 py-2 border-2 rounded text-sm' }))),
+      h('div', { className:'border rounded p-2 space-y-1.5' },
+        h('div', { className:'text-sm font-medium' }, 'อายุของส่วนเพิ่ม'),
+        radio('extended', 'ซ่อมแล้วใช้ได้นานขึ้น (แนะนำ) — เครื่องเดิมยืดอายุตามด้วย', false),
+        basis === 'extended' && h('div', { className:'pl-6 flex items-center gap-2 text-sm' }, 'ยืดออกไป',
+          h('input', { type:'number', min:0, step:'0.5', value:extYears, onChange:e=>setExtYears(e.target.value), 'data-testid':'acp-extend-years', className:'w-20 px-2 py-1 border-2 rounded text-right' }), 'ปี',
+          h('span', { className:'text-xs text-gray-500' }, `(= อายุส่วนเพิ่ม ${plan.lifeMonths} เดือน · 0 = เท่าอายุที่เหลือ)`)),
+        radio('main_remaining', 'เท่าอายุที่เหลือของเครื่อง (ไม่ยืดอายุ)', plan.mainRemaining <= 0),
+        radio('custom', 'กำหนดเอง (ผู้สอบบัญชีแนะนำ)', false),
+        basis === 'custom' && h('div', { className:'pl-6 flex items-center gap-2 text-sm' },
+          h('input', { type:'number', min:1, max:600, step:1, value:customMonths, onChange:e=>setCustomMonths(e.target.value), 'data-testid':'acp-custom-months', className:'w-20 px-2 py-1 border-2 rounded text-right' }), 'เดือน')),
+      plan.error && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-xs text-red-800', 'data-testid':'acp-error' }, '⛔ ', plan.error),
+      plan.rateWarn && h('div', { className:'bg-yellow-50 border border-yellow-300 rounded p-2 text-xs text-yellow-900', 'data-testid':'acp-rate-warn' },
+        `⚠️ อัตราค่าเสื่อมโดยนัย ${(1200 / plan.lifeMonths).toFixed(2)}% ต่อปี สูงกว่าอัตราของหมวด — ส่วนที่เกินอาจต้องบวกกลับตอนยื่นภาษี ให้ผู้สอบบัญชียืนยัน`),
+      !plan.error && h('div', { className:'bg-white border rounded overflow-hidden', 'data-testid':'acp-preview' },
+        h('table', { className:'w-full text-xs' },
+          h('thead', { className:'bg-gray-50' }, h('tr', null, ['ช่วง','เครื่องเดิม/เดือน','ส่วนเพิ่ม/เดือน','รวม/เดือน'].map((t,i) => h('th', { key:i, className: cls('px-2 py-1', i ? 'text-right' : 'text-left') }, t)))),
+          h('tbody', { className:'divide-y' },
+            h('tr', null, h('td', { className:'px-2 py-1' }, `ก่อน ${_ymTh(startYM)}`), h('td', { className:'px-2 py-1 text-right font-mono' }, fmtCur(oldPer)),
+              h('td', { className:'px-2 py-1 text-right font-mono' }, '–'), h('td', { className:'px-2 py-1 text-right font-mono' }, fmtCur(oldPer))),
+            h('tr', null, h('td', { className:'px-2 py-1' }, `${_ymTh(startYM)} – ${_ymTh(endYM)}`), h('td', { className:'px-2 py-1 text-right font-mono' }, fmtCur(newPer)),
+              h('td', { className:'px-2 py-1 text-right font-mono' }, fmtCur(compPer)), h('td', { className:'px-2 py-1 text-right font-mono font-bold' }, fmtCur(newPer + compPer))))),
+        h('div', { className:'px-2 py-1 text-[11px] text-gray-600 bg-gray-50' },
+          plan.revision ? `เครื่องเดิมยอดที่เหลือเฉลี่ยใหม่ถึง ${_ymTh(mainEndYM)} (ค่าเสื่อมที่ลงไปแล้วไม่แก้) · ` : '',
+          'ค่าเสื่อมเริ่มลงเมื่อกด "บันทึกค่าเสื่อมประจำเดือน" · ไม่สร้าง JE ตอนนี้ (บิลลง 16xx แล้ว)')),
+      h('div', { className:'flex gap-2 pt-2 border-t' },
+        h(Button, { variant:'primary', onClick:save, disabled: busy || !!plan.error || !canEdit, 'data-testid':'acp-save' }, '💾 เพิ่มเข้าเครื่อง'),
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'))));
+}
+
+function AssetComponentsPanel({ state, dispatch, user, assetId }){
+  const E = global.ERP;
+  const asset = (state.assets||[]).find(a => a.id === assetId);
+  const [reg, setReg] = useState(null);
+  if(!asset) return null;
+  const comps = asset.components || [];
+  const pending = E.getPendingCapexLines(state).filter(r => r.kind === 'exp_add' && r.asset && r.asset.id === asset.id);
+  const repairs = E.assetRepairHistory(state, asset.id);
+  const revs = asset.lifeRevisions || [];
+  const canVoid = isSuperUser(user) || hasPerm(user, 'accounting', 'assets', 'delete');
+  const canEdit = isSuperUser(user) || hasPerm(user, 'accounting', 'assets', 'edit');
+  const accOf = (cid) => (asset.depreciationHistory||[]).filter(e => (e.componentId||null) === cid).reduce((t,e) => t + (Number(e.depAmount)||0), 0);
+  const voidComp = (c) => {
+    const reason = prompt(`ยกเลิกส่วนเพิ่ม #${c.seq} ${fmtCur(c.cost)} — ใส่เหตุผล`);
+    if(!reason || !reason.trim()) return;
+    dispatch({ type:'VOID_ASSET_COMPONENT', data:{ assetId: asset.id, componentId: c.id, reason: reason.trim(), at: Date.now(), by: user.username, byName: user.name || user.username } });
+  };
+  const byYear = {}; repairs.forEach(r => { const y = String(r.date).slice(0,4); byYear[y] = (byYear[y]||0) + r.amount; });
+  return h('div', { className:'space-y-3' },
+    h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-3 space-y-2', 'data-testid':'asset-components' },
+      h('div', { className:'font-bold text-indigo-900 text-sm' }, `🔧 ส่วนเพิ่ม / ซ่อมใหญ่ (${comps.filter(c => !c.voided).length})`),
+      comps.length === 0 ? h('div', { className:'text-xs text-gray-500' }, 'ยังไม่มีส่วนเพิ่ม') :
+      h('div', { className:'overflow-x-auto bg-white rounded border' }, h('table', { className:'w-full text-xs' },
+        h('thead', { className:'bg-gray-50' }, h('tr', null, ['#','ชื่อ','ทุน','เริ่ม','อายุ (เดือน)','ค่าเสื่อมสะสม','คงเหลือ','ที่มา',''].map((t,i) => h('th', { key:i, className:'px-2 py-1 text-left' }, t)))),
+        h('tbody', { className:'divide-y' },
+          h('tr', { className:'text-gray-600' }, h('td', { className:'px-2 py-1' }, 'เดิม'), h('td', { className:'px-2 py-1' }, asset.name),
+            h('td', { className:'px-2 py-1 font-mono' }, fmtCur(asset.acquireCost||0)), h('td', { className:'px-2 py-1' }, String(asset.startDepDate||asset.acquireDate||'').slice(0,7)),
+            h('td', { className:'px-2 py-1' }, (Number(asset.usefulLifeYears)||0) * 12), h('td', { className:'px-2 py-1 font-mono' }, fmtCur(accOf(null))),
+            h('td', { className:'px-2 py-1 font-mono' }, fmtCur((Number(asset.acquireCost)||0) - accOf(null))), h('td', null), h('td', null)),
+          comps.map(c => h('tr', { key:c.id, className: c.voided ? 'text-gray-400 line-through' : '' },
+            h('td', { className:'px-2 py-1' }, '#' + c.seq), h('td', { className:'px-2 py-1' }, c.name, c.rateWarn && h('span', { className:'ml-1 text-yellow-700 no-underline', title:'อัตราสูงกว่าหมวด' }, '⚠️')),
+            h('td', { className:'px-2 py-1 font-mono' }, fmtCur(c.cost)), h('td', { className:'px-2 py-1' }, String(c.startDepDate||'').slice(0,7)),
+            h('td', { className:'px-2 py-1' }, c.lifeMonths), h('td', { className:'px-2 py-1 font-mono' }, fmtCur(accOf(c.id))),
+            h('td', { className:'px-2 py-1 font-mono' }, fmtCur((Number(c.cost)||0) - accOf(c.id))),
+            h('td', { className:'px-2 py-1' }, (c.source && c.source.invNumber) || '-'),
+            h('td', { className:'px-2 py-1' }, !c.voided && canVoid && accOf(c.id) === 0 && h('button', { type:'button', onClick:()=>voidComp(c), 'data-testid':'acp-void-' + c.id,
+              className:'text-red-600 hover:underline' }, 'ยกเลิก')))),
+          h('tr', { className:'bg-indigo-50 font-bold' }, h('td', { className:'px-2 py-1', colSpan:2 }, 'ทั้งเครื่อง'),
+            h('td', { className:'px-2 py-1 font-mono' }, fmtCur(E.assetTotalCost(asset))), h('td', null), h('td', null),
+            h('td', { className:'px-2 py-1 font-mono' }, fmtCur(E.assetAccumDep(asset))), h('td', { className:'px-2 py-1 font-mono' }, fmtCur(E.getAssetNBV(asset))), h('td', null), h('td', null))))),
+      revs.length > 0 && h('div', { className:'text-xs text-indigo-900', 'data-testid':'asset-life-revisions' },
+        h('b', null, '📅 ประวัติอายุ: '), revs.map((r,i) => h('span', { key:i, className: cls('mr-2', r.voided && 'line-through text-gray-400') },
+          `ตั้งแต่ ${_ymTh(r.fromPeriod)} เหลือ ${r.remainingMonths} เดือน`))),
+      pending.length > 0 && h('div', { className:'bg-white border border-indigo-300 rounded p-2 space-y-1' },
+        h('div', { className:'text-xs font-medium text-indigo-900' }, `📥 บิลซ่อมใหญ่รอเพิ่มเข้าเครื่องนี้ (${pending.length})`),
+        pending.map(r => h('div', { key: r.inv.id + r.line.id, className:'flex items-center justify-between gap-2 text-xs' },
+          h('span', null, `${r.inv.invNumber} · ${r.line.description} · ${fmtCur(r.line.lineTotal)}`),
+          canEdit && h(Button, { size:'sm', onClick:()=>setReg(r), 'data-testid':'acp-register' }, '+ เพิ่มต้นทุนจากบิล'))))),
+    h('div', { className:'bg-gray-50 border rounded p-3 space-y-1', 'data-testid':'asset-repair-history' },
+      h('div', { className:'font-bold text-sm' }, `🧾 ประวัติซ่อม (${repairs.length})`,
+        Object.keys(byYear).length > 0 && h('span', { className:'ml-2 text-xs font-normal text-gray-600' },
+          Object.keys(byYear).sort().reverse().map(y => `ปี ${Number(y) + 543}: ${fmtCur(byYear[y])}`).join(' · '))),
+      repairs.length === 0 ? h('div', { className:'text-xs text-gray-500' }, 'ยังไม่มีบิลที่ผูกเครื่องนี้ (ผูกได้ตอนตั้งหนี้ค่าใช้จ่าย → "🔧 ผูกเครื่อง")') :
+      h('table', { className:'w-full text-xs' }, h('tbody', { className:'divide-y' },
+        repairs.map((r,i) => h('tr', { key:i },
+          h('td', { className:'px-2 py-1' }, fmtDate(r.date)), h('td', { className:'px-2 py-1 font-mono' }, r.inv.invNumber),
+          h('td', { className:'px-2 py-1' }, r.line.description), h('td', { className:'px-2 py-1 text-right font-mono' }, fmtCur(r.amount)),
+          h('td', { className:'px-2 py-1' }, r.capex ? '💎 ซ่อมใหญ่' : 'ค่าใช้จ่าย')))))),
+    reg && h(ComponentModal, { state, dispatch, user, inv: reg.inv, line: reg.line, asset, onClose:()=>setReg(null) }));
 }
 
 // ================================================================
@@ -74255,7 +75322,8 @@ function AssetDetailModal({ asset, state, onClose, onEdit, onDispose, canDispose
   const depBase = cost - residual;
   const lifeYears = Number(asset.usefulLifeYears)||0;
   const accDep = computeAccumulatedDep(asset, today);
-  const nbv = cost - accDep;
+  const nbv = assetTotalCost(asset) - accDep;   // 🆕 FA-S4 รวมส่วนเพิ่ม
+  const _compSeq = {}; (asset.components||[]).forEach(c => { if(c) _compSeq[c.id] = c.seq; });
 
   // Generate schedule rows (annual)
   const scheduleRows = [];
@@ -74360,7 +75428,8 @@ function AssetDetailModal({ asset, state, onClose, onEdit, onDispose, canDispose
                 h('th', { className:'px-2 py-1 text-left' }, 'ลงโดย'))),
             h('tbody', { className:'divide-y' },
               (asset.depreciationHistory||[]).slice().reverse().map((e,i) => h('tr', { key:i },
-                h('td', { className:'px-2 py-1 font-mono' }, e.period),
+                h('td', { className:'px-2 py-1 font-mono' }, e.period,
+                  e.componentId && h('span', { className:'ml-1 text-[10px] text-indigo-700' }, `ส่วนเพิ่ม #${_compSeq[e.componentId] || '?'}`)),
                 h('td', { className:'px-2 py-1 text-right font-mono text-orange-700' }, fmtCur(e.depAmount)),
                 h('td', { className:'px-2 py-1 text-right font-mono' }, fmtCur(e.bookValueBefore)),
                 h('td', { className:'px-2 py-1 text-right font-mono' }, fmtCur(e.accumulatedAfter)),
@@ -74426,9 +75495,11 @@ function AssetDetailModal({ asset, state, onClose, onEdit, onDispose, canDispose
 function methodLabelDisp(m){ return m==='sell' ? 'ขาย' : m==='scrap' ? 'ตัดจำหน่าย/ทิ้ง' : m==='donate' ? 'บริจาค' : m; }
 function DisposeAssetModal({ asset, state, dispatch, user, onClose }){
   const _coa = state.chartOfAccounts || [];
-  const cost = Number(asset.acquireCost)||0;
-  const postedAccum = (asset.depreciationHistory||[]).reduce((t,e)=>t+(Number(e.depAmount)||0),0);
+  // 🆕 FA-S4 (B4.4): จำหน่ายทั้งเครื่อง = เครื่องเดิม + ส่วนเพิ่มทุกก้อน (ตรงกับ reducer DISPOSE_ASSET)
+  const cost = assetTotalCost(asset);
+  const postedAccum = assetAccumDep(asset);
   const nbv = Math.max(0, cost - postedAccum);
+  const _dispComps = (asset.components||[]).filter(c => c && !c.voided);
 
   const [method, setMethod]     = useState('sell');   // sell | scrap | donate
   const [disposeDate, setDate]  = useState(new Date().toISOString().slice(0,10));
@@ -74494,6 +75565,8 @@ function DisposeAssetModal({ asset, state, dispatch, user, onClose }){
         h('div', null, h('span',{className:'text-gray-500'},'ราคาทุน: '), money(cost)),
         h('div', null, h('span',{className:'text-gray-500'},'ค่าเสื่อมสะสม (post แล้ว): '), money(postedAccum)),
         h('div', null, h('span',{className:'text-gray-500'},'มูลค่าคงเหลือ (NBV): '), h('b',{className:'text-blue-700'}, money(nbv))),
+        _dispComps.length > 0 && h('div', { className:'col-span-2 text-xs text-indigo-800', 'data-testid':'dispose-comp-note' },
+          `🔧 รวมส่วนเพิ่ม ${_dispComps.length} รายการ ทุน ${money(_dispComps.reduce((t,c) => t + (Number(c.cost)||0), 0))} · ค่าเสื่อมสะสมส่วนเพิ่ม ${money((asset.depreciationHistory||[]).filter(e => e.componentId).reduce((t,e) => t + (Number(e.depAmount)||0), 0))}`),
       ),
       unposted > 1 && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-800' },
         `⚠️ ยังมีค่าเสื่อมที่ยังไม่ post ~${money(unposted)} (คิดถึงวันจำหน่าย) — ควร post ค่าเสื่อมให้ครบก่อน เพื่อกำไร/ขาดทุนแม่นยำ`),
@@ -75050,6 +76123,7 @@ function AuditLogTab({ state, dispatch, user }){
         payment_reject: 'gray',
         payment_petty: 'green',    payment_petty_reviewed: 'blue',   // 🆕 ACCT-V2: จ่ายจากเงินสดย่อย / ผู้อนุมัติตรวจย้อนหลัง
         qc_override: 'red',
+        asset_stock_clear: 'orange',   // 💎 FA-S3
       };
       const iconByType = {
         prod_time_edit: '🕐',
@@ -75057,7 +76131,7 @@ function AuditLogTab({ state, dispatch, user }){
         plan_shortage_ack: '📋',
         order_cancel: '❌',
         deposit_cancel: '💰', petty_topup_reverse: '🔄',
-        reimburse_cancel: '💸', gr_void: '🗑️',
+        reimburse_cancel: '💸', gr_void: '🗑️', asset_stock_clear: '💎',
         adjust_reverse: '🔄', inv_void: '🗑️',
         to_cancel: '🗑️', rtv_cancel: '↩️',
         payment_reverse: '🔄', po_cancel: '🗑️',
@@ -77551,31 +78625,8 @@ function AutoPostModal({ state, dispatch, user, onClose }){
         // 🆕 ACCT-V2 (A/B lockstep กับ autoPostINV §4.2-B3): PI ค่าใช้จ่าย → DR ตามบัญชี GL ของแต่ละบรรทัดในทะเบียนรายจ่าย
         //   group (accountCode, branch) เมื่อ Σ lineTotal == inv.amount ±0.01 · ไม่งั้น DR เดี่ยว COA(inv.accountCode) || 5300 (= INV เก่า/ไม่มีบรรทัด → พฤติกรรมเดิม)
         //   ⚠️ ต้องได้ JE lines เท่ากับ autoPostINV สำหรับ INV เดียวกัน — แก้คู่กันเสมอ
-        const accByCode = (code) => code ? accounts.find(a => a.code === code && a.type === 'expense') : null;
-        const baseAcc = inv.source === 'direct_expense' ? (accByCode(inv.accountCode) || expAcc) : (invAcc || expAcc);
-        if(baseAcc && inv.amount > 0){
-          const expLines = inv.source === 'direct_expense' ? (inv.expenseLines||[]).filter(l => l && (Number(l.lineTotal)||0) > 0) : [];
-          const expSum = expLines.reduce((a,l) => a + (Number(l.lineTotal)||0), 0);
-          if(expLines.length && Math.abs(expSum - (Number(inv.amount)||0)) <= 0.01){
-            const grp = {};
-            for(const l of expLines){
-              const code = l.accountCode || inv.accountCode || '5300';
-              const br = l.branch || inv.branch || state.currentBranch;
-              const k = code + '|' + br;
-              if(!grp[k]) grp[k] = { acc: accByCode(code) || expAcc, br, amt:0 };
-              grp[k].amt += Number(l.lineTotal)||0;
-            }
-            for(const k in grp){
-              const g = grp[k];
-              if(!g.acc) continue;
-              lines.push({ accountId:g.acc.id, accountCode:g.acc.code, accountName:g.acc.name,
-                debit: Number(g.amt.toFixed(2)), credit: 0, branchId: g.br, description: inv.description || desc });
-            }
-          } else {
-            lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name,
-              debit: inv.amount, credit: 0, branchId: inv.branch || state.currentBranch, description: desc });
-          }
-        }
+        //   💎 FA-S1 (§B5.1 · ปิด F13): Dr สร้างจาก 00-core.buildInvDrLines ตัวเดียวกับ autoPostINV (รวมแยกทรัพย์สิน A9 · เกณฑ์ต่อหน่วย · ยอดไม่รวม VAT หลังส่วนลด)
+        lines.push(...global.ERP.buildInvDrLines(inv, state, { desc }).lines);
         if(vatIn && (inv.vat||0) > 0){
           lines.push({ accountId:vatIn.id, accountCode:vatIn.code, accountName:vatIn.name,
             debit: inv.vat, credit: 0, description: 'VAT ซื้อ' });
@@ -81261,6 +82312,7 @@ function RTVManageTab({ state, dispatch, user }){
     const { genId, getToday, toBaseQty } = global.ERP;
     const stockUpdates = [], fifoLayers = [], movements = [];
     (r.lines||[]).forEach((l, idx) => {
+      if(l.noStock === true) return;   // 💎 FA-S2: บรรทัดทรัพย์สินไม่ได้ตัดสต๊อกตอนคืน → ยกเลิกก็ไม่คืนสต๊อก
       const item = (state.items||[]).find(x => x.id === l.itemId);
       // §U U3: ใช้ baseQty ที่ตรึงไว้ตอนคืน · RTV เก่าไม่มี → แปลงตามตัวคูณปัจจุบัน
       const baseQty = global.ERP.rtvLineBaseQty ? global.ERP.rtvLineBaseQty(state, l) : (toBaseQty ? toBaseQty(item, l.qty, l.unit) : (l.qty||0));
@@ -86929,6 +87981,9 @@ function SystemPolicyToggles({ state, dispatch }){
         h('div', null, '• ', h('b', null, 'ผู้จัดการผลิต / GM / Admin'), ' ยังเห็นครบทุกแท็บเสมอ (ตั้งค่า BOM/ไลน์/สถานีเตรียมไว้ล่วงหน้าได้)'),
         h('div', null, '• ', h('b', null, 'เปิด'), ' = ทุกคนเห็นเมนูผลิตครบตามสิทธิ์ของตัวเอง · ใช้ร่วมกับ Quick Profile "🧺 หน้างาน — เบิกวัตถุดิบ" ที่ ผู้ใช้ + สิทธิ์'),
         h('div', { className:'text-[11px] text-gray-500' }, 'มีผลทันที ทุกเครื่องเห็นค่าเดียวกัน — ไม่กระทบสิทธิ์รายคนหรือฟีเจอร์ผลิตของแต่ละสาขา'))),
+
+    // 💎 FA-S1: เกณฑ์ทรัพย์สิน (settings.capitalizeThreshold) — การ์ดกลางจาก 00-core (บัญชี → ทะเบียนทรัพย์สิน ใช้ตัวเดียวกัน)
+    global.ERP.CapexThresholdCard && h(global.ERP.CapexThresholdCard, { state, dispatch, user: state.currentUser }),
 
     // 🆕 WEIGH-ORDER E6 (§E-2): งานชั่งตามใบสั่ง — ใบสั่งของสูตรที่ติ๊ก "ส่งเข้าหน้าชั่ง" ไปชั่งที่ ⚖️ ชั่ง (settings.weighOrderJobs · ค่าว่าง = เปิด)
     //   ปิด = ถอยกลับแบบนุ่ม: ขั้นชั่งทำที่หน้างานทุกใบ · งานที่จองอยู่ขึ้นที่หน้างานพร้อมชื่อผู้จอง · ข้อมูลที่ชั่งเสร็จแล้วไม่หาย (สวิตช์เดียวกับในแท็บ ⚖️ ชั่ง ของผจก.)
@@ -96767,7 +97822,8 @@ function calcMonthKPI(state, period){
   const assetNbv = (state.assets||[]).filter(a =>
     a.acquireDate && a.acquireDate <= endISO &&
     !['disposed','sold'].includes(a.status||'')).reduce((s,a) => {
-    const cost = Number(a.acquireCost)||0;
+    // 🆕 FA-S4: รวมส่วนเพิ่ม (ทุนที่ได้มาถึงสิ้นงวด · ค่าเสื่อมทุกก้อนถึงงวด)
+    const cost = global.ERP.assetTotalCost ? global.ERP.assetTotalCost(a, endISO) : (Number(a.acquireCost)||0);
     const dep = (a.depreciationHistory||[]).filter(e => upToMonth(e.period,period))
       .reduce((x,e) => x + (Number(e.depAmount)||0), 0);
     return s + Math.max(0, cost - dep);
@@ -97023,6 +98079,9 @@ function calcAlerts(state, period){
   const lastMonth = monthShift(curPeriod, -1);
   const backlog = (state.assets||[]).reduce((s,a) => {
     if(['disposed','sold'].includes(a.status||'')) return s;
+    // 🆕 FA-S4: เครื่องที่มีส่วนเพิ่ม → ค้างถ้ามีก้อนใดยังไม่ลงงวดนั้น
+    if((a.components||[]).some(c => c && !c.voided) && global.ERP.calcMonthlyDepreciation)
+      return s + (global.ERP.calcMonthlyDepreciation(a, lastMonth) > 0 ? 1 : 0);
     const posted = (a.depreciationHistory||[]).some(h => h.period === lastMonth);
     if(posted || a.method === 'none') return s;
     return s + 1;
@@ -98154,6 +99213,16 @@ C.registerGroup({
                       }
                       return { count:out.length, detail:out }; } },
 
+    // 💎 FA-S1 ref: src/00-core.js getCapexUntickedPOLines (PO เปิด/ร่าง · บรรทัดไม่ติ๊ก 💎 · capexUnitExVat ≥ settings.capitalizeThreshold · ยังรับไม่ครบ)
+    //      เกณฑ์ 0 (ยังไม่ตั้ง) = ไม่นับ · info (ไม่บล็อก) — ให้จัดซื้อทบทวนว่าเป็นทรัพย์สินหรือไม่
+    { key:'acct_capex_under_threshold_po', label:'PO มีรายการราคาถึงเกณฑ์ทรัพย์สิน แต่ไม่ได้ติ๊ก 💎', severity:'info',
+      show: (ctx) => gate(ctx) && ctx.perm('purchase','po','view'),
+      nav: NAV_PO,
+      hint: (ctx) => `ราคาต่อชิ้น (ไม่รวม VAT หลังส่วนลด) ≥ ${fmtNum((ctx.H.capexThreshold && ctx.H.capexThreshold(ctx.state)) || 0)} บาท และใช้งานได้เกิน 1 ปี = ทรัพย์สิน → เปิด PO → "🔧 แก้เต็ม" ติ๊ก 💎 + เลือกหมวด · ถ้าเป็นของสิ้นเปลือง/วัตถุดิบ ไม่ต้องทำอะไร`,
+      run: (ctx) => { const fn = ctx.H.getCapexUntickedPOLines;
+                      const l = (typeof fn === 'function' ? fn(ctx.state) : []).filter(x => !isLegacyPO(x.po));
+                      return { count:l.length, detail:l.map(x => `${x.po.poNumber || x.po.id} · ${ctx.itemName(x.line.itemId)} · ${fmtNum(x.unitExVat)}/ชิ้น`) }; } },
+
     // ref: src/00-core.js:2470-2523 (getLowStockAlerts — FIFO remaining → stockByBranch, item.minStock, active) · src/mod-purchase.js:10999-11001 (LowStockTab กรองตาม allowed branches)
     //      :10917-10926 (on-order = PO เปิดอยู่ที่ qty−receivedQty > 0) · :177 (openPOs = pending|approved|partial) · PO นำเข้า Ecount receivedQty 0 ตลอดกาล → ไม่ถือว่า "ของกำลังมา" (isLegacyPO)
     //      total = สินค้าต่ำกว่าขั้นต่ำทั้งหมด · count = ที่ยังไม่มี PO เปิดอยู่จริง (frag-warehouse wh_low_stock alias มาที่นี่)
@@ -98484,6 +99553,21 @@ C.registerGroup({
         for(const e of l){ const k = e.branch + '|' + (e.locId || ''); if(!byLoc.has(k)) byLoc.set(k, { e, rows:[] }); byLoc.get(k).rows.push(e); }
         return { count:l.length, detail:[...byLoc.values()].slice(0,6).map(g => `📍 ${whereLabel(ctx, g.e.branch, g.e.locId)}: ${g.rows.length} รายการ — `
           + g.rows.slice(0,3).map(e => `${ctx.itemName(e.itemId)} ${fmtNum(e.qty)}`).join(', ') + (g.rows.length > 3 ? ` …อีก ${g.rows.length - 3}` : '')) };
+      } },
+
+    // 💎 FA-S3 ref: src/00-core.js getAssetInStockLines (GR 💎 เก่า ไม่มี noStock · ถึงเกณฑ์ · ยังไม่ล้าง · clearable = ล็อตเต็ม)
+    //      src/01-state.js CLEAR_ASSET_STOCK · src/mod-stock.js LegacyAssetStockPanel (แท็บ 💎 ทรัพย์สินรอบันทึก)
+    //   นับเฉพาะที่ล้างได้ (ล็อตเต็ม) · ที่ถูกเบิกไปแล้วแสดงใน detail ให้ปรับมือกับบัญชี (สัญญา R4)
+    { key:'wh_asset_in_stock', label:'ทรัพย์สิน (เครื่อง/อุปกรณ์) ค้างอยู่ในสต๊อก — รับเข้าก่อนระบบแยกทรัพย์สิน', severity:'warn',
+      show: (ctx) => (ctx.can('stock') && ctx.perm('stock','list','adjust')) || (ctx.can('accounting') && ctx.perm('accounting','assets','view')),
+      nav: { tab:'stock', subs:{ stock:'assetPending' } },
+      hint: 'คลัง → 💎 ทรัพย์สินรอบันทึก → กล่อง "⚠️ ทรัพย์สินเก่าที่ยังค้างในสต๊อก" → กด "💎 ล้างออกจากสต๊อก" (ไม่กระทบบัญชี) · ถ้าถูกเบิก/โอนไปบางส่วน กด "ล้างส่วนที่ค้าง" หรือปรับสต๊อก แล้วแจ้งบัญชี',
+      run: (ctx) => {
+        const fn = ctx.H.getAssetInStockLines;
+        const all = (typeof fn === 'function' ? (fn(ctx.state) || []) : []).filter(x => ctx.inScope(x.gr.branch));
+        const l = all.filter(x => x.clearable), manual = all.filter(x => !x.clearable);
+        return { count:l.length, detail:[...l.map(x => `${x.gr.grNumber} · ${ctx.itemName(x.line.itemId)} ${fmtNum(x.line.qty)}`),
+          ...manual.map(x => `${x.gr.grNumber} · ${ctx.itemName(x.line.itemId)} (${x.remainingQty > 1e-9 ? 'ถูกเบิกไปบางส่วน — ล้างส่วนที่ค้าง' : 'ไม่พบล็อต/ถูกเบิกแล้ว — ปรับสต๊อก แล้วกด จัดการแล้ว'})`)] };
       } },
 
     // ==================== GO-LIVE: ใบเบิกวัตถุดิบ (บันทึกอย่างเดียว) — ตามได้แม้ปิดกลุ่มผลิต (settings.productionLive=false) ====================
@@ -99658,7 +100742,7 @@ C.registerGroup({
 
     // ref: src/00-core.js:1416-1434 getPendingAssetLines (gr.lines[].isAsset && ยังไม่มี asset ผูก acquireFromGrId/acquireFromGrLine · ข้าม gr.voided)
     //      src/mod-stock.js:4095-4098 line.assetInfoAt = คลังคีย์ S/N แล้ว · src/mod-accounting.js:203 badge · :591-596 ตาราง '💎 รอลงทะเบียนจาก GR'
-    { key:'acct_asset_pending_register', label:'ทรัพย์สินรอลงทะเบียน (จาก GR)', severity:'warn',
+    { key:'acct_asset_pending_register', label:'ทรัพย์สินรอลงทะเบียน (จาก GR / บิลซ่อมใหญ่)', severity:'warn',
       show: (ctx) => ctx.can('accounting') && ctx.perm('accounting','assets','view'),
       nav: { tab:'accounting', subs:{ acct:'assets' } },
       hint: (ctx, res) => `ไปที่ 💎 ทะเบียนทรัพย์สิน → ตาราง "💎 รอลงทะเบียนจาก GR" → กด "ลงทะเบียน" (ตั้งหมวด/อายุใช้งาน/วิธีคิดค่าเสื่อม)` +
@@ -99667,9 +100751,22 @@ C.registerGroup({
         const fn = ctx.H.getPendingAssetLines;
         const l = typeof fn === 'function' ? (fn(ctx.state) || []) : [];
         const ready = l.filter(x => x.line && x.line.assetInfoAt);
-        return { count:l.length, waitWh: l.length - ready.length,
-          detail:l.map(x => `${x.gr.grNumber || x.gr.id} · ${x.line.itemName || ctx.itemName(x.line.itemId)}${x.line.assetInfoAt ? '' : ' (รอ S/N)'}`) };
+        // 💎 FA-S5: + บิลซ่อมใหญ่ที่ติ๊ก "เพิ่มเข้าเครื่อง" ยังไม่ลงเป็นส่วนเพิ่ม (getPendingCapexLines kind exp_add)
+        const fx = ctx.H.getPendingCapexLines;
+        const ex = typeof fx === 'function' ? (fx(ctx.state) || []).filter(x => x.kind === 'exp_add') : [];
+        return { count:l.length + ex.length, waitWh: l.length - ready.length,
+          detail:[...l.map(x => `${x.gr.grNumber || x.gr.id} · ${x.line.itemName || ctx.itemName(x.line.itemId)}${x.line.assetInfoAt ? '' : ' (รอ S/N)'}`),
+            ...ex.map(x => `${x.inv.invNumber} · ${x.line.description || ''} → ${x.asset ? (x.asset.code || x.asset.name) : '?'} (เพิ่มเข้าเครื่อง${x.disposed ? ' · ⚠ เครื่องจำหน่ายแล้ว' : ''})`)] };
       } },
+
+    // 💎 FA-S1 ref: src/00-core.js capexThreshold/canEditCapexThreshold/CapexThresholdCard · เจ้าของ 2026-09-29: เกณฑ์ 10,000 บาท/ชิ้น ให้ ผจก.บัญชีตั้งในนโยบาย
+    //      (โค้ดคงค่าตั้งต้น 0) → เตือนคนที่ตั้งได้จนกว่าจะตั้ง · info
+    { key:'acct_capex_threshold_unset', label:'ยังไม่ได้ตั้งเกณฑ์ทรัพย์สิน (แนะนำ 10,000 บาท/ชิ้น)', severity:'info',
+      show: (ctx) => ctx.can('accounting') && typeof ctx.H.canEditCapexThreshold === 'function' && ctx.H.canEditCapexThreshold(ctx.user),
+      nav: { tab:'accounting', subs:{ acct:'assets' } },
+      hint: 'บัญชี → 💎 ทะเบียนทรัพย์สิน → "💎 เกณฑ์ทรัพย์สิน" (หรือ ตั้งค่า → นโยบาย) → กด "ตั้งตามที่แนะนำ 10,000" · ให้ผู้สอบบัญชียืนยันตัวเลข',
+      run: (ctx) => { const t = (ctx.H.capexThreshold && ctx.H.capexThreshold(ctx.state)) || 0;
+                      return { count: t > 0 ? 0 : 1, detail: t > 0 ? [] : ['ตอนนี้ของที่ติ๊ก 💎 ทุกบรรทัดเป็นทรัพย์สิน (ถึงจะราคาถูก)'] }; } },
 
     // ref: src/01-state.js:4305-4371 POST_DEPRECIATION (กดเอง · depreciationHistory[].period + JE source 'depreciation' sourceId=period · :4309 _checkDateLock(period+'-01') → งวดปิดแล้ว post ไม่ได้)
     //      src/mod-accounting.js:750-773 BulkDepreciationModal default = เดือนนี้ ต้องเลือกเดือนก่อนเอง · :568-577 แถบ '📉 ค่าเสื่อมรอบันทึก' + ปุ่ม '▶ บันทึกค่าเสื่อมประจำเดือน' เห็นเฉพาะตอนเปิดแท็บ · :203 badge นับแค่ GR รอลงทะเบียน
@@ -99688,6 +100785,21 @@ C.registerGroup({
         const l = (ctx.state.assets||[]).map(a => ({ a, dep: a ? _num(fn(a, period)) : 0 })).filter(x => x.dep > 0);
         return { count:l.length, period, amount:l.reduce((s,x) => s + x.dep, 0), locked: periodClosed(ctx, monthEnd(period)),
           detail:l.map(x => `${x.a.code ? x.a.code + ' · ' : ''}${x.a.name || x.a.id} · ${fmtCur(x.dep)}`) };
+      } },
+
+    // 🆕 FA-S4 ref: FIXED_ASSET_CONTRACT D13 · src/00-core.js DEP_ACTIVE_STATUSES (สถานะ maintenance คิดค่าเสื่อมต่อ)
+    //   เครื่องสถานะ "ซ่อม" (maintenance) เกิน 30 วัน (นับจาก updatedAt) → เตือนให้เปลี่ยนกลับเป็นใช้งานเมื่อซ่อมเสร็จ · info
+    //   ผู้เห็น: บัญชี (ดูทะเบียนทรัพย์สิน) + ผลิต/ผจก.สาขาของเครื่อง (กรองตามสาขาในขอบเขต)
+    { key:'asset_maintenance_long', label:'เครื่องสถานะ "ซ่อม" นานเกิน 30 วัน', severity:'info',
+      show: (ctx) => (ctx.can('accounting') && ctx.perm('accounting','assets','view')) || ctx.can('production'),
+      nav: { tab:'accounting', subs:{ acct:'assets' } },
+      hint: 'ซ่อมเสร็จแล้วให้เปลี่ยนสถานะเป็น "ใช้งาน" ที่ 💎 ทะเบียนทรัพย์สิน → แก้ไขเครื่อง (ค่าเสื่อมคิดต่อระหว่างซ่อมอยู่แล้ว) · ถ้าซ่อมใหญ่/ยืดอายุ ให้บัญชีเพิ่มต้นทุนเข้าเครื่องเดิม',
+      run: (ctx) => {
+        const now = ctx.now;
+        const acct = ctx.can('accounting') && ctx.perm('accounting','assets','view');   // บัญชีเห็นทุกสาขา · ผลิตเห็นเฉพาะสาขาตัวเอง
+        const l = (ctx.state.assets||[]).filter(a => a && a.status === 'maintenance' && (acct || ctx.inScope(a.branch))
+          && Number(a.updatedAt) > 0 && (now - Number(a.updatedAt)) > 30 * 86400000);
+        return { count:l.length, detail:l.map(a => `${a.code ? a.code + ' · ' : ''}${a.name || a.id} · ซ่อม ${Math.floor((now - Number(a.updatedAt)) / 86400000)} วัน`) };
       } },
 
     // ref: src/mod-purchase.js:9156 balance = Σ pettyTxns.amount · :10620-10621 expense amount ติดลบ · :9371-9374 topup amount บวก · :9195 ปุ่ม '➕ เติมเงินสดย่อย' · src/01-state.js:288 pettyTxns
