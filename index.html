@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="38484ea3e9c8";window.__ERP_BUILT_AT__="2026-09-28T18:27:50";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="12bca23577e1";window.__ERP_BUILT_AT__="2026-09-29T01:52:16";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -2974,6 +2974,54 @@ function itemRefCost(state, item, opts){
   return none;
 }
 
+// 🆕 ITEM-FORM S8b (§A7): ต้นทุนต่อหน่วยฐานของ นับสต๊อก/ปรับยอด/ของเสีย/ยอดอนุมัติ — กติกาเดียวทุกจุด
+//   signed < 0 (ของลด) = prefer fifo → เฉลี่ยคงเหลือ (ใกล้ต้นทุนที่ FIFO จะตัดจริง · ยอด JE จริงมาจาก reducer = fifoUnitCost)
+//   signed ≥ 0 (ของเพิ่ม/layer ใหม่) = รับของล่าสุด → เฉลี่ยคงเหลือ → costPrice เดิม → สูตร · ไม่มี = 0 (UI เตือน "ยังไม่มีต้นทุน")
+//   🆕 UAT S8 S4: ของลด = จำลองตัด FIFO (dry-run ไม่แก้ state) ตามลำดับเดียวกับ deductFIFO (หมดอายุก่อน → เก่าก่อน · รวม layer ฿0)
+//     → ยอดอนุมัติ = ยอด JE ที่จะลงจริง (เดิมเฉลี่ยเฉพาะ layer ที่มีต้นทุน → ผู้อนุมัติเห็น ฿500 แต่ JE ลง ฿0)
+//     ส่วนที่ FIFO ไม่พอ = ต้นทุนติดลบ (negUnitCost เหมือน reducer) → ไม่มี = ต้นทุนอ้างอิง · locId (ถ้ามี) = ตัดเฉพาะคลังนั้น
+//   🆕 verify S8: locId = จำลอง _selfNetAtLoc (ล็อตบวกในคลังนั้นหักล้างยอดติดลบในคลังเดียวกันก่อน) แล้วตัดเฉพาะคลังนั้น (ตรงกับ ADJUST_STOCK)
+//     opts.storeOnly (ของเสีย) = ตัดเฉพาะคลังกลาง + ของที่ไม่มีคลัง แบบเดียวกับ deductFromStore (ไม่หยิบล็อตในคลังไลน์)
+function _adjStoreLocId(state, branch){
+  const b = ((state && state.branches) || _IF_EMPTY).find(x => x && x.id === branch);
+  if(!b || b.warehouseMode === 'simple' || !(b.locations||[]).length) return undefined;
+  const isLine = (l) => !!(l.lineId || l.type === 'wip' || l.type === 'line');
+  const main = (b.locations||[]).find(l => l && l.type === 'raw' && !isLine(l)) || (b.locations||[]).find(l => l && !isLine(l) && l.type !== 'fg') || null;
+  return main ? main.id : null;
+}
+function stockAdjUnitCost(state, item, branch, signed, locId, opts){
+  const rc = itemRefCost(state, item, Number(signed) < 0 ? { branch: branch || '', prefer:'fifo' } : { branch: branch || '' });
+  const ref = Number(rc.unitCost) > 0 ? Number(rc.unitCost) : 0;
+  const need0 = Math.abs(Number(signed) || 0);
+  if(!(Number(signed) < 0) || !(need0 > 0)) return ref;
+  const id = item && typeof item === 'object' ? item.id : item;
+  const mainId = (!locId && opts && opts.storeOnly) ? _adjStoreLocId(state, branch) : undefined;
+  const inScope = (l) => l && l.itemId === id && (!branch || l.branch === branch)
+    && (locId ? (l.locId || null) === locId : (mainId === undefined || !l.locId || l.locId === mainId));
+  const all = ((state && state.fifoLayers) || _IF_EMPTY).filter(inScope);
+  const ls = all.filter(l => (Number(l.remaining) || 0) > 0).map(l => ({ remaining: Number(l.remaining) || 0, unitCost: l.unitCost, date: l.date, expiryDate: l.expiryDate }));
+  if(locId){   // จำลอง _selfNetAtLoc — ยอดติดลบในคลังนั้นกินล็อตบวก (หมดอายุก่อน → เก่าก่อน) ก่อนตัด
+    let neg = all.reduce((t, l) => t + Math.max(0, -(Number(l.remaining) || 0)), 0);
+    const byNet = ls.slice().sort((a, b) => String(a.expiryDate || '9999').localeCompare(String(b.expiryDate || '9999')) || String(a.date || '').localeCompare(String(b.date || '')));
+    for(const p of byNet){ if(neg <= 1e-9) break; const t = Math.min(p.remaining, neg); p.remaining -= t; neg -= t; }
+  }
+  if(!ls.some(l => l.remaining > 1e-9)) return ref;
+  ls.sort((a, b) => {
+    if(a.expiryDate && b.expiryDate) return a.expiryDate.localeCompare(b.expiryDate);
+    if(a.expiryDate && !b.expiryDate) return -1;
+    if(!a.expiryDate && b.expiryDate) return 1;
+    return new Date(a.date) - new Date(b.date);
+  });
+  let need = need0, cost = 0;
+  for(const l of ls){ if(need <= 0) break; if(!(l.remaining > 1e-9)) continue; const t = Math.min(Number(l.remaining) || 0, need); need -= t; cost += t * (Number(l.unitCost) || 0); }
+  if(need > 0.0001){
+    let nu = 0;
+    try { nu = Number(global.ERP && global.ERP.negUnitCost ? global.ERP.negUnitCost(state, id, branch).unitCost : 0) || 0; } catch(_e){ nu = 0; }
+    cost += need * (nu > 0 ? nu : ref);
+  }
+  return cost / need0;
+}
+
 // index ประวัติซื้อ (ทุกสินค้า รอบเดียว): grs → pos → fifoLayers → Map(itemId → { gr: Map(supId→raw), po: Map(supId→raw) })
 //   ส่วนที่ขึ้นกับ item.units (ด่านหน่วย/lastBaseCost) คำนวณตอนอ่าน ไม่เก็บใน cache
 const _purchHistIdx = new WeakMap();
@@ -5076,6 +5124,28 @@ function _partyBranchKind(p){
   const code = normalizeBranchCode(p && p.branchCode);
   if(!code) return 'none';
   return code === '00000' ? 'hq' : 'branch';
+}
+// 🆕 COMPANY-ADDR (2026-09-28): ที่อยู่ผู้ขาย/ผู้ออกเอกสารบนใบพิมพ์
+//   สาขา HQ หรือไม่รู้สาขา → ที่อยู่บริษัท (สำนักงานใหญ่ตามหนังสือรับรอง · ตั้งที่ ตั้งค่า → 🏛️ บริษัท) ก่อน แล้วค่อยที่อยู่สาขา
+//   สาขาอื่น → ที่อยู่สาขา · สาขาไม่มีที่อยู่ → ที่อยู่บริษัท · ว่างทั้งคู่ → ''
+function sellerAddress(company, branch){
+  const t = (x) => String(x == null ? '' : x).trim();
+  const ca = t(company && company.address), ba = t(branch && branch.address);
+  if(!branch || branch.branchType === 'hq') return ca || ba;
+  return ba || ca;
+}
+// 🆕 COMPANY-ADDR UAT (2026-09-28): โทรผู้ขายบนใบพิมพ์ — HQ/ไม่รู้สาขา → โทรบริษัทเท่านั้น (เจ้าของยังไม่มีเบอร์ = ไม่พิมพ์ · กันเบอร์ตัวอย่างของสาขา HQ หลุดขึ้นใบ)
+//   สาขาอื่น → โทรสาขา · สาขาไม่มีโทร → โทรบริษัท · ว่าง → ''
+function sellerPhone(company, branch){
+  const t = (x) => String(x == null ? '' : x).trim();
+  const cp = t(company && company.phone), bp = t(branch && branch.phone);
+  if(!branch || branch.branchType === 'hq') return cp;
+  return bp || cp;
+}
+// รหัสสาขาผู้ขาย 5 หลัก — HQ/ไม่รู้สาขา → '00000' (พิมพ์ "สำนักงานใหญ่") · สาขาไม่มีรหัส → ''
+function sellerBranchCode(branch){
+  if(!branch || branch.branchType === 'hq') return normalizeBranchCode(branch && branch.branchCode) || '00000';
+  return normalizeBranchCode(branch.branchCode);
 }
 // ที่ตั้งสั้น ๆ จากที่อยู่: "เขต/อำเภอ · จังหวัด" (เช่น "บางบัวทอง · นนทบุรี") — หาไม่เจอ → 35 ตัวแรก
 function partyLocation(address){
@@ -7447,7 +7517,7 @@ Object.assign(global.ERP, {
   getStockValueByBranch,
   getItemAvgFifoCost,
   // 🆕 ITEM-FORM (ITEM_FORM_CONTRACT B2) — ต้นทุน/ผู้ขาย/รหัส จากประวัติซื้อจริง
-  itemRefCost, itemPurchaseHistory, lastUnitPriceEx, itemDefaultSupplierId, canSeePurchasePrice,
+  itemRefCost, stockAdjUnitCost, itemPurchaseHistory, lastUnitPriceEx, itemDefaultSupplierId, canSeePurchasePrice,
   ITEM_CODE_PREFIX, nextItemCode, findItemCodeDup, findItemNameDup,
   ITEM_UNIT_TEMPLATES, unitTemplatesForType, applyUnitTemplate,
   getMemoState,
@@ -7465,7 +7535,7 @@ Object.assign(global.ERP, {
   // Thai BE date picker
   BEDateInput, fmtDateBE, TH_MONTHS_FULL, TH_MONTHS_SHORT, TH_DAYS,
   // UI atoms
-  SB, Modal, Spinner, Button, Combobox, supplierComboProps, customerComboProps, partyComboProps, partyBranchLabel, partyLocation, partyOptionText, PartyBranchConfirm, normalizeBranchCode, partyBranchCode5, partyTaxBranchText, partyIsDup, partyShowBranch, partyNameWithBranch, PartyBranchChip, partySearchText, partyMatches, isDisallowedExpense, payEffectiveDate, invNonClaimVat, invNonClaimVatBase, invClaimableVat,
+  SB, Modal, Spinner, Button, Combobox, supplierComboProps, customerComboProps, partyComboProps, partyBranchLabel, partyLocation, sellerAddress, sellerPhone, sellerBranchCode, partyOptionText, PartyBranchConfirm, normalizeBranchCode, partyBranchCode5, partyTaxBranchText, partyIsDup, partyShowBranch, partyNameWithBranch, PartyBranchChip, partySearchText, partyMatches, isDisallowedExpense, payEffectiveDate, invNonClaimVat, invNonClaimVatBase, invClaimableVat,
   // 🆕 DEPOSIT-VAT (§C-5)
   vatLockOf, vatPeriodLocked, depositKindOf, depositAvail, depositEligible, planDepositApplication, depositVatSplit, invDepositVatOffset, invDepositBaseOffset, invClaimableVatBase, invVatConflictOpen,
   normTaxInvNo, taxInvKey, taxInvKey2, findDupTaxInv, findTaxInvGrant, taxInvClaimWindow, TAX_INV_OVERRIDE_ANYOF, taxInvOverrideApprover,
@@ -13069,7 +13139,17 @@ function reducer(s, a){
     case 'SET_BRANCH':   return { ...s, currentBranch:a.data };
 
     // ---------- Company ----------
-    case 'SET_COMPANY':  return { ...s, company:{ ...s.company, ...a.data } };
+    case 'SET_COMPANY': {
+      // 🆕 COMPANY-ADDR UAT (audit): ชื่อ/เลขผู้เสียภาษี/ที่อยู่/โทร/อีเมล ขึ้นหัวใบกำกับ → ลง auditLog (ใคร/เมื่อไร/ค่าเดิม→ค่าใหม่) · โลโก้ไม่เก็บค่า (รูปใหญ่)
+      const _old = s.company || {}, _new = { ..._old, ...(a.data || {}) };
+      const _WATCH = ['name','nameEn','taxId','address','phone','email'];
+      const _chg = _WATCH.filter(k => a.data && Object.prototype.hasOwnProperty.call(a.data, k) && String(_old[k] == null ? '' : _old[k]) !== String(a.data[k] == null ? '' : a.data[k]));
+      if(!_chg.length) return { ...s, company:_new };
+      const _by = (s.currentUser && s.currentUser.username) || 'system', _now = Date.now();
+      const _al = _chg.map((k, i) => ({ id:'al_co_' + _now.toString(36) + Math.random().toString(36).slice(2,5) + i, ts:_now, type:'company_change', by:_by,
+        key:k, from:_old[k] === undefined ? null : _old[k], to:a.data[k], summary:`ข้อมูลบริษัท ${k}: ${JSON.stringify(_old[k] === undefined ? null : _old[k])} → ${JSON.stringify(a.data[k])}` }));
+      return { ...s, company:_new, auditLog:[ ...(s.auditLog || []), ..._al ] };
+    }
     case 'UPDATE_SETTINGS': {
       // 🆕 UAT (audit): ค่าที่กระทบสต๊อก/บัญชี → ลง auditLog (ใคร/เมื่อไร/ค่าเดิม→ค่าใหม่) ตรวจย้อนได้ว่าช่วงไหนตัดแบบไหน
       // 🆕 VAT-CLAIM V3a (B3.3): vatLockUntil แก้ได้ทาง FILE_VAT_RETURN / UNLOCK_VAT_PERIOD เท่านั้น → ตัดทิ้ง คงค่าเดิม
@@ -13607,6 +13687,8 @@ function reducer(s, a){
       let _varVal = 0;  // 🆕 B1: มูลค่าผลต่าง (+ = ได้เพิ่ม, − = ขาดหาย)
       let _clearNegVal = 0;  // 🆕 PRODUCTION-LIVE UAT: มูลค่าส่วน "ล้างยอดติดลบ" (@ต้นทุน NEG) — แยกบรรทัด JE + ป้าย
       let _auditExtra = null;  // 🆕 R5: บันทึก FIFO shortage (ถ้ามี)
+      let _mvFifo = null;  // 🆕 S8a: { fifoCost, fifoUnitCost } เฉพาะของลด
+      const _mvLayer = (delta > 0 && newLayer && newLayer.id) ? newLayer.id : null;  // 🆕 UAT S8 S2: layer ที่การปรับเพิ่มนี้สร้าง → ยกเลิกแล้วตัด layer นี้ก่อน
       if(delta > 0 && newLayer){
         // 🆕 GO-LIVE UAT: ปรับเพิ่ม/นับเจอ → หักล้าง NEG layer ก่อน (มูลค่าผลต่างยังคิดจาก delta เต็ม เพราะ stock จริงเพิ่มเท่านั้น)
         const _net = netNegativeLayers(layers, newLayer);
@@ -13632,6 +13714,10 @@ function reducer(s, a){
             note: 'ปรับ/นับสต๊อก: FIFO ขาด ' + _r.shortage + ' หน่วย (ควร Reconcile) · คิดต้นทุนส่วนขาด @ ' + _cp };
         }
         _varVal = -_lossCost;
+        // 🆕 S8a (ITEM_FORM_CONTRACT B5.1): เก็บต้นทุน FIFO ที่ตัดจริง (รวมส่วนขาด @ negUnitCost) ลง movement
+        //   · movement.unitCost จาก payload คงไว้เป็น "ต้นทุนอ้างอิง" · REVERSE_ADJUST ดัน layer คืน @ fifoUnitCost (ตรงกับ JE)
+        if(movement){ const _aq = Math.abs(Number(delta) || 0);
+          _mvFifo = { fifoCost: _lossCost, fifoUnitCost: _aq > 0 ? _lossCost / _aq : 0 }; }
       }
       // 🆕 B1 (council): post JE ผลต่างปรับ/นับสต๊อก เข้า GL — เฉพาะ flow ที่ตั้ง postVarianceJE
       //   (นับสต๊อก + ปรับมือ) เพื่อกัน double-post กับ flow อื่นที่ post JE เอง (เช่น Direct INV รับเข้า @mod-purchase)
@@ -13662,7 +13748,8 @@ function reducer(s, a){
       }
       return {
         ...s, items, fifoLayers: layers,
-        movements: [...s.movements, (_clearNegVal > 0.001 && movement) ? { ...movement, clearsNegative:true, note:'[ล้างยอดติดลบ] ' + (movement.note||'') } : movement],
+        movements: [...s.movements, (_clearNegVal > 0.001 && movement) ? { ...movement, clearsNegative:true, note:'[ล้างยอดติดลบ] ' + (movement.note||''), ...(_mvLayer ? { layerId: _mvLayer } : {}) }
+          : (_mvFifo ? { ...movement, ..._mvFifo } : (_mvLayer && movement) ? { ...movement, layerId: _mvLayer } : movement)],
         journalEntries: _je, seq: { ...s.seq, je: _seqJe },
         ...(_auditExtra ? { auditLog: [ ...(s.auditLog||[]), _auditExtra ] } : {}),
       };
@@ -17062,15 +17149,51 @@ function reducer(s, a){
       }
       // 🆕 BUGFIX #9: คืน FIFO layer ให้ตรงกับ stockByBranch (เดิมแตะแค่ stockByBranch → FIFO desync, มูลค่าคงเหลือเพี้ยน)
       let fifoLayers = s.fifoLayers.map(l => ({...l}));
+      // 🆕 verify S8: หา JE เดิมก่อน — ใช้ตีต้นทุน layer ที่คืน (movement เก่าก่อน S8 ไม่มี fifoUnitCost)
+      const _jeOrig = (s.journalEntries||[]).find(j => j.id === 'je_adj_' + mv.id && j.status === 'posted');
+      let _raCut = null; let _raShort = 0;  // 🆕 UAT S8 S2: มูลค่า FIFO ที่ตัดจริงตอนกลับ adjust_in (null = ไม่ใช่กรณีนี้)
       if(delta < 0){
         // กลับ adjust_in (เดิมเพิ่มของ) → ตัด FIFO ออกตามจำนวน
-        const _resRa = deductFIFO(fifoLayers, mv.itemId, -delta, mv.branch, mv.locId||null);
-        // 🆕 UAT P2 (architect/warehouse): ไม่กลืน shortage เงียบ — ถ้า FIFO ตัดไม่พอ (ของถูกใช้ไปแล้ว) เตือนให้ Reconcile
-        if(_resRa && _resRa.shortage > 0.0001){ try { console.warn('⚠️ REVERSE_ADJUST: FIFO ขาด '+_resRa.shortage+' หน่วย (item '+mv.itemId+') — FIFO≠stockByBranch ควร Reconcile'); } catch(_e){} }
+        // 🆕 UAT S8 S2: ตัด layer ที่การปรับเพิ่มนี้สร้าง (mv.layerId) ก่อน → ส่วนที่เหลือค่อยตัด FIFO ตามปกติ
+        let _need = -delta; let _cutCost = 0;
+        const _ownAny = mv.layerId ? fifoLayers.find(l => l.id === mv.layerId && l.itemId === mv.itemId) : null;
+        // 🆕 verify S8: ส่วนที่การปรับเพิ่มนี้ "ล้างยอดติดลบ" (nettedQty) → สร้าง NEG layer คืน @ต้นทุน NEG เดิม (negNetCost ÷ nettedQty)
+        //   ยอด JE ส่วนนี้ = บรรทัดล้างยอดติดลบเดิมพอดี · ส่วนที่ไม่ได้ล้างเท่านั้นที่ตัดจาก FIFO
+        //   movement เก่า (ไม่มี layerId) + JE มีแต่บรรทัดล้างยอดติดลบ = ล้างทั้งจำนวน → ใช้ยอด JE ÷ จำนวน
+        let _nq = 0, _nVal = 0;
+        if(_ownAny && (Number(_ownAny.nettedQty)||0) > 0.0001){ _nq = Number(_ownAny.nettedQty); _nVal = Number(_ownAny.negNetCost)||0; }
+        else if(!_ownAny && mv.clearsNegative && _jeOrig){
+          const _cl = (_jeOrig.lines||[]).filter(l => String(l.description||'').indexOf('ล้างยอดติดลบ') === 0).reduce((t,l) => t + (Number(l.credit)||0), 0);
+          if(_cl > 0.001 && Math.abs(_cl - (Number(_jeOrig.totalDebit)||0)) < 0.01){ _nq = _need; _nVal = _cl; }
+        }
+        if(_nq > 0.0001){
+          const _nTake = Math.min(_nq, _need); const _nUc = _nVal / _nq;
+          fifoLayers.push({ id:'fl_revadj_neg_'+mv.id, itemId: mv.itemId, branch: mv.branch, locId: (_ownAny && _ownAny.locId) || mv.locId || null,
+            qty: -_nTake, remaining: -_nTake, unitCost: _nUc, cost: -_nTake*_nUc, totalCost: -_nTake*_nUc, date: getToday(),
+            lot:'NEG', isNegative:true, ref:'REV-'+(mv.ref||mv.id), source:'adjust_reverse', note:'ติดลบคืน: ยกเลิกการนับที่ล้างยอดติดลบ' });
+          _need = Number((_need - _nTake).toFixed(4)); _cutCost += _nTake * _nUc;
+          if(_ownAny) _ownAny.nettedQty = Number((_nq - _nTake).toFixed(4));
+        }
+        const _own = (_ownAny && (_ownAny.remaining||0) > 0) ? _ownAny : null;
+        if(_own){ const _t = Math.min(_own.remaining, _need); _own.remaining -= _t; _need -= _t; _cutCost += _t * (Number(_own.unitCost)||0); }
+        const _resRa = _need > 0.0001 ? deductFIFO(fifoLayers, mv.itemId, _need, mv.branch, mv.locId||null) : { cost:0, shortage:0 };
+        _cutCost += (_resRa && _resRa.cost) || 0;
+        // ส่วนขาด (ของถูกใช้ไปแล้ว) คิด @ต้นทุนเดิมของการปรับ (JE ไม่ต่ำกว่าจริง) + บันทึก auditLog (เดิมแค่ console.warn)
+        const _ucOrig = Number(mv.unitCost) || (mv.cost && mv.qty ? Math.abs(Number(mv.cost)/Number(mv.qty)) : 0);
+        if(_resRa && _resRa.shortage > 0.0001){
+          _cutCost += _resRa.shortage * _ucOrig; _raShort = _resRa.shortage;
+          try { console.warn('⚠️ REVERSE_ADJUST: FIFO ขาด '+_resRa.shortage+' หน่วย (item '+mv.itemId+') — FIFO≠stockByBranch ควร Reconcile'); } catch(_e){}
+        }
+        _raCut = _cutCost;
       } else if(delta > 0){
         // กลับ adjust_out (เดิมตัดของ) → ดัน layer กลับ @ ต้นทุนเดิม (fallback costPrice)
         const _itRa = s.items.find(x => x.id === mv.itemId);
-        const _unitRa = Number(mv.unitCost) || (mv.cost && mv.qty ? Math.abs(Number(mv.cost)/Number(mv.qty)) : 0) || Number(_itRa && _itRa.costPrice) || 0;
+        // 🆕 S8a (B5.1 ก): ต้นทุน FIFO ที่ตัดจริง (mv.fifoUnitCost) ก่อน → ตรงกับ JE ที่กลับ · movement เก่าไม่มีช่องนี้ = ลำดับเดิม
+        //   🆕 verify S8: movement เก่าไม่มี fifoUnitCost แต่มี JE เดิม (posted @FIFO จริง) → ต้นทุนต่อหน่วย = ยอด JE ÷ จำนวน (มูลค่า layer = JE ที่กลับ)
+        const _aqRa = Math.abs(Number(mv.qty) || 0);
+        const _unitRa = (mv.fifoUnitCost != null && isFinite(Number(mv.fifoUnitCost))) ? (Number(mv.fifoUnitCost) || 0)
+          : (_jeOrig && _aqRa > 0 && (Number(_jeOrig.totalDebit) || 0) > 0.001) ? (Number(_jeOrig.totalDebit) / _aqRa)
+          : (Number(mv.unitCost) || (mv.cost && mv.qty ? Math.abs(Number(mv.cost)/Number(mv.qty)) : 0) || Number(_itRa && _itRa.costPrice) || 0);
         fifoLayers.push({
           id:'fl_revadj_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
           itemId: mv.itemId, branch: mv.branch, locId: mv.locId||null,
@@ -17090,7 +17213,41 @@ function reducer(s, a){
       const auditLog = [...(s.auditLog||[]), { id:'al_'+Date.now().toString(36),
         ts:Date.now(), type:'adjust_reverse', by, entityId:movementId,
         entityRef:mv.ref||mv.id, amount:mv.qty||0, note:reason||'' }];
-      return { ...s, items, fifoLayers, movements, auditLog };
+      // 🆕 S8a (B5.1 ข): กลับ JE ผลต่างของการปรับนี้ (je_adj_<mv.id> ที่ posted) — สลับ debit/credit ทุกบรรทัด
+      //   · ไม่มี JE เดิม (มูลค่า 0 / flow ไม่ post) = ไม่ทำ JE · มี je_revadj_<mv.id> แล้ว = ไม่กลับซ้ำ
+      let journalEntries = s.journalEntries; let _seqRa = s.seq?.je || 0;
+      const _revId = 'je_revadj_' + mv.id;
+      // 🆕 UAT S8 S2: กลับ adjust_in → ยอด JE = มูลค่า FIFO ที่ตัดออกจริง (_raCut) ไม่ใช่ยอดเดิมทั้งก้อน · ทุกบรรทัดปรับสัดส่วนเดียวกัน (สมดุล)
+      const _origAmt = _jeOrig ? (Number(_jeOrig.totalDebit) || 0) : 0;
+      const _ratio = (_raCut != null && _origAmt > 0.001) ? (_raCut / _origAmt) : 1;
+      const _r2 = (v) => Math.round((Number(v)||0) * 100) / 100;
+      const _revLines = !_jeOrig ? [] : (() => {
+        const _sc = (v) => Math.abs(_ratio - 1) > 0.00001 ? _r2((Number(v)||0) * _ratio) : (Number(v)||0);   // ratio 1 = สลับตรง ๆ (ไม่ปัดเศษ)
+        const ls = (_jeOrig.lines||[]).map(l => ({ ...l, debit: _sc(l.credit), credit: _sc(l.debit), description: 'กลับ: ' + (l.description||'') }));
+        const td = ls.reduce((t,l) => t + l.debit, 0), tc = ls.reduce((t,l) => t + l.credit, 0);
+        const diff = _r2(td - tc);
+        if(Math.abs(diff) > 0.0001){ const k = ls.reduce((bi,l,i) => (l.credit > (ls[bi]?.credit||0) ? i : bi), 0); ls[k] = { ...ls[k], credit: _r2(ls[k].credit + diff) }; }
+        return ls.filter(l => l.debit > 0.0001 || l.credit > 0.0001);
+      })();
+      const _revAmt = Math.abs(_ratio - 1) > 0.00001 ? _r2(_revLines.reduce((t,l) => t + l.debit, 0)) : (_jeOrig ? Number(_jeOrig.totalDebit)||0 : 0);
+      if(_raCut != null && (_raShort > 0.0001 || (_jeOrig && Math.abs(_revAmt - _origAmt) > 0.01))){
+        auditLog.push({ id:'al_revadj_cost_'+mv.id, ts:Date.now(), type:'adjust_reverse_cost_diff', by, entityId:movementId, entityRef:mv.ref||mv.id,
+          amount: _revAmt, note: 'ยกเลิกการปรับเพิ่ม: JE เดิม ' + _r2(_origAmt) + ' · ตัด FIFO จริง ' + _r2(_raCut) + (_raShort > 0.0001 ? (' · FIFO ขาด ' + _raShort + ' หน่วย (คิด @ต้นทุนเดิม · ควร Reconcile)') : '') });
+      }
+      if(_jeOrig && _revAmt > 0.001 && !(s.journalEntries||[]).some(j => j.id === _revId)){
+        _seqRa += 1;
+        const _d = new Date();
+        const _jeNo = `JE-${_d.getFullYear()}-${String(_d.getMonth()+1).padStart(2,'0')}-${String(_seqRa).padStart(4,'0')}`;
+        journalEntries = [...(s.journalEntries||[]), {
+          id:_revId, jeNumber:_jeNo, date: a.data.date || counterMv.date,
+          description:'[กลับรายการ] ยกเลิกการปรับสต๊อก ' + (mv.ref||'') + ' — ' + (reason||'-'),
+          source:'adjust_reverse', sourceId: mv.id, reversesJeId: _jeOrig.id,  // sourceId = movement เดิม (deterministic · counterMv.id สุ่ม)
+          branchId: _jeOrig.branchId, refType:'adjust', refId: mv.itemId, status:'posted', postedBy: by||'system', postedAt: Date.now(),
+          lines: _revLines, totalDebit: _revAmt, totalCredit: _revAmt,
+          ...(Math.abs(_ratio - 1) > 0.00001 ? { origAmount: _r2(_origAmt) } : {}) }];
+      }
+      return { ...s, items, fifoLayers, movements, auditLog,
+        ...(journalEntries !== s.journalEntries ? { journalEntries, seq: { ...s.seq, je: _seqRa } } : {}) };
     }
 
     case 'RECEIVE_PO': {
@@ -18262,11 +18419,38 @@ function reducer(s, a){
       let layers = s.fifoLayers.map(l => ({...l}));
       let _lossVal = 0;  // 🆕 B1: รวมต้นทุน FIFO ของที่ตัดทิ้ง
       // 🆕 PRODUCTION-LIVE UAT must_fix 4: ตัดจากคลังกลาง+ของไม่มีคลัง (หรือ f.locId) · stock byLoc ตัดตรงคลังเดียวกับ FIFO (เดิมตัดแค่ _total → byLoc เพี้ยน)
-      const _scParts = {};
+      const _scParts = {}; const _scCost = {}; const _scQty = {};
       for(const f of (fifoDeducts||[])){
         const _r = deductFromStore(s, layers, f.itemId, f.qty, f.branch, f.locId||null); _lossVal += (_r && _r.cost) || 0;
         const _k = f.itemId + '|' + f.branch; _scParts[_k] = (_scParts[_k] || []).concat(_r.parts);
+        _scCost[_k] = (_scCost[_k] || 0) + ((_r && _r.cost) || 0); _scQty[_k] = (_scQty[_k] || 0) + (Number(f.qty) || 0);
       }
+      // 🆕 UAT S8 S1: เขียนต้นทุน FIFO ที่ตัดจริงกลับลงใบของเสีย + movement (ให้รายงานของเสีย/ผู้บริหาร/รายงานเคลื่อนไหว ตรง GL 5386)
+      //   ค่าที่หน้าจอประมาณไว้เก็บเป็น estLoss/estUnitCost · แถวสินค้าเดียวกันหลายแถว → แบ่งตามสัดส่วน baseQty
+      const _r2 = (v) => Math.round(v * 100) / 100;
+      const _scBr = scrap?.branchId || scrap?.branch || (fifoDeducts && fifoDeducts[0] && fifoDeducts[0].branch);
+      let _scrapRec = scrap;
+      if(scrap && Array.isArray(scrap.items) && (fifoDeducts||[]).length){
+        const _sumQ = {};
+        scrap.items.forEach(x => { const k = x.itemId + '|' + _scBr; _sumQ[k] = (_sumQ[k] || 0) + (Number(x.baseQty) || 0); });
+        const _its = scrap.items.map(x => {
+          const k = x.itemId + '|' + _scBr;
+          if(_scCost[k] == null) return x;
+          const share = _sumQ[k] > 0 ? (Number(x.baseQty) || 0) / _sumQ[k] : 0;
+          const lv = _r2(_scCost[k] * share);
+          return { ...x, estUnitCost: x.unitCost, estLoss: x.lossValue, lossValue: lv,
+            unitCost: (Number(x.baseQty) || 0) > 0 ? lv / Number(x.baseQty) : 0, costSource:'fifo' };
+        });
+        _scrapRec = { ...scrap, items: _its, estLoss: scrap.totalLoss,
+          totalLoss: _r2(_its.reduce((t, x) => t + (Number(x.lossValue) || 0), 0)) };
+      }
+      const _scMovs = (movements||[]).map(m => {
+        const k = m.itemId + '|' + (m.branch || _scBr);
+        if(m.type !== 'scrap' || _scCost[k] == null || !(_scQty[k] > 0)) return m;
+        const q = Math.abs(Number(m.qty) || 0);
+        const uc = _scCost[k] / _scQty[k];
+        return { ...m, unitCost: uc, cost: _r2(uc * q), fifoCost: _r2(uc * q), fifoUnitCost: uc };   // cost = มูลค่ารวม (แบบ movement ปรับสต๊อก)
+      });
       (stockUpdates||[]).forEach(su => {
         const _k = su.itemId + '|' + su.branch;
         // parts ของ key เดียวกันรวมทุกแถวแล้ว → แถวแรกใช้ทั้งหมด แถวถัดไปข้าม (ไม่ตัดซ้ำ) · ไม่มี fifoDeducts ของ key นี้ → ทางเดิม
@@ -18293,8 +18477,8 @@ function reducer(s, a){
           totalDebit:_lossVal, totalCredit:_lossVal }];
       }
       return { ...s, items, fifoLayers: layers,
-        scrapEntries: [...(s.scrapEntries||[]), scrap],
-        movements: [...s.movements, ...(movements||[])],
+        scrapEntries: [...(s.scrapEntries||[]), _scrapRec],
+        movements: [...s.movements, ..._scMovs],
         journalEntries: _je, seq: { ...s.seq, je: _seqJe } };
     }
     case 'UPDATE_SCRAP': return { ...s, scrapEntries: (s.scrapEntries||[]).map(x => x.id===a.data.id ? a.data : x) };
@@ -20818,6 +21002,7 @@ const ACTION_READS = Object.freeze({
   DEDUCT_FIFO_LAYERS: ['boms','fifoLayers','items'],
   ADD_FIFO_LAYER: ['fifoLayers'],
   ADJUST_STOCK: ['auditLog','boms','fifoLayers','items','journalEntries','movements'],
+  REVERSE_ADJUST: ['auditLog','fifoLayers','items','journalEntries','movements'],  // 🆕 S8a: กลับ JE je_adj_<mv.id>
   ADJUST_BRANCH_STOCK: ['items'],
   ADD_WEIGH_LOG: ['boms','weighLogs'],
   REVIEW_WEIGH_LOG: ['auditLog','weighLogs'], MARK_WEIGH_REPRINT: ['auditLog','weighLogs'],
@@ -23221,6 +23406,8 @@ function executeApprovedAction(req, state, dispatch, user){
           const curQty = (cur && typeof cur === 'object') ? Number(cur._total||0) : Number(cur||0);
           const delta = (Number(p.newQty)||0) - curQty;
           if(Math.abs(delta) > 0.0001){
+            // 🆕 ITEM-FORM S8b (§A7): ต้นทุนจริง ณ ตอนอนุมัติ — ของลด = เฉลี่ยคงเหลือ · ของเพิ่ม = รับของล่าสุด (กติกาเดียวกับหน้านับ/ปรับยอด)
+            const _auc = global.ERP.stockAdjUnitCost ? global.ERP.stockAdjUnitCost(state, it, p.branch, delta) : (Number(it.costPrice)||0);
             const movement = { id: genId('mv'), type:'adjust', itemId:p.itemId,
               // 🆕 FIX (task_178ed6cf): qty = SIGNED DELTA (เดิม = newQty absolute → REVERSE_ADJUST อ่าน mv.qty เป็น delta แล้วกลับยอดผิด + skew running-balance/movement-report/overview in-out)
               //   ทุก consumer ของ movement.qty คาดหวัง signed delta (REVERSE_ADJUST 01-state, MovementMatrix, OverviewReport, stock-card display) — ตรงกับ CountTab/StockAdjustTab ที่ใช้ qty:delta อยู่แล้ว
@@ -23228,11 +23415,11 @@ function executeApprovedAction(req, state, dispatch, user){
               qty: delta, delta, newQty: Number(p.newQty)||0, branch:p.branch, date: getToday(),
               ref:req.id, note:(req.reason||p.reason||'ปรับสต๊อก (อนุมัติ)'), by:user.username,
               // 🆕 UAT P1 (warehouse-mgr): เก็บ unitCost ที่ approval-path (high-value adjust วิ่งทางนี้เสมอ) → REVERSE_ADJUST คืนต้นทุนเดิมแม่น ไม่ fallback costPrice ปัจจุบัน
-              unitCost: Number(it.costPrice)||0, cost: (Number(it.costPrice)||0) * Math.abs(delta) };
+              unitCost: _auc, cost: _auc * Math.abs(delta) };
             const data = { itemId:p.itemId, branch:p.branch, delta, movement, postVarianceJE:true };
             if(delta > 0){
               data.newLayer = { id: genId('fl'), itemId:p.itemId, branch:p.branch,
-                qty: delta, remaining: delta, unitCost: Number(it.costPrice)||0,
+                qty: delta, remaining: delta, unitCost: _auc,
                 date: getToday(), lot:`ADJ-APV-${Date.now().toString(36)}`, note:'ปรับเพิ่ม (อนุมัติ)' };
             }
             dispatch({ type:'ADJUST_STOCK', data });
@@ -28715,17 +28902,20 @@ function MovementsTab({ state, user, dispatch }){
                     h('td', { className:'px-3 py-2 text-center no-underline' },
                       isAdjust && !m.reversed && canReverseAdj && h('button', {
                         onClick:()=>{
-                          const reason = prompt(`ยกเลิกการปรับสต๊อก ${fmtNum(m.qty)} (${item?.name||m.itemId})?\n\nระบบจะ post counter-movement\n\nเหตุผล:`, '');
+                          const reason = prompt(`ยกเลิกการปรับสต๊อก ${fmtNum(m.qty)} (${item?.name||m.itemId})?\n\nระบบจะคืนสต๊อกและกลับรายการบัญชีส่วนต่างของการปรับนี้\n(ถ้าของที่ปรับเพิ่มถูกใช้ไปแล้ว ยอดที่กลับอาจไม่เท่ายอดเดิม — ระบบตีตามต้นทุนล็อตที่ตัดจริง)\n\nเหตุผล:`, '');
                           if(reason === null) return;
                           if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
                           const queued = global.ERP.requestApprovalIfNeeded({
-                            action:'reverse_adjust', context:{ scope:'warehouse',
+                            // 🆕 ITEM-FORM S8b: ยอดอนุมัติ = มูลค่าที่ลงบัญชีตอนปรับ (fifoCost ของลด · cost ของเพิ่ม)
+                            action:'reverse_adjust', context:{ scope:'warehouse', entityType:'item', entityId:m.itemId,
+                              entityRef:`${item?.code||''} ${item?.name||m.itemId}`.trim(),
+                              amount: Math.abs(Number(m.fifoCost != null ? m.fifoCost : m.cost) || 0),
                               payload:{ movementId:m.id, reason:reason.trim() } },
                             user, state, dispatch });
                           if(!queued){
                             dispatch({ type:'REVERSE_ADJUST', data:{ movementId:m.id,
                               reason:reason.trim(), by:user.username } });
-                            alert(`✅ ยกเลิกการปรับแล้ว · post counter-movement`);
+                            alert(`✅ ยกเลิกการปรับแล้ว · คืนสต๊อก + กลับรายการบัญชี`);
                           }
                         },
                         className:'text-xs px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded',
@@ -28758,15 +28948,34 @@ const ADJUST_REASONS = [
 // ================================================================
 // 🆕 CT: ตอนเรียกจาก CountSheetModal จะส่ง pickedItemIds (Set) มา
 //   → filter items เฉพาะที่ pick + ซ่อน search/filter bar (รายการ pre-selected แล้ว)
-// 🆕 ITEM-FORM UAT M2: ฟอร์มสินค้าไม่มีช่องต้นทุนแล้ว → สินค้าใหม่ costPrice = 0 · จุดนับ/ปรับยอด/ของเสีย ยังตีมูลค่าจาก costPrice
-//   (เปลี่ยนเป็นต้นทุนจริงในขั้น S8a→S8b หลังเจ้าของยอมรับ A7) → ระหว่างนี้เตือนเมื่อมีรายการที่ต้นทุนเดิม 0 แต่มีต้นทุนจากการรับของจริง
-function CostPendingBanner({ state, items }){
-  const _rc = global.ERP.itemRefCost;
-  const bad = (items || []).filter(it => it && !(Number(it.costPrice) > 0) && _rc && _rc(state, it).unitCost > 0);
-  if(!bad.length) return null;
-  const names = bad.slice(0, 3).map(it => it.name).join(', ') + (bad.length > 3 ? ` +${bad.length - 3}` : '');
-  return h('div', { 'data-testid':'cost-pending-banner', className:'mb-2 px-3 py-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-900' },
-    `⚠️ มูลค่าคิดจากต้นทุนเดิม (0) — ${bad.length} รายการ (${names}) ยังไม่มีต้นทุนในทะเบียน · มูลค่า/ยอดอนุมัติ/บัญชีส่วนต่างของรายการนี้จะเป็น 0 จนกว่าระบบจะคิดจากต้นทุนรับของจริง (รอ S8)`);
+// 🆕 ITEM-FORM S8b (§A7): นับ/ปรับยอด/ของเสีย ตีมูลค่าจากต้นทุนจริง (global.ERP.stockAdjUnitCost — ของลด = เฉลี่ยคงเหลือ · ของเพิ่ม = รับของล่าสุด)
+//   แทนป้าย "รอ S8" เดิม · เหลือเตือนเฉพาะรายการที่ยังไม่มีต้นทุนเลย (ไม่เคยรับของ/ไม่มี layer/ไม่มีค่าเดิม/ไม่มีสูตร) → มูลค่า 0
+function _adjUc(state, item, branch, signed, locId, opts){
+  if(!item) return 0;
+  // 🆕 verify S8: ส่ง locId (นับระดับคลัง/ไลน์) + opts.storeOnly (ของเสีย = คลังกลาง) → จำลอง FIFO ขอบเขตเดียวกับ reducer
+  if(global.ERP.stockAdjUnitCost) return global.ERP.stockAdjUnitCost(state, item, branch, signed, locId || undefined, opts);
+  return Number(item.costPrice) || 0;
+}
+// 🆕 UAT S8 S3: เปิดให้โมดูลอื่นใช้ (นับสต๊อกไลน์ mod-production)
+global.ERP.NoCostWarning = (p) => h(NoCostWarning, p);
+// 🆕 verify S8: เช็กตามทิศทางจริงของแต่ละแถว — rows:[{ item, signed, locId?, storeOnly? }]
+//   ของลด = ล็อต FIFO ที่ถูกตัดมีต้นทุน 0 (เช่น ยอดยกมา ฿0) · ของเพิ่ม = ไม่เคยรับของ/ไม่มีต้นทุน · items (แบบเดิม) = ถือเป็นของเพิ่ม
+function NoCostWarning({ state, items, rows, branch }){
+  const list = rows ? rows : (items || []).map(it => ({ item: it, signed: 1 }));
+  const seen = new Set(); const out = [], inn = [];
+  list.forEach(r => {
+    const it = r && r.item; const sg = Number(r && r.signed) || 0;
+    if(!it || !sg) return;
+    const k = it.id + (sg < 0 ? '-' : '+'); if(seen.has(k)) return; seen.add(k);
+    if(!(_adjUc(state, it, branch, sg, r.locId, r.storeOnly ? { storeOnly:true } : undefined) > 0)) (sg < 0 ? out : inn).push(it);
+  });
+  if(!out.length && !inn.length) return null;
+  const nm = (arr) => arr.slice(0, 3).map(it => it.name).join(', ') + (arr.length > 3 ? ` +${arr.length - 3}` : '');
+  return h('div', { 'data-testid':'no-cost-warning', className:'mb-2 px-3 py-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-900' },
+    `⚠️ ยังไม่มีต้นทุน — ` + [
+      out.length ? `${out.length} รายการ (${nm(out)}) ล็อตที่ถูกตัดยังไม่มีต้นทุน (เช่น ยอดยกมา ฿0)` : '',
+      inn.length ? `${inn.length} รายการ (${nm(inn)}) ยังไม่เคยรับของ/ไม่มีต้นทุนในระบบ` : '',
+    ].filter(Boolean).join(' · ') + ` · มูลค่า/ยอดอนุมัติ/บัญชีส่วนต่างของรายการนี้จะเป็น 0 บาท`);
 }
 
 function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, presetLocId, onDone }){
@@ -28920,13 +29129,15 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
 
     let ok = 0, fail = 0, sentApprove = 0;
     for(const e of variances){
+      // 🆕 ITEM-FORM S8b (§A7): มูลค่าส่วนต่างจากต้นทุนจริง — ระดับสาขาและระดับคลังใช้กติกาเดียว (ห้ามนับรอบเดียวตีมูลค่า 2 แบบ)
+      const _uc = _adjUc(state, e.item, branchId, e.delta, targetLocId);   // 🆕 verify S8: นับระดับคลัง → จำลอง FIFO เฉพาะคลังนั้น
       // 🆕 A1 (council): นับสต๊อก variance ต้องผ่านอนุมัติเหมือน "ปรับสต๊อก" (กันนับกลบของหาย — counter≠approver≠poster)
       //    เฉพาะ branch-level (location-level ใช้ reducer คนละตัว → ดู WH-loc backlog) · executor adjust_stock รองรับ payload นี้แล้ว
       if(!targetLocId && global.ERP.requestApprovalIfNeeded){
         const _sent = global.ERP.requestApprovalIfNeeded({
           action:'adjust_stock', user, state, dispatch, silent:true,
           context:{ entityType:'item', entityId:e.item.id, entityRef:`${e.item.code||''} ${e.item.name}`,
-            scope:'warehouse', amount: Math.abs(e.delta) * (Number(e.item.costPrice)||0), reason:`นับสต๊อก: ${note}`,
+            scope:'warehouse', amount: Math.abs(e.delta) * _uc, reason:`นับสต๊อก: ${note}`,
             payload:{ itemId:e.item.id, branch:branchId, newQty:e.newBase, reason:`นับสต๊อก: ${note}` } }
         });
         if(_sent){ sentApprove++; continue; }
@@ -28936,9 +29147,9 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
         const _sentLoc = global.ERP.requestApprovalIfNeeded({
           action:'adjust_stock', user, state, dispatch, silent:true,
           context:{ entityType:'item', entityId:e.item.id, entityRef:`${e.item.code||''} ${e.item.name}`,
-            scope:'warehouse', amount: Math.abs(e.delta) * (Number(e.item.costPrice)||0), reason:`นับสต๊อก(loc): ${note}`,
+            scope:'warehouse', amount: Math.abs(e.delta) * _uc, reason:`นับสต๊อก(loc): ${note}`,
             payload:{ locAdjust:true, itemId:e.item.id, branch:branchId, locId:targetLocId, delta:e.delta,
-              unitCost:Number(e.item.costPrice)||0, lot:`COUNT-LOC-${Date.now().toString(36)}`, reason:`นับสต๊อก: ${note}` } }
+              unitCost:_uc, lot:`COUNT-LOC-${Date.now().toString(36)}`, reason:`นับสต๊อก: ${note}` } }
         });
         if(_sentLoc){ sentApprove++; continue; }
       }
@@ -28954,15 +29165,14 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
         note: `[${reasonLabel}] นับสต๊อก${locSuffix}: ${note}`,
         by: user.username,
         // 🆕 P2 (UAT architect/warehouse-mgr): เก็บ unitCost/cost ตอนปรับ → REVERSE_ADJUST ใช้ค่าจริง ณ ตอนปรับ (ไม่ fallback costPrice ปัจจุบัน)
-        unitCost: Number(e.item.costPrice)||0,
-        cost: (Number(e.item.costPrice)||0) * Math.abs(Number(e.delta)||0),
+        unitCost: _uc,
+        cost: _uc * Math.abs(Number(e.delta)||0),
       };
       try {
         if(targetLocId){
           // 🆕 PRODUCTION-LIVE คลื่น 1 (B3.11): นับระดับคลัง = ADJUST_STOCK + locId (เดิม PRODUCE/CONSUME = ไม่ล้าง NEG และไม่ลง JE)
           //   reducer หักล้างบวก/ลบที่คลังนั้นก่อน · นับเจอเพิ่ม = layer ที่คลังนั้น (ล้าง NEG) · ผลต่างลง JE 5385/1300
-          const _uc = Number(((global.ERP.negUnitCost && global.ERP.negUnitCost(state, e.item.id, branchId)) || {}).unitCost) || Number(e.item.costPrice) || 0;
-          const data = { itemId: e.item.id, branch: branchId, locId: targetLocId, delta: e.delta, movement: { ...movement, unitCost:_uc, cost:_uc * Math.abs(Number(e.delta)||0) } };
+          const data = { itemId: e.item.id, branch: branchId, locId: targetLocId, delta: e.delta, movement };
           if(e.delta > 0) data.newLayer = { id: genId('fl'), itemId: e.item.id, branch: branchId, locId: targetLocId,
             qty: e.delta, remaining: e.delta, unitCost: _uc, date: getToday(), lot: `COUNT-${Date.now().toString(36)}`, note: `นับได้เพิ่ม @ ${targetLoc ? targetLoc.name : targetLocId}: ${note}` };
           dispatch({ type:'ADJUST_STOCK', data: { ...data, postVarianceJE:true } });
@@ -28974,7 +29184,7 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
               id: genId('fl'),
               itemId: e.item.id, branch: branchId,
               qty: e.delta, remaining: e.delta,
-              unitCost: Number(e.item.costPrice)||0,
+              unitCost: _uc,
               date: getToday(),
               lot: `COUNT-${Date.now().toString(36)}`,
               note: `นับได้เพิ่ม: ${note}`,
@@ -29037,7 +29247,7 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
   ];
 
   return h('div', { className:'space-y-3' },
-    h(CostPendingBanner, { state, items: enteredItems.filter(e => e && e.delta !== 0).map(e => e.item) }),   // 🆕 ITEM-FORM UAT M2
+    h(NoCostWarning, { state, branch: branchId, rows: enteredItems.filter(e => e && e.delta !== 0).map(e => ({ item: e.item, signed: e.delta, locId: branchLocFilter !== '__all__' ? branchLocFilter : null })) }),   // 🆕 ITEM-FORM S8b · verify: ตามทิศทางแถว
     !isPickedMode && h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800' },
       '📋 ', h('b', null, 'Check Stock'),' — กรอกผลนับเป็นตาราง · กรอกได้ 2 ช่อง (หน่วยใหญ่+เล็ก) · ระบบเทียบกับสต๊อกระบบให้อัตโนมัติ · บันทึกทีเดียวทั้งหมด'),
 
@@ -29253,8 +29463,7 @@ function AdjustTab({ state, dispatch, user }){
 
   const addRow = (item) => {
     if(rows.some(r => r.itemId === item.id)) return;  // กันซ้ำ
-    setRows(rs => [...rs, { itemId:item.id, delta:0, reason:globalReason,
-      unitCost:item.costPrice||0, note:'' }]);
+    setRows(rs => [...rs, { itemId:item.id, delta:0, reason:globalReason, note:'' }]);   // 🆕 S8b: ต้นทุนคิดตอนคำนวณแถว (_adjUc) ไม่ตรึงตอนเพิ่มแถว
   };
   const updateRow = (idx, patch) => setRows(rs => rs.map((r,i) => i===idx ? { ...r, ...patch } : r));
   const removeRow = (idx) => setRows(rs => rs.filter((_,i) => i!==idx));
@@ -29267,7 +29476,9 @@ function AdjustTab({ state, dispatch, user }){
     //   เดิมอ่านดิบ → cur เป็น object → newQty ที่ส่ง approval = NaN → executor คำนวณ delta = -curQty → ยอดถูกล้างเป็น 0
     const _raw = item?.stockByBranch?.[branchId];
     const cur = (_raw && typeof _raw === 'object') ? Number(_raw._total||0) : (Number(_raw)||0);
-    return { ...r, item, reasonObj, signed, cur, result: cur + signed };
+    // 🆕 ITEM-FORM S8b (§A7): ต้นทุนจริงต่อหน่วยฐาน — ของลด = เฉลี่ยคงเหลือ · ของเพิ่ม = รับของล่าสุด
+    const uc = _adjUc(state, item, branchId, signed);
+    return { ...r, item, reasonObj, signed, cur, result: cur + signed, uc };
   });
   const validRows = rowsWithCalc.filter(r => r.item && r.signed !== 0);
 
@@ -29285,7 +29496,7 @@ function AdjustTab({ state, dispatch, user }){
       const sent = global.ERP.requestApprovalIfNeeded && global.ERP.requestApprovalIfNeeded({
         action:'adjust_stock', user, state, dispatch,
         context:{ entityType:'item', entityId:r.item.id, entityRef:`${r.item.code} ${r.item.name}`,
-          scope:'warehouse', amount: Math.abs(r.signed) * (r.item.costPrice||0), reason:note,
+          scope:'warehouse', amount: Math.abs(r.signed) * r.uc, reason:note,
           payload:{ itemId:r.item.id, branch:branchId, newQty, reason:note } }
       });
       if(sent){ sentApprove++; continue; }
@@ -29295,13 +29506,13 @@ function AdjustTab({ state, dispatch, user }){
         ref: `ADJ-${Date.now().toString(36)}-${done}`,
         note: `[${reasonObj?.label}] ${note}`, by: user.username,
         // 🆕 P2 (UAT architect/warehouse-mgr): เก็บ unitCost/cost ตอนปรับ → REVERSE_ADJUST ใช้ค่าจริง ณ ตอนปรับ (ไม่ fallback costPrice ปัจจุบัน)
-        unitCost: Number(r.item.costPrice)||0,
-        cost: (Number(r.item.costPrice)||0) * Math.abs(Number(r.signed)||0),
+        unitCost: r.uc,
+        cost: r.uc * Math.abs(Number(r.signed)||0),
       };
       const data = { itemId: r.item.id, branch: branchId, delta: r.signed, movement };
       if(r.signed > 0){
         data.newLayer = { id: genId('fl'), itemId: r.item.id, branch: branchId,
-          qty: r.signed, remaining: r.signed, unitCost: Number(r.unitCost)||0,
+          qty: r.signed, remaining: r.signed, unitCost: r.uc,
           date: getToday(), lot: `ADJ-${Date.now().toString(36)}-${done}`, note };
       }
       dispatch({ type:'ADJUST_STOCK', data: { ...data, postVarianceJE:true } });  // 🆕 B1: ปรับสต๊อก variance → JE 5385/1300
@@ -29312,7 +29523,7 @@ function AdjustTab({ state, dispatch, user }){
   };
 
   return h('div', { className:'space-y-4' },
-    h(CostPendingBanner, { state, items: rows.map(r => (state.items||[]).find(x => x.id === r.itemId)) }),   // 🆕 ITEM-FORM UAT M2
+    h(NoCostWarning, { state, branch: branchId, rows: rowsWithCalc.map(r => ({ item: r.item, signed: r.signed })) }),   // 🆕 ITEM-FORM S8b · verify: ตามทิศทางแถว
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800' },
       '💡 ปรับสต๊อกหลายรายการพร้อมกัน — เลือกประเภท/ค้นหา → กดเพิ่มเข้าตาราง → ใส่จำนวน → บันทึกทีเดียว'),
 
@@ -30507,8 +30718,9 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
 // 🆕 RTV-1: พิมพ์ใบคืนสินค้า (สำหรับ supplier เซ็นรับ)
 function printRTV(rtv, state, sup){
   const branch = (state.branches||[]).find(b => b.id === rtv.branch);
-  const company = state.settings?.companyName || 'บริษัท';
-  const company2 = state.settings?.companyAddress || '';
+  // 🆕 COMPANY-ADDR (verify): หัวใบคืนใช้ชื่อ/ที่อยู่บริษัท (state.company) — เดิมอ่าน settings.companyName/companyAddress ซึ่งไม่มีใครตั้ง
+  const company = (state.company||{}).name || 'บริษัท';
+  const company2 = global.ERP.sellerAddress ? (global.ERP.sellerAddress(state.company, branch) || '') : '';
   // 🔒 PARTY-FORM ขั้น 2: ใบคืนที่ตรึง supplierSnapshot ไว้ → ใช้ snapshot ทั้งก้อน (ชื่อ/ที่อยู่/เลขภาษี/สาขา) · ไม่มีค่อยทะเบียนสด
   const _snapV = (rtv && rtv.supplierSnapshot && rtv.supplierSnapshot.name) ? rtv.supplierSnapshot : null;
   const _supObj = _snapV || sup || (state.suppliers||[]).find(s => s.id === rtv.supplierId);
@@ -32134,7 +32346,9 @@ function OutgoingReportTab({ state, user }){
       //   movement ที่ไม่มี m.cost (production_out จาก mod-production, transfer/sale/rtv) → fallback qty × costPrice เหมือนเดิม
       //   🆕 ITEM-FORM S5: fallback = ต้นทุนอ้างอิงของสาขานั้น (itemRefCost) แทน costPrice ที่กรอกมือ
       const _rc = (it && global.ERP.itemRefCost) ? global.ERP.itemRefCost(state, it, { branch: m.branch }).unitCost : (it?.costPrice||0);
-      const value = (m.cost != null && isFinite(Number(m.cost))) ? Math.abs(Number(m.cost)) : qty * (_rc||0);
+      // 🆕 UAT S8 S5: ใช้ fifoCost (ต้นทุนที่ตัดจริง = ยอด JE) ก่อน m.cost (ค่าประมาณตอนปรับ) → ตรง je_adj_/je_scrap_
+      const _mc = m.fifoCost != null && isFinite(Number(m.fifoCost)) ? m.fifoCost : m.cost;
+      const value = (_mc != null && isFinite(Number(_mc))) ? Math.abs(Number(_mc)) : qty * (_rc||0);
       rowsByItem[m.itemId].dests[colKey].qty += qty;
       rowsByItem[m.itemId].dests[colKey].value += value;
       rowsByItem[m.itemId].totalQty += qty;
@@ -32503,11 +32717,14 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose, initialItems,
     const it = (state.items||[]).find(x => x.id === m.itemId);
     const baseQty = it ? toBaseQty(it, m.qty, m.unit) : 0;
     const stock = it ? (it.stockByBranch?.[branchId]?._total ?? it.stockByBranch?.[branchId] ?? 0) : 0;
-    const unitCost = it?.costPrice || 0;
+    // 🆕 ITEM-FORM S8b (§A7): ของเสีย = ของลด → ต้นทุนเฉลี่ยคงเหลือ (ใกล้ต้นทุน FIFO ที่ตัดจริง) · ไม่มี = รับของล่าสุด/ค่าเดิม/0
+    const unitCost = _adjUc(state, it, branchId, -(baseQty || 1), null, { storeOnly:true });   // 🆕 UAT S8 S4 · verify: ตัดเฉพาะคลังกลาง (= deductFromStore ของ ADD_SCRAP)
     const lossValue = baseQty * unitCost;
     return { ...m, item:it, baseQty, baseUnit:getBaseUnit(it), stock, unitCost, lossValue, shortage: baseQty > stock };
   });
   const totalLoss = enriched.reduce((s,m) => s + m.lossValue, 0);
+  // 🆕 UAT S8 M1 (U9): ต้นทุนจริงแล้ว → ซ่อนมูลค่าจากคนไม่มีสิทธิ์ดูมูลค่าสต๊อก (ค่าที่ส่งอนุมัติยังเป็นยอดจริง)
+  const showValue = global.ERP.canSeeStockValue(user, state);
 
   const onPhoto = async (e) => {
     const files = Array.from(e.target.files||[]);
@@ -32581,7 +32798,7 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose, initialItems,
         payload:{ scrap, stockUpdates, fifoDeducts, movements } }
     });
     if(sent){
-      alert(`📤 ส่งขออนุมัติตัดของเสียแล้ว\n${scrapNumber} · มูลค่า ${fmtCur(totalLoss)}\n\n⚠️ ของยัง "ไม่ถูกตัด" ออกจากสต๊อกจนกว่าผู้จัดการจะอนุมัติ\n→ ให้ผู้จัดการกด 🔔 มุมขวาบน เพื่ออนุมัติ`);
+      alert(`📤 ส่งขออนุมัติตัดของเสียแล้ว\n${scrapNumber}${showValue ? ` · มูลค่าประมาณ ${fmtCur(totalLoss)}` : ''}\n\n⚠️ ของยัง "ไม่ถูกตัด" ออกจากสต๊อกจนกว่าผู้จัดการจะอนุมัติ\n→ ให้ผู้จัดการกด 🔔 มุมขวาบน เพื่ออนุมัติ`);
       _saved('pending');
       onClose();
       return;
@@ -32591,7 +32808,7 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose, initialItems,
     function _saved(status){ try { if(onSaved) onSaved({ scrapNumber, status }); } catch(_e){} }
     const SB = global.ERP.SBSync;
     const cloud = !!(SB && SB.isCloudOnly && SB.isCloudOnly() && SB.pushNow);
-    const okMsg = `✅ บันทึกตัดของเสียเรียบร้อย\n${scrapNumber}\nมูลค่าเสียหาย: ${fmtCur(totalLoss)}`;
+    const okMsg = `✅ บันทึกตัดของเสียเรียบร้อย\n${scrapNumber}` + (showValue ? `\nมูลค่าเสียหาย (ประมาณ): ${fmtCur(totalLoss)}` : '');
     if(!cloud){ dispatch(act); alert(okMsg); _saved('saved'); onClose(); return; }
     setSaving(true);
     try {
@@ -32618,7 +32835,7 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose, initialItems,
 
   return h(Modal, { isOpen:true, title:'🔻 บันทึกของเสีย', onClose, size:'lg' },
     h('div', { className:'space-y-3' },
-      h(CostPendingBanner, { state, items: enriched.map(e => e.item) }),   // 🆕 ITEM-FORM UAT M2
+      h(NoCostWarning, { state, branch: branchId, rows: enriched.map(e => ({ item: e.item, signed: -(e.baseQty || 1), storeOnly: true })) }),   // 🆕 ITEM-FORM S8b · verify: ทิศลด
       h('div', { className:'grid grid-cols-2 gap-2' },
         h('div', null,
           h('label', { className:'block text-xs font-medium mb-1' }, 'วันที่'),
@@ -32649,7 +32866,7 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose, initialItems,
               h('th', { className:'px-2 py-1.5 text-right text-xs w-24' }, 'จำนวน'),
               h('th', { className:'px-2 py-1.5 text-left text-xs w-24' }, 'หน่วย'),
               h('th', { className:'px-2 py-1.5 text-right text-xs w-20' }, 'มี'),
-              h('th', { className:'px-2 py-1.5 text-right text-xs' }, 'มูลค่าเสีย'),
+              showValue && h('th', { className:'px-2 py-1.5 text-right text-xs' }, 'มูลค่าเสีย (ประมาณ)'),
               h('th', { className:'px-2 py-1.5' }))),
           h('tbody', { className:'divide-y' },
             enriched.map((m,i) => h('tr', { key:i, className: m.shortage ? 'bg-orange-50' : '' },
@@ -32665,13 +32882,13 @@ function NewScrapModal({ state, dispatch, user, branchId, onClose, initialItems,
                     h('option', { key:u.name, value:u.name }, u.name)))),
               h('td', { className: cls('px-2 py-1.5 text-right text-xs',
                 m.shortage ? 'text-orange-600 font-bold' : 'text-gray-500') }, fmtNum(m.stock)),
-              h('td', { className:'px-2 py-1.5 text-right font-mono text-red-700' }, fmtCur(m.lossValue)),
+              showValue && h('td', { className:'px-2 py-1.5 text-right font-mono text-red-700' }, fmtCur(m.lossValue)),
               h('td', { className:'px-2 py-1.5 text-center' },
                 h('button', { type:'button', onClick:()=>removeItem(i),
                   className:'text-red-500' }, '×')))),
-            h('tr', { className:'bg-gray-50 font-bold' },
-              h('td', { colSpan:4, className:'px-2 py-2 text-right' }, 'รวมมูลค่าเสียหาย:'),
-              h('td', { className:'px-2 py-2 text-right text-red-700' }, fmtCur(totalLoss)),
+            showValue && h('tr', { className:'bg-gray-50 font-bold' },
+              h('td', { colSpan:4, className:'px-2 py-2 text-right' }, 'รวมมูลค่าเสียหาย (ประมาณ — ตัดจริงตามต้นทุน FIFO):'),
+              h('td', { className:'px-2 py-2 text-right text-red-700', 'data-testid':'scrap-total-loss' }, fmtCur(totalLoss)),
               h('td'))))),
 
       h('div', null,
@@ -33617,7 +33834,8 @@ function ItemPickerModal({ state, user, onCancel, onConfirm }){
   );
 }
 
-global.ERP.NewScrapModal = NewScrapModal;   // 🌊 UAT คลื่น 3: เทสต์ w3_killswitch_e2e (ตัดของเสียรอผลขึ้นระบบก่อนบอก ✅)
+global.ERP.NewScrapModal = NewScrapModal;
+global.ERP.StockCountTab = StockCountTab;   // 🆕 ITEM-FORM S8b: เทสต์ cost_s8_e2e (นับสต๊อกตีมูลค่าจากต้นทุนจริง)   // 🌊 UAT คลื่น 3: เทสต์ w3_killswitch_e2e (ตัดของเสียรอผลขึ้นระบบก่อนบอก ✅)
 // ================================================================
 // 🚚 IN_TRANSIT S4 — InTransitModal (modal กลาง, อ่านอย่างเดียว) · export global.ERP.InTransitModal
 //   props: { state, user, onClose, side:'dest'|'src'|'any', branchId, branchIds, locId, itemId, title }
@@ -51782,7 +52000,10 @@ function LineStockTab({ state, dispatch, user, branchId }){
     let ok = 0, sentApprove = 0;
     const ref = 'COUNT-LINE-' + Date.now().toString(36);
     for(const v of realVariances){
-      const uc = Number(((global.ERP.negUnitCost && global.ERP.negUnitCost(state, v.item.id, branchId)) || {}).unitCost) || Number(v.item.costPrice) || 0;
+      // 🆕 UAT S8 S3: กติกาเดียวกับ 📦 นับสต๊อก (stockAdjUnitCost) · ต้นทุนติดลบ (negUnitCost) เฉพาะแถวที่นับเพิ่มเพื่อล้างยอดติดลบ (ตามข้อความยืนยัน)
+      const _clr = v.delta > 0 && (Number(v.cur)||0) < -0.0001;
+      const _neg = _clr ? Number(((global.ERP.negUnitCost && global.ERP.negUnitCost(state, v.item.id, branchId)) || {}).unitCost) || 0 : 0;
+      const uc = _neg > 0 ? _neg : (global.ERP.stockAdjUnitCost ? global.ERP.stockAdjUnitCost(state, v.item, branchId, v.delta, stockLocId || undefined) : (Number(v.item.costPrice) || 0));   // 🆕 verify S8: จำลอง FIFO เฉพาะคลังไลน์ (= ADJUST_STOCK locId)
       if(global.ERP.requestApprovalIfNeeded){
         const _sent = global.ERP.requestApprovalIfNeeded({
           action:'adjust_stock', user, state, dispatch, silent:true,
@@ -51947,6 +52168,9 @@ function LineStockTab({ state, dispatch, user, branchId }){
             className:'px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs rounded font-bold' },
             '✅ บันทึกผลนับทั้งหมด')
         : h('span', { className:'text-xs text-amber-800', title:'ต้องมีสิทธิ์ คลัง → ปรับสต๊อก (stock.list.adjust)' }, '🔒 บันทึกผลนับได้เฉพาะผู้มีสิทธิ์ปรับสต๊อก — แจ้งหัวหน้า/คลัง')),
+    // 🆕 UAT S8 S3: เตือนรายการที่นับต่างแต่ยังไม่มีต้นทุน (มูลค่าผลต่าง = 0) — ตัวเดียวกับ 📦 นับสต๊อก
+    enteredCount > 0 && global.ERP.NoCostWarning && global.ERP.NoCostWarning({ state, branch: branchId,
+      rows: variances.filter(v => Math.abs(v.delta) >= 0.001 && !(v.delta > 0 && (Number(v.cur)||0) < -0.0001)).map(v => ({ item: v.item, signed: v.delta, locId: stockLocId || null })) }),   // 🆕 verify S8: ตามทิศทางแถว · แถวล้างติดลบใช้ต้นทุน NEG
 
     // ===== Items table =====
     stockReady && h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
@@ -67739,7 +67963,7 @@ function printPO(po, state){
     <div class="box"><div class="label">ผู้ซื้อ</div>
       <div><b>${company.name||''}</b></div>
       <div>${company.address||'-'}</div>
-      <div>เลขผู้เสียภาษี: <b>${company.taxId||'-'}</b></div>
+      <div>เลขผู้เสียภาษี: <b>${company.taxId||'-'}</b> (สำนักงานใหญ่)</div>
     </div>
     <div class="box"><div class="label">ผู้ขาย / Supplier</div>
       <div><b>${sup?.name||'-'}</b></div>
@@ -67804,7 +68028,7 @@ function printGR(gr, state){
   <div class="info">
     <div class="box"><div class="label">ผู้รับ</div>
       <div><b>${company.name||''}</b> — ${branch?.name||''}</div>
-      <div>${branch?.address||company.address||''}</div>
+      <div>${global.ERP.sellerAddress(company, branch)}</div>
     </div>
     <div class="box"><div class="label">ผู้ส่ง / Supplier</div>
       <div><b>${sup?.name||'-'}</b></div>
@@ -67931,7 +68155,7 @@ function printPI(inv, state){
     <div class="box"><div class="label">บริษัท (ผู้ซื้อ)</div>
       <div><b>${company.name||''}</b></div>
       <div>${company.address||'-'}</div>
-      <div>เลขผู้เสียภาษี: <b>${company.taxId||'-'}</b></div>
+      <div>เลขผู้เสียภาษี: <b>${company.taxId||'-'}</b> (สำนักงานใหญ่)</div>
     </div>
     <div class="box"><div class="label">เจ้าหนี้ (Supplier)</div>
       <div><b>${_esc(sup?.name || inv.supplierNameFreeform || '-')}</b></div>
@@ -68054,7 +68278,7 @@ function printPV(pay, inv, state){
     <div class="box"><div class="label">บริษัท (ผู้จ่าย)</div>
       <div><b>${company.name||''}</b></div>
       <div>${company.address||'-'}</div>
-      <div>เลขผู้เสียภาษี: <b>${company.taxId||'-'}</b></div>
+      <div>เลขผู้เสียภาษี: <b>${company.taxId||'-'}</b> (สำนักงานใหญ่)</div>
     </div>
     <div class="box"><div class="label">ผู้รับเงิน (Payee)</div>
       <div><b>${sup?.name||'-'}</b></div>
@@ -68130,7 +68354,7 @@ function printRTV(rtv, state){
     <div class="box"><div class="label">ผู้คืน</div>
       <div><b>${company.name||''}</b> — ${branch?.name||''}</div>
       <div>${company.address||''}</div>
-      <div>เลขผู้เสียภาษี: <b>${company.taxId||'-'}</b></div>
+      <div>เลขผู้เสียภาษี: <b>${company.taxId||'-'}</b> (สำนักงานใหญ่)</div>
     </div>
     <div class="box"><div class="label">ผู้รับคืน / Supplier</div>
       <div><b>${sup?.name||'-'}</b></div>
@@ -84592,7 +84816,7 @@ function printBilling(bn, state){
   : 'เอกสารนี้ไม่ใช่ใบกำกับภาษี ใช้สำหรับเรียกเก็บเงินตามเอกสารที่ออกไปแล้ว'}</div>
 <div class="info">
   <div class="box"><b>ผู้วางบิล</b><br/>${company.name||''}<br/>${company.address||'-'}<br/>
-    เลขประจำตัวผู้เสียภาษี ${company.taxId||'-'}<br/>โทร ${company.phone||'-'}</div>
+    เลขประจำตัวผู้เสียภาษี ${company.taxId||'-'} (สำนักงานใหญ่)${company.phone ? '<br/>โทร ' + company.phone : ''}</div>
   <div class="box"><b>ลูกค้า</b><br/>${cs.name||'-'}<br/>${cs.address||''}<br/>
     ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + (_buyerBranchText(cs) ? ' · ' + _buyerBranchText(cs) : '') : ''}</div>
 </div>
@@ -85038,8 +85262,8 @@ function printQuote(qt, state){
 <div class="info">
   <div class="box"><div class="label">ผู้เสนอราคา</div>
     ${company.name || ''}${b && b.branchType !== 'hq' ? ' (สาขา: ' + b.name + ')' : ''}<br/>
-    ${(b && b.address) || company.address || '-'}<br/>
-    เลขประจำตัวผู้เสียภาษี ${company.taxId || '-'}<br/>โทร ${(b && b.phone) || company.phone || '-'}</div>
+    ${global.ERP.sellerAddress(company, b) || '-'}<br/>
+    เลขประจำตัวผู้เสียภาษี ${company.taxId || '-'}${global.ERP.sellerBranchCode(b) ? ' (' + (global.ERP.sellerBranchCode(b) === '00000' ? 'สำนักงานใหญ่' : 'สาขาที่ ' + global.ERP.sellerBranchCode(b)) + ')' : ''}${global.ERP.sellerPhone(company, b) ? '<br/>โทร ' + global.ERP.sellerPhone(company, b) : ''}</div>
   <div class="box"><div class="label">ลูกค้า</div>
     ${cs.name || qt.customerName || '-'}<br/>${cs.address || ''}<br/>
     ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + (_buyerBranchText(cs) ? ' · ' + _buyerBranchText(cs) : '') + '<br/>' : ''}
@@ -86214,10 +86438,14 @@ function printSalesInvoice(si, state, opts){
   const sellerName = sellerBranch && sellerBranch.branchType !== 'hq'
     ? `${company.name||''} (สาขา: ${sellerBranch.name})`
     : (company.name||'');
-  const sellerAddr = sellerBranch?.address || company.address || '-';
+  const sellerAddr = global.ERP.sellerAddress(company, sellerBranch) || '-';   // 🆕 COMPANY-ADDR: HQ → ที่อยู่บริษัท · สาขาไม่มีที่อยู่ → ที่อยู่บริษัท
   const sellerTaxId = company.taxId || '-';
-  const sellerBranchCode = sellerBranch?.branchCode || (sellerBranch?.branchType === 'hq' ? '00000' : '');
-  const sellerPhone = sellerBranch?.phone || company.phone || '';
+  // 🆕 COMPANY-ADDR UAT: ไม่รู้สาขา = สำนักงานใหญ่ (00000) · HQ พิมพ์โทรบริษัทเท่านั้น (กันเบอร์ตัวอย่างของสาขา HQ)
+  const sellerBranchCode = global.ERP.sellerBranchCode(sellerBranch);
+  const sellerPhone = global.ERP.sellerPhone(company, sellerBranch);
+  // 🆕 COMPANY-ADDR UAT (ม.86/4): ใบของสาขา (ไม่ใช่ HQ) ต้องมีที่อยู่ + รหัสสาขาของสาขานั้น — ขาด → เตือนบนจอก่อนพิมพ์ (ไม่พิมพ์ลงกระดาษ)
+  const _siBrMiss = (sellerBranch && sellerBranch.branchType !== 'hq')
+    ? [ !String(sellerBranch.address || '').trim() ? 'ที่อยู่สาขา (ตอนนี้พิมพ์ที่อยู่สำนักงานใหญ่แทน)' : '', !sellerBranchCode ? 'รหัสสาขา 5 หลัก' : '' ].filter(Boolean) : [];
   const thDate = (s) => {
     if(!s) return '';
     const [y,m,d] = s.split('-');
@@ -86288,6 +86516,7 @@ function printSalesInvoice(si, state, opts){
 <div class="noprint">
   <button onclick="window.print()">🖨️ Print</button>
   <button onclick="window.close()">ปิด</button>
+  ${_siBrMiss.length ? `<div data-testid="si-branch-warn" style="margin-top:6px;color:#b00;font-weight:bold">⚠️ สาขา "${sellerBranch.name}" ยังไม่ได้ตั้ง ${_siBrMiss.join(' · ')} — ใบกำกับภาษีเต็มรูปของสาขาต้องมีที่อยู่และรหัสสาขาของสาขาที่ออกใบ (ม.86/4) · แก้ที่ ตั้งค่า → 🏢 องค์กร → 🏪 สาขา ก่อนส่งให้ลูกค้า</div>` : ''}
 </div>
 <div class="sheet">
   <h1>ใบกำกับภาษี / ใบส่งของ</h1>
@@ -87309,18 +87538,18 @@ function BranchesSettings({ state, dispatch }){
     ),
 
     // Invoice preview
-    h('div', { className:'mt-4 bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm' },
+    h('div', { 'data-testid':'branch-invoice-preview', className:'mt-4 bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm' },
       h('div', { className:'font-bold text-blue-900 mb-2' }, '🧾 ตัวอย่างหัวบิลใบกำกับภาษี'),
       h('div', { className:'space-y-1 text-blue-800' },
-        state.branches.slice(0,2).map(b =>
-          h('div', { key:b.id, className:'bg-white border border-blue-200 rounded p-2 font-mono text-xs' },
+        // 🆕 COMPANY-ADDR (verify): ตัวอย่างใช้ตัวช่วยเดียวกับใบพิมพ์จริง (HQ → ที่อยู่/โทรบริษัท · สาขาไม่มีที่อยู่ → ที่อยู่บริษัท)
+        state.branches.slice(0,2).map(b => { const _bc = global.ERP.sellerBranchCode(b), _ph = global.ERP.sellerPhone(state.company, b);
+          return h('div', { key:b.id, className:'bg-white border border-blue-200 rounded p-2 font-mono text-xs' },
             h('div', { className:'font-bold text-sm' }, state.company.name||'ชื่อบริษัท'),
             h('div', null, state.company.nameEn||''),
-            h('div', null, `เลขผู้เสียภาษี: ${state.company.taxId||'—'} (สาขา ${b.branchCode||'—'})`),
-            h('div', null, `สำนักงาน${b.branchType==='hq'?'ใหญ่':`สาขา ${b.name}`}: ${b.address||'—'}`),
-            h('div', null, `โทร. ${b.phone||'—'}`)
-          )
-        )
+            h('div', null, `เลขผู้เสียภาษี: ${state.company.taxId||'—'} (${_bc==='00000'?'สำนักงานใหญ่':_bc?'สาขาที่ '+_bc:'สาขา —'})`),
+            h('div', null, `สำนักงาน${b.branchType==='hq'?'ใหญ่':`สาขา ${b.name}`}: ${global.ERP.sellerAddress(state.company, b)||'—'}`),
+            _ph ? h('div', null, `โทร. ${_ph}`) : h('div', { className:'text-gray-400' }, '(ไม่พิมพ์เบอร์โทร)')
+          ); })
       )
     ),
 
@@ -87463,13 +87692,18 @@ function BranchEditModal({ branch, state, dispatch, onClose }){
           '💡 เปิด/ปิด feature ที่สาขานี้ใช้ — เช่น สาขาเล็กไม่ต้องผลิต ปิด BOM ได้')),
 
       // Preview
-      h('div', { className:'bg-gray-50 border rounded p-3 text-xs font-mono' },
+      h('div', { 'data-testid':'branch-edit-preview', className:'bg-gray-50 border rounded p-3 text-xs font-mono' },
         h('div', { className:'text-gray-500 mb-1' }, '🧾 ตัวอย่างหัวบิล:'),
         h('div', { className:'font-bold text-gray-800' }, state.company.name||'บริษัท'),
-        h('div', null, `เลขผู้เสียภาษี: ${state.company.taxId||'—'} `,
-          h('span', { className:'text-blue-700' }, `(สาขา ${branchCode||'—'})`)
-        ),
-        h('div', null, `${branchType==='hq'?'สำนักงานใหญ่':`สาขา ${name||'—'}`}: ${address||'—'}`)
+        // 🆕 COMPANY-ADDR (verify): สาขาชั่วคราวจากค่าในฟอร์ม → ตัวช่วยเดียวกับใบพิมพ์จริง
+        (() => { const _tb = { branchType, address, phone, branchCode: String(branchCode||'').trim() };
+          const _bc = global.ERP.sellerBranchCode(_tb), _ph = global.ERP.sellerPhone(state.company, _tb);
+          return h(global.React.Fragment, null,
+            h('div', null, `เลขผู้เสียภาษี: ${state.company.taxId||'—'} `,
+              h('span', { className:'text-blue-700' }, `(${_bc==='00000'?'สำนักงานใหญ่':_bc?'สาขาที่ '+_bc:'สาขา —'})`)
+            ),
+            h('div', null, `${branchType==='hq'?'สำนักงานใหญ่':`สาขา ${name||'—'}`}: ${global.ERP.sellerAddress(state.company, _tb)||'—'}`),
+            _ph ? h('div', null, `โทร. ${_ph}`) : h('div', { className:'text-gray-400' }, '(ไม่พิมพ์เบอร์โทร)')); })()
       ),
 
       h('div', { className:'flex gap-2 pt-2' },
@@ -91882,8 +92116,148 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
   );
 }
 
+// ================================================================
+// 🆕 COMPANY-ADDR (2026-09-28): ที่อยู่บริษัท (สำนักงานใหญ่) — ชุดเดียวกับฟอร์มคู่ค้า (ThAddressFields 5 ช่อง + เลือกตำบล + ✨ แยกที่อยู่เดิม)
+//   company.address = สตริงที่ประกอบแล้ว (ใบพิมพ์ทุกใบอ่านช่องนี้) · ช่องแยก addrLine/subdistrict/district/province/postcode/addrForeign = ตัวเลือก (optional)
+//   passthrough: ไม่แตะส่วนที่อยู่ = บันทึกไบต์เดิม ไม่เขียนช่องแยก · ประกอบแบบเต็ม (ตำบล/อำเภอ/จังหวัด) เสมอ — หัวใบกำกับใช้ตามหนังสือรับรอง
+//   ถอยกลับ: ปิดฟอร์มแยกช่อง (partyFormSplit=false) / ไม่มี lib / component พัง → textarea ช่องเดียวแบบเดิม
+// ================================================================
+const _CO_ADDR_K = ['addrLine','subdistrict','district','province','postcode','addrForeign'];
+const _CO_ADDR_LONG = true;
+// ค่าตัวอย่าง (seed) ของบริษัท — ใช้เตือนในหน้านี้ + หน้างานค้าง (company_sample_info)
+const companySeedValues = () => { try { return ((global.ERP && global.ERP.INIT_STATE) || {}).company || {}; } catch(_e){ return {}; } };
+const companyIsSample = (k, v) => { const s = String(v == null ? '' : v).trim(); const sv = String(companySeedValues()[k] == null ? '' : companySeedValues()[k]).trim(); return !!s && !!sv && s === sv; };
+function CompanyAddressSection({ c, setC, company, AI, pristine, onFail }){
+  const L = _pfLib();
+  const long = _CO_ADDR_LONG;
+  const [thSt, setThSt] = useState(() => (L && L.thAddrStatus) ? L.thAddrStatus() : 'offline');
+  const [offer, setOffer] = useState(() => (AI && AI.offer) || null);
+  const [applied, setApplied] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [pcFromDb, setPcFromDb] = useState(false);
+  const undoRef = useRef(null);
+  const touchAddr = () => { pristine.current = false; };
+  // โหลดฐานตำบลตอนเปิดหน้า · ข้อมูลมาทีหลัง → คำนวณแค่ข้อเสนอ ✨ (ไม่เขียนลงช่อง)
+  useEffect(() => {
+    if(!L || !L.thAddrReady) return;
+    let alive = true;
+    const on = () => {
+      if(!alive) return;
+      setThSt(L.thAddrStatus());
+      if(AI && AI.state !== 'split' && AI.needData && pristine.current){
+        try { const o = L.partyAddrParts(company).offer; if(o) setOffer(o); } catch(e){ console.error('[company-addr] offer', e); }
+      }
+    };
+    global.addEventListener('erp:thaddr', on);
+    try { const pr = L.thAddrReady(); setThSt(L.thAddrStatus()); if(pr && pr.then) pr.then(on); } catch(e){ setThSt('offline'); }
+    return () => { alive = false; global.removeEventListener('erp:thaddr', on); };
+  }, []);
+  const apply = (parts) => {
+    if(!undoRef.current){ const snap = {}; _CO_ADDR_K.forEach(k => { snap[k] = c[k]; }); undoRef.current = { vals:snap, pristine:pristine.current }; }
+    pristine.current = false;
+    setC(v => ({ ...v, addrLine:parts.addrLine, subdistrict:parts.subdistrict, district:parts.district, province:parts.province, postcode:String(parts.postcode || ''), addrForeign:false }));
+    setPcFromDb(!!(parts.fromDb && parts.postcode)); setApplied(true); setPreview(null); setMsg(null);
+  };
+  const undo = () => {   // ↩️ คืนค่าก่อนกด ✨ (ที่อยู่เดิมทุกไบต์)
+    const u = undoRef.current;
+    if(u){ setC(v => ({ ...v, ...u.vals })); pristine.current = u.pristine; }
+    undoRef.current = null; setPcFromDb(false); setApplied(false); setPreview(null); setMsg(null);
+  };
+  const runSplit = (src, preset) => {
+    if(!L || thSt !== 'ready') return;
+    let r = preset || null;
+    if(!r){ try { r = L.thAddress.parseAddress(src); } catch(e){ console.error('[company-addr] parseAddress', e); r = null; } }
+    if(!r || r.confidence === 'none'){ setMsg('แยกที่อยู่อัตโนมัติไม่ได้ — พิมพ์แยกเองในแต่ละช่อง (หรือเว้นไว้ในช่อง "ที่อยู่" ช่องเดียวก็บันทึกได้)'); return; }
+    if(r.confidence === 'high') apply(_pfAddrFromParse(r, src, null));
+    else { setPreview({ src, r }); setMsg(null); }
+  };
+  const onProvince = (val) => {
+    touchAddr();
+    if(val === _PF_FOREIGN){ setC(v => ({ ...v, addrForeign:true, province:'', subdistrict:'', district:'', postcode:'' })); setPcFromDb(false); return; }
+    const fits = !val || _pfAddrFits(c, val, thSt === 'ready');
+    const fitsOld = !!_pfClean(c.province) && _pfAddrFits(c, _pfClean(c.province), thSt === 'ready');
+    if(!fits && fitsOld){
+      setC(v => ({ ...v, province:val, addrForeign:false, subdistrict:'', district:'', postcode:'' })); setPcFromDb(false);
+      _toastWarn('เปลี่ยนจังหวัด — ล้างตำบล/อำเภอเดิมแล้ว');
+    } else setC(v => ({ ...v, province:val, addrForeign:false }));
+  };
+  const src = String((company || {}).address == null ? '' : company.address);
+  const legacy = !!AI && AI.state !== 'split' && !!_pfClean(src);
+  const offerHas = !!(offer && (offer.subdistrict || offer.district || offer.province || offer.postcode || (offer.candidates || []).length));
+  const showBar = legacy && offerHas && !applied && c.addrForeign !== true;
+  const line = c.addrLine == null ? '' : String(c.addrLine);
+  const marked = _PF_ADDR_MARK.test(line);
+  let splitBtn = null;
+  if(!applied && !showBar && !preview && c.addrForeign !== true && (legacy || marked)){
+    const s2 = marked ? line : src;
+    splitBtn = { onClick:() => runSplit(s2), disabled: thSt !== 'ready', title: thSt !== 'ready' ? 'ต้องออนไลน์ (โหลดรายชื่อตำบลก่อน)' : undefined,
+      label: (marked && !(legacy && pristine.current)) ? '✨ ดูเหมือนที่อยู่เต็ม — แยกให้ไหม?' : '✨ แยกที่อยู่จากข้อความเดิม' };
+  }
+  let composed = '';
+  try { composed = pristine.current ? src : (L.composePartyAddress(c, { long }) || ''); } catch(_e){ composed = ''; }
+  const f = { k:'address', label:'ที่อยู่' };
+  return h('div', { className:'space-y-2', 'data-testid':'company-addr' },
+    showBar && h(PartyAddrOfferBar, { composed: L.composePartyAddress(_pfAddrFromParse(offer, src, null), { long }), high: offer.confidence === 'high',
+      onApply:() => runSplit(src, offer) }),
+    applied && h(PartyAddrOfferBar, { applied:true, onUndo:undo }),
+    preview && h(PartyAddrOfferPreview, { src:preview.src, r:preview.r, long, onUse:(parts) => apply(parts), onCancel:() => setPreview(null) }),
+    h(PartyPartBoundary, { id:'company-addr', onFail,
+      fallback:() => h('textarea', { value: c.address || '', rows:2, 'data-f':'company-address', className:'w-full px-3 py-2 border-2 rounded text-sm',
+        onChange:e => setC(v => ({ ...v, address:e.target.value })) }) },
+      h(ThAddressFields, { f, values:c, setValues:setC, touchAddr, thSt, pcFromDb, onPcTouched:() => setPcFromDb(false), onProvince,
+        warn: _pfAddrWarn(c, thSt === 'ready'), splitBtn, msg })),
+    h('div', { className:'text-xs rounded bg-gray-50 border px-2 py-1 text-gray-700', 'data-testid':'company-addr-composed' },
+      '🖨️ พิมพ์บนเอกสารว่า: ', composed ? h('b', null, composed) : h('span', { className:'text-red-700' }, '— ยังไม่มีที่อยู่ (ใบกำกับภาษีเต็มรูปต้องมีที่อยู่ผู้ขาย)')));
+}
+
+// รวมช่องที่อยู่ก่อนบันทึก (คืน null = ผ่าน / สตริง = ข้อความ error) · แก้ data ในที่
+function _coAddrFinalize(data, company, splitLive, pristine){
+  const L = _pfLib();
+  company = company || {};
+  if(splitLive && data.__splitAddr === true && L && L.composePartyAddress){
+    if(data.addrForeign !== true){
+      const pc = String(data.postcode == null ? '' : data.postcode).trim();
+      if(pc && !/^\d{5}$/.test(pc)) return 'รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลัก';
+    }
+    let ad = L.composePartyAddress(data, { long:_CO_ADDR_LONG });
+    if(ad == null) ad = '';
+    if(company.address != null && (pristine || _pfClean(ad) === _pfClean(company.address))) ad = company.address;
+    data.address = ad;
+    if(pristine){ _CO_ADDR_K.forEach(k => { delete data[k]; }); if(company.address == null) delete data.address; }
+    else {
+      // ช่องว่าง → ไม่เขียน (ถ้าเดิมมีค่า เขียน '' ทับ — SET_COMPANY เป็น merge)
+      ['addrLine','subdistrict','district','province','postcode'].forEach(k => {
+        if(data[k] == null || String(data[k]).trim() === '') { if(company[k] != null && company[k] !== '') data[k] = ''; else delete data[k]; }
+        else data[k] = String(data[k]);
+      });
+      if(data.addrForeign !== true){ if(company.addrForeign === true) data.addrForeign = false; else delete data.addrForeign; }
+      // ที่อยู่ก้อนเดียว (addrLine อย่างเดียว = address) → ไม่เก็บ addrLine ซ้ำ
+      if(!data.subdistrict && !data.district && !data.province && !data.postcode && data.addrForeign !== true
+         && data.addrLine && _pfClean(data.addrLine) === _pfClean(data.address)){ if(company.addrLine) data.addrLine = ''; else delete data.addrLine; }
+    }
+  } else {
+    _CO_ADDR_K.forEach(k => { delete data[k]; });   // ฟอร์มเดิม (textarea) — ไม่แตะช่องแยก
+  }
+  delete data.__splitAddr;   // flag ชั่วคราวของฟอร์ม — ห้ามลง state
+  return null;
+}
+
 function CompanySettings({ state, dispatch }){
-  const [c, setC] = useState(state.company);
+  // 🆕 COMPANY-ADDR: ตัดสินครั้งเดียวตอนเปิดว่าใช้ที่อยู่แบบแยกช่องไหม · รายเดิม (สตริงก้อนเดียว) = addrLine เป็นที่อยู่เดิมทุกไบต์ + ข้อเสนอ ✨
+  const addrInit = useRef(null);
+  if(addrInit.current === null){
+    let ai = false;
+    if(_pfSplitOn(state.settings) && _pfLib().partyAddrParts){
+      try { ai = _pfLib().partyAddrParts(state.company || {}); } catch(e){ console.error('[company-addr] partyAddrParts', e); ai = false; }
+    }
+    addrInit.current = ai;
+  }
+  const AI = addrInit.current || null;
+  const addrPristine = useRef(true);
+  const [addrFailed, setAddrFailed] = useState(false);
+  const addrSplitLive = !!AI && !addrFailed;
+  const [c, setC] = useState(() => ({ ...(state.company || {}), ...(AI ? AI.values : {}) }));
   const [taxErr, setTaxErr] = useState(null);
 
   const save = () => {
@@ -91910,10 +92284,18 @@ function CompanySettings({ state, dispatch }){
       data = { ...c, taxId: t };
     }
     setTaxErr(null);
+    // 🆕 COMPANY-ADDR: ประกอบที่อยู่จากช่องแยก (passthrough ถ้าไม่แตะ) + ลบ flag ชั่วคราว
+    data = { ...data };
+    const addrErr = _coAddrFinalize(data, state.company, addrSplitLive, addrPristine.current);
+    if(addrErr) return alert(addrErr);
     dispatch({ type:'SET_COMPANY', data });
     alert('บันทึกแล้ว');
   };
 
+  // 🆕 COMPANY-ADDR: ค่ายังเป็นตัวอย่างจากระบบ (seed) → ป้ายเหลือง ให้แก้หรือลบออก
+  const sampleNote = (k, v) => companyIsSample(k, v)
+    ? h('div', { className:'text-xs text-amber-800 mt-1', 'data-tid':'company-sample-' + k }, '⚠️ ยังเป็นค่าตัวอย่างจากระบบ — แก้เป็นข้อมูลจริง หรือลบออก (ขึ้นหัวเอกสาร)')
+    : null;
   const form = h('div', { className:'bg-white rounded-lg shadow p-5 max-w-2xl' },
     h('h3', { className:'font-bold text-gray-800 mb-3' }, '🏛️ ข้อมูลบริษัท'),
     h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 mb-3 text-xs text-blue-800' },
@@ -91921,12 +92303,26 @@ function CompanySettings({ state, dispatch }){
     ),
     h('div', { className:'space-y-3' },
       h(Field, { label:'ชื่อบริษัท (ไทย)' },
-        h('input', { type:'text', value:c.name||'', onChange:e=>setC({...c,name:e.target.value}),
-          className:'w-full px-3 py-2 border-2 rounded text-sm' })
+        h('input', { type:'text', value:c.name||'', onChange:e=>setC({...c,name:e.target.value}), 'data-tid':'company-name',
+          className:'w-full px-3 py-2 border-2 rounded text-sm' + (companyIsSample('name', c.name) ? ' border-amber-400' : '') }),
+        sampleNote('name', c.name)
       ),
       h(Field, { label:'ชื่อบริษัท (English)' },
-        h('input', { type:'text', value:c.nameEn||'', onChange:e=>setC({...c,nameEn:e.target.value}),
-          className:'w-full px-3 py-2 border-2 rounded text-sm' })
+        h('input', { type:'text', value:c.nameEn||'', onChange:e=>setC({...c,nameEn:e.target.value}), 'data-tid':'company-nameEn',
+          className:'w-full px-3 py-2 border-2 rounded text-sm' + (companyIsSample('nameEn', c.nameEn) ? ' border-amber-400' : '') }),
+        sampleNote('nameEn', c.nameEn)
+      ),
+      // 🆕 COMPANY-ADDR: ที่อยู่สำนักงานใหญ่ (5 ช่อง + เลือกตำบล) — ขึ้นหัวใบกำกับ/PO/ใบวางบิล ทุกใบ
+      h('div', { className:'space-y-2 pt-1 border-t', 'data-company-addr':'1' },
+        h('div', { className:'text-xs font-semibold text-slate-600' }, '📍 ที่อยู่บริษัท — ',
+          h('span', { className:'inline-block px-1.5 py-0.5 rounded bg-blue-100 text-blue-800', 'data-testid':'company-addr-hq' }, 'สำนักงานใหญ่')),
+        h('div', { className:'text-[11px] text-gray-500' }, 'ตามหนังสือรับรอง/ภ.พ.20 · พิมพ์บนหัวใบกำกับ/PO/ใบวางบิล/50 ทวิ ทุกใบ · สาขาที่ยังไม่ใส่ที่อยู่ จะพิมพ์ที่อยู่นี้แทน (ใบกำกับภาษีของสาขาต้องใช้ที่อยู่สาขาจริง — ตั้งที่ 🏪 สาขา)'),
+        addrSplitLive
+          ? h(CompanyAddressSection, { c, setC, company: state.company || {}, AI, pristine: addrPristine,
+              onFail:() => { setAddrFailed(true); setC(v => { const n = { ...v }; delete n.__splitAddr; return n; }); } })
+          : h(Field, { label:'ที่อยู่' },
+              h('textarea', { value:c.address||'', rows:2, 'data-f':'company-address', onChange:e=>setC({...c,address:e.target.value}),
+                className:'w-full px-3 py-2 border-2 rounded text-sm' }))
       ),
       h('div', { className:'grid grid-cols-2 gap-3' },
         h(Field, { label:'เลขผู้เสียภาษี (ยอดเดียว)' },
@@ -91936,13 +92332,17 @@ function CompanySettings({ state, dispatch }){
           taxErr ? h('div', { 'data-tid':'company-tax-err', className:'text-xs text-red-700 mt-1' }, '⛔ ' + taxErr) : null
         ),
         h(Field, { label:'โทร' },
-          h('input', { type:'text', value:c.phone||'', onChange:e=>setC({...c,phone:e.target.value}),
-            className:'w-full px-3 py-2 border-2 rounded text-sm' })
+          h('input', { type:'text', value:c.phone||'', onChange:e=>setC({...c,phone:e.target.value}), 'data-tid':'company-phone',
+            placeholder:'ยังไม่มี เว้นว่างได้',
+            className:'w-full px-3 py-2 border-2 rounded text-sm' + (companyIsSample('phone', c.phone) ? ' border-amber-400' : '') }),
+          sampleNote('phone', c.phone)
         ),
       ),
       h(Field, { label:'Email' },
-        h('input', { type:'email', value:c.email||'', onChange:e=>setC({...c,email:e.target.value}),
-          className:'w-full px-3 py-2 border-2 rounded text-sm' })
+        h('input', { type:'email', value:c.email||'', onChange:e=>setC({...c,email:e.target.value}), 'data-tid':'company-email',
+          placeholder:'ยังไม่มี เว้นว่างได้',
+          className:'w-full px-3 py-2 border-2 rounded text-sm' + (companyIsSample('email', c.email) ? ' border-amber-400' : '') }),
+        sampleNote('email', c.email)
       ),
 
       // VAT precision settings
@@ -101983,7 +102383,38 @@ C.registerGroup({
         else if(!/^\d{13}$/.test(S(c.taxId))) why.push(`เลขผู้เสียภาษีไม่ใช่ 13 หลัก (${c.taxId})`);
         // UAT S4 (กฎ 2026-09-28): 13 หลักแต่หลักตรวจสอบ mod-11 ไม่ตรง → หน้าบริษัทบันทึกไม่ได้ (แม้แก้แค่โลโก้/ที่อยู่) — บอกเหตุผลที่นี่ด้วย · ไม่แก้ค่าให้ (ไม่มี migration)
         else if(global.ERP.taxIdProblem && global.ERP.taxIdProblem(c.taxId) === 'checksum') why.push(`เลขผู้เสียภาษีหลักตรวจสอบไม่ตรง (${c.taxId}) — เลขนี้ไม่มีจริง ตรวจกับหนังสือรับรอง/ภ.พ.20 แล้วแก้ (หน้าบริษัทบันทึกไม่ได้จนกว่าจะแก้)`);
+        // 🆕 COMPANY-ADDR (2026-09-28): ใบกำกับภาษีเต็มรูปต้องมีที่อยู่ผู้ขาย (ม.86/4) — company.address ว่าง = หัวเอกสารขึ้น "-"
+        if(!S(c.address)) why.push('ไม่มีที่อยู่บริษัท (สำนักงานใหญ่)');
         return { count: why.length ? 1 : 0, detail: why }; } },
+
+    // 🆕 COMPANY-ADDR (2026-09-28): ค่าตัวอย่างที่เหลือ (ไม่บล็อกใบกำกับ แต่ขึ้นหัวเอกสาร) — ชื่ออังกฤษ/อีเมล/โทร ยังเป็นค่า seed · สาขา (ไม่ใช่ HQ) ไม่มีที่อยู่ หรือยังเป็นที่อยู่ตัวอย่าง
+    //   ref: src/01-state.js:49-57 company seed · :65-100 branches seed (address) · สาขาไม่มีที่อยู่ → ใบพิมพ์ใช้ company.address แทน (mod-sales-full.js sellerAddr · mod-purchase.js ใบสั่งซื้อ)
+    //   ค่าว่าง (nameEn/email/phone) = ไม่เตือน (เจ้าของยังไม่มีเบอร์ — เว้นว่างได้)
+    { key:'company_sample_info', label:'ข้อมูลบริษัท/สาขายังเป็นค่าตัวอย่างหรือไม่ครบ', severity: sSev('warn','company'),
+      show: (ctx) => ctx.can('settings'),
+      nav: sNav('company'),
+      hint: sHint('company', 'ตั้งค่า → 🏢 องค์กร → 🏛️ บริษัท → แก้/ลบ ชื่ออังกฤษ · อีเมล · โทร ที่ยังเป็นค่าตัวอย่าง · ที่อยู่สาขา: ตั้งค่า → 🏢 องค์กร → 🏪 สาขา → แก้ไข'),
+      run: (ctx) => {
+        const c = ctx.state.company || {}; const init = M.init(ctx); const seed = init.company || {};
+        const why = [];
+        const LBL = { nameEn:'ชื่อบริษัท (English)', email:'Email', phone:'โทร' };
+        ['nameEn','email','phone'].forEach(k => { if(S(c[k]) && S(seed[k]) && S(c[k]) === S(seed[k])) why.push(`${LBL[k]} ยังเป็นค่าตัวอย่าง "${S(c[k])}"`); });
+        // สาขา: ที่อยู่/โทร ตรงกับค่าตัวอย่าง (ทุกสาขา รวม HQ — ใบเสนอราคา/ใบกำกับอ่านโทรของสาขาก่อน) · สาขาอื่นไม่มีที่อยู่ (HQ ว่างได้ — ใช้ที่อยู่บริษัท)
+        const seedAddr = new Set(A(init.branches).map(b => S(b && b.address)).filter(Boolean));
+        const seedPhone = new Set(A(init.branches).map(b => S(b && b.phone)).concat([S(seed.phone)]).filter(Boolean));
+        // UAT: ชื่อสาขาขึ้นต้น "สาขา" อยู่แล้ว → ไม่เติมซ้ำ · สาขาไม่มีที่อยู่ รวมเป็นบรรทัดเดียว (กันงานค้างพุ่งตามจำนวนสาขา)
+        const bnm = (b) => { const n = S(b.name) || b.id; return /^สาขา/.test(n) ? n : 'สาขา ' + n; };
+        const noAddr = [];
+        A(ctx.state.branches).filter(b => b && isActive(b)).forEach(b => {
+          const ad = S(b.address), nm = bnm(b);
+          if(!ad){ if(b.branchType !== 'hq') noAddr.push(nm); }
+          else if(seedAddr.has(ad)) why.push(`${nm}: ที่อยู่ยังเป็นค่าตัวอย่าง "${ad}"`);
+          if(S(b.phone) && seedPhone.has(S(b.phone))) why.push(`${nm}: โทรยังเป็นค่าตัวอย่าง "${S(b.phone)}"`);
+          // UAT (ม.86/4): ใบกำกับของสาขาต้องมีรหัสสาขา 5 หลัก — ไม่มี = พิมพ์ใบกำกับไม่มี "สาขาที่ ....."
+          if(b.branchType !== 'hq' && !(global.ERP.sellerBranchCode ? global.ERP.sellerBranchCode(b) : S(b.branchCode))) why.push(`${nm}: ไม่มีรหัสสาขา 5 หลัก (ใบกำกับภาษีของสาขาต้องมี)`);
+        });
+        if(noAddr.length) why.push(`${noAddr.length} สาขาไม่มีที่อยู่ (ใบพิมพ์จะใช้ที่อยู่สำนักงานใหญ่แทน — ใบกำกับภาษีของสาขาต้องใช้ที่อยู่สาขาจริง): ${noAddr.join(', ')}`);
+        return { count: why.length, detail: why }; } },
 
     // ref: src/01-state.js:124-131 items[].units[{name,isBase,equalTo,purposes}] · src/00-core.js:176-188 resolveToBase (ไม่เจอ isBase → คืน 1 เงียบ ๆ)
     //      · :190-194 getBaseUnit fallback issueUnit · src/mod-settings.js:1455-1464 บังคับหน่วยหลักตอนบันทึก · migrate v31→32 src/01-state.js:5589-5606 (isBase → toBase:1 → หน่วยแรก)
