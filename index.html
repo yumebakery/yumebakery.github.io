@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="4582f4fcf340";window.__ERP_BUILT_AT__="2026-10-02T08:22:39";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="149483afb2f3";window.__ERP_BUILT_AT__="2026-10-02T10:58:07";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -3709,6 +3709,28 @@ function buildInvDrLines(inv, state, opts){
   if(!baseAcc || !(inv.amount > 0)) return { lines, baseAcc: baseAcc || null };
   const br0 = inv.branch || state.currentBranch;
   const mainDesc = o.desc != null ? o.desc : (inv.description || '');
+  // 🆕 MIG_AP_NORMAL N3: ส่วนของ GR นำเข้า (ไม่เข้าสต๊อก · ของอยู่ในยอดยกมาแล้ว) → Dr 3900 ยอดยกมา แทนสินค้า/ค่าใช้จ่าย/ทรัพย์สิน
+  //   ปนกับ GR ใหม่ = แยกสัดส่วนตามยอดบรรทัด GR (ไม่รวม VAT) · ส่วนที่เหลือคิดแบบเดิม (เรียกซ้ำด้วย GR ใหม่อย่างเดียว)
+  if(!o._noMig && inv.source !== 'direct_expense'){
+    const _gids = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+    const _grs = _gids.map(id => (state.grs||[]).find(g => g.id === id)).filter(Boolean);
+    const _migGrs = _grs.filter(grMigOpening);
+    const obe = accounts.find(a => a.code === '3900');
+    if(_migGrs.length && obe){
+      const _ex = g => { const t = (g.lines||[]).reduce((s2, l) => s2 + (Number(l && l.lineTotal) || ((Number(l && l.qty)||0) * (Number(l && l.unitPrice)||0))), 0) || (Number(g.totalValue)||0);
+        return g.priceMode === 'inclusive' ? t / 1.07 : t; };
+      const migSum = _migGrs.reduce((s2, g) => s2 + _ex(g), 0), allSum = _grs.reduce((s2, g) => s2 + _ex(g), 0);
+      const amt = Number(inv.amount) || 0;
+      const migAmt = _migGrs.length === _grs.length || !(allSum > 0) ? amt : Number((amt * migSum / allSum).toFixed(2));
+      const rest = Number((amt - migAmt).toFixed(2));
+      const restIds = _grs.filter(g => !grMigOpening(g)).map(g => g.id);
+      const sub = rest > 0.005 ? buildInvDrLines({ ...inv, amount: rest, grIds: restIds, grId: restIds[0] || null }, state, { ...o, _noMig: true }).lines : [];
+      lines.push(...sub);
+      if(migAmt > 0.005) lines.push({ accountId:obe.id, accountCode:obe.code, accountName:obe.name, debit: migAmt, credit: 0, branchId: br0,
+        description: 'ยอดยกมา (ของรับก่อนตัดระบบ ' + _migGrs.map(g => g.grNumber || g.id).join(', ') + ')', migOpening: true });
+      return { lines, baseAcc };
+    }
+  }
   // A9: GR line ทรัพย์สิน → Dr บัญชีหมวด (1610/1620/1635/1660 → 1600)
   const grIds = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
   const assetByAcc = {}; let assetTotalRaw = 0;
@@ -6086,6 +6108,38 @@ function supMemoNettedInInv(state, m){
   return !!r && ((Number(r.deductedFromINV) || 0) > 0.005 || r.decideJeId === 'DEDUCTED_IN_PI');
 }
 function _invIsMig(i){ return !!i && (i._migrated === true || i.createdBy === 'migration'); }
+// 🆕 MIG_AP_NORMAL N2: GR ประวัติจาก Ecount ที่ยังไม่เคยถูกปลดจากใบตั้งหนี้ (ไม่เข้าคิวตั้งหนี้) · ปลดแล้ว (ย้อนไปตั้งหนี้ → prevInvoiceId) = เข้าคิวตั้งหนี้ปกติ
+function grMigApHeld(g){ return !!g && g._migrated === true && !g.prevInvoiceId && !((g.prevSplitInvoiceIds || []).length); }
+// 🆕 MIG_AP_NORMAL N3: GR นำเข้า (ไม่เข้าสต๊อก · ไม่มีล็อต/JE) — ของรับก่อนตัดระบบ อยู่ในยอดยกมาแล้ว → ตั้งหนี้ใหม่ Dr 3900 แทนสินค้า
+function grMigOpening(g){ return !!g && g._migrated === true && g.noStock === true; }
+// 🆕 MIG_AP_NORMAL N1: ใบนำเข้า Ecount ย้อนไปตั้งหนี้ได้ไหม ('' = ได้) — ต้องยังไม่จ่าย (ใน Ecount) และไม่มี PV/คำขอจ่ายที่มีผลในระบบนี้
+// 🆕 verify F1: นำเข้ามาเป็น "จ่ายแล้วใน Ecount" (ภาษีซื้อยื่นใน Ecount แล้ว) = ประวัติจ่ายรายการแรกเป็น 'unpay' (ใบที่นำเข้าเป็นค้าง → ✅ บันทึกจ่าย → 🔄 ยกเลิก ไม่นับ)
+function migEcountPaidOrig(inv){ const l = (inv && inv.ecountPayLog) || []; return !!(l[0] && l[0].action === 'unpay'); }
+function migInvBackDeny(state, inv){
+  if(!_invIsMig(inv)) return '';
+  // 🆕 MIG_AP_NORMAL UAT MF2: ใบนำเข้าแบบค่าใช้จ่าย (ไม่มี GR) — ย้อนแล้วไม่มีอะไรกลับเข้าคิว + ตั้งใหม่ผ่านทะเบียนรายจ่าย = Dr 5300 ซ้ำ (ค่าใช้จ่ายนับ 2 รอบ)
+  //   → ปิดไว้จนกว่าทะเบียนรายจ่ายลง 3900 ได้ · ยอดผิดให้ทำใบลด/เพิ่มหนี้ (CN/DN) ผ่าน ผจก.บัญชี
+  if(inv.source === 'direct_expense')
+    return 'ใบนำเข้าแบบค่าใช้จ่าย (ไม่มีใบรับของ) — ย้อนไปตั้งหนี้ไม่ได้ (ไม่มี GR กลับเข้าคิว · ตั้งใหม่จะลงค่าใช้จ่ายซ้ำ) · ยอดผิดให้แจ้ง ผจก.บัญชี ทำใบลดหนี้/เพิ่มหนี้ (CN/DN)';
+  if((Number(inv.paidAmount) || 0) > 0.005 || ['paid', 'partial'].includes(inv.paymentStatus)) return 'ใบนำเข้าจาก Ecount ที่จ่ายแล้ว — ย้อนไปตั้งหนี้ไม่ได้ (เหมือนใบจ่ายแล้วทั่วไป)';
+  // 🆕 verify F1: Ecount เคยบันทึกจ่ายแล้ว (ยกเลิกการจ่ายทีหลัง) + มี VAT → ภาษีซื้อยื่นใน Ecount แล้ว · ตั้งใหม่จาก GR จะลง Dr 1150 ซ้ำ/ค้าง
+  if(invVatInEcount(inv) && (Number(inv.vat) || 0) > 0.005 && migEcountPaidOrig(inv))
+    return 'ใบนี้ Ecount เคยบันทึกจ่ายแล้ว (ภาษีซื้อยื่นใน Ecount แล้ว) — ย้อนไปตั้งหนี้ไม่ได้ · จ่ายตามใบนี้ได้เลย ถ้ายอดผิดให้ทำใบลด/เพิ่มหนี้ (CN/DN)';
+  // 🆕 verify F4: ใบที่ยังไม่ผูกผู้ขาย — GR ที่ปลดจะไม่โผล่ในคิวไหนเลย (ทุกคิวต้องมีผู้ขาย) → เจ้าหนี้หาย
+  if(!inv.supplierId) return 'ใบนี้ยังไม่ผูกผู้ขาย — 🔗 ผูกผู้ขายก่อน แล้วค่อย ↩️ ย้อนไปตั้งหนี้';
+  const ids = p => !p ? [] : (p.invId ? [p.invId] : (p.invoiceIds || (p.invoiceId ? [p.invoiceId] : [])));
+  if(((state && state.payments) || []).some(p => p && !p.reversed && ['pending', 'approved'].includes(p.approvalStatus) && ids(p).includes(inv.id)))
+    return 'ใบนี้มีคำขอจ่าย/PV ในระบบนี้ — ยกเลิกคำขอจ่ายก่อน';
+  return '';
+}
+// 🆕 MIG_AP_NORMAL N3: ใส่ยอด VAT ตามใบกำกับตรง ๆ (ปัดเศษ ±) ได้ = ใบนำเข้าที่เคลมในระบบนี้ (เดิม) + ใบตั้งหนี้ใหม่จาก GR นำเข้า (ตั้งหนี้ใหม่หลังย้อน)
+function invVatExactOk(inv, state){
+  if(!inv) return false;
+  if(invVatHereMoved(inv)) return true;
+  if(_invIsMig(inv)) return false;
+  const ids = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+  return ids.some(id => grMigOpening(((state && state.grs) || []).find(g => g.id === id)));
+}
 // 🆕 MIG_VAT_HERE V1: ใบนำเข้า Ecount ที่ "ภาษีซื้อยื่นใน Ecount แล้ว" = นำเข้า และยังไม่ถูกย้ายมาเคลมในระบบนี้ (inv.vatClaimHere)
 //   ใช้เฉพาะจุดภาษีซื้อ/ใบกำกับ — จุดอื่นของใบนำเข้า (ยกเลิก/ลบ/แก้ยอด/WHT/ผูกผู้ขาย) ยังใช้ _invIsMig ตามเดิม
 //   changelog 2026-10-01: ธง vatClaimHere มาจากไฟล์นำเข้า (เจ้าหนี้ค้างจ่ายยกมา · auto 'ap-open') หรือจาก action MIG_VAT_HERE (ผจก.บัญชี/GM)
@@ -8610,7 +8664,7 @@ Object.assign(global.ERP, {
   findDupSupInv, consumeSupplierCredit,
   // Helpers
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines,
-  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
+  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, grMigApHeld, grMigOpening, invVatExactOk, migInvBackDeny, migEcountPaidOrig, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
   readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, unitUsage, unitUsageAdvice, getBaseUnit, findItemUnit, toBaseQty, rtvReturnBaseQty, rtvLineBaseQty, rtvReplaceBaseQty, unitsForPurpose,
@@ -13061,8 +13115,16 @@ function _siKeepMigrated(old, nu){
 function _invIsMigrated(inv){ return !!inv && (inv._migrated === true || inv.createdBy === 'migration'); }
 // 🆕 นำเข้า2569 UAT MF1: ใบรับประวัติจาก Ecount (ไม่เข้าสต๊อก) — คืน/ยกเลิกไม่ได้ (ไม่งั้นตัดสต๊อกนับจริง 1 ต.ค.)
 function _grIsMigrated(gr){ return !!gr && (gr._migrated === true || gr.historyOnly === true || gr.createdBy === 'migration'); }
-const _MIG_GR_MSG = '⛔ ใบรับประวัติจาก Ecount — ไม่ได้เข้าสต๊อก คืน/ยกเลิกไม่ได้ ถ้ายอดผิดให้ทำใบลดหนี้ที่ใบตั้งหนี้';
-const _MIG_INV_VOID_MSG = '⛔ ใบนำเข้าจาก Ecount — ยกเลิก/ลบไม่ได้ ถ้ายอดผิดให้ทำใบลด/เพิ่มหนี้ (ผจก.บัญชี)';
+// 🆕 MIG_AP_NORMAL UAT2 N8: GR นำเข้าที่ย้อนไปตั้งหนี้แล้ว อาจมีใบตั้งหนี้หลายรุ่น (ใบเดิมยกเลิก + ใบใหม่) → บอกให้ทำ CN ที่ใบล่าสุด
+const _MIG_GR_MSG = '⛔ ใบรับประวัติจาก Ecount — ไม่ได้เข้าสต๊อก คืน/ยกเลิกไม่ได้ ถ้ายอดผิดให้ทำใบลดหนี้ที่ใบตั้งหนี้'
+  + '\n• ถ้าต้องคืนของจริง → แจ้งบัญชีออกใบลดหนี้ (CN) ที่ใบตั้งหนี้ล่าสุดของใบรับนี้ (ใบที่ยังไม่ยกเลิก — ถ้าเคย ↩️ ย้อนไปตั้งหนี้ ใช้ใบที่ตั้งใหม่ ไม่ใช่ใบเดิมที่ยกเลิกแล้ว)';
+// 🆕 MIG_AP_NORMAL UAT MF3: ใบนำเข้าที่ Ecount บันทึกจ่ายแล้ว (ภาษีซื้อยื่นใน Ecount แล้วตามกติกาเจ้าของ) แล้วถูก MIG_AP_UNPAY → ย้อนไปตั้งหนี้ได้
+//   แต่เลขใบกำกับเดิม "ใช้ไปแล้ว" (filedAtVoid = true) — กันคีย์เลขเดิมให้ใบใหม่แล้วเคลมซ้ำใน ภ.พ.30 ของระบบนี้ (ต่างจากใบที่ค้างตอนตัดระบบ = ยังไม่เคยเคลม)
+function _migUnpaidVatFiled(i){
+  if(!i || !global.ERP.invVatInEcount(i) || !String(i.supTaxInvNumber || '').trim()) return false;
+  return global.ERP.migEcountPaidOrig(i);   // verify F1: เฉพาะใบที่นำเข้าเป็น "จ่ายแล้ว" (ใบค้าง → บันทึกจ่าย → ยกเลิก = ยังไม่เคยเคลม)
+}
+const _MIG_INV_VOID_MSG = '⛔ ใบนำเข้าจาก Ecount ที่จ่ายแล้ว (หรือมีคำขอจ่าย/PV ในระบบนี้) — ย้อนไปตั้งหนี้/ยกเลิกไม่ได้ เหมือนใบจ่ายแล้วทั่วไป · ถ้ายอดผิดให้ทำใบลด/เพิ่มหนี้ · ถ้าจริงยังไม่จ่าย แจ้ง ผจก.บัญชี';
 global.ERP.grIsMigrated = _grIsMigrated;
 global.ERP.invIsMigrated = _invIsMigrated;
 // คงธง migrate ของใบเดิมบน out (แก้ out ตรง ๆ) · คืนรายชื่อฟิลด์ที่ถูกดึงกลับ — UPDATE_INV / PATCH_INV / MERGE_IMPORT (รวม allowProtected)
@@ -13079,7 +13141,9 @@ const _INV_PROTECTED = Object.freeze(['depositApplications','depositUsed','depos
   'taxInvGroup','taxInvRefId','taxInvKey','supTaxInvHistory','paymentBlock','nonDeductibleVat','nonDeductibleVatBase','paidAmount',
   'supTaxInvNumber','supTaxInvDate','supVatClaimDate',
   'vatDefer','vatClaimHistory','vatExpiredAt',
-  'vatClaimHere','vatClaimHereLog']);   // 🆕 MIG_VAT_HERE V2: ธงย้ายมาเคลมในระบบนี้ — แก้ได้เฉพาะ MIG_VAT_HERE/_UNDO (ไฟล์นำเข้าใบใหม่ตั้งมาได้)   // 🆕 VAT-CLAIM verify (B3.1): เลื่อนเคลม/ประวัติเคลม/หมดสิทธิ์ — แก้ได้เฉพาะ action ของมัน (V5+)
+  'vatClaimHere','vatClaimHereLog',
+  'ecountPayLog','ecountPayReversed']);   // 🆕 MIG_AP_NORMAL N5: แก้ได้เฉพาะ MIG_AP_UNPAY/_MARKPAID
+  //   // 🆕 MIG_VAT_HERE V2: ธงย้ายมาเคลมในระบบนี้ — แก้ได้เฉพาะ MIG_VAT_HERE/_UNDO (ไฟล์นำเข้าใบใหม่ตั้งมาได้)   // 🆕 VAT-CLAIM verify (B3.1): เลื่อนเคลม/ประวัติเคลม/หมดสิทธิ์ — แก้ได้เฉพาะ action ของมัน (V5+)
 // PATCH_INV.add ที่สายจ่ายเงินใช้ (บวกเท่านั้น — ค่าลบ/ฟิลด์ควบคุมอื่นถูกตัดทิ้ง)
 const _INV_PROTECTED_ADD_OK = Object.freeze(['paidAmount','nonDeductibleVat','nonDeductibleVatBase']);
 function _protEmpty(v){ return v == null || v === '' || (Array.isArray(v) && v.length === 0); }
@@ -13682,6 +13746,29 @@ function _migApOpenCheck(s, d, u){
   if(!ids.some(id => !_migApOpenDeny(s, (s.invoices || []).find(i => i && i.id === id)))) return 'ไม่มีใบที่เข้าเงื่อนไข (ปรับไปแล้ว หรือจ่ายแล้วใน Ecount)';
   return null;
 }
+// 🆕 MIG_AP_NORMAL N5: แก้สถานะจ่ายของใบนำเข้า Ecount ที่บัญชีตรวจแล้วว่า Ecount บันทึกผิด (เช่น RR26090157 สุขและรวย)
+//   MIG_AP_UNPAY = "จ่ายใน Ecount" แต่จริงยังไม่จ่าย → ค้างจ่าย (Dr 3900 / Cr 2100) · MIG_AP_MARKPAID = ระบบบอกค้าง แต่จ่ายจริงก่อนตัดระบบ → จ่ายแล้ว (Dr 2100 / Cr 3900)
+//   ผจก.บัญชี/GM · เหตุผลบังคับ · ไม่มี PV/คำขอจ่ายที่มีผลในระบบนี้ · ย้อนกันเองได้ · replay (at เดิมลงประวัติแล้ว) = dup เงียบ
+function _r2mp(x){ return Math.round((Number(x) || 0) * 100) / 100; }
+function _migApPayCheck(s, d, u, mark){
+  const inv = (s.invoices || []).find(i => i && i.id === d.invId);
+  if(!inv || inv.voided) return { deny:'ไม่พบใบตั้งหนี้ (หรือยกเลิกแล้ว)' };
+  if(!_invIsMigrated(inv)) return { deny:'ใช้ได้เฉพาะใบนำเข้าจาก Ecount — ใบในระบบนี้จ่าย/ยกเลิกจ่ายผ่าน PV ตามปกติ' };
+  const at = d.at != null ? Number(d.at) : null, log = Array.isArray(inv.ecountPayLog) ? inv.ecountPayLog : [];
+  if(at != null && log.some(x => x && x.action === (mark ? 'markpaid' : 'unpay') && x.at === at)) return { deny:'บันทึกครั้งนี้ลงไปแล้ว', dup:true };
+  if(!global.ERP.taxInvOverrideApprover(u)) return { deny:(mark ? 'บันทึกว่าจ่ายแล้วก่อนตัดระบบ' : 'ยกเลิกการจ่าย (Ecount)') + ' ได้เฉพาะ ผจก.บัญชี/GM' };
+  if((s.payments || []).some(p => p && !p.reversed && !p.voided && (p.status || 'posted') !== 'cancelled' && ['pending', 'approved'].includes(p.approvalStatus || 'approved') && _payRefsInv(p, inv.id)))
+    return { deny:'ใบนี้มีคำขอจ่าย/PV ในระบบนี้ — แก้ผ่าน PV (ยกเลิกคำขอ/กลับรายการจ่าย) แทน' };
+  const net = _r2mp(inv.netPayable), paid = _r2mp(inv.paidAmount);
+  const amt = mark ? _r2mp(net - paid) : paid;
+  if(!(amt > 0.005)) return { deny: mark ? 'ใบนี้จ่ายครบแล้ว (หรือยอดสุทธิไม่เป็นบวก)' : 'ใบนี้ยังไม่จ่าย — ไม่มียอดจ่ายให้ยกเลิก' };
+  if(String(d.reason || '').trim().length < 5) return { deny:'ใส่เหตุผล (อย่างน้อย 5 ตัวอักษร) เช่น บัญชีตรวจสมุดธนาคารแล้ว ' + (mark ? 'จ่ายแล้ววันที่ …' : 'ยังไม่ได้โอนจริง') };
+  const coa = s.chartOfAccounts || [], ap = coa.find(x => x.code === '2100'), obe = coa.find(x => x.code === '3900');
+  if(!ap || !obe) return { deny:'ผังบัญชีไม่มี 2100 เจ้าหนี้ / 3900 ยอดยกมา' };
+  return { inv, amt, ap, obe };
+}
+global.ERP.migApPayDeny = function(state, type, data, user){
+  try { const d = data || {}; return _migApPayCheck(state || {}, d, user || _actorOf(state, d.by), type === 'MIG_AP_MARKPAID').deny || ''; } catch(e){ return 'ตรวจไม่สำเร็จ: ' + (e && e.message); } };
 function _vatClaimDenyReason(s, type, d, u){
   if(type === 'MARK_VAT_EXPIRED') return _vatExpireCheck(s, d || {}, u).deny || null;
   if(type === 'MIG_VAT_HERE') return _migVatHereCheck(s, d || {}, u, false).deny || null;   // 🆕 MIG_VAT_HERE V2
@@ -14139,6 +14226,11 @@ const _ADD_DUP = {
                           return at != null && (s.invoices || []).some(i => i && ids.has(i.id) && (i.vatClaimHereLog || []).some(x => x && x.action === 'apopen' && x.at === at)); },
   MIG_VAT_HERE_UNDO:    (s, d) => { const inv = d && (s.invoices || []).find(i => i && i.id === d.invId);
                           return !!(inv && d.at != null && (inv.vatClaimHereLog || []).some(x => x && x.action === 'undo' && x.at === Number(d.at))); },
+  // 🆕 MIG_AP_NORMAL N5: ยกเลิกจ่าย/บันทึกจ่ายแล้วครั้งเดียวกัน (at เดิม) ลง ecountPayLog แล้ว = ซ้ำ
+  MIG_AP_UNPAY:         (s, d) => { const inv = d && (s.invoices || []).find(i => i && i.id === d.invId);
+                          return !!(inv && d.at != null && (inv.ecountPayLog || []).some(x => x && x.action === 'unpay' && x.at === Number(d.at))); },
+  MIG_AP_MARKPAID:      (s, d) => { const inv = d && (s.invoices || []).find(i => i && i.id === d.invId);
+                          return !!(inv && d.at != null && (inv.ecountPayLog || []).some(x => x && x.action === 'markpaid' && x.at === Number(d.at))); },
   // verify: รับเอกสาร CN เลขเดิมที่รับแล้วและงวดภาษียื่นแล้ว = ซ้ำ (เครื่องที่สองเล่นซ้ำหลังออฟไลน์) — งวดยังเปิดให้ reducer ทำงาน (แก้รูป/วันที่ได้)
   RECEIVE_CN_DOC:       (s, d) => { if(!d || !d.memoId) return false; const m = (s.supplierMemos || []).find(x => x && x.id === d.memoId);
                           return !!m && m.status !== 'await_doc' && !!m.supMemoNumber && m.supMemoNumber === d.supCnNumber && _vatPeriodLocked(s, m.vatClaimDate || m.supMemoDate); },
@@ -17456,7 +17548,8 @@ function reducer(s, a){
       // 🆕 MIG_VAT_HERE V5: ยอด VAT ตามใบกำกับ (vatExact) — supplier ปัดเศษต่าง (เช่น +0.01) · ฐาน/อัตราเดิม ไม่แตะ GR
       //   ต้องมีอัตรา + ฐาน VAT > 0 (ใบนำเข้าไม่คำนวณใหม่เป็น 0) · ห่างจากฐาน×อัตรา ได้ไม่เกิน 1.00 (เกินนั้น = อัตรา/ฐานผิด ใช้แบบอัตรา)
       if(d.vatExact != null){
-        if(!global.ERP.invVatHereMoved(inv)){ alert('⛔ ใส่ยอด VAT ตามใบกำกับตรง ๆ ได้เฉพาะใบนำเข้า Ecount ที่เคลมในระบบนี้ — ใบปกติให้ปรับอัตราราย line'); return s; }
+        if(!global.ERP.invVatExactOk(inv, s)){   // 🆕 MIG_AP_NORMAL N3: + ใบตั้งหนี้ใหม่จาก GR นำเข้า
+           alert('⛔ ใส่ยอด VAT ตามใบกำกับตรง ๆ ได้เฉพาะใบนำเข้า Ecount ที่เคลมในระบบนี้ — ใบปกติให้ปรับอัตราราย line'); return s; }
         const _rt = Number(inv.vatRate) || 0;
         const _bs = r2(inv.vatableBase != null ? inv.vatableBase : (_rt > 0 ? (inv.amount || 0) : 0));
         const _ex = r2(d.vatExact);
@@ -17791,8 +17884,12 @@ function reducer(s, a){
       const inv = (s.invoices||[]).find(i => i.id === invId);
       if(!inv) return s;
       if(inv.voided) { alert('INV นี้ยกเลิกไปแล้ว'); return s; }
-      // 🆕 นำเข้า2569 UAT MF2: ใบนำเข้า Ecount → ห้ามยกเลิก/ลบ (ปลด GR ประวัติกลับเข้าคิวรอตั้งหนี้ = เคลม VAT ซ้ำ + AP ยกมาเพี้ยน)
-      if(_invIsMigrated(inv)){ alert(_MIG_INV_VOID_MSG); return s; }
+      // 🆕 MIG_AP_NORMAL N1 (แทน UAT MF2 เดิมที่ห้ามทุกใบ): ใบนำเข้า Ecount ที่ "ยังไม่จ่าย" ย้อนไปตั้งหนี้ได้เหมือนใบปกติ (ด่านเดิมทุกด่านด้านล่าง)
+      //   ใบนำเข้าที่จ่ายแล้ว/จ่ายบางส่วน (ใน Ecount) หรือมี PV/คำขอจ่ายในระบบนี้ = เหมือนใบจ่ายแล้ว → ยกเลิกไม่ได้
+      const _migV = _invIsMigrated(inv);
+      if(_migV && global.ERP.migInvBackDeny(s, inv)){
+        const _dn = global.ERP.migInvBackDeny(s, inv);   // 🆕 UAT MF2: ใบค่าใช้จ่ายนำเข้า → ข้อความของมันเอง (ไม่ใช่ "จ่ายแล้ว")
+        alert(/ค่าใช้จ่าย|ผูกผู้ขาย|ยื่นใน Ecount แล้ว/.test(_dn) ? '⛔ ' + _dn : _MIG_INV_VOID_MSG + '\n(' + _dn + ')'); return s; }
       // 💎 FA-S5 (B4.10 บางส่วน): บิลนี้ลงทะเบียนเป็นส่วนเพิ่มของเครื่องแล้ว → ยกเลิกส่วนเพิ่มก่อน (ลงค่าเสื่อมแล้ว = ใช้ CN + JE)
       {
         const _cp = []; (s.assets||[]).forEach(x => (x.components||[]).forEach(c => { if(c && !c.voided && c.source && c.source.invId === invId) _cp.push({ x, c }); }));
@@ -17820,7 +17917,8 @@ function reducer(s, a){
       if(locked) return locked;
       // 🆕 DEPOSIT-VAT E-5 R3: ใบกำกับของใบนี้เข้า ภ.พ.30 ที่ยื่นแล้ว (งวดภาษีล็อก แม้ invDate ยังไม่ล็อก) → ห้าม void
       //   (void แล้วคีย์ใบกำกับเดิมให้ใบใหม่ = เคลมซ้ำอีกเดือน) · ทางที่ถูก: ขอใบลดหนี้จากผู้ขาย
-      if(_invTaxFiled(s, inv)){
+      //   🆕 MIG_AP_NORMAL N1: ใบนำเข้าที่ภาษีซื้อไม่เคยอยู่ในรายงานระบบนี้ (invVatInEcount) ไม่นับว่ายื่นแล้วในระบบนี้ → ย้อนได้ (ใบใหม่เคลมตามกติกาปกติ ม.82/10)
+      if(!global.ERP.invVatInEcount(inv) && _invTaxFiled(s, inv)){
         alert('⛔ ยกเลิกใบนี้ไม่ได้ — ใบกำกับ ' + inv.supTaxInvNumber + ' อยู่ในงวดภาษี ' + String(_invTaxPeriodDate(inv)).slice(0,7) + ' ที่ยื่น ภ.พ.30 แล้ว (ปิดถึง ' + _vatLockOf(s) + ')'
           + '\n→ ขอใบลดหนี้จากผู้ขาย แล้วบันทึก CN แทนการยกเลิก · หรือแจ้ง ผจก.บัญชี ขอปลดล็อก (GM/เจ้าของอนุมัติ) แล้วยื่นเพิ่มเติม — หรือขอใบลด/เพิ่มหนี้จากผู้ขาย');
         return s;
@@ -17867,6 +17965,26 @@ function reducer(s, a){
         if(g.invoiceId === invId){
           const _alt = (g.splitInvoiceIds||[]).find(_activeInv) || null;
           next = { ...next, invoiceId:_alt, prevInvoiceId:invId };
+          // 🆕 verify F4: GR นำเข้าที่ไม่มีผู้ขาย (ผูกผู้ขายที่ใบตั้งหนี้ทีหลัง) → ยกผู้ขายจากใบไปด้วย ไม่งั้นไม่เข้าคิวไหนเลย
+          if(_migV && !next.supplierId && inv.supplierId) next = { ...next, supplierId: inv.supplierId, ...(inv.supplierName && !next.supplierName ? { supplierName: inv.supplierName } : {}) };
+          // 🆕 MIG_AP_NORMAL UAT SF3: ใบนำเข้าที่มีค่าบริการ (ค่าส่ง ฯลฯ lineKind 'charge') เก็บไว้เฉพาะในใบ ไม่อยู่ใน GR
+          //   → ย้อนแล้วยกบรรทัดค่าบริการไปต่อท้าย GR (noStock) ให้ตั้งหนี้ใหม่จาก GR ได้ยอดครบเท่า Ecount (ไม่งั้น 2100 ขาด/3900 เพี้ยนเท่าค่าบริการ)
+          // 🆕 verify F2: ใบนำเข้ามีส่วนลดท้ายบิล — ยอดใบ = หลังส่วนลด แต่บรรทัด GR = ก่อนส่วนลด → หักส่วนลด (billDiscAlloc ของบรรทัดใบเดียวกัน _poLineIdx) ลงบรรทัด GR
+          //   ให้ตั้งหนี้ใหม่จาก GR ได้ยอด/VAT เท่าใบเดิม (ตรงกับข้อความ "PO หักส่วนลดท้ายบิลแล้วในยอด GR")
+          const _bdA = l => Number(l && l.billDiscAlloc) || 0;
+          if(_migV && global.ERP.grMigOpening(next) && (Number(inv.billDiscount && inv.billDiscount.amount) || 0) > 0.005 && !next.migBillDiscFrom){
+            const _il = inv.lines || [];
+            const _dl = (next.lines||[]).map(l => { const a = l && l._poLineIdx != null ? _bdA(_il[l._poLineIdx]) : 0;
+              return a > 0.005 ? { ...l, lineTotalBeforeMigDisc: Number(l.lineTotal)||0, migDiscAlloc: a, lineTotal: Number(((Number(l.lineTotal)||0) - a).toFixed(2)) } : l; });
+            next = { ...next, lines:_dl, migBillDiscFrom: invId, totalValue: Number(_dl.reduce((t, l) => t + (Number(l.lineTotal)||0), 0).toFixed(2)) };
+          }
+          const _chg = _migV && global.ERP.grMigOpening(g) ? (inv.lines||[]).filter(l => l && l.lineKind === 'charge') : [];
+          if(_chg.length && !(g.lines||[]).some(l => l && l.migChargeFrom === invId)){
+            const _cl = _chg.map(l => { const { amount, billDiscAlloc, receivedQty, ...r } = l; const a = _bdA(l);
+              return { ...r, noStock:true, migChargeFrom:invId, ...(a > 0.005 ? { lineTotalBeforeMigDisc: Number(r.lineTotal)||0, migDiscAlloc: a, lineTotal: Number(((Number(r.lineTotal)||0) - a).toFixed(2)) } : {}) }; });
+            const _gl = [ ...(next.lines||[]), ..._cl ];
+            next = { ...next, lines:_gl, totalValue: Number(_gl.reduce((t, l) => t + (Number(l.lineTotal)||0), 0).toFixed(2)) };
+          }
         }
         if((g.splitInvoiceIds||[]).includes(invId)){
           next = { ...next, splitInvoiceIds: g.splitInvoiceIds.filter(x => x !== invId),
@@ -17915,6 +18033,30 @@ function reducer(s, a){
             totalDebit: j.totalCredit || 0, totalCredit: j.totalDebit || 0,  // 🆕 BUGFIX #6: เดิมไม่ set total → undefined
           }));
         journalEntries = [...journalEntries, ...reverseJes];
+      }
+      // 🆕 MIG_AP_NORMAL N1: ใบนำเข้าไม่มี JE ตั้งหนี้ (ยอดอยู่ในยอดยกมาก้อนเดียว Dr 3900 / Cr 2100) → ย้อนแล้วกลับยอดเจ้าหนี้ยกมา Dr 2100 / Cr 3900 ยอดค้าง
+      //   id ตายตัวต่อใบ (ยกเลิกได้ครั้งเดียว) · ใบตั้งหนี้ใหม่จาก GR นำเข้าจะ Cr 2100 กลับเข้ามาเอง (N3)
+      if(_migV){
+        const _coa = s.chartOfAccounts || [];
+        const _ap = _coa.find(x => x.code === '2100'), _obe = _coa.find(x => x.code === '3900');
+        // 🆕 MIG_AP_NORMAL UAT MF1: ยอดค้างเดิมตอนยกมา = ยอดค้างปัจจุบัน + ผล 2100 สุทธิของ JE ปรับ (ADJUST_INV_WHT/VAT · source 'inv') ที่เพิ่งกลับรายการข้างบน
+        //   (เช่น ปรับ WHT: Dr 2100 W ลด netPayable W → กลับรายการ Cr 2100 W แล้ว → je_migvoid_ ต้อง Dr 2100 เต็ม N ไม่งั้น 2100/3900 ค้าง W)
+        const _is2100 = l => l && (l.accountCode === '2100' || (_ap && l.accountId === _ap.id));
+        const _adj2100 = origJes.filter(j => !j.voidedReversal && j.status === 'posted' && j.id !== 'je_migvoid_' + invId)
+          .reduce((t, j) => t + (j.lines||[]).filter(_is2100).reduce((u, l) => u + (Number(l.debit)||0) - (Number(l.credit)||0), 0), 0);
+        const _out = Number(((Number(inv.netPayable)||0) - (Number(inv.paidAmount)||0) + _adj2100).toFixed(2));
+        if(_out > 0.005 && _ap && _obe && !journalEntries.some(j => j.id === 'je_migvoid_' + invId)){
+          const _br = inv.branch || s.currentBranch;
+          journalEntries = [...journalEntries, {
+            id: 'je_migvoid_' + invId, jeNumber: 'JE-MIGVOID-' + (inv.invNumber || invId), date: getToday(),
+            description: `กลับยอดเจ้าหนี้ยกมา ${inv.invNumber || ''} (ย้อนไปตั้งหนี้) — ${reason || '-'}`,
+            refType: 'inv_void', refId: invId, source: 'inv', sourceId: invId, sourceRef: inv.invNumber,
+            status: 'posted', postedBy: by, postedAt: Date.now(), migApVoid: true, branchId: _br,
+            lines: [
+              { accountId:_ap.id, accountCode:_ap.code, accountName:_ap.name, debit:_out, credit:0, description:'เจ้าหนี้ยกมา ' + (inv.invNumber||''), branchId:_br },
+              { accountId:_obe.id, accountCode:_obe.code, accountName:_obe.name, debit:0, credit:_out, description:'ยอดยกมา', branchId:_br } ],
+            totalDebit:_out, totalCredit:_out }];
+        }
       }
 
       // 🆕 Chain reverse: ล้างคำขอจ่าย pending + reverse payment ที่ approved/posted
@@ -17972,7 +18114,7 @@ function reducer(s, a){
             prevSupTaxInvNumber: i.supTaxInvNumber || null,
             // 🆕 DEPOSIT-VAT review: เก็บใบกำกับเดิม (เลข/วันที่/งวดเคลม) ให้ด่านใบกำกับซ้ำ (voided_locked) เทียบได้ — ยื่น ภ.พ.30 ไปแล้ว = ใช้ไปแล้วถาวร
             //   🆕 DEPOSIT-VAT UAT: filedAtVoid = งวดภาษีของใบถูกยื่นแล้วตอน void (R3 ปฏิเสธกรณีนั้น → ปกติ false) · findDupTaxInv นับ voided_locked เฉพาะ true
-            ...(String(i.supTaxInvNumber||'').trim() ? { voidedTaxInv: { number: i.supTaxInvNumber, date: i.supTaxInvDate || '', claimDate: i.supVatClaimDate || '', filedAtVoid: _invTaxFiled(s, i), voidedDate: getToday() } } : {}),   // verify: voidedDate → _taxLocked (ยกเลิกหลังกำหนดยื่น)
+            ...(String(i.supTaxInvNumber||'').trim() ? { voidedTaxInv: { number: i.supTaxInvNumber, date: i.supTaxInvDate || '', claimDate: i.supVatClaimDate || '', filedAtVoid: _migUnpaidVatFiled(i) || (!global.ERP.invVatInEcount(i) && _invTaxFiled(s, i)), voidedDate: getToday() } } : {}),   // verify: voidedDate → _taxLocked (ยกเลิกหลังกำหนดยื่น)
             // WHT certificates → mark voided (เก็บไว้ trace แต่ flag ให้ report ข้าม)
             whtCertificates: (i.whtCertificates||[]).map(c => ({ ...c, voided:true,
               voidedAt:Date.now(), voidedBy:by, voidReason:'INV voided' })),
@@ -18371,6 +18513,46 @@ function reducer(s, a){
       const al = { id:'al_migvat_apopen_' + now.toString(36), ts: now, type:'mig_vat_here_apopen', action:'mig_vat_here_apopen', by: who, entityId: null, entityRef:'MIG_VAT_HERE_APOPEN',
         note: 'ปรับเจ้าหนี้ค้างจ่ายยกมา ' + done.length + ' ใบ → ภาษีซื้อเคลมในระบบนี้ (งวด ต.ค. 2569 เป็นต้นไป) · เลขใบกำกับ Ecount ย้ายลงประวัติ: ' + done.join(' · ').slice(0, 900) };
       return { ...s, invoices, auditLog: [...(s.auditLog || []), al] };
+    }
+
+    // 🆕 MIG_AP_NORMAL N5: ใบนำเข้า Ecount — ยกเลิกการจ่าย (Ecount บันทึกจ่ายแต่ยังไม่จ่ายจริง) / บันทึกว่าจ่ายแล้วก่อนตัดระบบ
+    //   ไม่สร้าง PV/ไม่แตะเงินธนาคาร · JE ปรับยอดเจ้าหนี้ยกมา (id ตายตัวจาก at → replay ได้ผลเดิม) · ประวัติ ecountPayLog
+    case 'MIG_AP_UNPAY':
+    case 'MIG_AP_MARKPAID': {
+      const d = a.data || {}, u = _actorOf(s, d.by), mark = a.type === 'MIG_AP_MARKPAID';
+      const ck = _migApPayCheck(s, d, u, mark);
+      if(ck.dup) return s;
+      if(ck.deny){ alert('⛔ ' + ck.deny); return s; }
+      const { inv, amt, ap, obe } = ck, now = Number(d.at) || Date.now(), who = (u && u.username) || d.by || '', reason = String(d.reason || '').trim();
+      const _dt = new Date(now), date = _dt.getFullYear() + '-' + String(_dt.getMonth() + 1).padStart(2, '0') + '-' + String(_dt.getDate()).padStart(2, '0');
+      const no = inv.invNumber || inv.id, br = inv.branch || s.currentBranch;
+      const prev = { paymentStatus: inv.paymentStatus || '', paidAmount: Number(inv.paidAmount) || 0, paidDate: inv.paidDate || '', paidBy: inv.paidBy || '', ...(inv.ecountPay ? { ecountPay: inv.ecountPay } : {}) };
+      const log = Array.isArray(inv.ecountPayLog) ? inv.ecountPayLog : [];
+      const ent = { action: mark ? 'markpaid' : 'unpay', by: who, at: now, reason, amount: amt, prev };
+      const L = (acc, dr, cr, desc) => ({ accountId: acc.id, accountCode: acc.code, accountName: acc.name, debit: dr, credit: cr, description: desc, branchId: br });
+      const je = { id: 'je_migpay_' + inv.id + '_' + now.toString(36) + (mark ? 'p' : 'u'), jeNumber: 'JE-MIG' + (mark ? 'PAID-' : 'UNPAY-') + no, date,
+        description: (mark ? `ลดเจ้าหนี้ยกมา ${no} (จ่ายจริงแล้วก่อนตัดระบบ)` : `เพิ่มเจ้าหนี้ยกมา ${no} (Ecount บันทึกจ่ายแต่ยังไม่จ่ายจริง)`) + ' — ' + reason,
+        // source แยก (ไม่ใช่ 'inv' · ไม่มี refId) — VOID_INV ห้ามกลับ JE นี้ (ย้อนใบนำเข้ากลับยอดค้างด้วย je_migvoid_ อยู่แล้ว)
+        refType: mark ? 'mig_ap_markpaid' : 'mig_ap_unpay', source: 'mig_ap_pay', sourceId: inv.id, sourceRef: no,
+        status: 'posted', postedBy: who, postedAt: now, migApPay: mark ? 'markpaid' : 'unpay', branchId: br,
+        lines: mark ? [L(ap, amt, 0, 'เจ้าหนี้ยกมา ' + no), L(obe, 0, amt, 'ยอดยกมา')] : [L(obe, amt, 0, 'ยอดยกมา'), L(ap, 0, amt, 'เจ้าหนี้ยกมา ' + no)],
+        totalDebit: amt, totalCredit: amt };
+      // MARKPAID ที่ย้อน UNPAY ล่าสุด → คืนข้อมูลการจ่าย Ecount เดิม (วันที่/ใบจ่าย)
+      const lastU = [...log].reverse().find(x => x && (x.action === 'unpay' || x.action === 'markpaid'));
+      const back = mark && lastU && lastU.action === 'unpay' ? (lastU.prev || {}) : null;
+      const invoices = s.invoices.map(i => { if(i.id !== inv.id) return i;
+        const o = mark
+          ? { ...i, paymentStatus:'paid', paidAmount: _r2mp(Number(i.netPayable) || 0), paidDate: String(d.paidDate || (back && back.paidDate) || ''),
+              paidBy: (back && back.paidBy) || ('จ่ายแล้วก่อนตัดระบบ (บัญชียืนยัน ' + who + ') · ' + reason), ecountPayReversed: null,
+              ...(back && back.ecountPay ? { ecountPay: back.ecountPay } : {}) }
+          : { ...i, paymentStatus:'unpaid', paidAmount: 0, paidDate: '', paidBy: '', ecountPayReversed: { prev, by: who, at: now, reason } };
+        if(!mark) delete o.ecountPay;
+        o.ecountPayLog = [...log, ent];
+        return o; });
+      const al = { id: 'al_migpay_' + inv.id + '_' + now.toString(36) + (mark ? 'p' : 'u'), ts: now, type: mark ? 'mig_ap_markpaid' : 'mig_ap_unpay', action: mark ? 'mig_ap_markpaid' : 'mig_ap_unpay',
+        by: who, entityId: inv.id, entityRef: no,
+        note: (mark ? 'บันทึกว่าจ่ายแล้วก่อนตัดระบบ (ไม่มี PV) · JE Dr 2100 / Cr 3900 ' : 'ยกเลิกการจ่าย (Ecount) → ค้างจ่าย · JE Dr 3900 / Cr 2100 ') + amt.toFixed(2) + ' · ' + reason };
+      return { ...s, invoices, journalEntries: [...(s.journalEntries || []), je], auditLog: [...(s.auditLog || []), al] };
     }
 
     // 🆕 VAT-CLAIM V3a (B4.3): บันทึกยื่น ภ.พ.30 — ไม่ลง JE (JE ปิดภาษี = V10) · ภาษีขายรับจาก payload (ค่าที่ยื่น + ค่าที่ระบบคำนวณตอนเปิดฟอร์ม)
@@ -23414,6 +23596,8 @@ const ACTION_MERGE = Object.freeze({
   MIG_VAT_HERE: { kind:'delta' },          // 🆕 MIG_VAT_HERE V2
   MIG_VAT_HERE_UNDO: { kind:'delta' },
   MIG_VAT_HERE_APOPEN: { kind:'delta' },   // 🆕 MIG_VAT_HERE UAT MF1 ปรับเจ้าหนี้ยกมา (ไฟล์ ③ รุ่นเก่า) ครั้งเดียว
+  MIG_AP_UNPAY: { kind:'delta' },      // 🆕 MIG_AP_NORMAL N5 ใบนำเข้า: ยกเลิกการจ่าย (Ecount) → ค้างจ่าย
+  MIG_AP_MARKPAID: { kind:'delta' },   // 🆕 MIG_AP_NORMAL N5 ใบนำเข้า: จ่ายแล้วก่อนตัดระบบ
   FILE_VAT_RETURN: { kind:'delta' },     // 🆕 VAT-CLAIM V3a: claimSet คำนวณจาก state ปัจจุบัน · replay ตรวจ inputVatSeen ใหม่
   UNLOCK_VAT_PERIOD: { kind:'delta' },   // 🆕 VAT-CLAIM V3a
   SET_USER_CLOUD_PENDING: { kind:'delta' },
@@ -23593,6 +23777,8 @@ const ACTION_READS = Object.freeze({
   MIG_VAT_HERE: ['auditLog','invoices','approvalRequests','payments'],   // 🆕 MIG_VAT_HERE V2 (case เดียวกับ UNDO) · verify: ใบมีเลข Ecount ย้ายได้เมื่อค้างจ่าย/มี PV มีผล
   MIG_VAT_HERE_UNDO: ['auditLog','invoices','approvalRequests','payments'],   // คำขอปรับ VAT ค้าง = ย้อนไม่ได้ · case เดียวกับ MIG_VAT_HERE (ด่านใบมีเลข Ecount)
   MIG_VAT_HERE_APOPEN: ['auditLog','invoices','payments'],   // 🆕 MIG_VAT_HERE UAT MF1: ค้างจ่ายตอนปิด Ecount = มี PV อ้างใบ
+  MIG_AP_UNPAY: ['auditLog','invoices','journalEntries','payments'],      // 🆕 MIG_AP_NORMAL N5: ด่าน PV/คำขอจ่ายที่อ้างใบ · JE ต่อท้าย
+  MIG_AP_MARKPAID: ['auditLog','invoices','journalEntries','payments'],
   FILE_VAT_RETURN: ['approvalRequests','auditLog','invoices','returns','supplierMemos','vatFilings'],   // VAT-DEFER D2: คำขอเลื่อน/เคลมคืนค้าง = ต้องรับทราบ     // 🆕 VAT-CLAIM V3a (B4.6 · deposits ตัดออก: T-READS ไม่อ่าน — D2 ค่อยเพิ่ม)
   UNLOCK_VAT_PERIOD: ['approvalRequests','auditLog','vatFilings'],
 
@@ -23637,6 +23823,8 @@ const APPEND_ONLY_READS = Object.freeze({
   MIG_VAT_HERE: ['auditLog'],    // 🆕 MIG_VAT_HERE V2
   MIG_VAT_HERE_UNDO: ['auditLog'],
   MIG_VAT_HERE_APOPEN: ['auditLog'],   // 🆕 MIG_VAT_HERE UAT MF1
+  MIG_AP_UNPAY: ['auditLog'],      // 🆕 MIG_AP_NORMAL N5: ต่อท้าย audit อย่างเดียว (กันซ้ำด้วย ecountPayLog)
+  MIG_AP_MARKPAID: ['auditLog'],
   FILE_VAT_RETURN: ['auditLog'],     // 🆕 VAT-CLAIM V3a
   UNLOCK_VAT_PERIOD: ['auditLog'],
   GM_SELF_APPROVE_REQUEST: ['auditLog'],   // 🆕 GM-SELF: ต่อท้าย gm_self_approved อย่างเดียว
@@ -24367,7 +24555,7 @@ const NAV_COUNTS = {
   // mod-purchase.js PO_STATUS.pending = รออนุมัติ
   'purchase.po': (state) => (state.pos || []).filter(p => p.status === 'pending').length,
   // mod-accounting.js pendingGRs (GR ยังไม่ตั้งหนี้ · replacement เฉพาะที่ต้องตั้ง PI)
-  'accounting.invQueue': (state) => (state.grs || []).filter(g => !g.invoiceId && !g._migrated && g.supplierId && (!g.isReplacement || g.replacementNeedsPI)).length, /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
+  'accounting.invQueue': (state) => (state.grs || []).filter(g => !g.invoiceId && !(global.ERP.grMigApHeld ? global.ERP.grMigApHeld(g) : g._migrated) && g.supplierId && (!g.isReplacement || g.replacementNeedsPI)).length, /* นำเข้า2569 MF2 · MIG_AP_NORMAL UAT SF1: GR นำเข้าที่ปลดแล้ว (ย้อนไปตั้งหนี้) นับเหมือนคิวจริง */
   // mod-accounting.js pendingPay (PI ที่ยังจ่ายไม่ครบ)
   'accounting.payment': (state) => (state.invoices || []).filter(i => !i.voided && i.paymentStatus !== 'paid').length,
   // mod-accounting.js pendingApproval (คำขอจ่ายรออนุมัติ)
@@ -61801,7 +61989,7 @@ function PurchaseModule({ state, dispatch }){
   // counts (exclude voided/cancelled lifecycle states)
   const openPOs = (state.pos||[]).filter(p => p.status==='pending' || p.status==='approved' || p.status==='partial').length;
   const overduePOs = (state.pos||[]).filter(isPOOverdue);
-  const recentGRs = (state.grs||[]).filter(g => !g.invoiceId && !g._migrated && g.supplierId && !g.isIntraBranch).length;  // 🆕 PRODUCTION-LIVE UAT: ไม่นับ GRT ภายใน (ส่งมอบ/รับ TR)
+  const recentGRs = (state.grs||[]).filter(g => !g.invoiceId && !global.ERP.grMigApHeld(g) && g.supplierId && !g.isIntraBranch).length;  // 🆕 PRODUCTION-LIVE UAT: ไม่นับ GRT ภายใน (ส่งมอบ/รับ TR)
   const unpaidInvs = (state.invoices||[]).filter(i => !i.voided && i.paymentStatus!=='paid').length;
   // 🆕 F1-4: นับ PO ที่มี line รอ decide
   const decisionPendingPOs = (state.pos||[]).filter(p =>
@@ -62191,7 +62379,7 @@ function PurchaseDashboard({ state, user, setTab }){
   const overduePOs = pos.filter(isPOOverdue);
   const monthPOs = pos.filter(p => (p.poDate||'').slice(0,7) === ym);
   const monthValue = monthPOs.reduce((s,p) => s + (p.total||0), 0);
-  const pendingGRs = grs.filter(g => !g.invoiceId && !g._migrated && !g.isReplacement && g.supplierId); /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
+  const pendingGRs = grs.filter(g => !g.invoiceId && !global.ERP.grMigApHeld(g) && !g.isReplacement && g.supplierId); /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
   const unpaidInvs = invs.filter(i => !i.voided && i.paymentStatus !== 'paid' && i.paymentStatus !== 'cancelled');
   const unpaidTotal = unpaidInvs.reduce((s,i) => s + ((i.netPayable||0) - (i.paidAmount||0)), 0);
   const activeRTVs = (state.returns||[]).filter(r => (r.rtvStatus||'pending') !== 'closed');
@@ -65620,7 +65808,7 @@ function GRList({ state, dispatch, user }){
 
   const filtered = useMemo(() => {
     let list = (state.grs || []).filter(g => inDateRange(g.grDate, dr.startDate, dr.endDate));
-    if(filter === 'pending_inv') list = list.filter(g => !g.invoiceId && !g._migrated && g.supplierId && !g.isIntraBranch);  // 🆕 PRODUCTION-LIVE UAT: GRT ภายในไม่ต้องตั้งหนี้
+    if(filter === 'pending_inv') list = list.filter(g => !g.invoiceId && !global.ERP.grMigApHeld(g) && g.supplierId && !g.isIntraBranch);  // 🆕 PRODUCTION-LIVE UAT: GRT ภายในไม่ต้องตั้งหนี้
     if(filter === 'invoiced') list = list.filter(g => g.invoiceId);
     return [...list].sort((a,b) => (b.grDate||'').localeCompare(a.grDate||''));
   }, [state.grs, filter, dr.startDate, dr.endDate]);
@@ -67748,7 +67936,7 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
     r.grId === grId && (r.rtvStatus === 'pending_decision' || r.rtvStatus === 'pending'));
   const availableGRs = useMemo(() =>
     (state.grs||[]).filter(g =>
-      g.supplierId === supplierId && !g.invoiceId && !g._migrated && !g.isReplacement && !_poDecisionPending(g.poId)
+      g.supplierId === supplierId && !g.invoiceId && !global.ERP.grMigApHeld(g) && !g.isReplacement && !_poDecisionPending(g.poId)
       && !_grPendingRtv(g.id)
     ).sort((a,b) => (a.grDate||'').localeCompare(b.grDate||''))
       .map(g => global.ERP.grEffective(g, state.invoices)),   // 🆕 BILL-DISC §B5-9: ไม่หักส่วนลดของ PI ที่ void
@@ -68303,7 +68491,7 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
   const availableGRs = useMemo(() =>
     (state.grs||[]).filter(g =>
       g.supplierId === supplierId &&
-      !g.invoiceId && !g._migrated && /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
+      !g.invoiceId && !global.ERP.grMigApHeld(g) && /* MIG_AP_NORMAL N2: GR ที่ปลดแล้วเข้าคิว · นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
       !g.isReplacement &&  // ไม่รวม replacement GR
       !_poDecisionPendingC(g.poId) &&
       !_grHasPendingRtv(g.id)
@@ -69046,6 +69234,9 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
   //   pendingReq = คำขอ adjust_inv_vat / edit_inv ค้างอนุมัติ → ห้ามส่งซ้ำ/ส่งทับ (คำขอที่ 2 จะติด prevVat/stale snapshot)
   const pendingReq = _pendingInvReq(state, inv.id);
   const isMigratedInv = _isMigratedInv(inv);
+  const _migDenyMsg = (isMigratedInv && global.ERP.migInvBackDeny && global.ERP.migInvBackDeny(state, inv)) || '';   // 🆕 UAT2 N1
+  const _migDenyPaid = _migDenyMsg.indexOf('ใบนำเข้าจาก Ecount ที่จ่ายแล้ว') === 0;   // ข้อความจาก migInvBackDeny (00-core)
+  const _migBackOk = isMigratedInv && !_migDenyMsg;   // 🆕 MIG_AP_NORMAL N1: ใบนำเข้ายังไม่จ่าย ย้อนไปตั้งหนี้ได้
   // 🆕 MIG_VAT_HERE V5: ใบนำเข้าที่ ผจก.บัญชี ย้ายมาเคลมภาษีซื้อในระบบนี้ → ปรับ VAT ตามใบกำกับได้เหมือนใบปกติ (แก้ไข/ลบ ยังห้าม)
   const vatMovedHere = !!(global.ERP.invVatHereMoved && global.ERP.invVatHereMoved(inv));
   const rtvTied = _rtvTiedInv(state, inv);
@@ -69536,14 +69727,14 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
             (pendingPay.requestedPayDate || pendingPay.payDate) && h('span', { className:'ml-2 font-normal text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-900' },
               `📅 นัดจ่าย ${fmtDate(pendingPay.requestedPayDate || pendingPay.payDate)}`, pendingPay.bankName ? ` · ${pendingPay.bankName}` : '')),
           h('div', { className:'text-xs text-yellow-800' },
-            'ต้อง ', h('b', null, 'ยกเลิกคำขอจ่ายก่อน'), ' จึงจะแก้/ยกเลิก INV ได้'),
+            'ต้อง ', h('b', null, 'ยกเลิกคำขอจ่ายก่อน'), ' จึงจะแก้ไข/↩️ ย้อนไปตั้งหนี้ได้'),
           hasPerm(user,'purchase','payment','delete') && h('button', {
             onClick:()=>{
               const reason = prompt('เหตุผลที่ยกเลิกคำขอจ่าย:', '');
               if(!reason) return;
               if(!confirm(`ยกเลิกคำขอจ่าย ${fmtCur(pendingPay.amount||0)}?`)) return;
               dispatch({ type:'CANCEL_PAY_REQUEST', data:{ paymentId:pendingPay.id, by:user.username, reason } });
-              alert('✅ ยกเลิกคำขอจ่ายแล้ว — ตอนนี้แก้/ยกเลิก INV ได้');
+              alert('✅ ยกเลิกคำขอจ่ายแล้ว — ตอนนี้แก้ไข/↩️ ย้อนไปตั้งหนี้ได้');
             },
             className:'mt-2 px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-xs rounded' },
             '🚫 ยกเลิกคำขอจ่ายนี้'));
@@ -69578,8 +69769,19 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
         !inv.voided && isMigratedInv && !inv.supplierId && (inv.paidAmount||0) === 0 && hasPerm(user,'purchase','inv','edit')
           && h(MigBindSupplierRow, { inv, state, dispatch, user }),
         !inv.voided && isMigratedInv && h('div', { className:'basis-full text-[11px] text-gray-600 -mt-1' },
-          '📥 ใบนำเข้าจาก Ecount — แก้ไข/ยกเลิก/ลบไม่ได้ ถ้ายอดผิดให้ทำใบลด/เพิ่มหนี้ (ผจก.บัญชี)',
+          _migBackOk ? '📥 ใบนำเข้าจาก Ecount (ยังไม่จ่าย) — แก้ยอดตรงไม่ได้ · ได้ใบกำกับ/ยอดต่าง → ↩️ ย้อนไปตั้งหนี้ แล้วตั้งหนี้ใหม่จาก GR'
+            // 🆕 MIG_AP_NORMAL UAT2 N1: ย้อนไม่ได้ → บอกเหตุผลจริง (จ่ายแล้ว / มีคำขอจ่าย / ใบค่าใช้จ่าย) ไม่ใช่ "จ่ายแล้ว" ทุกกรณี
+            : (_migDenyPaid
+              ? '📥 ใบนำเข้าจาก Ecount ที่จ่ายแล้ว — แก้ไข/ย้อนไม่ได้ · ถ้าจริงยังไม่จ่าย → 🔄 ยกเลิกการจ่าย (Ecount) (ผจก.บัญชี) แล้วจ่ายได้ (ใบมี VAT ย้อนไปตั้งหนี้ไม่ได้ — ภาษีซื้อยื่นใน Ecount แล้ว · ใบไม่มี VAT ย้อนได้) · ยอดผิด → ใบลด/เพิ่มหนี้'
+              : '📥 ใบนำเข้าจาก Ecount — แก้ยอดตรงไม่ได้ · ↩️ ย้อนไปตั้งหนี้ยังไม่ได้: ' + _migDenyMsg),
           vatMovedHere ? ' · ภาษีซื้อเคลมในระบบนี้ (งวด ต.ค. 2569 เป็นต้นไป) — คีย์ใบกำกับ/ปรับ VAT ตามใบกำกับได้' : ''),
+        // 🆕 MIG_AP_NORMAL N5: ใบนำเข้า — สถานะจ่ายใน Ecount ผิด (บัญชีตรวจแล้ว) → ยกเลิกการจ่าย / จ่ายแล้วก่อนตัดระบบ (ผจก.บัญชี/GM · เหตุผลบังคับ)
+        !inv.voided && isMigratedInv && dispatch && global.ERP.migApPayCan && global.ERP.migApPayCan(state, user, inv, false) &&
+          h('span', { 'data-testid':'inv-mig-unpay' }, h(Button, { variant:'warning', onClick:()=>global.ERP.migApPayAsk(state, dispatch, user, inv, false),
+            title:'Ecount บันทึกว่าจ่ายแล้ว แต่จริงยังไม่จ่าย — ใบกลับไปรอจ่าย (JE เพิ่มเจ้าหนี้ยกมา Dr 3900 / Cr 2100)' }, '🔄 ยกเลิกการจ่าย (Ecount)')),
+        !inv.voided && isMigratedInv && dispatch && global.ERP.migApPayCan && global.ERP.migApPayCan(state, user, inv, true) &&
+          h('span', { 'data-testid':'inv-mig-markpaid' }, h(Button, { variant:'secondary', onClick:()=>global.ERP.migApPayAsk(state, dispatch, user, inv, true),
+            title:'ใบยกมาจาก Ecount ที่จ่ายจริงแล้วก่อนตัดระบบ — บันทึกว่าจ่ายแล้ว (ไม่สร้าง PV · JE ลดเจ้าหนี้ยกมา Dr 2100 / Cr 3900)' }, '✅ จ่ายแล้วก่อนตัดระบบ')),
         // 🆕 VAT-FIX: ปรับ VAT ตามใบกำกับ (ราย line) — guard chain เดียวกับ ✏️ แก้ไข INV · ผ่าน approval adjust_inv_vat · JE ส่วนต่าง 1150↔2100
         //   🆕 R15: PI นำเข้าจาก Ecount → ซ่อน (ยื่น ภ.พ.30 ในระบบเดิมแล้ว — สอดคล้องหน้าคีย์ใบกำกับฝั่งบัญชี)
         //   RTV ผูก / มูลค่าสินค้า ≠ Σ lineTotal ของ GR (ใบแยกตาม WHT / หัก RTV / แก้ยอดเอง) / มีคำขอค้าง → ปุ่ม disabled + บอกเหตุผล (ไม่ซ่อนเงียบ ๆ)
@@ -69591,7 +69793,7 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
               '🧾 ปรับ VAT ตามใบกำกับ')),
         canChangeInv && (!isMigratedInv || vatMovedHere) && vatAdjustBlock && !pendingReq && h('div', { className:'basis-full text-[11px] text-gray-600 -mt-1' },
           '🧾 ปรับ VAT ตามใบกำกับ ใช้ไม่ได้: ', vatAdjustBlock),
-        !inv.voided && !isMigratedInv && hasPerm(user,'purchase','inv','delete') && (inv.paidAmount||0) === 0 &&
+        !inv.voided && (!isMigratedInv || _migBackOk) && hasPerm(user,'purchase','inv','delete') && (inv.paidAmount||0) === 0 && /* MIG_AP_NORMAL N1 */
           !(state.payments||[]).some(p => (p.invId===inv.id || p.invoiceIds?.includes(inv.id)) && p.approvalStatus==='pending') &&
           h(Button, { variant:'danger',
             onClick:()=>{
@@ -69614,10 +69816,11 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
                 )) return;
               }
               const _sibV = inv.splitGroup ? (state.invoices||[]).filter(x => x && x.id !== inv.id && !x.voided && x.splitGroup === inv.splitGroup) : [];   // 🆕 DEPOSIT-VAT verify
-              const reason = prompt('🗑️ ยกเลิก INV นี้?\n\nระบบจะ:\n• Reverse JE\n' + (_sibV.length
+              const reason = prompt('↩️ ย้อน ' + inv.invNumber + ' ไปตั้งหนี้?\n\nระบบจะ:\n• ใบตั้งหนี้นี้ถูกยกเลิก' + (isMigratedInv ? ' + กลับยอดเจ้าหนี้ยกมา (Dr 2100 / Cr 3900)' : ' (กลับ JE อัตโนมัติ)') + '\n' + (_sibV.length
                 ? '• ใบนี้แยกตาม WHT กับอีก ' + _sibV.length + ' ใบ (' + _sibV.map(x => x.invNumber || x.id).join(', ') + ') — GR กลับเข้าคิวเมื่อยกเลิกครบทุกใบในชุด'
                 : '• ปลดล็อก GR (ตั้งหนี้ INV ใหม่ได้ · แก้ PO: จัดซื้อใช้ 🔧 แก้เต็ม แล้วส่งอนุมัติใหม่)') +
                 (activeWhtCerts.length > 0 ? '\n• Mark WHT cert ' + activeWhtCerts.length + ' ฉบับ เป็น voided' : '') +
+                ((global.ERP.migChargeNote && global.ERP.migChargeNote(inv)) || '') +   // 🆕 MIG_AP_NORMAL UAT SF3
                 '\n\nเหตุผล:', '');
               if(reason === null) return;
               if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
@@ -69628,7 +69831,7 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
                   entityType:'inv', entityId:inv.id, entityRef:inv.invNumber,
                   scope:'accounting', amount: inv.netPayable||0,
                   wasPaid: (Number(inv.paidAmount) || 0) > 0,   // 🆕 APPROVAL 1b-2 (D-1): ใบจ่ายแล้ว = 2 ขั้น (r_delete_inv_paid)
-                  reason:`ยกเลิก INV: ${inv.invNumber} · ${reason}`,
+                  reason:`↩️ ย้อนไปตั้งหนี้: ${inv.invNumber} · ${reason}`,
                   payload:{ invId: inv.id, reason }
                 }
               });
@@ -69638,12 +69841,12 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
               try { const _cs = { ...state, currentUser:state.currentUser || user };
                 if(global.ERP.reducer && global.ERP.reducer(_cs, _vAct) === _cs){ if(_gmV) global.ERP.gmDirectFail('ระบบไม่รับการยกเลิก ' + inv.invNumber, dispatch); return; } } catch(_e){}   // 🆕 DEPOSIT-VAT R3: ถูกปฏิเสธ → reducer แจ้งแล้ว ไม่ขึ้น ✅
               dispatch(_vAct);
-              alert(`✅ ยกเลิก INV ${inv.invNumber} แล้ว\nGR ปลดล็อกแล้ว — ตั้งหนี้ INV ใหม่ได้ · ถ้าต้องแก้ PO แจ้งจัดซื้อใช้ 🔧 แก้เต็ม บน PO แล้วส่งอนุมัติใหม่` +
+              alert(`✅ ย้อน ${inv.invNumber} ไปตั้งหนี้แล้ว\nGR กลับเข้าคิว 🧾 เจ้าหนี้ — ตั้งหนี้ใหม่ได้ · ถ้าต้องแก้ PO แจ้งจัดซื้อใช้ 🔧 แก้เต็ม บน PO แล้วส่งอนุมัติใหม่` +
                 (activeWhtCerts.length > 0 ? `\n📋 WHT cert ${activeWhtCerts.length} ฉบับ mark voided — ไป "Voided WHT" ดูรายการสำหรับยื่นแก้` : ''));
               onClose();
-            }
-          }, '🗑️ ยกเลิก INV'),
-        // ↺ ส่งกลับให้จัดซื้อ Reopen PO (one-click flow) — เฉพาะ PO ที่ยังไม่มีการรับของ (รับแล้ว จัดซื้อแก้เต็มไม่ได้ → ใช้ 🧾 ปรับ VAT หรือ 🗑️ ยกเลิก INV แล้วตั้งหนี้ใหม่)
+            },
+            'data-testid':'inv-back-to-ap' }, '↩️ ย้อนไปตั้งหนี้'),   // 🆕 UAT2 N2: ใบยังไม่จ่าย = ↩️ ย้อนไปตั้งหนี้ (คำเดียวกันทุกจอ)
+        // ↺ ส่งกลับให้จัดซื้อ Reopen PO (one-click flow) — เฉพาะ PO ที่ยังไม่มีการรับของ (รับแล้ว จัดซื้อแก้เต็มไม่ได้ → ใช้ 🧾 ปรับ VAT หรือ ↩️ ย้อนไปตั้งหนี้ แล้วตั้งหนี้ใหม่)
         !inv.voided && (inv.poId || pos.length > 0) && hasPerm(user,'purchase','inv','edit') && (inv.paidAmount||0) === 0 &&
           !((((state.pos||[]).find(p => p.id === inv.poId) || pos[0] || {}).lines)||[]).some(l => (Number(l.receivedQty)||0) > 0) &&
           !(state.payments||[]).some(p => (p.invId===inv.id || p.invoiceIds?.includes(inv.id)) && p.approvalStatus==='pending') &&
@@ -70105,7 +70308,7 @@ function AdjustINVVatModal({ inv:invProp, state, dispatch, user, onClose, onDone
   const [headerRate, setHeaderRate] = useState(Number(inv.vatRate)||0);
   const [reason, setReason] = useState('');
   // 🆕 MIG_VAT_HERE V5: ใบนำเข้า Ecount ที่เคลมในระบบนี้ → ใส่ "ยอด VAT ตามใบกำกับ" ตรง ๆ (supplier ปัดเศษต่าง เช่น +0.01) · ไม่คำนวณจาก GR ประวัติ
-  const exactMode = !!(global.ERP.invVatHereMoved && global.ERP.invVatHereMoved(inv));
+  const exactMode = !!(global.ERP.invVatExactOk && global.ERP.invVatExactOk(inv, state));   // 🆕 MIG_AP_NORMAL N3: + ใบตั้งหนี้ใหม่จาก GR นำเข้า
   const [vatExactStr, setVatExactStr] = useState(() => (Number(inv.vat)||0).toFixed(2));
   const hdrRate = Number(inv.vatRate)||0;   // fallback สำหรับ GR line เก่าที่ไม่มี vatRate (mirror reducer)
   // อัตราที่ INV "ใช้อยู่จริง" ต่อ line = GR line vatRate ทับด้วย override ตอนตั้งหนี้ (inv.vatLineOverrides)
@@ -70280,7 +70483,7 @@ function AdjustINVVatModal({ inv:invProp, state, dispatch, user, onClose, onDone
         h('div', { className:'font-bold' }, `💰 ใบรับของ ${inclusiveGR.grNumber} เป็นราคา "รวม VAT"`),
         h('div', { className:'text-xs mt-1' },
           'เปลี่ยนอัตรา VAT ราย line จะทำให้มูลค่าสินค้า (ก่อน VAT) และต้นทุนสต๊อกขยับตามด้วย — จอนี้ปรับเฉพาะ VAT จึงใช้ไม่ได้',
-          h('br'), '→ ', h('b', null, '🗑️ ยกเลิก INV นี้ แล้วตั้งหนี้ใหม่จาก GR เดิม'), ' โดยเลือกอัตรา VAT ราย line ตอนตั้งหนี้ (รองรับราคารวม VAT · ไม่ต้องย้อน PO/GR)')),
+          h('br'), '→ ', h('b', null, '↩️ ย้อนไปตั้งหนี้ แล้วตั้งหนี้ใหม่จาก GR เดิม'), ' โดยเลือกอัตรา VAT ราย line ตอนตั้งหนี้ (รองรับราคารวม VAT · ไม่ต้องย้อน PO/GR)')),
       // 🆕 ACCT-V2: PI ค่าใช้จ่าย VAT หลายอัตรา → บล็อก (header-rate mode ทับฐานผิด · reducer guard เดียวกัน)
       mixedVatExp && h('div', { className:'bg-red-50 border-2 border-red-300 rounded p-3 text-sm text-red-900' },
         h('div', { className:'font-bold' }, '⛔ PI ค่าใช้จ่ายใบนี้มี VAT หลายอัตราในบรรทัด (0% และ 7%)'),
@@ -71306,6 +71509,13 @@ function bahtText(n){
     }
     return out;
   }
+  // verify PV-A5: ≥ 10 ล้าน เดิมได้ "undefined" (units หมดที่ 'ล้าน') → แบ่งทีละล้านแบบเรียกซ้ำ · กฎ 'เอ็ด' ใช้ต่อกลุ่ม
+  //   (กลุ่มบนที่เป็น 1 ตัวเดียวหน้า 'ล้าน' = 'หนึ่งล้าน' · กลุ่มล่างที่ลงท้าย 1 และมีกลุ่มบน = 'เอ็ด' เช่น 1,000,001 = หนึ่งล้านเอ็ด)
+  function bahtInt(num){
+    if(num < 1e6) return chunk(num);
+    const hi = Math.floor(num / 1e6), lo = num % 1e6;
+    return bahtInt(hi) + 'ล้าน' + (lo === 1 ? 'เอ็ด' : chunk(lo));
+  }
   // 🛠 ถ้าไม่มีบาทเต็ม (เช่น 0.10) → แสดงแค่ "สิบสตางค์" ไม่ใช่ "บาทสิบสตางค์"
   let txt;
   if(int === 0 && decimal === 0){
@@ -71314,7 +71524,7 @@ function bahtText(n){
     // มีแต่สตางค์ ไม่มีบาทเต็ม
     txt = chunk(decimal) + 'สตางค์';
   } else {
-    txt = chunk(int) + 'บาท';
+    txt = bahtInt(int) + 'บาท';
     if(decimal === 0) txt += 'ถ้วน';
     else txt += chunk(decimal) + 'สตางค์';
   }
@@ -71458,6 +71668,7 @@ function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
 
   return h(Modal, { isOpen:true, title:`💰 จ่ายเงิน ${inv.invNumber}`, onClose, size:'md' },
     h('div', { className:'space-y-3' },
+      global.ERP.EcountRevWarn && h(global.ERP.EcountRevWarn, { invs:[inv] }),   // 🆕 MIG_AP_NORMAL UAT SF4
 
       h('div', { className:'bg-red-50 border border-red-200 rounded p-3 text-center' },
         h('div', { className:'text-xs text-red-700' }, 'คงเหลือจ่าย'),
@@ -71839,19 +72050,75 @@ const PRINT_STYLES = `
   @media print { .noprint { display:none !important; } }
   @media screen { body { background:#ddd; } .sheet { background:#fff; margin:10mm auto; box-shadow:0 0 8px rgba(0,0,0,0.1); min-height:277mm; } }
 `;
-function printWindowHTML(title, bodyHTML){
+// 🆕 PV-A5 (P1): ใบสำคัญจ่ายพิมพ์ A5 เป็นค่าเริ่ม — สลับ A5 แนวนอน/A5 แนวตั้ง/A4 ได้ในหน้าต่างพิมพ์ (จำค่าต่อเครื่องใน localStorage)
+//   ใบพิมพ์อื่นเรียก openPrintWindow(title, body) แบบเดิม → A4 เหมือนเดิมทุก byte
+const PV_PAPER_KEY = 'erp_pv_paper';
+const PV_PAPERS = { a5l:{ size:'A5 landscape', margin:'6mm', label:'A5 แนวนอน' }, a5p:{ size:'A5 portrait', margin:'6mm', label:'A5 แนวตั้ง' }, a4:{ size:'A4 portrait', margin:'10mm', label:'A4' } };
+const PV_STYLES = `
+  body.pv .sheet { max-width:none; padding:0; margin:0 auto; }
+  body.pv-a5l .sheet { width:198mm; } body.pv-a5p .sheet { width:136mm; } body.pv-a4 .sheet { width:190mm; }
+  .pvqr { width:24mm; height:24mm; }
+  .pvsig { display:grid; grid-template-columns:repeat(4,1fr); gap:6mm; margin-top:14mm; break-inside:avoid; page-break-inside:avoid; }
+  .pvsig .sig { margin-top:0; border-top:none; padding-top:0; }
+  .pvsig .sigsp { height:42px; }
+  .pvsig .sigl { border-top:1px dotted #888; padding-top:1mm; text-align:center; font-size:9pt; }
+  .pvtag { display:inline-block; margin-left:3mm; padding:0.5mm 2.5mm; border:1.2px solid #7c3aed; border-radius:3mm; color:#5b21b6; font-size:9.5pt; font-weight:bold; }
+  .pvtag.ec { border-color:#0369a1; color:#075985; }
+  .pvnote { display:inline-block; font-size:10.5pt; font-weight:bold; color:#000; border:1.5px solid #000; padding:0.8mm 2.5mm; margin-top:1.5mm; }   /* UAT S1: ต้องอ่านชัดเมื่อพิมพ์ขาวดำ */
+  table.items thead { display:table-header-group; } table.items tr { break-inside:avoid; page-break-inside:avoid; }
+  body.pv-a5l, body.pv-a5p { font-size:9pt; }
+  body.pv-a5l h1, body.pv-a5p h1 { font-size:13pt; }
+  body.pv-a5l .sub, body.pv-a5p .sub { font-size:9.5pt !important; margin-bottom:1mm; }
+  body.pv-a5l .info, body.pv-a5p .info { gap:2mm; margin-bottom:2mm; font-size:8.5pt; }
+  body.pv-a5l .box, body.pv-a5p .box { padding:1.2mm 2mm; }
+  body.pv-a5l .box .label, body.pv-a5p .box .label { font-size:8pt; margin-bottom:0.5mm; }
+  body.pv-a5l .ref-row, body.pv-a5p .ref-row { flex-wrap:wrap; gap:0.5mm 4mm; font-size:8.5pt; margin-bottom:1.5mm; }
+  body.pv-a5l .pvlist, body.pv-a5p .pvlist { margin-top:1.5mm !important; font-size:9pt !important; }
+  body.pv-a5l table.items, body.pv-a5p table.items { font-size:8.5pt; margin-bottom:1.5mm; }
+  body.pv-a5l table.items th, body.pv-a5p table.items th, body.pv-a5l table.items td, body.pv-a5p table.items td { padding:0.7mm 1.2mm; }
+  body.pv-a5l .totals, body.pv-a5p .totals { width:80mm; }   /* verify: 62mm ทำให้ "ยอดล้างเจ้าหนี้ (ก่อนหัก ณ ที่จ่าย):" ตัดสองบรรทัด */
+  body.pv-a5l .totals .row.final, body.pv-a5p .totals .row.final { font-size:11pt !important; }
+  body.pv-a5l .pvwords, body.pv-a5p .pvwords { margin-top:1.5mm !important; font-size:8.5pt !important; }
+  body.pv-a5l .pvqr, body.pv-a5p .pvqr { width:15mm; height:15mm; }
+  body.pv-a5l .pvsig, body.pv-a5p .pvsig { gap:3mm; margin-top:4mm; }
+  body.pv-a5l .pvsig .sigsp, body.pv-a5p .pvsig .sigsp { height:24px; }
+  body.pv-a5l .pvsig .sigl, body.pv-a5p .pvsig .sigl { font-size:8pt; }
+  body.pv-a5l .pvsig img, body.pv-a5p .pvsig img { max-height:24px !important; }
+  body.pv-a5l .pvslip, body.pv-a5p .pvslip { max-width:40mm !important; max-height:30mm !important; }
+  .pvslipbox { float:left; max-width:45%; margin-top:1mm; break-inside:avoid; page-break-inside:avoid; }   /* verify: สลิปวางข้างยอดรวม ไม่ดันช่องเซ็นไปหน้า 2 */
+  .pvsig { clear:both; }
+  body.pv-a5l .pvslipbox, body.pv-a5p .pvslipbox { margin-top:0 !important; max-width:calc(100% - 84mm); }
+  body.pv-a5l .pvslip { max-height:26mm !important; }
+  body.pv-a5l .pvbadge, body.pv-a5p .pvbadge { margin-top:1.5mm !important; padding:0.6mm 2mm !important; font-size:8pt !important; }
+  .noprint .pvsz.on { background:#7c3aed; color:#fff; border:1px solid #5b21b6; }
+  @media screen { body.pv .sheet { padding:6mm; box-sizing:content-box; min-height:0; } }
+`;
+function _pvPaperScript(){
+  return `<script>(function(){var K=${JSON.stringify(PV_PAPER_KEY)},P=${JSON.stringify(PV_PAPERS)};
+function set(k,save){if(!P[k])k='a5l';var st=document.getElementById('pgsize');if(st)st.textContent='@page { size: '+P[k].size+'; margin: '+P[k].margin+'; }';
+document.body.className='pv pv-'+k;var bs=document.querySelectorAll('.pvsz');for(var i=0;i<bs.length;i++){bs[i].className='pvsz'+(bs[i].getAttribute('data-k')===k?' on':'');}
+if(save){try{localStorage.setItem(K,k);}catch(e){}}}
+window.__pvSetPaper=set;var k0='a5l';try{k0=localStorage.getItem(K)||'a5l';}catch(e){}set(k0,false);})();<\/script>`;
+}
+function printWindowHTML(title, bodyHTML, opts){
+  // 🆕 PV-A5: opts.pvPaper → ใส่ @page A5 แนวนอน (ค่าเริ่ม) + ปุ่มสลับขนาด · ไม่ส่ง opts = A4 แบบเดิม
+  const pv = !!(opts && opts.pvPaper);
+  const d = PV_PAPERS.a5l;
   return `<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"/>
-<title>${title}</title><style>${PRINT_STYLES}</style></head><body>
+<title>${title}</title><style>${PRINT_STYLES}</style>${pv ? `<style>${PV_STYLES}</style><style id="pgsize">@page { size: ${d.size}; margin: ${d.margin}; }</style>` : ''}</head><body${pv ? ' class="pv pv-a5l"' : ''}>
 <div class="noprint">
   <button onclick="window.print()">🖨️ Print</button>
-  <button onclick="window.close()">ปิด</button>
+  <button onclick="window.close()">ปิด</button>${pv ? `
+  <span style="margin-left:10px;font-size:10pt">ขนาดกระดาษ:</span>
+  ${Object.keys(PV_PAPERS).map(k => `<button class="pvsz${k === 'a5l' ? ' on' : ''}" data-k="${k}" onclick="__pvSetPaper('${k}',true)">${PV_PAPERS[k].label}</button>`).join('')}` : ''}
 </div>
 ${bodyHTML}
+${pv ? _pvPaperScript() : ''}
 </body></html>`;
 }
-function openPrintWindow(title, bodyHTML){
+function openPrintWindow(title, bodyHTML, opts){
   const w = window.open('', '_blank');
-  w.document.write(printWindowHTML(title, bodyHTML));
+  w.document.write(printWindowHTML(title, bodyHTML, opts));
   w.document.close();
 }
 
@@ -72283,9 +72550,9 @@ function printPV(pay, inv, state){
   <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3mm">
     <div>
       <h1 style="margin:0">ใบสำคัญจ่าย / Payment Voucher (PV)</h1>
-      <div class="sub" style="text-align:left;font-size:11pt;margin-top:1mm">เลขที่ <b style="color:#7c3aed">${docNumber}</b>${isGroupPV ? ` <span style="display:inline-block;margin-left:3mm;padding:0.5mm 2.5mm;border:1.2px solid #7c3aed;border-radius:3mm;color:#5b21b6;font-size:9.5pt;font-weight:bold">วางบิล — รวม ${invs.length} ใบ</span>` : ''}</div>
+      <div class="sub" style="text-align:left;font-size:11pt;margin-top:1mm">เลขที่ <b style="color:#7c3aed">${docNumber}</b>${isGroupPV ? ` <span class="pvtag">วางบิล — รวม ${invs.length} ใบ</span>` : ''}</div>
     </div>
-    <img src="${qrUrl}" alt="QR" style="width:24mm;height:24mm"/>
+    <img class="pvqr" src="${qrUrl}" alt="QR"/>
   </div>
   <div class="info">
     <div class="box"><div class="label">บริษัท (ผู้จ่าย)</div>
@@ -72307,37 +72574,133 @@ function printPV(pay, inv, state){
     ${pay.requestedPayDate && pay.requestedPayDate !== payDateEff ? `<div>วันนัดจ่าย: <b>${thPrintDate(pay.requestedPayDate)}</b></div>` : ''}
   </div>
 
-  <div style="margin-top:4mm;font-size:11pt"><b>รายการใบตั้งหนี้ที่จ่าย${isGroupPV ? ` (รวม ${invs.length} ใบ)` : ''}:</b></div>
+  <div class="pvlist" style="margin-top:4mm;font-size:11pt"><b>รายการใบตั้งหนี้ที่จ่าย${isGroupPV ? ` (รวม ${invs.length} ใบ)` : ''}:</b></div>
   <table class="items">
     <thead><tr>
       <th>#</th><th>เลขที่ PI</th><th>เจ้าหนี้</th><th>วันที่</th><th>ยอดสุทธิ</th><th>จ่ายครั้งนี้</th>
     </tr></thead>
     <tbody>${piRows || '<tr><td colspan="6" style="text-align:center;color:#999">— ไม่มีรายการ —</td></tr>'}</tbody>
   </table>
+  ${pay.slip ? `<div class="pvslipbox"><b>📎 หลักฐานการจ่าย:</b><br/><img class="pvslip" src="${pay.slip.dataUrl||''}" style="max-width:80mm;max-height:60mm;border:1px solid #ccc;margin-top:1mm"/></div>` : ''}
   <div class="totals">
     <div class="row final" style="font-size:14pt"><span>รวมจ่ายครั้งนี้:</span><span style="color:#7c3aed">${fmtAmt(pay.amount||0)}</span></div>
   </div>
-  <div style="margin-top:4mm;font-size:10pt;text-align:right">
+  <div class="pvwords" style="margin-top:4mm;font-size:10pt;text-align:right">
     <b>จำนวนเงิน (ตัวอักษร):</b> <u>&nbsp;${bahtText(pay.amount||0)}&nbsp;</u>
   </div>
 
   ${isPetty && pay.pettyKind === 'non_deductible' && (Number(pay.nonDeductibleVat)||0) > 0
-    ? `<div style="margin-top:3mm;display:inline-block;padding:1.5mm 3mm;border:1.5px solid #b91c1c;border-radius:3mm;background:#fef2f2;color:#991b1b;font-size:9pt;font-weight:bold">⛔ ค่าใช้จ่ายต้องห้าม · ภาษีซื้อ ฿${fmtAmt(pay.nonDeductibleVat)} ไม่เคลม (ม.82/5)</div>`
+    ? `<div class="pvbadge" style="margin-top:3mm;display:inline-block;padding:1.5mm 3mm;border:1.5px solid #b91c1c;border-radius:3mm;background:#fef2f2;color:#991b1b;font-size:9pt;font-weight:bold">⛔ ค่าใช้จ่ายต้องห้าม · ภาษีซื้อ ฿${fmtAmt(pay.nonDeductibleVat)} ไม่เคลม (ม.82/5)</div>`
     : (isPetty && pay.pettyKind === 'non_deductible' && pay.pettyVatClaimable && invs.some(iv => (Number(iv.vat)||0) > 0)
       ? `<div style="margin-top:3mm;font-size:9pt;color:#92400e">⚠️ ค่าใช้จ่ายต้องห้าม — ผู้จ่ายยืนยันว่าภาษีซื้อของบิลนี้เคลมได้ (กรณีพิเศษ)</div>` : '')}
-  ${pay.slip ? `<div style="margin-top:4mm"><b>📎 หลักฐานการจ่าย:</b><br/><img src="${pay.slip.dataUrl||''}" style="max-width:80mm;max-height:60mm;border:1px solid #ccc;margin-top:2mm"/></div>` : ''}
   ${pay.note ? `<div style="margin-top:3mm;font-size:9pt"><b>หมายเหตุ:</b> ${pay.note}</div>` : ''}
-  ${pay.gmSelf && pay.gmSelf.by ? `<div style="margin-top:4mm;display:inline-block;padding:1.5mm 3mm;border:1.5px solid #7c3aed;border-radius:3mm;background:#f5f3ff;color:#5b21b6;font-size:9pt;font-weight:bold">👑 GM อนุมัติเอง (ไม่ผ่านคิวอนุมัติ · บันทึกให้ตรวจย้อนหลัง)</div>` : ''}
-  ${pay.selfApproved ? `<div style="margin-top:4mm;display:inline-block;padding:1.5mm 3mm;border:1.5px solid #b45309;border-radius:3mm;background:#fffbeb;color:#92400e;font-size:9pt;font-weight:bold">💵 จ่ายจากเงินสดย่อย · self-approved (ไม่ผ่านคิวอนุมัติ)${pay.pettyReviewedAt ? ` · ✔ ตรวจแล้วโดย ${findUser(pay.pettyReviewedBy)?.name||pay.pettyReviewedBy||''} ${thPrintDate(new Date(pay.pettyReviewedAt).toISOString().slice(0,10))}` : ' · รอผู้อนุมัติตรวจย้อนหลัง'}</div>` : ''}
+  ${pay.gmSelf && pay.gmSelf.by ? `<div class="pvbadge" style="margin-top:4mm;display:inline-block;padding:1.5mm 3mm;border:1.5px solid #7c3aed;border-radius:3mm;background:#f5f3ff;color:#5b21b6;font-size:9pt;font-weight:bold">👑 GM อนุมัติเอง (ไม่ผ่านคิวอนุมัติ · บันทึกให้ตรวจย้อนหลัง)</div>` : ''}
+  ${pay.selfApproved ? `<div class="pvbadge" style="margin-top:4mm;display:inline-block;padding:1.5mm 3mm;border:1.5px solid #b45309;border-radius:3mm;background:#fffbeb;color:#92400e;font-size:9pt;font-weight:bold">💵 จ่ายจากเงินสดย่อย · self-approved (ไม่ผ่านคิวอนุมัติ)${pay.pettyReviewedAt ? ` · ✔ ตรวจแล้วโดย ${findUser(pay.pettyReviewedBy)?.name||pay.pettyReviewedBy||''} ${thPrintDate(new Date(pay.pettyReviewedAt).toISOString().slice(0,10))}` : ' · รอผู้อนุมัติตรวจย้อนหลัง'}</div>` : ''}
 
-  <div class="footer" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6mm;margin-top:14mm">
-    <div class="sig">${sigImg(pay.createdBy||pay.by)}<div style="border-top:1px dotted #888;margin-top:2px;padding-top:1mm;text-align:center;font-size:9pt">ผู้จัดทำ<br/><b>${pay.createdByName||pay.by||''}</b></div></div>
-    <div class="sig"><div style="border-top:1px dotted #888;margin-top:42px;padding-top:1mm;text-align:center;font-size:9pt">ผู้ตรวจสอบ</div></div>
-    <div class="sig">${sigImg(pay.approvedBy)}<div style="border-top:1px dotted #888;margin-top:2px;padding-top:1mm;text-align:center;font-size:9pt">ผู้อนุมัติจ่าย<br/><b>${pay.approvedBy ? (findUser(pay.approvedBy)?.name||pay.approvedBy) + (pay.selfApproved ? ' (self)' : '') + (pay.gmSelf && pay.gmSelf.by ? ' (GM อนุมัติเอง)' : '') : '................'}</b></div></div>
-    <div class="sig"><div style="border-top:1px dotted #888;margin-top:42px;padding-top:1mm;text-align:center;font-size:9pt">ผู้รับเงิน (Supplier)</div></div>
+  <div class="pvsig">
+    <div class="sig">${sigImg(pay.createdBy||pay.by) || '<div class="sigsp"></div>'}<div class="sigl">ผู้จัดทำ<br/><b>${pay.createdByName||pay.by||''}</b></div></div>
+    <div class="sig"><div class="sigsp"></div><div class="sigl">ผู้ตรวจสอบ</div></div>
+    <div class="sig">${sigImg(pay.approvedBy) || '<div class="sigsp"></div>'}<div class="sigl">ผู้อนุมัติจ่าย<br/><b>${pay.approvedBy ? (findUser(pay.approvedBy)?.name||pay.approvedBy) + (pay.selfApproved ? ' (self)' : '') + (pay.gmSelf && pay.gmSelf.by ? ' (GM อนุมัติเอง)' : '') : '................'}</b></div></div>
+    <div class="sig"><div class="sigsp"></div><div class="sigl">ผู้รับเงิน (Supplier)</div></div>
   </div>
 </div>`;
-  openPrintWindow(`PV ${docNumber}`, body);
+  openPrintWindow(`PV ${docNumber}`, body, { pvPaper:true });   // 🆕 PV-A5 (P1/P4): ทุกที่ที่เรียก printPV ได้ A5
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 🆕 PV-A5 (P2): ใบสำคัญจ่าย สำหรับบิลนำเข้าที่ "จ่ายใน Ecount" (ไม่มี PV/JE ในระบบนี้ — สำเนาจากประวัติ)
+//   members = [{ inv, ep, amount }] — ผู้เรียก (แท็บ ✅ จ่ายแล้ว) รวมบิลที่เลขใบจ่าย Ecount เดียวกัน+ผู้ขายเดียวกันมาให้แล้ว
+//   ยอดแต่ละบิล = ส่วนที่จ่ายใน Ecount (ค่าเดียวกับแถวในแท็บ) · ไม่มีเลขใบจ่าย (ถือว่าจ่ายแล้วก่อน ส.ค.) → ทีละบิล
+// ════════════════════════════════════════════════════════════════════
+function printEcountPV(members, state){
+  const ms = (members||[]).filter(m => m && m.inv);
+  if(!ms.length) return;
+  const _e = (v) => String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const inv0 = ms[0].inv;
+  const ep0 = ms.find(m => m.ep && m.ep.voucher)?.ep || ms[0].ep || null;
+  const voucher = (ep0 && ep0.voucher) || '';
+  const sup = _printVendor(inv0, state) || (state.suppliers||[]).find(s => s.id === inv0.supplierId);
+  const company = state.company || {};
+  const total = Number(ms.reduce((a, m) => a + (Number(m.amount)||0), 0).toFixed(2));
+  // UAT M1: ตัวนำเข้าเก็บ WHT "ทั้งใบจ่าย" ซ้ำไว้ทุกบิลของเลขใบจ่ายเดียวกัน → นับครั้งเดียวต่อเลขใบจ่าย
+  //   (บิลไม่มีเลขใบจ่าย → นับของบิลนั้นเอง) · กันพิมพ์ 6 บิล × 300 = 1,800 ไม่ตรง ภ.ง.ด.3/53
+  const _whtByV = new Map();
+  ms.forEach((m, i) => { const w = Number(m.ep && m.ep.wht) || 0; const k = (m.ep && m.ep.voucher) ? 'v:' + m.ep.voucher : 'i:' + i; if(!_whtByV.has(k)) _whtByV.set(k, w); });
+  const whtSum = Number(Array.from(_whtByV.values()).reduce((a, w) => a + w, 0).toFixed(2));
+  // UAT S2: ยอดในตาราง = ยอดล้างเจ้าหนี้ (ก่อนหัก ณ ที่จ่าย) · เงินออกจริง = ยอดล้างเจ้าหนี้ − หัก ณ ที่จ่าย
+  const netPaid = Number((total - whtSum).toFixed(2));
+  const payDate = ms.map(m => (m.ep && m.ep.date) || m.inv.paidDate || '').filter(Boolean).sort().pop() || '';
+  const banks = Array.from(new Set(ms.map(m => m.ep && m.ep.bank).filter(Boolean)));
+  const notes = Array.from(new Set(ms.map(m => m.ep && m.ep.note).filter(Boolean)));
+  const isGroup = ms.length > 1;
+  const rows = ms.map((m, i) => `<tr>
+      <td style="text-align:center;width:8mm">${i+1}</td>
+      <td style="font-family:monospace;font-size:9pt;color:#c00">${_e(m.inv.invNumber)}</td>
+      <td style="font-size:9pt">${_e(m.inv.supInvNumber || m.inv.supTaxInvNumber || '-')}</td>
+      <td style="font-size:9pt">${thPrintDate(m.inv.invDate)}</td>
+      <td style="text-align:right;font-family:monospace;font-size:9pt">${fmtAmt(m.inv.netPayable||0)}</td>
+      <td style="text-align:right;font-family:monospace;font-weight:bold">${fmtAmt(m.amount||0)}</td>
+    </tr>`).join('');
+  const wordAmt = whtSum > 0 ? netPaid : total;   // ตัวอักษร = เงินที่จ่ายออกจริง (เหมือนใบตั้งหนี้: ยอดสุทธิที่ต้องจ่าย)
+  const words = wordAmt < 0 ? 'ลบ' + bahtText(-wordAmt) : bahtText(wordAmt);
+  // verify PV-A5: "ถือว่าจ่ายแล้ว" ใช้เฉพาะบิลที่ paidBy บอกไว้/บิลก่อน ส.ค. 2569 · อื่น ๆ ไม่มีเลข → พิมพ์ paidBy เป็น "อ้างอิง Ecount"
+  const _assumed = /ถือว่าจ่ายแล้ว/.test(String(inv0.paidBy||'')) || String(inv0.invDate||'') < '2026-08-01';
+  const _isPart = (m) => !!(m.ep && m.ep.partial) || Math.abs(Number(m.amount)||0) < Math.abs(Number(m.inv.netPayable)||0) - 0.005;
+  const partial = ms.some(_isPart);
+  const tag = (voucher
+    ? `<span class="pvtag ec">จ่ายใน Ecount · เลขใบจ่าย ${_e(voucher)}</span>`
+    : `<span class="pvtag ec">${_assumed ? 'ไม่มีใบจ่ายใน Ecount (ถือว่าจ่ายแล้ว)' : 'ไม่มีเลขใบจ่ายใน Ecount'}</span>`)
+    + (partial ? ` <span class="pvtag">จ่ายบางส่วนใน Ecount</span>` : '');
+  const refLine = (!voucher && inv0.paidBy) ? `<div>อ้างอิง Ecount: <b>${_e(inv0.paidBy)}</b></div>` : '';
+  const body = `<div class="sheet">
+  <div style="margin-bottom:2mm">
+    <h1 style="margin:0;text-align:left">ใบสำคัญจ่าย / Payment Voucher <span style="font-size:0.75em">(สำเนา)</span></h1>
+    <div class="sub" style="text-align:left;font-size:11pt;margin-top:1mm">${tag}${isGroup ? ` <span class="pvtag">รวม ${ms.length} ใบ</span>` : ''}</div>
+    <div class="pvnote">สำเนาจากประวัติ Ecount — ไม่ใช่การจ่ายในระบบนี้</div>
+  </div>
+  <div class="info">
+    <div class="box"><div class="label">บริษัท (ผู้จ่าย)</div>
+      <div><b>${_e(company.name||'')}</b></div>
+      <div>${_e(company.address||'-')}</div>
+      <div>เลขผู้เสียภาษี: <b>${_e(company.taxId||'-')}</b> (สำนักงานใหญ่)</div>
+    </div>
+    <div class="box"><div class="label">ผู้รับเงิน (Payee)</div>
+      <div><b>${_e(sup?.name||'-')}</b></div>
+      <div>${_e(sup?.address||'-')}</div>
+      <div>เลขผู้เสียภาษี: <b>${_e(sup?.taxId||'-')}</b>${_supBranchHtml(sup)}</div>
+    </div>
+  </div>
+  <div class="ref-row">
+    <div>วันที่จ่าย: <b>${payDate ? thPrintDate(payDate) : '-'}</b></div>
+    ${banks.length ? `<div>บัญชี: <b>${_e(banks.join(', '))}</b></div>` : ''}
+    ${whtSum > 0 ? `<div>หัก ณ ที่จ่าย: <b>${fmtAmt(whtSum)}</b></div>` : ''}
+    ${refLine}
+  </div>
+  <div class="pvlist" style="margin-top:4mm;font-size:11pt"><b>รายการใบตั้งหนี้ที่จ่าย${isGroup ? ` (รวม ${ms.length} ใบ)` : ''}:</b></div>
+  <table class="items">
+    <thead><tr><th>#</th><th>เลขที่ PI</th><th>เลขที่บิลผู้ขาย</th><th>วันที่</th><th>ยอดสุทธิ</th><th>จ่ายใน Ecount</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  ${partial ? `<div class="pvpart" style="font-size:8.5pt;margin-bottom:1mm">⚠️ จ่ายบางส่วนใน Ecount — ยอดที่เหลือของบิลจ่ายในระบบนี้/ยังค้าง (ดูใบสำคัญจ่ายของระบบนี้)</div>` : ''}
+  <div class="totals">
+    ${whtSum > 0
+      ? `<div class="row"><span>ยอดล้างเจ้าหนี้ (ก่อนหัก ณ ที่จ่าย):</span><span>${fmtAmt(total)}</span></div>
+    <div class="row"><span>หัก ณ ที่จ่าย:</span><span style="color:#c00">−${fmtAmt(whtSum)}</span></div>
+    <div class="row final" style="font-size:14pt"><span>จ่ายสุทธิ:</span><span style="color:#0369a1">${fmtAmt(netPaid)}</span></div>`
+      : `<div class="row final" style="font-size:14pt"><span>รวมจ่าย:</span><span style="color:#0369a1">${fmtAmt(total)}</span></div>`}
+  </div>
+  <div class="pvwords" style="margin-top:4mm;font-size:10pt;text-align:right">
+    <b>จำนวนเงิน (ตัวอักษร):</b> <u>&nbsp;${words}&nbsp;</u>
+  </div>
+  ${notes.length ? `<div style="margin-top:2mm;font-size:9pt"><b>หมายเหตุ (Ecount):</b> ${_e(notes.join(' · '))}</div>` : ''}
+  <div class="pvsig">
+    <div class="sig"><div class="sigsp"></div><div class="sigl">ผู้จัดทำ</div></div>
+    <div class="sig"><div class="sigsp"></div><div class="sigl">ผู้ตรวจสอบ</div></div>
+    <div class="sig"><div class="sigsp"></div><div class="sigl">ผู้อนุมัติจ่าย</div></div>
+    <div class="sig"><div class="sigsp"></div><div class="sigl">ผู้รับเงิน (Supplier)</div></div>
+  </div>
+</div>`;
+  openPrintWindow(`PV ${voucher || inv0.invNumber || ''}`, body, { pvPaper:true });
 }
 
 // PRINT RTV / Credit Note — ใบลดหนี้/ใบคืนของ
@@ -76262,6 +76625,7 @@ global.ERP.registerModule('purchase', {
   printWHTCert,
   printPayApprovalSheet,
   printPO, printGR, printRTV, printPI, printPV,
+  printEcountPV,                // 🆕 PV-A5 (P2): ใบสำคัญจ่ายของบิลที่จ่ายใน Ecount (รวมตามเลขใบจ่าย)
   // 🆕 ACCT-V2: ฝั่งจัดซื้อเห็นวันนัดจ่าย/จ่ายแล้ว + reclass ค่าใช้จ่ายต้องห้าม (เรียกจาก BulkRequestPayModal ฝั่งบัญชี)
   getPOPaymentSummary,
   getINVPaySummary,             // 🆕 ACCT-V2 G: สรุปวันจ่ายของ INV ใบเดียว (shape เดียวกับ getPOPaymentSummary → ใช้กับ PayDateTag)
@@ -76555,7 +76919,7 @@ function AccountingModule({ state, dispatch }){
   const [tab, setTab] = usePersistedTab('acct', 'dashboard');
 
   // pending count: GR ที่ยังไม่ออก INV — กติกาเดียวกับคิวตั้งหนี้ใน INVQueueTab (replacement GR ที่ต้องตั้ง PI นับด้วย · UAT #64)
-  const pendingGRs = (state.grs||[]).filter(g => !g.invoiceId && !g._migrated && g.supplierId && (!g.isReplacement || g.replacementNeedsPI)).length; /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
+  const pendingGRs = (state.grs||[]).filter(g => !g.invoiceId && !global.ERP.grMigApHeld(g) && g.supplierId && (!g.isReplacement || g.replacementNeedsPI)).length; /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
 
   // Count INVs ที่ค้างจ่าย
   const pendingPay = (state.invoices||[]).filter(i => !i.voided && i.paymentStatus !== 'paid').length;
@@ -79407,6 +79771,7 @@ function AuditLogTab({ state, dispatch, user }){
         payment_petty: 'green',    payment_petty_reviewed: 'blue',   // 🆕 ACCT-V2: จ่ายจากเงินสดย่อย / ผู้อนุมัติตรวจย้อนหลัง
         qc_override: 'red',
         asset_stock_clear: 'orange',   // 💎 FA-S3
+        mig_ap_unpay: 'amber', mig_ap_markpaid: 'green',   // 🆕 MIG_AP_NORMAL N5
       };
       const iconByType = {
         prod_time_edit: '🕐',
@@ -79422,6 +79787,7 @@ function AuditLogTab({ state, dispatch, user }){
         payment_reject: '❌',
         payment_petty: '💵', payment_petty_reviewed: '✔',   // 🆕 ACCT-V2
         qc_override: '⛔',
+        mig_ap_unpay: '🔄', mig_ap_markpaid: '✅',   // 🆕 MIG_AP_NORMAL N5
       };
       const ref = a.refLabel || a.refId || a.entityRef || a.entityId || '';
       list.push({
@@ -81871,6 +82237,7 @@ function AutoPostModal({ state, dispatch, user, onClose }){
   // INVs ที่ยังไม่มี JE — exclude voided + reversed
   const unpostedINVs = (state.invoices||[]).filter(i =>
     !i.voided &&
+    !global.ERP.invIsMigrated(i) &&   // 🆕 verify F3: ใบนำเข้า Ecount อยู่ใน JE ยอดยกมา (Dr 3900/Cr 2100) แล้ว — post ซ้ำ = เจ้าหนี้ 2 เท่า
     !(state.journalEntries||[]).some(j => j.source === 'inv' && j.sourceId === i.id)
   );
   const unpostedPays = (state.payments||[]).filter(p =>
@@ -83942,11 +84309,12 @@ function INVQueueTab({ state, dispatch, user }){
   // 🆕 กัน duplicate-INV: ถ้า GR ผูกกับ PO ที่มี advance INV อยู่แล้ว — ไม่ต้องแสดง
   const pendingGRs = useMemo(() =>
     (state.grs||[]).filter(g => {
-      if(g.invoiceId || g._migrated) return false; /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
+      if(g.invoiceId || global.ERP.grMigApHeld(g)) return false; /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
       // 🆕 U13: replacement GR ที่ต้องตั้ง PI → แสดงในคิว (เดิม isReplacement ถูกตัดทิ้งหมด)
       if(g.isReplacement && !g.replacementNeedsPI) return false;
       if(!g.supplierId) return false;
-      if(!inDateRange(g.grDate, dr.startDate, dr.endDate)) return false;
+      // 🆕 verify F5: GR นำเข้าที่ ↩️ ย้อนไปตั้งหนี้แล้ว (ลงวันที่ มี.ค.–ก.ย.) แสดงเสมอ ไม่ตกช่วงวันที่ default 60 วัน (ตรงกับ badge)
+      if(!(g._migrated && (g.prevInvoiceId || (g.prevSplitInvoiceIds||[]).length)) && !inDateRange(g.grDate, dr.startDate, dr.endDate)) return false;
       if(supFilter && g.supplierId !== supFilter) return false;
       // 🛡️ ถ้า PO ของ GR นี้ มี advance INV อยู่แล้ว — ตัดออก (กันสร้าง INV ซ้ำ)
       if(g.poId){
@@ -85202,6 +85570,7 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
   const _supName = ((state.suppliers||[]).find(s => s.id === pay.supplierId) || {}).name || inv?.supplierNameFreeform || '';
   return h(Modal, { isOpen:true, title: isGroup ? `✅ อนุมัติจ่าย: PV รวม ${members.length} ใบ${_supName ? ' · ' + _supName : ''}` : `✅ อนุมัติจ่าย: ${inv?.invNumber || '-'}`, onClose, size:'md' },
     h('div', { className:'space-y-3' },
+      h(global.ERP.EcountRevWarn, { invs: members.map(m => m.inv) }),   // 🆕 UAT SF4
       h('div', { className:'bg-red-50 border border-red-200 rounded p-3 text-center' },
         h('div', { className:'text-xs text-red-700' }, isGroup ? `จำนวนที่ขอจ่าย (วางบิล ${members.length} ใบ)` : 'จำนวนที่ขอจ่าย'),
         h('div', { className:'text-2xl font-bold text-red-800' }, fmtCur(pay.amount))
@@ -86580,37 +86949,21 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
   const isMigratedInv = global.ERP.invVatInEcount(inv);
   const _vatHere = global.ERP.invVatHereMoved(inv), _vatHereAuto = global.ERP.invVatHereAuto(inv);
   const _hasNo = !!String(inv.supTaxInvNumber || '').trim();
-  const [moveOpen, setMoveOpen] = useState(false), [moveReason, setMoveReason] = useState(''), [moveOk, setMoveOk] = useState(false);
-  const _moveData = { invId: inv.id, reason: moveReason.trim(), by: user && user.username };
-  const _moveDeny = isMigratedInv && hasVat && _E.vatClaimDenyReason ? _E.vatClaimDenyReason(state, 'MIG_VAT_HERE', { ..._moveData, reason: moveReason.trim() || 'xxxxx' }, user) : 'x';
-  const _undoDeny = _vatHere && !_vatHereAuto && _E.vatClaimDenyReason ? _E.vatClaimDenyReason(state, 'MIG_VAT_HERE_UNDO', { invId: inv.id, by: user && user.username }, user) : 'x';
-  const doMove = () => {
-    if(!moveOk) return alert('ติ๊กยืนยันก่อนว่าตรวจรายงานภาษีซื้อของ Ecount แล้ว ไม่มีใบนี้');
-    const _d = { ..._moveData, at: Date.now() };
-    const _deny = _E.vatClaimDenyReason(state, 'MIG_VAT_HERE', _d, user);
-    if(_deny) return alert('⛔ ' + _deny);
-    dispatch({ type:'MIG_VAT_HERE', data:_d }); setMoveOpen(false);
-  };
-  // 🆕 MIG_VAT_HERE UAT MF1: ใบค้างจ่ายที่ไฟล์ ③ รุ่นเก่าใส่เลข Ecount → ปรับทั้งชุดครั้งเดียว (ผจก.บัญชี/GM)
-  //   verify: useMemo — สแกนใบ ~3,500 ใบ ไม่ทำทุกการพิมพ์ (ตัวผู้ช่วยสร้าง Set PV มีผลครั้งเดียว)
-  const _apOpenIds = useMemo(() => (isMigratedInv && _hasNo && _E.migApOpenCandidates) ? _E.migApOpenCandidates(state) : [],
-    [state.invoices, state.payments, isMigratedInv, _hasNo]);
-  // verify: ใบมีเลข Ecount ที่ค้างจ่ายตอนปิด (ไฟล์ ③ รุ่นเก่าจับคู่จ่ายผิด) → ย้ายใบเดียวได้ (เลข Ecount ย้ายลงประวัติ)
-  const _showMove = isMigratedInv && hasVat && (!_hasNo || _apOpenIds.includes(inv.id));
-  const doApOpen = () => {
-    const _d = { invIds: _apOpenIds, by: user && user.username, at: Date.now() };
-    const _deny = _E.vatClaimDenyReason(state, 'MIG_VAT_HERE_APOPEN', _d, user);
-    if(_deny) return alert('⛔ ' + _deny);
-    if(!confirm('ปรับเจ้าหนี้ค้างจ่ายยกมา ' + _apOpenIds.length + ' ใบ → ภาษีซื้อเคลมในระบบนี้ (งวด ต.ค. 2569 เป็นต้นไป)\n'
-      + '• เลขใบกำกับ Ecount ย้ายไปเป็นเลขอ้างอิง (เก็บในประวัติ) · ใบจะขึ้นในรายการรอใบกำกับ ให้คีย์เลข/วันที่ตามใบกำกับจริง\n'
-      + '• ใบที่จ่ายแล้วใน Ecount ไม่ถูกแตะ\nยืนยัน?')) return;
-    dispatch({ type:'MIG_VAT_HERE_APOPEN', data:_d });
-  };
-  const doUndo = () => {
-    const _d = { invId: inv.id, by: user.username, at: Date.now() };
-    const _deny = _E.vatClaimDenyReason(state, 'MIG_VAT_HERE_UNDO', _d, user);
-    if(_deny) return alert('⛔ ' + _deny);
-    if(confirm('ย้อนกลับ: ถือว่าภาษีซื้อของ ' + (inv.invNumber || '') + ' ยื่นใน Ecount แล้ว (ล็อกคีย์ใบกำกับ)?')) dispatch({ type:'MIG_VAT_HERE_UNDO', data:_d });
+  // 🆕 MIG_AP_NORMAL N6: กล่องย้ายมาเคลม/ปรับเจ้าหนี้ยกมาทั้งหมด/ใช้เลข Ecount เอาออก (reducer MIG_VAT_HERE* คงไว้ — ข้อมูลเก่า/replay)
+  //   ใบนำเข้าที่ยังไม่จ่าย → คำแนะนำ + ปุ่ม "↩️ ย้อนไปตั้งหนี้" (VOID_INV ปกติ · สิทธิ์เดียวกับยกเลิก INV · เหตุผลบังคับ)
+  const _migBack = isMigratedInv && !inv.voided && !(_E.migInvBackDeny && _E.migInvBackDeny(state, inv));
+  const _canBack = !!user && (isSuperUser(user) || hasPerm(user,'purchase','inv','delete'));
+  // 🆕 verify F4: ใบนำเข้ายังไม่จ่ายแต่ย้อนไม่ได้เพราะยังไม่ผูกผู้ขาย → บอกเหตุผลจริง (แทนกล่องแดงข้อความเดิม)
+  const _migDenyBind = isMigratedInv && !inv.voided && !_hasNo && /ผูกผู้ขาย/.test((_E.migInvBackDeny && _E.migInvBackDeny(state, inv)) || '');
+  const doBackToAp = () => {
+    const _cn = _E.migChargeNote(inv);
+    const reason = prompt('↩️ ย้อน ' + (inv.invNumber || '') + ' ไปตั้งหนี้?\n\nระบบจะ:\n• ยกเลิกใบนี้ + กลับยอดเจ้าหนี้ยกมา (Dr 2100 / Cr 3900)\n• ใบรับของ (GR) กลับเข้าคิว 🧾 เจ้าหนี้ — ตั้งหนี้ใหม่ (เดี่ยว/รวม) พร้อมคีย์ใบกำกับ' + _cn + '\n\nเหตุผล:', '');
+    if(reason === null) return;
+    if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
+    const r = _E.voidInvViaApproval(state, dispatch, user, inv, reason.trim());   // 🆕 UAT SF2: ผ่านสายอนุมัติ delete_inv
+    if(r === 'rejected') return;
+    if(r === 'done') alert('✅ ย้อน ' + (inv.invNumber || '') + ' แล้ว — GR กลับเข้าคิว "🧾 เจ้าหนี้" ตั้งหนี้ใหม่ได้' + _cn);
+    onClose && onClose();
   };
   const hasPendingPay = (state.payments||[]).some(p => (p.invId === inv.id || p.invoiceIds?.includes(inv.id)) && p.approvalStatus === 'pending');
   const isUnpaidInv = (Number(inv.paidAmount)||0) === 0 && (inv.paymentStatus||'unpaid') === 'unpaid';
@@ -86748,35 +87101,17 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
       _vatHere && h('div', { className:'bg-sky-50 border border-sky-300 rounded p-2 text-xs text-sky-900 flex items-center justify-between gap-2 flex-wrap', 'data-testid':'taxinv-vathere' },
         h('span', null, _vatHereAuto ? '📥 เจ้าหนี้ยกมา — ภาษีซื้อเคลมในระบบนี้ (งวด ต.ค. 2569 เป็นต้นไป)'
           : `📥 ย้ายมาเคลมในระบบนี้ โดย ${inv.vatClaimHere.by || '-'} วันที่ ${fmtDate(new Date(Number(inv.vatClaimHere.at) || 0).toISOString().slice(0,10))}${inv.vatClaimHere.reason ? ' · ' + inv.vatClaimHere.reason : ''} — เคลมงวด ต.ค. 2569 เป็นต้นไป`),
-        !_vatHereAuto && !_undoDeny && h('button', { type:'button', onClick:doUndo, 'data-testid':'taxinv-vathere-undo',
-          className:'text-[11px] px-2 py-0.5 rounded border border-sky-400 bg-white hover:bg-sky-100' }, '↩️ ย้อนกลับ (ยื่นใน Ecount)')),
-      _showMove && h('div', { className:'bg-sky-50 border-2 border-sky-300 rounded p-3 text-xs text-sky-900 space-y-2', 'data-testid':'taxinv-move-box' },
-        h('div', { className:'font-bold text-sm' }, '📥 ใบนี้ยังไม่ได้เคลมภาษีซื้อใน Ecount? (ใบกำกับมาถึงหลังปิดระบบเดิม)'),
-        _hasNo && h('div', { className:'text-sky-800' }, `ย้ายเฉพาะใบนี้: เลข ${String(inv.supTaxInvNumber).trim()} จาก Ecount ย้ายไปเป็นเลขอ้างอิง (เก็บในประวัติ · ย้อนกลับได้) แล้วคีย์เลขใบกำกับจริง`),
-        h('div', null, 'ใบนำเข้าจาก Ecount ถือว่ายื่นภาษีซื้อในระบบเดิมแล้ว — ถ้าตรวจรายงานภาษีซื้อของ Ecount แล้วไม่มีใบนี้ ให้ ผจก.บัญชี/GM ย้ายมาเคลมใน ภ.พ.30 ระบบนี้ (งวด ต.ค. 2569 เป็นต้นไป) แล้วคีย์ใบกำกับ/ปรับ VAT ได้ตามปกติ'),
-        !_isApprover ? h('div', { className:'text-sky-800' }, '→ แจ้ง ผจก.บัญชี ให้กด "ย้ายมาเคลมในระบบนี้"')
-        : !moveOpen ? h('button', { type:'button', onClick:() => setMoveOpen(true), 'data-testid':'taxinv-move-open',
-            className:'px-3 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white font-medium' }, 'ย้ายมาเคลมในระบบนี้ (ภ.พ.30 ต.ค.)')
-        : h('div', { className:'space-y-1' },
-            h('label', { className:'flex items-start gap-2' }, h('input', { type:'checkbox', checked:moveOk, onChange:e => setMoveOk(e.target.checked), 'data-testid':'taxinv-move-ok', className:'mt-0.5' }),
-              h('span', null, 'ตรวจรายงานภาษีซื้อของ Ecount แล้ว — ไม่มีใบนี้ (กันเคลมซ้ำ)')),
-            h('input', { type:'text', value:moveReason, onChange:e => setMoveReason(e.target.value), 'data-testid':'taxinv-move-reason',
-              placeholder:'เหตุผล เช่น ใบกำกับมาถึง 1 ต.ค. หลังปิด Ecount', className:'w-full px-2 py-1 border rounded text-sm' }),
-            _moveDeny && moveReason.trim() && h('div', { className:'text-red-700' }, '⛔ ', _moveDeny),
-            h('div', { className:'flex gap-2' },
-              h('button', { type:'button', onClick:doMove, disabled: !moveOk || !moveReason.trim() || !!_E.vatClaimDenyReason(state, 'MIG_VAT_HERE', _moveData, user), 'data-testid':'taxinv-move-confirm',
-                className:'px-3 py-1 rounded bg-sky-600 text-white font-medium disabled:opacity-40' }, '✅ ยืนยันย้ายมาเคลม'),
-              h('button', { type:'button', onClick:() => setMoveOpen(false), className:'px-3 py-1 rounded border bg-white' }, 'ยกเลิก')))),
-      isMigratedInv && _hasNo && h('div', { className:'bg-gray-50 border border-gray-300 rounded p-2 text-xs text-gray-700', 'data-testid':'taxinv-ecount-locked' },
+        ),   // 🆕 MIG_AP_NORMAL N6: ปุ่มย้อนกลับ (MIG_VAT_HERE_UNDO) เอาออก — reducer คงไว้สำหรับข้อมูลเก่า
+      // 🆕 MIG_AP_NORMAL N6: ใบนำเข้าที่ยังไม่จ่าย → ไม่ล็อก ให้ย้อนไปตั้งหนี้ (VOID_INV ปกติ) แล้วตั้งหนี้ใหม่จาก GR พร้อมคีย์ใบกำกับ · ใบจ่ายแล้ว = ล็อกเหมือนใบจ่ายแล้วทั่วไป
+      _migBack && h('div', { className:'bg-sky-50 border border-sky-300 rounded p-2 text-xs text-sky-900 space-y-1', 'data-testid':'taxinv-mig-back' },
+        h('div', null, `📥 ใบนี้ยกมาจาก Ecount และยังไม่จ่าย${_hasNo ? ` (เลขเดิม ${String(inv.supTaxInvNumber).trim()})` : ''} — ได้ใบกำกับแล้ว ให้ "↩️ ย้อนไปตั้งหนี้" แล้วตั้งหนี้ใหม่ (เดี่ยว/รวมหลาย GR) พร้อมคีย์เลข/วันที่/VAT ตามใบกำกับ · ภาษีซื้อเข้างวดตามวันที่ที่คีย์`),
+        _canBack ? h('button', { type:'button', onClick:doBackToAp, 'data-testid':'taxinv-mig-back-btn', className:'px-3 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white font-medium' }, '↩️ ย้อนไปตั้งหนี้')
+          : h('div', { className:'font-medium' }, '→ ต้องมีสิทธิ์ยกเลิกใบตั้งหนี้ (จัดซื้อ › ใบตั้งหนี้ › ลบ) — แจ้ง ผจก.บัญชี')),
+      isMigratedInv && !_migBack && _hasNo && h('div', { className:'bg-gray-50 border border-gray-300 rounded p-2 text-xs text-gray-700', 'data-testid':'taxinv-ecount-locked' },
         `🔒 ภาษีซื้อของใบนี้ยื่นใน Ecount แล้ว (เลขใบกำกับ ${String(inv.supTaxInvNumber).trim()} จาก Ecount) — แก้เลข/วันที่ทางนี้ไม่ได้ (กันเคลมซ้ำ) · แนบรูปได้`),
-      // 🆕 MIG_VAT_HERE UAT MF1: ใบค้างจ่ายจากไฟล์ ③ รุ่นเก่า (มีเลข Ecount) → ปุ่มปรับเจ้าหนี้ยกมาทั้งหมดครั้งเดียว (ผจก.บัญชี/GM)
-      isMigratedInv && _hasNo && _apOpenIds.includes(inv.id) && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900 space-y-1', 'data-testid':'taxinv-apopen-box' },
-        h('div', null, `📥 ใบนี้ยังค้างจ่ายตอนปิด Ecount = ภาษีซื้อยังไม่ได้เคลม (กติกาเจ้าของ 1 ต.ค.) — ข้อมูลนำเข้ารุ่นเก่าใส่เลข Ecount ไว้ในช่องใบกำกับ`),
-        _isApprover
-          ? h('button', { type:'button', onClick:doApOpen, 'data-testid':'taxinv-apopen-btn', className:'px-3 py-1 rounded bg-amber-600 text-white font-medium' },
-              `📥 ปรับเจ้าหนี้ค้างจ่ายยกมาทั้งหมด (${_apOpenIds.length} ใบ) → เคลมในระบบนี้ (ภ.พ.30 ต.ค.)`)
-          : h('div', { className:'font-medium' }, '→ แจ้ง ผจก.บัญชี/GM กด "ปรับเจ้าหนี้ค้างจ่ายยกมาทั้งหมด" ในหน้าต่างนี้')),
-      setDenyReason && !(isMigratedInv && hasVat && !_hasNo) && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-xs text-red-800' }, '⛔ ', setDenyReason),
+      _migDenyBind && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900', 'data-testid':'taxinv-mig-bind' },
+        '⚠️ ใบนี้ยกมาจาก Ecount ยังไม่ผูกผู้ขาย — 🔗 ผูกผู้ขายที่หน้าใบตั้งหนี้ก่อน แล้วค่อย ↩️ ย้อนไปตั้งหนี้ (ตั้งหนี้ใหม่พร้อมคีย์ใบกำกับ)'),
+      setDenyReason && !_migBack && !_migDenyBind && !(isMigratedInv && _hasNo) && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-xs text-red-800' }, '⛔ ', setDenyReason),
       !setDenyReason && _taxFiled && h('div', { className:'bg-gray-50 border border-gray-300 rounded p-2 text-xs text-gray-700' },
         `🔒 ใบกำกับนี้อยู่ในงวด ${String(_taxPeriod).slice(0,7)} ที่ยื่น ภ.พ.30 แล้ว — แนบรูปเพิ่มได้ แต่แก้เลข/วันที่ไม่ได้`),
       !setDenyReason && _win && _win.warn && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900' },
@@ -86796,7 +87131,8 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
           : String(_claimPreview) === String(inv.supVatClaimDate || '') && String(inv.supTaxInvNumber||'').trim()
           ? `📅 ภาษีซื้อของใบนี้เคลมไว้ในงวด ${String(_claimPreview).slice(0,7)} แล้ว — แก้เลข/วันที่ไม่ย้ายงวดเคลม`
           : `📅 เดือนของใบกำกับ ${String(taxInvDate).slice(0,7)} ปิดงวดแล้ว → ภาษีซื้อจะเข้างวด ${String(_claimPreview).slice(0,7)} (เดือนที่คีย์)`),
-      h('div', null,
+      // 🆕 verify F9: ใบนำเข้าที่ยังไม่จ่าย → ไม่ให้คีย์เลข/วันที่ที่ใบเดิม (ทางเดียว = ↩️ ย้อนไปตั้งหนี้ ในกล่องฟ้าด้านบน)
+      !_migBack && !_migDenyBind && h('div', null,
         h('label', { className:'block text-xs font-medium mb-1' },
           `📄 เลข ${docType} *`),
         h('input', { type:'text', value:taxInvNumber,
@@ -86804,12 +87140,8 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
           placeholder:inv.supInvNumber ? `เช่น ${inv.supInvNumber}` : 'TX-2026-12345',
           className:'w-full px-3 py-2 border-2 rounded text-sm font-mono' }),
         // 🆕 F1: ปุ่ม "ใช้เลขเดียวกับใบแจ้งหนี้" — ให้ user ตั้งใจกดเอง
-        // 🆕 MIG_VAT_HERE V4: ใบนำเข้าที่เคลมในระบบนี้ → เติมเลข Ecount (supInvNumber) + วันที่ (supInvDate/invDate) ให้ตรวจกับกระดาษก่อนบันทึก
-        _vatHere && !_hasNo && inv.supInvNumber && !taxInvNumber && h('button', { type:'button', 'data-testid':'taxinv-use-ecount',
-          onClick:()=>{ setTaxInvNumber(inv.supInvNumber); setTaxInvDate(inv.supInvDate || inv.invDate || taxInvDate); },
-          className:'mt-1 text-xs px-2 py-1 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-300 rounded' },
-          `📥 ใช้เลขจาก Ecount (${inv.supInvNumber}) — ตรวจเลข/วันที่กับใบกำกับจริงก่อนบันทึก`),
-        !(_vatHere && !_hasNo) && inv.supInvNumber && !taxInvNumber && h('button', { type:'button',
+        // 🆕 MIG_AP_NORMAL N6: เอาปุ่ม "📥 ใช้เลขจาก Ecount" ออก — ใช้ปุ่มเดียวกับใบปกติ
+        inv.supInvNumber && !taxInvNumber && h('button', { type:'button',
           onClick:()=>setTaxInvNumber(inv.supInvNumber),
           className:'mt-1 text-xs px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded' },
           `📋 ใช้เลขเดียวกับใบแจ้งหนี้ (${inv.supInvNumber})`),
@@ -86818,13 +87150,13 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
             '💡 เลข Tax INV ตรงกับเลขใบแจ้งหนี้ — supplier บางรายใช้เลขเดียวกัน')
       ),
 
-      h('div', null,
+      !_migBack && !_migDenyBind && h('div', null,
         h('label', { className:'block text-xs font-medium mb-1' }, `วันที่ ${docType} *`),
         h(BEDateInput, { value:taxInvDate, onChange:setTaxInvDate,
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
       ),
 
-      h('div', null,
+      !_migBack && !_migDenyBind && h('div', null,
         h('label', { className:'block text-xs font-medium mb-1' }, '📷 รูปใบกำกับ (optional)'),
         h('input', { type:'file', accept:'image/*', capture:'environment',
           onChange:onUpload, disabled:uploading,
@@ -86844,10 +87176,10 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
         h('input', { type:'text', value:reason, onChange:e => setReason(e.target.value), 'data-testid':'taxinv-reason',
           className:'w-full px-3 py-2 border rounded text-sm', placeholder:'เช่น ผู้ขายออกใบกำกับใหม่แทนใบเดิม' })),
       h('div', { className:'flex gap-2 pt-3 border-t flex-wrap' },
-        h(Button, { variant:'primary', onClick:save, disabled:uploading || !!setDenyReason || (_dateAfterYm && !redOk), title: setDenyReason || '' }, '💾 บันทึก Tax INV'),
+        !_migBack && !_migDenyBind && h(Button, { variant:'primary', onClick:save, disabled:uploading || !!setDenyReason || (_dateAfterYm && !redOk), title: setDenyReason || '' }, '💾 บันทึก Tax INV'),
         _canAcceptExpired && h(Button, { variant:'danger', onClick:() => save(true), disabled:uploading || (_dateAfterYm && !redOk),
           title:'เก็บเลข/รูปใบกำกับเป็นหลักฐาน — ภาษีซื้อไม่เข้างวดใด (🔴 หมดสิทธิ์ ม.82/3)' }, 'บันทึกเป็นหลักฐาน (หมดสิทธิ์)'),
-        inv.supTaxInvNumber && h(Button, { variant:'danger', disabled: !!clearDenyReason, title: clearDenyReason || '',
+        !_migBack && inv.supTaxInvNumber && h(Button, { variant:'danger', disabled: !!clearDenyReason, title: clearDenyReason || '',
           onClick:()=>{
             if(clearDenyReason) return alert('⛔ ' + clearDenyReason);
             if(confirm(`ลบ Tax INV "${inv.supTaxInvNumber}" จาก INV นี้?`)){
@@ -87134,6 +87466,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
 
   return h(Modal, { isOpen:true, title: isPetty ? `💵 จ่ายจากเงินสดย่อย (${invs.length} ใบ)` : `📋 ขออนุมัติจ่ายรวม (${invs.length} ใบ)`, onClose, size:'lg' },
     h('div', { className:'space-y-3' },
+      h(global.ERP.EcountRevWarn, { invs }),   // 🆕 UAT SF4
       // 🆕 ACCT-V2: เลือกแหล่งเงิน
       h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-2' },
         h('label', { className: cls('border-2 rounded-lg p-2 cursor-pointer text-sm flex gap-2 items-start',
@@ -87299,8 +87632,10 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
 function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selectedIds, setSelectedIds, q, setQ }){
   const canVoid = user && (isSuperUser(user) || hasPerm(user,'purchase','inv','delete'));
   const pg = usePaged(invs, 50);
-  const voidINV = (i) => {
-    const reason = prompt(`❌ ยกเลิก/ลบ INV ${i.invNumber} ทั้งใบ?\n\nเหตุผล (เช่น "คีย์ผิด" / "คืนของทั้งล็อต ไม่ต้องจ่าย"):`, '');
+  const voidINV = (i, back) => {
+    const _mig = !!(global.ERP.invIsMigrated && global.ERP.invIsMigrated(i));
+    const reason = prompt(back ? `↩️ ย้อน ${i.invNumber} ไปตั้งหนี้?\n\n• ใบตั้งหนี้นี้ถูกยกเลิก${_mig ? ' + กลับยอดเจ้าหนี้ยกมา (Dr 2100 / Cr 3900)' : ' (กลับ JE อัตโนมัติ)'}\n• GR กลับเข้าคิว 🧾 เจ้าหนี้ — ตั้งหนี้ใหม่ (เดี่ยว/รวม) พร้อมคีย์ใบกำกับ${global.ERP.migChargeNote(i)}\n\nเหตุผล:`
+      : `❌ ยกเลิก/ลบ INV ${i.invNumber} ทั้งใบ?\n\nเหตุผล (เช่น "คีย์ผิด" / "คืนของทั้งล็อต ไม่ต้องจ่าย"):`, '');
     if(reason === null) return;
     if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
     // 🆕 DEPOSIT-VAT verify: ใบแยกตาม WHT (splitGroup) — GR กลับเข้าคิวเมื่อยกเลิกครบทุกใบในชุด
@@ -87308,11 +87643,13 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
     const _grLine = _sib.length
       ? `• ใบนี้แยกตาม WHT กับอีก ${_sib.length} ใบ (${_sib.map(x => x.invNumber || x.id).join(', ')}) — GR จะกลับเข้าคิวเจ้าหนี้เมื่อยกเลิกครบทุกใบในชุด`
       : '• ปลด link จาก GR (กลับไปอยู่คิวเจ้าหนี้ ตั้งใหม่ได้)';
-    if(!confirm(`⚠️ ยืนยันยกเลิก INV ${i.invNumber}?\n\nระบบจะ:\n• Mark INV เป็น voided (เก็บ audit log)\n• Reverse JE อัตโนมัติ\n${_grLine}\n• INV หายจากรายการรอจ่าย\n\nเหตุผล: ${reason}`)) return;
-    const _vAct = { type:'VOID_INV', data:{ invId:i.id, reason:reason.trim(), by:user.username } };
-    try { if(global.ERP.reducer && global.ERP.reducer(state, _vAct) === state) return; } catch(_e){}   // 🆕 DEPOSIT-VAT R3: ถูกปฏิเสธ (งวดภาษียื่นแล้ว ฯลฯ) → reducer แจ้งแล้ว ไม่ขึ้น ✅
-    dispatch(_vAct);
-    alert(`✅ ยกเลิก INV ${i.invNumber} แล้ว\n• Reverse JE แล้ว\n• GR กลับเข้าคิว "🧾 เจ้าหนี้" — ตั้งใหม่ได้`);
+    // 🆕 UAT2 N2: ใบยังไม่จ่าย (back) = คำว่า "↩️ ย้อนไปตั้งหนี้" ทุกข้อความ · "ยกเลิก INV" เหลือเฉพาะใบจ่ายบางส่วน
+    const _ttl = back ? `↩️ ย้อน ${i.invNumber} ไปตั้งหนี้` : `ยกเลิก INV ${i.invNumber}`;
+    if(!confirm(`⚠️ ยืนยัน${_ttl}?\n\nระบบจะ:\n• Mark INV เป็น voided (เก็บ audit log)\n• Reverse JE อัตโนมัติ\n${_grLine}\n• INV หายจากรายการรอจ่าย\n\nเหตุผล: ${reason}`)) return;
+    // 🆕 MIG_AP_NORMAL UAT SF2: ผ่านสายอนุมัติ delete_inv (เหมือนหน้ารายละเอียด PI) · reducer ปฏิเสธ → แจ้งแล้ว ไม่ขึ้น ✅
+    const _r = global.ERP.voidInvViaApproval(state, dispatch, user, i, reason.trim());
+    if(_r !== 'done') return;
+    alert(`✅ ${back ? `ย้อน ${i.invNumber} ไปตั้งหนี้` : `ยกเลิก INV ${i.invNumber}`} แล้ว\n• Reverse JE แล้ว\n• GR กลับเข้าคิว "🧾 เจ้าหนี้" — ตั้งใหม่ได้` + global.ERP.migChargeNote(i));
   };
   if(invs.length === 0){
     return String(q||'').trim()
@@ -87396,7 +87733,11 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
                 title:`คำขอ${_pendChg.action === 'edit_inv' ? 'แก้ไข INV' : 'ปรับ VAT ตามใบกำกับ'} โดย ${_pendChg.requestedByName || _pendChg.requestedBy || '-'} รออนุมัติอยู่ — ยอดค้างจ่ายอาจเปลี่ยนหลังอนุมัติ` },
                 '⏳ รอปรับ VAT/แก้ไข — ขอจ่ายหลังอนุมัติ'),
               // 🆕 F5: badge "รอใบแจ้งหนี้" (ใบแจ้งหนี้ supplier) — ส่วน "รอใบกำกับ" ย้ายไปอยู่ในคอลัมน์ เลขใบกำกับ แล้ว
-              i.needSupInv && h('div', { className:'text-[10px] text-orange-600' }, '⚠️ รอใบแจ้งหนี้')
+              i.needSupInv && h('div', { className:'text-[10px] text-orange-600' }, '⚠️ รอใบแจ้งหนี้'),
+              // 🆕 MIG_AP_NORMAL UAT SF4: Ecount เคยบันทึกว่าจ่ายแล้ว แต่ถูกยกเลิกการจ่าย (MIG_AP_UNPAY) → เตือนก่อนจ่ายซ้ำ
+              i.ecountPayReversed && h('div', { className:'text-[10px] text-red-700 font-semibold', 'data-testid':'pay-ecount-reversed',
+                title:`Ecount บันทึกจ่ายแล้ว (${fmtCur(Number((i.ecountPayReversed.prev||{}).paidAmount)||0)}) · ยกเลิกการจ่ายโดย ${i.ecountPayReversed.by || '-'} — ${i.ecountPayReversed.reason || ''}` },
+                '⚠️ Ecount เคยบันทึกว่าจ่ายแล้ว — ตรวจสมุดธนาคารก่อนจ่าย')
             ),
             // 🆕 เลขใบกำกับภาษี · ยังไม่คีย์ → เลขใบแจ้งหนี้ (เทา) · ไม่มีทั้งคู่ → "ยังไม่ได้รับ" (อำพัน)
             h('td', { className:'px-3 py-2 font-mono text-xs' },
@@ -87416,7 +87757,19 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
             h('td', { className:'px-3 py-2 text-center' },
               h('div', { className:'flex gap-1 justify-center flex-wrap' },
                 h(Button, { variant:'secondary', size:'sm', onClick:()=>setDetail(i) }, 'ดู'),
-                canVoid && !(global.ERP.invIsMigrated && global.ERP.invIsMigrated(i)) && h('button', {   // 🆕 นำเข้า2569 MF2: ใบ Ecount ยกเลิกไม่ได้
+                // 🆕 MIG_AP_NORMAL N7: ใบที่ยังไม่จ่าย (ไม่มีคำขอจ่ายค้าง — คิวนี้ตัดออกแล้ว) → ↩️ ย้อนไปตั้งหนี้ (VOID_INV · สิทธิ์เดียวกับยกเลิก · เหตุผลบังคับ) — ใบนำเข้าที่ยังไม่จ่ายด้วย
+                canVoid && (Number(i.paidAmount)||0) <= 0.005 && !(global.ERP.migInvBackDeny && global.ERP.migInvBackDeny(state, i)) && h('button', {
+                  onClick:()=>voidINV(i, true), 'data-testid':'pay-back-to-ap',
+                  title:'ย้อนใบนี้ไปตั้งหนี้ใหม่ — ใบตั้งหนี้ถูกยกเลิก GR กลับเข้าคิว 🧾 เจ้าหนี้ (เช่น ได้ใบกำกับแล้วต้องการตั้งหนี้รวม/คีย์ใหม่)',
+                  className:'text-xs px-2 py-1 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-300 rounded font-medium' },
+                  '↩️ ย้อนไปตั้งหนี้'),
+                // 🆕 MIG_AP_NORMAL N5: ใบนำเข้าที่ระบบบอกค้าง แต่จ่ายจริงแล้วก่อนตัดระบบ (ผจก.บัญชี/GM)
+                global.ERP.invIsMigrated && global.ERP.invIsMigrated(i) && global.ERP.migApPayCan(state, user, i, true) && h('button', {
+                  onClick:()=>global.ERP.migApPayAsk(state, dispatch, user, i, true), 'data-testid':'pay-mig-markpaid',
+                  title:'ใบยกมาจาก Ecount ที่จ่ายจริงแล้วก่อนตัดระบบ — บันทึกว่าจ่ายแล้ว (ไม่สร้าง PV · JE ลดเจ้าหนี้ยกมา Dr 2100 / Cr 3900)',
+                  className:'text-xs px-2 py-1 bg-green-50 hover:bg-green-100 text-green-800 border border-green-300 rounded font-medium' },
+                  '✅ จ่ายแล้วก่อนตัดระบบ'),
+                canVoid && (Number(i.paidAmount)||0) > 0.005 && !(global.ERP.invIsMigrated && global.ERP.invIsMigrated(i)) && h('button', {   // จ่ายบางส่วนแล้ว = ยกเลิกทั้งใบ (กลับรายการจ่ายด้วย) · ใบ Ecount จ่ายแล้วยกเลิกไม่ได้
                   onClick:()=>voidINV(i),
                   title:'ยกเลิก INV ทั้งใบ (เผื่อคีย์ผิด/คืนของทั้งล็อต) — GR กลับเข้าคิวตั้งใหม่ได้',
                   className:'text-xs px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded font-medium' },
@@ -87593,9 +87946,13 @@ function PaidPaymentsTab({ state, dispatch, user }){
       const amt = paid > 0 ? Math.max(0, Number((paid - (livePvByInv[i.id]||0)).toFixed(2))) : paid;
       if(Math.abs(amt) < 0.005) continue;
       // verify: ใบจ่ายบางส่วน (เช่น RE260922019) ไม่มี ecountPay — paidBy เป็นโน้ต "🔴 บัญชียืนยันค้างจริง…" ห้ามโชว์เป็นแหล่งเงิน → ดึงเลขใบจ่ายจาก paidBy
-      const _partNoEp = !i.ecountPay && i.paymentStatus === 'partial';
-      const _pv = _partNoEp ? (/\(([A-Z]{2}\d+)\)/.exec(String(i.paidBy || '')) || [])[1] || '' : '';
-      const ep = i.ecountPay || (_partNoEp ? { voucher:_pv, amount:amt, partial:true } : null);
+      //   verify PV-A5: ไม่มี ecountPay → ดึงเลขใบจ่ายจาก paidBy ทุกสถานะ (เช่น จ่ายบางส่วนใน Ecount แล้ว PV ระบบนี้จ่ายส่วนที่เหลือ → status 'paid'
+      //   หรือ "จ่ายแล้ว: … · PVxxxx" จาก openitems) · partial = ยอดที่จ่ายใน Ecount น้อยกว่ายอดสุทธิของบิล
+      const _noEp = !i.ecountPay;
+      const _pv = _noEp ? (/(?:^|[^A-Z0-9])([A-Z]{2}\d{8,})(?![0-9])/.exec(String(i.paidBy || '')) || [])[1] || '' : '';
+      const _np = Number(i.netPayable != null ? i.netPayable : i.total) || 0;
+      const _isPart = i.paymentStatus === 'partial' || (amt > 0 && _np > 0 && amt < _np - 0.005);
+      const ep = i.ecountPay || ((_noEp && (_pv || i.paymentStatus === 'partial')) ? { voucher:_pv, amount:amt, partial:_isPart } : null);
       const realDate = i.paidDate || (ep && ep.date) || '';
       out.push({ id:'ecount_'+i.id, kind:'ecount', p:null, ep, inv:i, members:[{ inv:i, invoiceId:i.id, amount:amt }], group:false, sup: supOf(i.supplierId),
         payDate: realDate || i.invDate || '', noPayDate: !realDate, amount: amt, reversed:false, ts: i.createdAt||0, byName:'Ecount',
@@ -87825,6 +88182,14 @@ function PaidPaymentsTab({ state, dispatch, user }){
   };
   const printPV = (r) => { const fn = purchaseMod?.printPV; if(fn) fn(r.p, r.inv, state); else alert('printPV ยังไม่พร้อม'); };
   const printPI = (inv) => { const fn = purchaseMod?.printPI; if(fn) fn(inv, state); else alert('printPI ยังไม่พร้อม'); };
+  // 🆕 PV-A5 (P2): แถว 📥 จ่ายใน Ecount → ใบสำคัญจ่าย · รวมทุกบิลที่เลขใบจ่าย Ecount เดียวกัน+ผู้ขายเดียวกัน (ไม่มีเลข = ทีละบิล)
+  const printEcountPV = (r) => {
+    const fn = purchaseMod?.printEcountPV; if(!fn) return alert('printEcountPV ยังไม่พร้อม');
+    const vc = (r.ep && r.ep.voucher) || '';
+    const grp = vc ? rowsAll.filter(x => x.kind === 'ecount' && x.ep && x.ep.voucher === vc && x.inv.supplierId === r.inv.supplierId) : [r];
+    grp.sort((a, b) => String(a.inv.invDate||'').localeCompare(String(b.inv.invDate||'')) || String(a.inv.invNumber||'').localeCompare(String(b.inv.invNumber||'')));
+    fn(grp.map(x => ({ inv:x.inv, ep:x.ep, amount:x.amount })), state);
+  };
   const openInv = (inv) => { if(!inv) return; if(_restoreOpenModal(null, 'INV: ' + inv.invNumber)) return; setDetail(inv); };
 
   const reviewCell = (p) => {
@@ -87965,7 +88330,7 @@ function PaidPaymentsTab({ state, dispatch, user }){
                         h('td', { className:'px-3 py-2 text-center' },
                           h('div', { className:'flex gap-1 justify-center flex-wrap' },
                             !rev && p.pvNumber && h('button', { onClick:()=>printPV(r), title:'พิมพ์ใบสำคัญจ่าย (PV)',
-                              className:'text-[10px] px-1.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 rounded' }, '🖨️ PV'),
+                              className:'text-[10px] px-1.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 rounded' }, '🖨️ ใบสำคัญจ่าย'),   // 🆕 PV-A5 (P3)
                             rev && h('span', { className:'text-[10px] text-gray-400' }, '—'),
                             !rev && canReview && !p.pettyReviewedAt && (mine
                               ? h('span', { className:'text-[10px] text-orange-600 bg-orange-100 rounded px-1.5 py-1', title:'คุณเป็นคนจ่าย PV นี้ — ต้องให้คนอื่นตรวจ (dual-eye)' }, '🔒 ตัวเอง')
@@ -88039,9 +88404,11 @@ function PaidPaymentsTab({ state, dispatch, user }){
                               : h('span', { className:'text-amber-700' }, '⏳ ยังไม่ตรวจ'))),
                         h('td', { className:'px-3 py-2 text-center no-underline space-x-1 whitespace-nowrap' },
                           r.kind === 'pv' && p.pvNumber && !r.reversed && h('button', { onClick:()=>printPV(r), title:'พิมพ์ใบสำคัญจ่าย (PV)',
-                            className:'text-[10px] px-1.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 rounded no-underline' }, '🖨️ PV'),
+                            className:'text-[10px] px-1.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 rounded no-underline' }, '🖨️ ใบสำคัญจ่าย'),   // 🆕 PV-A5 (P3)
+                          r.kind === 'ecount' && h('button', { onClick:()=>printEcountPV(r), title: (r.ep && r.ep.voucher) ? `พิมพ์ใบสำคัญจ่าย (เลขใบจ่าย Ecount ${r.ep.voucher} — รวมทุกบิลในใบจ่ายเดียวกัน)` : 'พิมพ์ใบสำคัญจ่าย (ไม่มีใบจ่ายใน Ecount — ถือว่าจ่ายแล้ว)',   // 🆕 PV-A5 (P2)
+                            className:'text-[10px] px-1.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 rounded no-underline' }, '🖨️ ใบสำคัญจ่าย'),
                           inv && h('button', { onClick:()=>printPI(inv), title: r.group ? `พิมพ์ใบตั้งหนี้ใบแรก (${inv.invNumber}) — ใบอื่นเปิดจากคอลัมน์ PI` : 'พิมพ์ใบตั้งหนี้ (PI)',   // 🆕 PV-GROUP
-                            className:'text-[10px] px-1.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded no-underline' }, '🖨️ PI')),
+                            className:'text-[10px] px-1.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded no-underline' }, '🖨️ ใบตั้งหนี้')),   // 🆕 PV-A5 (P3): เดิม 🖨️ PI
                         h('td', { className:'px-3 py-2 text-center no-underline' },
                           r.kind === 'pv'
                             ? h('div', { className:'flex gap-1 justify-center items-center flex-wrap' },
@@ -88060,8 +88427,13 @@ function PaidPaymentsTab({ state, dispatch, user }){
                                 r.reversed && h('span', { className:'text-[10px] text-red-700 no-underline', title:`โดย ${p.reversedBy||'-'} · ${p.reverseReason||'-'}` }, '✗ reversed'))
                             : r.kind === 'ecount'
                               // 🆕 PAID-ECOUNT (E1): อ่านอย่างเดียว — ไม่มี PV/สลิป/Tax INV/ยกเลิก
-                              ? h('span', { className:'text-[10px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-800 border border-sky-200 whitespace-nowrap',
-                                  title:'ประวัติจากระบบ Ecount — จ่ายใน Ecount ไม่มีใบสำคัญจ่าย (PV) ในระบบนี้ · ดู/พิมพ์ใบตั้งหนี้ได้จากคอลัมน์ PI · ยกเลิก/แนบสลิปไม่ได้' }, '📥 ประวัติ Ecount')
+                              ? h('div', { className:'flex gap-1 justify-center items-center flex-wrap' },
+                                  h('span', { className:'text-[10px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-800 border border-sky-200 whitespace-nowrap',
+                                  title:'ประวัติจากระบบ Ecount — จ่ายใน Ecount ไม่มีใบสำคัญจ่าย (PV) ในระบบนี้ · ดู/พิมพ์ใบตั้งหนี้ได้จากคอลัมน์ PI · แนบสลิปไม่ได้' }, '📥 ประวัติ Ecount'),
+                                  // 🆕 MIG_AP_NORMAL N5: Ecount บันทึกจ่ายแต่จริงยังไม่จ่าย → ยกเลิกการจ่าย (ผจก.บัญชี/GM) → ใบกลับไปรอจ่าย
+                                  r.inv && global.ERP.migApPayCan(state, user, r.inv, false) && h('button', { onClick:()=>global.ERP.migApPayAsk(state, dispatch, user, r.inv, false),
+                                    'data-testid':'paid-mig-unpay', title:'Ecount บันทึกว่าจ่ายแล้ว แต่จริงยังไม่จ่าย — ใบกลับไปรอจ่าย (JE เพิ่มเจ้าหนี้ยกมา Dr 3900 / Cr 2100)',
+                                    className:'text-[10px] px-1.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded no-underline whitespace-nowrap' }, '🔄 ยกเลิกการจ่าย (Ecount)'))
                               : h('span', { className:'text-[10px] text-gray-400', title:'จ่ายจากเงินสดย่อยแบบเดิม — จัดการที่แท็บ 💵 เงินสดย่อย' }, 'เงินสดย่อย (เดิม)')));
                     })))),
           h(Pager, { pg, label: view === 'petty' ? 'PV เงินสดย่อย' : 'รายการที่จ่ายแล้ว' })),
@@ -88071,10 +88443,81 @@ function PaidPaymentsTab({ state, dispatch, user }){
   );
 }
 
+// 🆕 MIG_AP_NORMAL N5: ใบนำเข้า Ecount — ถามเหตุผล → 🔄 ยกเลิกการจ่าย (Ecount) / ✅ จ่ายแล้วก่อนตัดระบบ (ผจก.บัญชี/GM)
+//   ใช้ร่วม: หน้ารายละเอียดใบตั้งหนี้ (mod-purchase) · แท็บ ✅ รายการที่จ่ายแล้ว · คิว 💰 รอจ่าย
+// 🆕 MIG_AP_NORMAL UAT SF2: ↩️ ย้อนไปตั้งหนี้/ยกเลิก INV จากฝั่งบัญชี ผ่านสายอนุมัติ delete_inv เหมือนปุ่มในหน้ารายละเอียด PI (mod-purchase)
+//   คืน 'sent' (ส่งคำขออนุมัติแล้ว/ถูกบล็อก) · 'rejected' (reducer ปฏิเสธ — แจ้งแล้ว) · 'done' (ทำแล้ว)
+global.ERP.voidInvViaApproval = function(state, dispatch, user, inv, reason){
+  const E = global.ERP;
+  const _vAct = { type:'VOID_INV', data:{ invId:inv.id, reason, by:user.username } };
+  const sent = E.requestApprovalIfNeeded && E.requestApprovalIfNeeded({ direct:true, directAct:_vAct,
+    action:'delete_inv', user, state, dispatch,
+    context:{ entityType:'inv', entityId:inv.id, entityRef:inv.invNumber, scope:'accounting', amount: inv.netPayable||0,
+      wasPaid: (Number(inv.paidAmount) || 0) > 0, reason:`${(Number(inv.paidAmount) || 0) > 0 ? 'ยกเลิก INV' : '↩️ ย้อนไปตั้งหนี้'}: ${inv.invNumber} · ${reason}`, payload:{ invId: inv.id, reason } } });
+  if(sent) return 'sent';
+  const _gmV = E.gmDirectLast && E.gmDirectLast();
+  try { const _cs = { ...state, currentUser: state.currentUser || user };
+    if(E.reducer && E.reducer(_cs, _vAct) === _cs){ if(_gmV && E.gmDirectFail) E.gmDirectFail('ระบบไม่รับการยกเลิก ' + inv.invNumber, dispatch); return 'rejected'; } } catch(_e){}
+  dispatch(_vAct);
+  return 'done';
+};
+// 🆕 MIG_AP_NORMAL UAT SF3: ใบนำเข้าที่มีค่าบริการ (ค่าส่ง ฯลฯ) — บอกผู้ใช้ว่ายกไปต่อท้าย GR ให้ตั้งหนี้ใหม่ได้ยอดครบ
+global.ERP.migChargeNote = function(inv){
+  const _m = !!(inv && global.ERP.invIsMigrated && global.ERP.invIsMigrated(inv));
+  const c = _m ? (inv.lines||[]).filter(l => l && l.lineKind === 'charge') : [];
+  // 🆕 verify F2/F7: ส่วนลดท้ายบิลของใบนำเข้า → หักลงบรรทัด GR ตอนย้อนแล้ว (VOID_INV) · ห้ามกรอกซ้ำตอนตั้งหนี้ใหม่
+  const d = _m ? (Number(inv.billDiscount && inv.billDiscount.amount) || 0) : 0;
+  return (c.length ? '\n• ค่าบริการในใบนี้ ' + c.map(l => (l.itemName || 'ค่าบริการ') + ' ' + fmtCur(Number(l.lineTotal)||0)).join(', ') + ' บาท — ยกไปต่อท้าย GR ให้ตั้งหนี้ใหม่ได้ยอดครบ (ตรวจยอดก่อนบันทึก)' : '')
+    + (d > 0.005 ? '\n• ใบเดิมมีส่วนลดท้ายบิล ' + fmtCur(d) + ' บาท — หักในยอด GR ให้แล้ว (ยอดตั้งหนี้ใหม่เท่าใบเดิม) · ไม่ต้องกรอก "ส่วนลดท้ายบิลตามใบกำกับ" ซ้ำ ยกเว้นผู้ขายลดเพิ่ม' : '');
+};
+// 🆕 MIG_AP_NORMAL UAT SF4: กล่องแดงบนหน้าจ่าย/อนุมัติจ่าย — ใบที่ Ecount เคยบันทึกว่าจ่ายแล้ว แต่ถูกยกเลิกการจ่าย (กันจ่ายซ้ำ)
+global.ERP.EcountRevWarn = function({ invs }){
+  const xs = (invs || []).filter(i => i && i.ecountPayReversed);
+  if(!xs.length) return null;
+  return h('div', { className:'bg-red-50 border-2 border-red-400 rounded p-2 text-xs text-red-800', 'data-testid':'pay-ecount-reversed-warn' },
+    h('div', { className:'font-bold' }, '⚠️ Ecount เคยบันทึกว่าจ่ายแล้ว — ตรวจสมุดธนาคาร/ใบจ่าย Ecount ก่อนจ่ายซ้ำ'),
+    xs.map(i => { const r = i.ecountPayReversed, ep = (r.prev || {}).ecountPay || {};
+      return h('div', { key:i.id }, `• ${i.invNumber || i.id}: Ecount จ่าย ${fmtCur(Number((r.prev || {}).paidAmount) || 0)}${ep.voucher ? ' (ใบจ่าย ' + ep.voucher + (ep.date ? ' ' + fmtDate(ep.date) : '') + ')' : ''} · ยกเลิกการจ่ายโดย ${r.by || '-'} — ${r.reason || ''}`); }));
+};
+global.ERP.migApPayCan = function(state, user, inv, mark){
+  const E = global.ERP;
+  return !!(inv && user && E.taxInvOverrideApprover && E.taxInvOverrideApprover(user) && E.migApPayDeny
+    && !E.migApPayDeny(state, mark ? 'MIG_AP_MARKPAID' : 'MIG_AP_UNPAY', { invId:inv.id, reason:'(ตรวจปุ่ม)', by:user.username }, user));
+};
+global.ERP.migApPayAsk = function(state, dispatch, user, inv, mark){
+  const E = global.ERP, type = mark ? 'MIG_AP_MARKPAID' : 'MIG_AP_UNPAY', no = inv.invNumber || inv.id;
+  const pre = E.migApPayDeny(state, type, { invId:inv.id, reason:'(ตรวจปุ่ม)', by:user.username }, user);
+  if(pre){ alert('⛔ ' + pre); return; }
+  const amt = mark ? (Number(inv.netPayable)||0) - (Number(inv.paidAmount)||0) : (Number(inv.paidAmount)||0);
+  const reason = prompt(mark
+    ? `✅ ${no} จ่ายจริงแล้วก่อนตัดระบบ?\n\n• ใบนี้เปลี่ยนเป็น "จ่ายแล้ว" ${fmtCur(amt)} บาท — ไม่สร้าง PV · ไม่แตะเงินธนาคาร\n• JE ลดเจ้าหนี้ยกมา Dr 2100 / Cr 3900\n\nเหตุผล (เช่น "บัญชีตรวจสมุดธนาคาร จ่ายแล้ว 28/08/2569"):`
+    : `🔄 ยกเลิกการจ่าย (Ecount) ${no}?\n\n• Ecount บันทึกว่าจ่ายแล้ว แต่จริงยังไม่จ่าย → ใบกลับไปรอจ่าย ${fmtCur(amt)} บาท\n• JE เพิ่มเจ้าหนี้ยกมา Dr 3900 / Cr 2100\n• ใบที่ Ecount บันทึกจ่าย ถือว่าภาษีซื้อยื่นใน ภ.พ.30 ของ Ecount แล้ว — ใบมี VAT ย้อนไปตั้งหนี้ไม่ได้ (จ่ายตามใบนี้ · ยอดผิดทำ CN/DN)\n• จากนั้นจ่ายตามปกติ (ใบไม่มี VAT ↩️ ย้อนไปตั้งหนี้ได้)\n\nเหตุผล (เช่น "บัญชีตรวจสมุดธนาคาร ยังไม่ได้โอน"):`, '');
+  if(reason === null) return;
+  if(reason.trim().length < 5){ alert('ใส่เหตุผลอย่างน้อย 5 ตัวอักษร'); return; }
+  // 🆕 MIG_AP_NORMAL UAT SF4: บันทึกจ่ายแล้ว ต้องมีวันที่จ่ายจริง (ตรวจย้อนกับสมุดธนาคารได้) · รับ 2569-09-28 / 28/09/2569 / 2026-09-28
+  let paidDate = '';
+  if(mark){
+    const pd = prompt(`📅 วันที่จ่ายจริงของ ${no} (ก่อนตัดระบบ) — เช่น 28/09/2569:`, '');
+    if(pd === null) return;
+    const m1 = /^\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*$/.exec(pd), m2 = /^\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/.exec(pd);
+    let y = 0, mo = 0, dd = 0;
+    if(m1){ y = +m1[1]; mo = +m1[2]; dd = +m1[3]; } else if(m2){ y = +m2[3]; mo = +m2[2]; dd = +m2[1]; }
+    if(y > 2400) y -= 543;
+    const iso = y ? y + '-' + String(mo).padStart(2,'0') + '-' + String(dd).padStart(2,'0') : '';
+    const dt = iso ? new Date(iso + 'T00:00:00Z') : null;
+    if(!dt || isNaN(dt) || dt.toISOString().slice(0,10) !== iso || iso > getToday()){ alert('วันที่จ่ายไม่ถูกต้อง (ต้องเป็นวันที่จริง ไม่เกินวันนี้ เช่น 28/09/2569)'); return; }
+    paidDate = iso;
+  }
+  const act = { type, data:{ invId:inv.id, reason:reason.trim(), by:user.username, at:Date.now(), ...(paidDate ? { paidDate } : {}) } };
+  try { if(E.reducer && E.reducer(state, act) === state) return; } catch(_e){}   // ถูกปฏิเสธ → reducer แจ้งแล้ว
+  dispatch(act);
+  alert(mark ? `✅ ${no} บันทึกว่าจ่ายแล้ว (ก่อนตัดระบบ) — ขึ้นในแท็บ ✅ รายการที่จ่ายแล้ว` : `✅ ${no} กลับไปรอจ่ายแล้ว — ดูที่คิว 💰 รอจ่าย`);
+};
+
 // ==================== REGISTER ====================
 // 🆕 export AssetEditModal — ให้หน้า "💎 ทรัพย์สินรอบันทึก" ฝั่งคลัง (mod-stock) เปิดฟอร์มลงทะเบียนได้เมื่อโมดูลบัญชีโหลดอยู่
 // 🆕 ACCT-V2: export ExpenseItemEditModal — ให้ DirectExpenseModal (mod-purchase) กด "+ เพิ่มในทะเบียน" เปิดฟอร์มรายการรายจ่ายได้
-global.ERP.registerModule('accounting', { main: AccountingModule, AssetEditModal, ExpenseItemEditModal, TaxInvEntryModal });   // 🆕 VAT-CLAIM V5: TaxInvEntryModal (claimYm) ให้ป๊อปอัป/เทสต์เรียกได้
+global.ERP.registerModule('accounting', { main: AccountingModule, AssetEditModal, ExpenseItemEditModal, TaxInvEntryModal, INVQueueTab, AutoPostModal });   // verify F3/F5: INVQueueTab/AutoPostModal ให้เทสต์เรียกได้   // 🆕 VAT-CLAIM V5: TaxInvEntryModal (claimYm) ให้ป๊อปอัป/เทสต์เรียกได้
 
 })(window);
 
@@ -100587,7 +101030,7 @@ const _WIPE_TODO = ['① นำเข้าผู้ขาย/ลูกค้า
   '② ผูกสูตร (BOM/สูตรชั่ง) เดิมกับสินค้าใหม่ตามรหัสสินค้า: ไฟล์ boms-relink.json (ทำจากไฟล์สำรองก่อนล้าง) → "🔀 Merge (เฉพาะส่วน)" — ระบบไม่ยอมถ้าสูตรอ้างสินค้าที่ไม่มี · หน้ายืนยันต้องขึ้น "สูตรผูกได้ N/M (สูตรชั่ง k)" ครบ ถ้าไม่ครบ (🔴) ดูชีต "สูตรที่ไม่นำเข้า" แล้วคีย์สูตรนั้นใหม่',
   '②ก (UAT S3 รายการโปรดบริษัท) หลัง Merge boms-relink.json: GM ผูกชุดรายการโปรดบริษัท (แผนกขนมปัง/เค้ก/บราวนี่/ชั่งวัดตวง) กับไลน์ของแต่ละชุดที่ ⚙️ ตั้งค่า → 🏢 สาขา → ⭐ รายการโปรดบริษัท → เลือกชุด → ผูกไลน์ → 💾 — ไม่ผูก = ทุกไลน์เห็นชุดแรกตามชื่อ (ข้ามได้ถ้ารันผูกสูตรด้วย --company-fav-line แล้ว)',
   '③ นำเข้าประวัติซื้อ + เจ้าหนี้ค้างจ่ายยกมา: ไฟล์ history-import.json → "🔀 Merge (เฉพาะส่วน)" (ระบบไม่ยอมถ้าเอกสารอ้างผู้ขาย/สินค้าที่ยังไม่มี) · ห้ามแก้สินค้าระหว่าง ①–③'
-    + ' · (UAT MF1) ถ้านำเข้า ③ รุ่นเก่าไปแล้ว (ใบค้างจ่ายขึ้น "ยื่นใน Ecount แล้ว"): ผจก.บัญชี/GM เปิด Tax INV ของใบค้างจ่ายใบใดก็ได้ → กด "📥 ปรับเจ้าหนี้ค้างจ่ายยกมาทั้งหมด" ครั้งเดียว',
+    + ' · (MIG_AP_NORMAL) ใบค้างจ่ายที่ได้ใบกำกับแล้ว → ↩️ ย้อนไปตั้งหนี้ (รอจ่าย/หน้า PI/หน้าคีย์ใบกำกับ) แล้วตั้งหนี้ใหม่พร้อมคีย์ใบกำกับ (ภาษีซื้อเข้างวดตามวันที่ที่คีย์)',
   '④ นับสต๊อกจริงเช้า 1 ต.ค. เป็นยอดยกมา (📋 นับสต๊อก ทุกคลัง/สาขา)',
   '⑤ ผจก.บัญชี ตั้งยอดยกมา 2100 = ยอดเจ้าหนี้ค้างจ่ายยกมา (ตามชีตกระทบยอด) ส่วนต่าง 3900 ก่อนจ่ายใบแรก — ใบนำเข้าไม่มี JE (ไม่ตั้ง = จ่ายใบยกมาแล้ว 2100 ติดลบ)'
     + ' · (UAT SF1) ในยอดยกมาเดียวกัน Dr 1150 ภาษีซื้อ = VAT รวมของเจ้าหนี้ค้างจ่ายยกมาที่ยังไม่เคลม (รายงานนำเข้า แถว "ภาษีซื้อยังไม่เคลม…") ไม่งั้น 1150 ไม่ตรง ภ.พ.30 ต.ค.',
@@ -104310,7 +104753,7 @@ C.registerGroup({
         const poMap = ctx.memo('acct.poMap', () => new Map((ctx.state.pos||[]).map(p => [p.id, p])));
         const amt = (g) => (g.totalValue != null ? _num(g.totalValue) : _num(g.total));
         const l = (ctx.state.grs||[]).filter(g => {
-          if(!g || g.voided || g.invoiceId || !g.supplierId || isMig(g)) return false;
+          if(!g || g.voided || g.invoiceId || !g.supplierId || global.ERP.grMigApHeld(g)) return false;   // 🆕 verify F6: GR นำเข้าที่ ↩️ ย้อนแล้ว = รอตั้งหนี้ (ตรง badge)
           if(g.isReplacement && !g.replacementNeedsPI) return false;
           if(g.poId){ const po = poMap.get(g.poId); if(po && po.advanceInvCreated && po.invoiceId) return false; }
           return true;
@@ -104370,7 +104813,7 @@ C.registerGroup({
     { key:'acct_mig_unpaid_vat_no_taxinv', label:'ใบยกมาจาก Ecount ที่ยังไม่จ่าย มี VAT แต่ไม่มีเลขใบกำกับ — ยืนยันกับ Ecount', severity:'info',
       show: (ctx) => ctx.can('accounting') && ctx.perm('accounting','vatByInv','view'),
       nav: (ctx) => ({ tab:'accounting', subs:{ acct:'vatByInv' } }),
-      hint: (ctx, res) => `เทียบรายการนี้กับรายงานภาษีซื้อของ Ecount (เดือนที่ยื่นก่อนย้ายระบบ) ทีละใบ — ใบที่ Ecount เคลมแล้วไม่ต้องทำอะไร · ใบที่ Ecount ยังไม่เคลม ให้ ผจก.บัญชี แจ้ง admin พร้อมหลักฐาน (ในระบบนี้คีย์ใบกำกับของใบยกมาไม่ได้ กันเคลมซ้ำ) · VAT รวม ${fmtCur(res.amount||0)}`,
+      hint: (ctx, res) => `เทียบรายการนี้กับรายงานภาษีซื้อของ Ecount (เดือนที่ยื่นก่อนย้ายระบบ) ทีละใบ — ใบที่ Ecount เคลมแล้วไม่ต้องทำอะไร · ใบที่ Ecount ยังไม่เคลม (ยังไม่จ่าย) → ↩️ ย้อนไปตั้งหนี้ แล้วตั้งหนี้ใหม่จาก GR พร้อมคีย์เลข/วันที่/VAT ตามใบกำกับ (เคลมตามวันที่ที่คีย์) · VAT รวม ${fmtCur(res.amount||0)}`,
       run: (ctx) => {
         const l = liveInvs(ctx).filter(i => vatEc(i) && _num(i.vat) > 0.005 && !_s(i.supTaxInvNumber)   // ใบย้ายมาเคลมที่นี่ (vatClaimHere) ไม่ต้องยืนยันกับ Ecount
           && _num(i.paidAmount) < (i.netPayable != null ? _num(i.netPayable) : _num(i.total != null ? i.total : _num(i.amount) + _num(i.vat))) - 0.01)
@@ -104432,7 +104875,7 @@ C.registerGroup({
     { key:'acct_mig_vat_no_taxinv', label:'PI จาก Ecount มี VAT แต่ยังไม่มีใบกำกับ — ตรวจว่า Ecount เคลมแล้วหรือยัง', severity:'warn',
       show: (ctx) => ctx.can('accounting') && ctx.perm('accounting','vatByInv','view'),
       nav: (ctx) => ({ tab:'accounting', subs:{ acct:'vatByInv' } }),
-      hint: (ctx, res) => `เทียบแต่ละใบกับรายงานภาษีซื้อ Ecount เดือนที่ตั้งหนี้ · Ecount เคลมแล้ว = ไม่ต้องทำอะไร · ยังไม่เคลม (ใบกำกับมาหลัง cutover) = ผจก.บัญชี ลง JE ภาษีซื้อด้วยมืออ้างเลขใบกำกับ + ใส่ในรายงานภาษีซื้อเดือนที่ได้รับ (คีย์ใบกำกับที่ PI เดิมไม่ได้ — กันเคลมซ้ำกับ Ecount) · VAT ${fmtCur(res.amount||0)}`,
+      hint: (ctx, res) => `เทียบแต่ละใบกับรายงานภาษีซื้อ Ecount เดือนที่ตั้งหนี้ · Ecount เคลมแล้ว = ไม่ต้องทำอะไร · ยังไม่เคลม: ใบยังไม่จ่าย → ↩️ ย้อนไปตั้งหนี้ แล้วตั้งหนี้ใหม่จาก GR พร้อมคีย์เลข/วันที่/VAT ตามใบกำกับ (เคลมตามวันที่ที่คีย์ · ห้ามลง JE มือซ้ำ) · ใบจ่ายแล้วเท่านั้น = ผจก.บัญชี ลง JE ภาษีซื้อด้วยมืออ้างเลขใบกำกับ + ใส่ในรายงานภาษีซื้อเดือนที่ได้รับ · VAT ${fmtCur(res.amount||0)}`,
       run: (ctx) => {
         const l = liveInvs(ctx).filter(i => vatEc(i) && _num(i.vat) > 0.005 && !_s(i.supTaxInvNumber));   // ใบย้ายมาเคลมที่นี่ไม่นับ
         return { count:l.length, amount:l.reduce((t,i) => t + _num(i.vat), 0), detail:l.map(i => `${invLabel(ctx,i)} · VAT ${fmtCur(i.vat)}`) };
@@ -107914,7 +108357,7 @@ C.registerGroup({
       run: (ctx) => {
         const posById = ctx.memo('adm.posById', () => new Map(A(ctx.state.pos).map(p => [p.id, p])));
         const l = A(ctx.state.grs).filter(g => {
-          if(g._migrated || g.invoiceId || !g.supplierId || g.voided || !ctx.inScope(g.branch)) return false;
+          if(global.ERP.grMigApHeld(g) || g.invoiceId || !g.supplierId || g.voided || !ctx.inScope(g.branch)) return false;
           if(g.isReplacement && !g.replacementNeedsPI) return false;
           if(g.poId){ const po = posById.get(g.poId); if(po && po.advanceInvCreated && po.invoiceId) return false; }
           return true; });
