@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="2303f517ee6f";window.__ERP_BUILT_AT__="2026-10-05T10:30:20";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="82a3608e1ccf";window.__ERP_BUILT_AT__="2026-10-05T13:08:48";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -8787,10 +8787,129 @@ function RenumBadge({ doc, long }){
     long ? `🔢 เลขเดิม ${from} (เปลี่ยนเพราะชนกับเครื่องอื่น)` : `🔢 เดิม ${from}`);
 }
 
+// 🆕 DOC-TAGS D1 (DOC_TAGS_CONTRACT): แท็กกลาง (ทะเบียนเดียว state.payTags) ใช้ทั้ง PO / PI / การจ่าย
+//   สิทธิ์เพิ่มแท็กใหม่ = คนที่สร้าง/แก้เอกสารที่ติดแท็กได้ (ตรงกับ reducer ADD_PAY_TAG)
+function canAddPayTag(user){
+  return !!user && (isSuperUser(user) || hasPerm(user, 'purchase', 'payment', 'create') || hasPerm(user, 'accounting', 'payment', 'create')
+    || hasPerm(user, 'accounting', 'payApprove', 'approve') || hasPerm(user, 'accounting', 'payment', 'edit')
+    || hasPerm(user, 'purchase', 'po', 'create') || hasPerm(user, 'purchase', 'po', 'edit')
+    || hasPerm(user, 'purchase', 'inv', 'create') || hasPerm(user, 'purchase', 'inv', 'edit'));
+}
+// สิทธิ์แก้แท็กเอกสารทีหลัง (SET_DOC_TAG): PO = แก้ PO ได้ · PI = แก้ PI ได้ · หรือบัญชี (accounting.payment.edit) · superuser
+function canSetDocTag(user, kind){
+  return !!user && (isSuperUser(user) || hasPerm(user, 'purchase', kind === 'po' ? 'po' : 'inv', 'edit') || hasPerm(user, 'accounting', 'payment', 'edit'));
+}
+const _tagNorm = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+// ชื่อแท็กของเอกสาร: ทะเบียนปัจจุบันก่อน → snapshot tagName → id · ไม่มีแท็ก = null
+function docTagOf(state, doc){
+  if(!doc || !doc.tagId) return null;
+  const tags = (state && state.payTags) || [];
+  const t = tags.find(x => x && x.id === doc.tagId);
+  if(t) return { id:t.id, name:t.name || doc.tagName || doc.tagId };
+  // UAT S3: id ไม่อยู่ในทะเบียน (2 เครื่องสร้างชื่อเดียวกันพร้อมกัน → ตัวหลังถูกตัดเป็นชื่อซ้ำ) = โยงไปแท็กที่ชื่อตรงกัน (ตัวกรอง/รายงานนับรวมกัน)
+  const k = _tagNorm(doc.tagName).toLowerCase();
+  const byName = k ? (tags.find(x => x && x.active !== false && _tagNorm(x.name).toLowerCase() === k) || tags.find(x => x && _tagNorm(x.name).toLowerCase() === k)) : null;
+  if(byName) return { id:byName.id, name:byName.name };
+  return { id:doc.tagId, name:doc.tagName || doc.tagId };
+}
+// 🆕 DOC-TAGS D3/D4: แท็กร่วมของเอกสารหลายใบ (PO ที่ผูก / ใบตั้งหนี้ที่เลือก)
+//   คืน { tag:{id,name}|null, mixed:bool, counts:[{ name, n }] } · ทุกใบแท็กเดียวกัน (รวมกรณีใบเดียว) = tag นั้น · ต่างกัน/บางใบไม่มี = mixed
+function commonDocTag(state, docs){
+  const list = (docs || []).filter(Boolean);
+  const by = new Map();
+  for(const d of list){ const t = docTagOf(state, d); const k = t ? t.id : ''; const e = by.get(k) || { tag:t, n:0 }; e.n++; by.set(k, e); }
+  const counts = Array.from(by.values()).map(e => ({ name: e.tag ? e.tag.name : 'ไม่ระบุ', n:e.n, id: e.tag ? e.tag.id : null }));
+  if(by.size === 1){ const only = by.values().next().value; return { tag: only.tag, mixed:false, counts }; }
+  return { tag:null, mixed: by.size > 1, counts };
+}
+// ค่าเริ่มแท็กตอนตั้งหนี้ = แท็กของ PO ที่ผูก (poIds) · PO แท็กต่างกัน = ว่าง + hint
+function poTagDefault(state, poIds){
+  const ids = Array.from(new Set((poIds || []).filter(Boolean)));
+  const pos = ids.map(id => ((state && state.pos) || []).find(p => p && p.id === id)).filter(Boolean);
+  const r = commonDocTag(state, pos);
+  return { tag: r.tag, mixed: r.mixed && r.counts.some(c => c.id),
+    hint: (r.mixed && r.counts.some(c => c.id)) ? ('PO มีแท็กต่างกัน: ' + r.counts.map(c => c.name + (c.n > 1 ? ' (' + c.n + ' ใบ)' : '')).join(' · ') + ' — เลือกแท็กของใบนี้เอง') : '' };
+}
+function DocTagChip({ state, doc, empty }){
+  const t = docTagOf(state, doc);
+  if(!t) return empty ? h('span', { className:'text-[10px] text-gray-400', 'data-testid':'doc-tag-chip-none' }, '🏷️ ไม่ระบุ') : null;
+  return h('span', { className:'inline-block text-[10px] bg-violet-100 text-violet-800 border border-violet-200 rounded px-1.5 py-0.5 whitespace-nowrap',
+    'data-testid':'doc-tag-chip', title:'แท็ก (ใช้ดึงรายงาน)' }, '🏷️ ', t.name);
+}
+// ตัวเลือกแท็ก: — ไม่ระบุ — / แท็กในทะเบียน / ＋ เพิ่มแท็กใหม่… (ชื่อซ้ำ = เลือกตัวเดิม · ADD_PAY_TAG)
+//   value = { id, name } | null — เก็บทั้งก้อน เผื่อแท็กที่เพิ่งสร้างยังไม่อยู่ใน state รอบ render นี้ · onChange(tag|null)
+function TagSelect({ state, dispatch, user, value, onChange, testid, className, autoFocus, onBlur, disabled }){
+  const tags = ((state && state.payTags) || []).filter(t => t && t.active !== false);
+  const vid = (value && value.id) || '';
+  const pick = (v) => {
+    if(v !== '__new__'){
+      if(!v) return onChange(null);
+      const t = ((state && state.payTags) || []).find(x => x && x.id === v);
+      return onChange(t ? { id:t.id, name:t.name } : (value && value.id === v ? value : null));
+    }
+    const raw = global.prompt ? global.prompt('🏷️ ชื่อแท็กใหม่ (ไม่เกิน 40 ตัวอักษร)', '') : null;
+    if(raw == null) return;   // กดยกเลิก = คงค่าเดิม
+    const name = _tagNorm(raw);
+    if(!name) return alert('⛔ ใส่ชื่อแท็กก่อน');
+    if(name.length > 40) return alert('⛔ ชื่อแท็กยาวเกิน 40 ตัวอักษร');
+    const ex = ((state && state.payTags) || []).find(x => x && _tagNorm(x.name).toLowerCase() === name.toLowerCase());
+    if(ex) return onChange({ id:ex.id, name:ex.name });   // ชื่อซ้ำ = ใช้ตัวเดิม
+    const act = { type:'ADD_PAY_TAG', data:{ tag:{ id: genId('ptag'), name }, by:(user && user.username) || '', at:Date.now() } };
+    if(global.ERP.reducer && global.ERP.reducer(state, act) === state) return;   // reducer แจ้งเหตุผลแล้ว (สิทธิ์ ฯลฯ)
+    dispatch(act);
+    onChange({ id:act.data.tag.id, name });
+  };
+  return h('select', { value:vid, disabled:!!disabled, autoFocus:!!autoFocus, onBlur, onChange:e => pick(e.target.value),
+      'data-testid':testid || 'tag-select', className:className || 'w-full px-2 py-1.5 border rounded text-sm bg-white' },
+    h('option', { value:'' }, '— ไม่ระบุ —'),
+    tags.map(t => h('option', { key:t.id, value:t.id }, t.name)),
+    vid && !tags.some(t => t.id === vid) && h('option', { key:vid, value:vid }, (value && value.name) || vid),
+    canAddPayTag(user) && h('option', { value:'__new__' }, '＋ เพิ่มแท็กใหม่…'));
+}
+// ปุ่ม 🏷️ แก้แท็กทีหลัง (PO / PI) → SET_DOC_TAG ทันที (ไม่แตะเงิน/JE) · เอกสารยกเลิกแล้ว/ไม่มีสิทธิ์ = ไม่แสดง
+function DocTagEdit({ state, dispatch, user, kind, doc }){
+  const [open, setOpen] = useState(false);
+  if(!doc || !canSetDocTag(user, kind)) return null;
+  if(kind === 'po' ? doc.status === 'cancelled' : (doc.voided || doc.status === 'cancelled' || doc.status === 'voided')) return null;
+  const cur = docTagOf(state, doc);
+  // UAT S1: แก้แท็กที่ใบนี้ไม่ตามไปใบที่ผูก (สัญญา D4/D5) → บอกว่าใบไหนยังเป็นแท็กเดิม (เตือนอย่างเดียว ไม่แตะข้อมูล)
+  const curId = (cur && cur.id) || '';
+  const diff = (d) => (((docTagOf(state, d) || {}).id) || '') !== curId;
+  let note = '';
+  if(kind === 'po'){
+    const n = ((state && state.invoices) || []).filter(i => i && !i.voided && i.status !== 'cancelled'
+      && (i.poId === doc.id || (i.poIds || []).includes(doc.id) || doc.invoiceId === i.id) && diff(i)).length;
+    if(n) note = 'ใบตั้งหนี้ ' + n + ' ใบยังเป็นแท็กเดิม — แก้ที่ใบตั้งหนี้';
+  } else {
+    const ids = (p) => p.invId ? [p.invId] : (p.invoiceIds || (p.invoiceId ? [p.invoiceId] : []));
+    const hit = ((state && state.payments) || []).some(p => p && !p.voided && !p.reversed && !['rejected','cancelled','voided'].includes(p.status) && !['rejected','cancelled'].includes(p.approvalStatus) && ids(p).includes(doc.id) && diff(p));
+    if(hit) note = 'การจ่ายยังเป็นแท็กเดิม — แก้ที่แท็บจ่ายแล้ว 🏷️';
+  }
+  const noteEl = note && h('span', { className:'ml-1 text-[10px] text-amber-700', 'data-testid':'doc-tag-linked-note' }, '⚠️ ', note);
+  const setTag = (t) => {
+    setOpen(false);
+    if(((cur && cur.id) || null) === ((t && t.id) || null)) return;
+    dispatch({ type:'SET_DOC_TAG', data:{ kind, id:doc.id, tagId:t ? t.id : null, ...(t ? { tagName:t.name } : {}), by:user.username, at:Date.now() } });
+  };
+  if(!open) return h('span', null, h('button', { type:'button', onClick:() => setOpen(true), 'data-testid':'doc-tag-edit', title:'แก้แท็ก (ใช้ดึงรายงาน)',
+    className:'text-[11px] px-1.5 py-0.5 border border-violet-200 text-violet-700 rounded hover:bg-violet-50' }, '🏷️ แก้แท็ก'), noteEl);
+  return h('span', null, h(TagSelect, { state, dispatch, user, value:cur, onChange:setTag, autoFocus:true, onBlur:() => setOpen(false),
+    testid:'doc-tag-edit-select', className:'text-[11px] px-1 py-0.5 border border-violet-300 rounded bg-white max-w-[12rem]' }), noteEl);
+}
+
+// 🆕 DOC-TAGS D3: ช่อง "🏷️ แท็ก" ในฟอร์มสร้าง PI (ไม่บังคับ) · hint = ข้อความใต้ช่อง (เช่น PO มีแท็กต่างกัน)
+function InvTagField({ state, dispatch, user, value, onChange, hint, note, testid }){
+  return h('div', { 'data-testid':(testid || 'inv-tag') + '-field' },
+    h('label', { className:'block text-xs font-medium mb-1' }, '🏷️ แท็ก ', h('span', { className:'text-gray-400 font-normal' }, note || '(ไม่บังคับ · ใช้ดึงรายงาน)')),
+    h(TagSelect, { state, dispatch, user, value, onChange, testid:(testid || 'inv-tag') + '-select', className:'w-full sm:w-72 px-2 py-1.5 border-2 rounded text-sm bg-white' }),
+    hint && h('div', { className:'text-[11px] text-amber-700 mt-1', 'data-testid':(testid || 'inv-tag') + '-hint' }, '⚠️ ', hint));
+}
+
 // ==================== EXPORT ====================
 global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
   docRenumFrom, docNumMatches, RenumBadge,
+  canAddPayTag, canSetDocTag, docTagOf, commonDocTag, poTagDefault, InvTagField, DocTagChip, TagSelect, DocTagEdit,   // 🆕 DOC-TAGS D1/D5
   invVatInEcount, invVatHereMoved, invVatHereAuto, MIG_VAT_HERE_FROM_YM,   // 🆕 MIG_VAT_HERE V1
   siIsMigrated, siVatExcluded, siAwaitingDue, siOverdue, siArUnsettled,   // 🆕 SALES_HISTORY: ใบขายประวัติ Ecount
   // React bits
@@ -11496,7 +11615,7 @@ Object.assign(global.ERP, {
   // เล่น entries บนฐาน · ref = ก้อนที่ผู้ใช้เห็นตอนแก้ (เช็ก replace / นับสต๊อก) · คืน {ok, state, renum} | {ok:false, reason}
   //   numMap0 = เลขที่เปลี่ยนไปแล้วในรอบก่อน (งานที่กดระหว่าง rebase อ้างเลขเดิม) · cmpBase = ก้อน cloud "ก่อนเล่นงานของเรา" ใช้เทียบว่าเครื่องอื่นแก้อะไร
   //   (verify คลื่น 2: รอบเล่นงานที่กดระหว่าง rebase เดิมเทียบกับก้อนในเครื่อง → เวลา/เลขที่ reducer ออกใหม่ต่างกัน = ฟ้อง "มีคนแก้" ผิด ๆ)
-  var _DROP_IF_REJECTED = { REVIEW_WEIGH_LOG:'weigh_review_lost', MARK_WEIGH_REPRINT:'weigh_reprint_lost', SET_PAY_TAG:'pay_tag_lost' };   // verify PAY-TAGS: แท็ก = ข้อมูลรายงาน แพ้แล้วทิ้ง+แจ้ง ไม่ลากงานอื่นไปงานค้าง
+  var _DROP_IF_REJECTED = { REVIEW_WEIGH_LOG:'weigh_review_lost', MARK_WEIGH_REPRINT:'weigh_reprint_lost', SET_PAY_TAG:'pay_tag_lost', SET_DOC_TAG:'doc_tag_lost' };   // verify PAY-TAGS: แท็ก = ข้อมูลรายงาน แพ้แล้วทิ้ง+แจ้ง ไม่ลากงานอื่นไปงานค้าง
   function _foldEntries(base, entries, ref, numMap0, cmpBase, sameBase){
     var E = global.ERP, pol = E.ACTION_MERGE || {}, red = E.reducer;
     if(!red) return { ok:false, reason:'no-reducer' };
@@ -11515,13 +11634,25 @@ Object.assign(global.ERP, {
         if(p.kind === 'replace'){
           var id; try { id = p.id(data || {}); } catch(_g){ id = null; }
           if(id == null) return { ok:false, reason:'replace-noid:' + e.type };
-          var was = _pickDoc(ref, p.coll, id), cloudDoc = _pickDoc(cmp, p.coll, id);
+          // 🆕 DOC-TAGS D5: coll เป็นฟังก์ชันได้ (SET_DOC_TAG → pos หรือ invoices ตาม kind)
+          var _coll = typeof p.coll === 'function' ? p.coll(data || {}) : p.coll;
+          var was = _pickDoc(ref, _coll, id), cloudDoc = _pickDoc(cmp, _coll, id);
           // เอกสารถูกเครื่องอื่นแก้/ลบ ตั้งแต่ผู้ใช้เปิดมาแก้ → ห้ามทับ ให้คนตัดสิน
           //   (เทียบ "ฐาน cloud" กับ "ที่ผู้ใช้เห็น" — ของที่สมุดเราเองเพิ่งทำอยู่ใน s ไม่ใช่ใน base)
           //   UAT S2 (PAY-TAGS): p.cmpOmit = ช่องที่ไม่นับว่า "ถูกแก้" (แท็กรายงาน ไม่ทำให้อนุมัติจ่ายตกงานค้าง)
           //   p.cmpOnly = เทียบเฉพาะช่องเหล่านี้ (แก้แท็กอย่างเดียว ไม่ชนกับการอนุมัติ — reducer ตรวจสถานะใบจากก้อนจริงอีกชั้น)
           if(!_same(_cmpView(was, p), _cmpView(cloudDoc, p))){
             // verify PAY-TAGS: ใบถูกยกเลิก/ลบ/ปฏิเสธจากเครื่องอื่น หรือเครื่องอื่นติดแท็กเดียวกันแล้ว → ทิ้งงานแก้แท็กนี้ + แจ้ง (ไม่ spill งานเงินอื่น)
+            // 🆕 DOC-TAGS D5: แก้แท็ก PO/PI แบบเดียวกัน — ใบยกเลิก/ลบจากเครื่องอื่น = ทิ้ง+แจ้ง · แท็กตรงกันแล้ว = ข้าม
+            if(e.type === 'SET_DOC_TAG'){
+              var dd = cloudDoc;
+              var _dAlive = dd && dd.status !== 'cancelled' && !dd.voided && dd.status !== 'voided';
+              if(_dAlive && (E.docTagSame ? E.docTagSame(s, dd, data) : (dd.tagId || null) === ((data && data.tagId) || null))) continue;   // verify 1: id กำพร้า+ชื่อตรง = แท็กเดียวกัน
+              if(!_dAlive){
+                dropped.push({ type:e.type, id: data && data.id, why:'doc_tag_lost', ref: dd ? (dd.poNumber || dd.invNumber || dd.id) : (data && data.id), by: (data && data.by) || e.by || null });
+                continue;
+              }
+            }
             if(e.type === 'SET_PAY_TAG'){
               var cd = cloudDoc;
               var _alive = cd && !cd.reversed && !cd.voided && cd.status !== 'cancelled' && cd.approvalStatus !== 'rejected';
@@ -11564,6 +11695,12 @@ Object.assign(global.ERP, {
           if(E.isDupAdd && E.isDupAdd(s, { type:e.type, data:data })) continue;   // มีอยู่แล้ว (เคยลงสำเร็จ)
           if(e.type === 'PRODUCE_FG_TO_LOCATION' && data && data.dedupeKey && (s.fgDispatchKeys || []).indexOf(data.dedupeKey) >= 0) continue;
           // 🌊 คลื่น 4 (B4.2 ข้อ 10): ชุดชั่งถูกตัดสิน/หายไปแล้วจากเครื่องอื่น = ไม่ใช่งานค้าง → ทิ้ง + แจ้ง (ไม่ spill · ไม่ reload)
+          if(e.type === 'SET_DOC_TAG'){   // 🆕 DOC-TAGS D5: ใบยกเลิกแล้ว/สิทธิ์หาย → ทิ้ง+แจ้ง · ค่าเดิมอยู่แล้ว = ข้ามเงียบ
+            var _dc = (s[(data && data.kind) === 'po' ? 'pos' : 'invoices'] || []).find(function(x){ return x && data && x.id === data.id; });
+            if(!(_dc && (E.docTagSame ? E.docTagSame(s, _dc, data) : (_dc.tagId || null) === ((data && data.tagId) || null))))   // verify 1: id กำพร้า+ชื่อตรง = ไม่ใช่แท็กหาย
+              dropped.push({ type:e.type, id: data && data.id, why:'doc_tag_lost', ref: _dc ? (_dc.poNumber || _dc.invNumber || _dc.id) : (data && data.id), by: (data && data.by) || e.by || null });
+            continue;
+          }
           if(e.type === 'SET_PAY_TAG'){   // verify PAY-TAGS: ใบยกเลิก/ปฏิเสธแล้ว · ค่าเดิมอยู่แล้ว (no-op) → ทิ้ง + แจ้ง ไม่ใช่งานค้าง
             var _pp = (s.payments || []).find(function(x){ return x && data && x.id === data.paymentId; });
             if(!(_pp && (_pp.tagId || null) === ((data && data.tagId) || null)))
@@ -11678,6 +11815,12 @@ Object.assign(global.ERP, {
       var key = String(x.deviceId || '') + '|' + String(x.id || ''), w = null;
       try { w = ((st && st.weighLogs) || []).find(function(y){ return y && (String(y.deviceId || '') + '|' + String(y.id)) === key; }) || null; } catch(_f){}
       var lot = (w && w.lot) || x.lot || x.id || '-', line;
+      if(x.type === 'SET_DOC_TAG'){   // 🆕 DOC-TAGS D5
+        line = '🏷️ แก้แท็ก ' + (x.ref || x.id || '-') + ' ไม่ถูกบันทึก — เอกสารถูกยกเลิก/ลบจากเครื่องอื่น หรือสิทธิ์เปลี่ยน (เงินไม่เปลี่ยน)';
+        lines.push(line);
+        try { logAudit({ ts:new Date().toISOString(), action:x.why, label:line.slice(0, 240), ref:String(x.ref || x.id || ''), device:deviceId(), detail:{ by:x.by || null } }); } catch(_l3){}
+        return;
+      }
       if(x.type === 'SET_PAY_TAG'){   // verify PAY-TAGS
         line = '🏷️ แก้แท็กการจ่าย ' + (x.ref || x.id || '-') + ' ไม่ถูกบันทึก — ใบถูกยกเลิก/ปฏิเสธ/ลบจากเครื่องอื่นแล้ว · งานอื่นบันทึกตามปกติ';
         lines.push(line);
@@ -14375,7 +14518,28 @@ function _freezeCusDocs(s, prev, next){
 // 🆕 PAY-TAGS: ชื่อแท็กแบบมาตรฐาน (ตัดหัวท้าย + ช่องว่างซ้ำเหลือช่องเดียว) — ใช้เทียบชื่อซ้ำแบบไม่สนตัวพิมพ์
 function _payTagName(v){ return String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); }
 // UAT M1: หาแท็กในทะเบียนจากชื่อ (ไม่สนตัวพิมพ์/ช่องว่างซ้ำ) — ใช้กันชื่อซ้ำข้ามเครื่อง + โยง tagId ที่ไม่มีในทะเบียนไปตัวที่ชื่อตรงกัน
+// 🆕 DOC-TAGS D2/D3: แท็กบนเอกสาร (PO/PI) จาก payload → { tagId, tagName } · ไม่มี = {}
+function _docTagPick(s, d){
+  const tid = d && d.tagId ? String(d.tagId) : '';
+  if(!tid) return {};
+  const nm = _payTagName(d.tagName || '').slice(0, 40);   // snapshot จากฟอร์ม (ไม่อ่าน payTags → ACTION_READS ของ ADD_PO/UPDATE_PO ไม่เปลี่ยน)
+  return { tagId:tid, ...(nm ? { tagName:nm } : {}) };
+}
+// payload ไม่มีคีย์ tagId = คงแท็กเดิมของเอกสาร (ทางอนุมัติ/รับของ/ยกเลิก ฯลฯ ที่ส่งฉบับเก่าไม่ทำแท็กหาย) · มีคีย์ = ใช้ค่าที่ส่ง (null = ล้าง)
+function _docTagKeep(s, old, next, d){
+  const { tagId:_a, tagName:_b, ...rest } = next || {};
+  const src = d && Object.prototype.hasOwnProperty.call(d, 'tagId') ? d : (old || {});
+  return { ...rest, ..._docTagPick(s, src) };
+}
 function _payTagByName(s, name){ const k = _payTagName(name).toLowerCase(); return k ? ((s && s.payTags) || []).find(x => x && _payTagName(x.name).toLowerCase() === k) || null : null; }
+// verify 1 (S): แท็กของเอกสาร "ตรงกับ" งาน SET_DOC_TAG ไหม — กติกาเดียวกับ reducer: id ตรง หรือ id กำพร้า (ไม่อยู่ใน payTags) แต่ชื่อตรงกัน (ตัดช่องว่าง/ไม่สนตัวพิมพ์)
+function _docTagSame(s, doc, d){
+  const want = (d && d.tagId) || null, have = (doc && doc.tagId) || null;
+  if(have === want) return true;
+  if(!want || !have || ((s && s.payTags) || []).some(t => t && t.id === String(want))) return false;
+  const a = _payTagName(d && d.tagName).toLowerCase(), b = _payTagName(doc && doc.tagName).toLowerCase();
+  return !!a && a === b;
+}
 // 🆕 WHT-MERGE M1/M2: ใบ 50 ทวิ ของใบตั้งหนี้ที่ถูกรวมเข้าใบรวมของ PV (cert.mergedInto) — ใบสมาชิกไม่ voided (รายงานยังเห็นบรรทัด)
 function _invWhtMergedInto(inv){
   const c = ((inv && inv.whtCertificates) || []).find(x => x && !x.voided && x.mergedInto && x.mergedInto.payId);
@@ -16189,7 +16353,8 @@ function reducer(s, a){
       const _st0 = (a.data && a.data.status) || 'draft';
       if(!['draft','pending'].includes(_st0)){ alert('⛔ PO ใหม่ต้องเป็นร่างหรือรออนุมัติ (ส่งมาเป็น "' + _st0 + '") — ต้องผ่านการอนุมัติตามขั้นตอน'); return s; }
       // GM-SELF verify: ป้าย gmSelfApproved ตั้งได้ทาง UPDATE_PO เท่านั้น · PO ใหม่ไม่รับจาก payload
-      const { gmSelfApproved:_gsA, ..._poNew } = a.data || {};
+      const { gmSelfApproved:_gsA, tagId:_tgI, tagName:_tgN, ..._poNew0 } = a.data || {};
+      const _poNew = { ..._poNew0, ..._docTagPick(s, a.data) };   // 🆕 DOC-TAGS D2: แท็ก (ไม่บังคับ) · ว่าง = ไม่มี key
       return { ...s, pos:[...s.pos, _poNew], seq:{ ...s.seq, po:s.seq.po+1 } };
     }
     case 'UPDATE_PO': {
@@ -16217,7 +16382,7 @@ function reducer(s, a){
         if(_gs && _self){
           const { gmSelf:_g0, ..._rest } = a.data, _at = Number(a.data.approvedAt) || 0;
           if(!(_at > 0)){ alert('⛔ อนุมัติ PO ' + (_old.poNumber || '') + ' ไม่ได้: ไม่มีเวลาอนุมัติ (approvedAt)'); return s; }
-          const _po = { ..._rest, gmSelfApproved:{ by:_cu.username, at:_at }, ...(_old.usedApprovalIds ? { usedApprovalIds:_old.usedApprovalIds } : {}) };
+          const _po = _docTagKeep(s, _old, { ..._rest, gmSelfApproved:{ by:_cu.username, at:_at }, ...(_old.usedApprovalIds ? { usedApprovalIds:_old.usedApprovalIds } : {}) }, null);   // verify 1: คงแท็กจาก PO จริง (ทาง GM อนุมัติเองก็ห้ามส่ง {...po} เก่ามาทับแท็ก)
           // approvedAt > 0 บังคับ → อนุมัติรอบใหม่ = id ใหม่ (ไม่อ่าน auditLog · append-only)
           const _e = { id:'al_gmself_po_' + _sanId(_old.id) + '_' + _at.toString(36), ts:_at, type:'gm_self_approved', by:_cu.username, action:'approve_po', label:'อนุมัติ PO',
             entityType:'po', entityId:_old.id, entityRef:_old.poNumber || _old.id, amount:Number(_old.total) || 0, summary:'👑 อนุมัติ PO ' + (_old.poNumber || '') + ' ของตัวเอง — GM/เจ้าของ ทำเองไม่ผ่านอนุมัติ' };
@@ -16227,7 +16392,8 @@ function reducer(s, a){
       // GM-SELF: ป้าย gmSelfApproved ตั้งได้ทางด้านบนเท่านั้น (คงค่าเดิม) · gmSelf เป็นแค่ตัวบอกเจตนา ไม่เก็บ
       const { gmSelf:_g1, gmSelfApproved:_g2, ..._ad } = a.data || {};
       const _base = _old && _old.gmSelfApproved && !['draft','pending'].includes(_ad.status) ? { ..._ad, gmSelfApproved:_old.gmSelfApproved } : _ad;   // เปิดใหม่/ส่งใหม่ = ป้ายหาย
-      const _next = _old && _old.usedApprovalIds ? { ..._base, usedApprovalIds:_old.usedApprovalIds } : _base;
+      const _next0 = _old && _old.usedApprovalIds ? { ..._base, usedApprovalIds:_old.usedApprovalIds } : _base;
+      const _next = _docTagKeep(s, _old, _next0, null);   // 🆕 DOC-TAGS D2 · UAT M1: คงแท็กจาก PO จริงเสมอ (ทุกทางที่ส่ง {...po} ฉบับเก่า ไม่ทำแท็กที่เพิ่งแก้หาย) — แก้แท็กผ่าน SET_DOC_TAG เท่านั้น
       return { ...s, pos:s.pos.map(p => p.id===a.data.id ? _next : p) };
     }
 
@@ -16322,7 +16488,9 @@ function reducer(s, a){
         ts:Date.now(), type:'po_edit_full', by, entityId:id, entityRef:old.poNumber,
         note: reason||'' + (reApproveNeeded ? ' [🔄 รออนุมัติใหม่ เพราะราคาเปลี่ยน]' : ''),
         amount: (newPo.total||0) - (old.total||0) }];
-      return { ...s, pos: s.pos.map(p => p.id === id ? merged : p), auditLog };
+      // 🆕 DOC-TAGS D5: แท็กเปลี่ยนด้วย SET_DOC_TAG เท่านั้น → คงแท็กปัจจุบัน (คำขออนุมัติที่ค้างนานไม่ทับแท็กใหม่)
+      const _mergedT = _docTagKeep(s, old, merged, null);
+      return { ...s, pos: s.pos.map(p => p.id === id ? _mergedT : p), auditLog };
     }
 
     // 🆕 ---------- PO EDIT (Tier 3α — หลังรับของ + post variance JE) ----------
@@ -17727,6 +17895,8 @@ function reducer(s, a){
       const _oldInv = s.invoices.find(i => i.id === a.data.id);
       // 🆕 DEPOSIT-VAT E-5 R4: ฟิลด์ควบคุม (ยอดจ่าย/ใบกำกับ/มัดจำ/ต้องห้าม) คงค่าเดิมจากใบใน state — ผู้เรียกมักส่งสำเนาเก่าทั้งใบ
       let _newInv = _oldInv ? _invKeepProtected(_oldInv, a.data).inv : a.data;
+      // 🆕 DOC-TAGS D3: แท็กของ PI แก้ได้ทาง SET_DOC_TAG เท่านั้น — UPDATE_INV (มักส่งสำเนาเก่าทั้งใบ) คงแท็กจากใบใน state เสมอ
+      if(_oldInv) _newInv = _docTagKeep(s, _oldInv, _newInv, null);
       // 🆕 DEPOSIT-VAT E-5 R2: ใบ migrate (ยื่นภาษีซื้อใน Ecount แล้ว) ห้ามตั้ง/เปลี่ยนเลขใบกำกับ
       if(_oldInv && global.ERP.invVatInEcount(_oldInv) && a.data.supTaxInvNumber !== undefined
         && String(a.data.supTaxInvNumber||'').trim() && String(a.data.supTaxInvNumber||'').trim() !== String(_oldInv.supTaxInvNumber||'').trim()){
@@ -18049,9 +18219,9 @@ function reducer(s, a){
       if((s.payTags || []).some(x => x && (x.id === t.id || _payTagName(x.name).toLowerCase() === key))) return s;
       const who = (s.currentUser && s.currentUser.username) || '';
       const _u = who ? (_userByRef(s, who) || null) : null;
-      const _ok = !!_u && (global.ERP.hasPerm(_u, 'purchase', 'payment', 'create') || global.ERP.hasPerm(_u, 'accounting', 'payment', 'create')
-        || global.ERP.hasPerm(_u, 'accounting', 'payApprove', 'approve'));
-      if(!_ok){ alert('⛔ ไม่มีสิทธิ์เพิ่มแท็กการจ่าย — ให้ผู้มีสิทธิ์ขออนุมัติจ่ายเพิ่มแท็กก่อน แล้วค่อยเลือกจากรายการ'); return s; }
+      // 🆕 DOC-TAGS D1: ผู้เปิด/แก้ PO และผู้ตั้งหนี้/แก้ PI เพิ่มแท็กได้ด้วย (canAddPayTag ใน 00-core — UI ใช้ตัวเดียวกัน)
+      const _ok = !!_u && global.ERP.canAddPayTag(_u);
+      if(!_ok){ alert('⛔ ไม่มีสิทธิ์เพิ่มแท็ก — ให้ผู้เปิด PO / ตั้งหนี้ / บัญชี เพิ่มแท็กก่อน แล้วค่อยเลือกจากรายการ'); return s; }
       const at = Number(d.at) || 0;
       const rec = { id:String(t.id), name, active:true, createdBy:who, createdAt:at };
       const al = { id:'al_paytag_' + rec.id, ts:at, type:'pay_tag_add', action:'pay_tag_add', by:who, entityId:rec.id, entityRef:name,
@@ -18087,6 +18257,36 @@ function reducer(s, a){
         entityRef:p0.pvNumber || p0.id, oldTagId:p0.tagId || null, newTagId:tag ? tag.id : null,
         note:'แก้แท็กการจ่าย "' + oldName + '" → "' + newName + '"' + (d.reason ? ' · ' + String(d.reason).slice(0, 200) : '') };
       return { ...s, payments:(s.payments || []).map(x => x === p0 ? p1 : x), auditLog:[ ...(s.auditLog || []), al ] };
+    }
+    // 🆕 DOC-TAGS D5 (DOC_TAGS_CONTRACT): แก้แท็กของ PO / PI ทีหลัง — ข้อมูลรายงานเท่านั้น ไม่แตะเงิน/JE/สถานะ
+    //   a.data = { kind:'po'|'inv', id, tagId|null, tagName?, by, at } · สิทธิ์ = canSetDocTag (ตัวตนจากแถวผู้ใช้จริง)
+    //   เอกสารยกเลิกแล้ว = ปฏิเสธ · tagId ต้องอยู่ในทะเบียน (ไม่เจอ id → โยงด้วยชื่อ) · ค่าเดิม = no-op · audit เดิม→ใหม่
+    case 'SET_DOC_TAG': {
+      const d = a.data || {};
+      const kind = d.kind === 'po' || d.kind === 'inv' ? d.kind : null;
+      if(!kind){ alert('⛔ ชนิดเอกสารไม่ถูกต้อง (po/inv)'); return s; }
+      const doc0 = (kind === 'po' ? (s.pos || []) : (s.invoices || [])).find(x => x && x.id === d.id);
+      if(!doc0){ alert('⛔ ไม่พบเอกสารนี้'); return s; }
+      const who = (s.currentUser && s.currentUser.username) || '';
+      const _u = who ? (_userByRef(s, who) || null) : null;
+      if(!_u || !global.ERP.canSetDocTag(_u, kind)){ alert('⛔ ไม่มีสิทธิ์แก้แท็ก' + (kind === 'po' ? ' PO' : 'ใบตั้งหนี้')); return s; }
+      const ref = (kind === 'po' ? doc0.poNumber : doc0.invNumber) || doc0.id;
+      const dead = kind === 'po' ? doc0.status === 'cancelled' : (doc0.voided || doc0.status === 'cancelled' || doc0.status === 'voided');
+      if(dead){ alert('⛔ ' + ref + ' ยกเลิกแล้ว — แก้แท็กไม่ได้'); return s; }
+      const tid = d.tagId ? String(d.tagId) : null;
+      const tag = tid ? ((s.payTags || []).find(t => t && t.id === tid) || _payTagByName(s, d.tagName)) : null;
+      if(tid && !tag){ alert('⛔ ไม่พบแท็กนี้ในทะเบียน'); return s; }
+      if((doc0.tagId || null) === (tag ? tag.id : null)) return s;   // ค่าเดิม = ไม่เขียน
+      const { tagId:_ot, tagName:_on, ...rest } = doc0;
+      const doc1 = tag ? { ...rest, tagId:tag.id, tagName:_payTagName(tag.name).slice(0, 40) } : rest;
+      const at = Number(d.at) || 0;
+      const oldName = doc0.tagId ? (doc0.tagName || doc0.tagId) : 'ไม่ระบุ', newName = tag ? doc1.tagName : 'ไม่ระบุ';
+      const al = { id:'al_doctag_' + kind + '_' + doc0.id + '_' + at, ts:at, type:'doc_tag_set', action:'doc_tag_set', by:who,
+        entityType:kind, entityId:doc0.id, entityRef:ref, oldTagId:doc0.tagId || null, newTagId:tag ? tag.id : null,
+        note:'แก้แท็ก ' + ref + ' "' + oldName + '" → "' + newName + '"' };
+      const al2 = [ ...(s.auditLog || []), al ];
+      return kind === 'po' ? { ...s, pos:(s.pos || []).map(x => x === doc0 ? doc1 : x), auditLog:al2 }
+        : { ...s, invoices:(s.invoices || []).map(x => x === doc0 ? doc1 : x), auditLog:al2 };
     }
     case 'ADD_PAY': {
       const locked = _checkDateLock(s, a.data.date, 'จ่ายเงิน');
@@ -20042,7 +20242,7 @@ function reducer(s, a){
         items,
         grs: [...s.grs, gr],
         seq: { ...s.seq, gr: s.seq.gr+1 },
-        pos: s.pos.map(p => p.id === updatedPO.id ? updatedPO : p),
+        pos: s.pos.map(p => p.id === updatedPO.id ? _docTagKeep(s, p, updatedPO, null) : p),   // UAT M1 (DOC-TAGS): แท็กคงจาก PO จริง
         fifoLayers: _layers,
         movements: [...s.movements, ...(movements||[])],
       };
@@ -24080,7 +24280,7 @@ const ACTION_MERGE = Object.freeze({
   PROD_WORKFLOW_STEP: { kind:'replace', coll:'productionOrders', id: d => d && d.order && d.order.id },
   PRUNE_AUDIT_LOG: { kind:'deny' },
   RECEIVE_CN_DOC: { kind:'delta' },
-  RECEIVE_PO: { kind:'replace', coll:'pos', id: d => d && d.updatedPO && d.updatedPO.id },
+  RECEIVE_PO: { kind:'replace', coll:'pos', id: d => d && d.updatedPO && d.updatedPO.id, cmpOmit:['tagId','tagName'] },   // UAT M1 (DOC-TAGS): แก้แท็กจากเครื่องอื่นไม่ทำให้รับของ/อนุมัติ PO ชน (reducer คงแท็กจาก PO จริง)
   RECEIVE_INTRA_TO: { kind:'delta' },   // 🆕 คิดจาก TO ปัจจุบัน (ยอดที่รับไปแล้ว ≠ ที่ผู้ใช้เห็น = ถูกปฏิเสธ → งานค้าง) · เลข GR ออกใน reducer
   RECONCILE_STOCK_FROM_FIFO: { kind:'delta' },
   RENAME_ITEM_TAG: { kind:'delta' },
@@ -24145,7 +24345,7 @@ const ACTION_MERGE = Object.freeze({
   UPDATE_FIFO_LAYER: { kind:'delta' },
   UPDATE_GR: { kind:'replace', coll:'grs', id: d => d && d.id },
   UPDATE_GR_ASSET_INFO: { kind:'delta' },
-  UPDATE_INV: { kind:'replace', coll:'invoices', id: d => d && d.id },
+  UPDATE_INV: { kind:'replace', coll:'invoices', id: d => d && d.id, cmpOmit:['tagId','tagName'] },   // 🆕 DOC-TAGS D3: reducer คงแท็กจากใบจริง → แก้แท็กจากเครื่องอื่นไม่ทำให้แก้ PI ชน
   UPDATE_ITEM: { kind:'replace', coll:'items', id: d => d && d.id },
   UPDATE_ITEM_GROUP: { kind:'replace', coll:'itemGroups', id: d => d && d.id },
   UPDATE_ITEM_TYPE: { kind:'replace', coll:'itemTypes', id: d => d && d.id },
@@ -24157,9 +24357,10 @@ const ACTION_MERGE = Object.freeze({
   UPDATE_ORDER_OPERATION: { kind:'delta' },
   UPDATE_PAY: { kind:'replace', coll:'payments', id: d => d && d.id, cmpOmit:['tagId','tagName'] },   // UAT S2 (PAY-TAGS): แก้แท็กจากเครื่องอื่นไม่ทำให้อนุมัติ/แก้คำขอตกงานค้าง (reducer คงแท็กจากใบจริง)
   SET_PAY_TAG: { kind:'replace', coll:'payments', id: d => d && d.paymentId, cmpOnly:['tagId','tagName'] },   // UAT S2: ชนเฉพาะเมื่อแท็กถูกแก้จากเครื่องอื่น (สถานะใบตรวจใน reducer)   // 🆕 PAY-TAGS T3: แก้แท็กบน payment ใบเดียว (ไม่แตะเงิน)
+  SET_DOC_TAG: { kind:'replace', coll: d => (d && d.kind === 'po') ? 'pos' : 'invoices', id: d => d && d.id, cmpOnly:['tagId','tagName'] },   // 🆕 DOC-TAGS D5: แก้แท็ก PO/PI ใบเดียว (coll ตาม kind) · ชนเฉพาะแท็กถูกแก้จากเครื่องอื่น (สถานะใบตรวจใน reducer)
   UPDATE_PETTY_TXN: { kind:'replace', coll:'pettyTxns', id: d => d && d.id },
-  UPDATE_PO: { kind:'replace', coll:'pos', id: d => d && d.id },
-  UPDATE_PO_FULL: { kind:'replace', coll:'pos', id: d => d && d.id },
+  UPDATE_PO: { kind:'replace', coll:'pos', id: d => d && d.id, cmpOmit:['tagId','tagName'] },   // UAT M1 (DOC-TAGS): แก้แท็กจากเครื่องอื่นไม่ทำให้รับของ/อนุมัติ PO ชน (reducer คงแท็กจาก PO จริง)
+  UPDATE_PO_FULL: { kind:'replace', coll:'pos', id: d => d && d.id, cmpOmit:['tagId','tagName'] },   // UAT M1 (DOC-TAGS): แก้แท็กจากเครื่องอื่นไม่ทำให้รับของ/อนุมัติ PO ชน (reducer คงแท็กจาก PO จริง)
   UPDATE_PO_POST_GR: { kind:'deny' },
   UPDATE_PO_SOFT: { kind:'delta' },
   UPDATE_PRODUCTION_LINE: { kind:'replace', coll:'branches', id: d => d && d.branchId },
@@ -24226,6 +24427,7 @@ const ACTION_READS = Object.freeze({
   // ADD_PAY · DEPOSIT-VAT review R8: จ่าย DP ทาง ADD_PAY ถูกปฏิเสธเสมอ → ไม่อ่าน/เขียน deposits แล้ว (เปิดมัดจำที่ UPDATE_PAY)
   ADD_PAY_TAG: ['auditLog','payTags'],   // 🆕 PAY-TAGS T1: กันชื่อซ้ำ (อ่านทั้งทะเบียน) — ชื่อซ้ำ = ไม่เขียน จึงต้องตรวจหมวดนี้เสมอ
   SET_PAY_TAG: ['auditLog','payTags','payments'],   // 🆕 PAY-TAGS T3: payTags = ตรวจว่าแท็กยังอยู่ + snapshot ชื่อ
+  SET_DOC_TAG: ['auditLog','invoices','payTags','pos'],   // 🆕 DOC-TAGS D5: ใบ (pos|invoices) + ทะเบียนแท็ก (ตรวจว่ายังอยู่ + โยงด้วยชื่อ)
   ADD_QUICK_ISSUE: ['boms','fifoLayers','items','materialIssues','movements'],   // boms: ต้นทุนส่วนติดลบ (negUnitCost) — ระบบผลิตรอบ 1
   SHIP_PUSH_LINE: ['boms','fifoLayers','items','movements','transferOrders'],   // 🆕 TR_PUSH_FAV (A3): boms = negUnitCost ส่วนติดลบ · transferOrders = กันซ้ำ + เลข TO
   VOID_QUICK_ISSUE: ['auditLog','fifoLayers','items','materialIssues','movements'],
@@ -24334,6 +24536,7 @@ const APPEND_ONLY_READS = Object.freeze({
   UPDATE_PAY: ['auditLog'],   // B18: GM อนุมัติจ่ายของตัวเองทางคิวปกติ → ต่อท้าย gm_self_approved อย่างเดียว
   ADD_PAY_TAG: ['auditLog'],   // 🆕 PAY-TAGS T1: ต่อท้าย audit pay_tag_add อย่างเดียว
   SET_PAY_TAG: ['auditLog'],   // 🆕 PAY-TAGS T3: ต่อท้าย audit pay_tag_set อย่างเดียว
+  SET_DOC_TAG: ['auditLog'],   // 🆕 DOC-TAGS D5: ต่อท้าย audit doc_tag_set อย่างเดียว
   UPDATE_PO_SOFT: ['auditLog'],
   UPDATE_PO_FULL: ['auditLog'],   // ต่อท้าย po_edit_full อย่างเดียว
   RECEIVE_PO: ['grs', 'movements'],
@@ -24394,7 +24597,7 @@ function reducerTracked(s, a){
 // ==================== EXPORT ====================
 global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
-  INIT_STATE, reducer, deductFIFO, deductFromStore, ADD_REPLAY_SAFE, isDupAdd: _isDupAdd, payTagName: _payTagName, ACTION_MERGE, DOC_NUMBERS, reducerTracked,
+  INIT_STATE, reducer, deductFIFO, deductFromStore, ADD_REPLAY_SAFE, isDupAdd: _isDupAdd, payTagName: _payTagName, docTagSame: _docTagSame, ACTION_MERGE, DOC_NUMBERS, reducerTracked,
   ACTION_READS, MERGE_GUARD_KEYS, capLogsForSave: _capLogsForSave,   // 🆕 คลื่น 3 (WAVE3_CONTRACT §B4.1)
   APPEND_KEYS, SEQ_BUMP_KEYS, SEQ_BUMPS, APPEND_ONLY_READS, PATCH_READS, CAP_LIMITS: Object.freeze({ auditLog:AUDIT_LOG_CAP, weighLogs:WEIGH_LOG_CAP }),   // 🌊 คลื่น 4 (WAVE4_CONTRACT §B4.1)
   PUSH_LINE_REASONS,   // 🆕 TR_PUSH_FAV (A2)
@@ -63034,6 +63237,7 @@ function POList({ state, dispatch, user }){
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [supFilter, setSupFilter] = useState('');   // 🆕 PARTY-BRANCH (UAT): กรองตาม supplierId (ไม่ใช่ชื่อ — ซีพี แอ็กซ์ตร้า 5 สาขาชื่อเดียวกัน)
+  const [tagF, setTagF] = useState('all');   // 🆕 DOC-TAGS D2: ตัวกรองแท็ก ('all' | '__none__' | tagId)
   const [hiId, setHiId] = useState(null);  // 🆕 UI-v2 openDoc: แถวที่ถูกเลือกจากช่องค้นหา (ไฮไลต์ + เลื่อนให้เห็น)
   const dr = useDateRange(30);
 
@@ -63050,6 +63254,7 @@ function POList({ state, dispatch, user }){
     }
     if(filter !== 'all' && filter !== po.status) setFilter('all');
     if(supFilter && po.supplierId !== supFilter) setSupFilter('');   // 🆕 (verify): ตัวกรองผู้ขายค้าง → แถวเป้าหมายหาย
+    if(tagF !== 'all') setTagF('all');   // 🆕 DOC-TAGS D2: ตัวกรองแท็กค้าง → แถวเป้าหมายต้องโผล่
     setSearch(po.poNumber || '');
     setHiId(po.id);
   };
@@ -63113,6 +63318,7 @@ function POList({ state, dispatch, user }){
   const filtered = useMemo(() => {
     let list = (state.pos || []).filter(p => inDateRange(p.poDate, dr.startDate, dr.endDate) && poMatchesFilter(p, filter));
     if(supFilter) list = list.filter(p => p.supplierId === supFilter);
+    if(tagF !== 'all') list = list.filter(p => tagF === '__none__' ? !p.tagId : ((global.ERP.docTagOf(state, p) || {}).id === tagF));   // 🆕 DOC-TAGS D2 · UAT S3: id กำพร้า → แท็กชื่อเดียวกัน
     if(search){
       const q = search.toLowerCase();
       list = list.filter(p => {
@@ -63129,7 +63335,7 @@ function POList({ state, dispatch, user }){
       // same date → sort by createdAt desc (newer first)
       return (b.createdAt||0) - (a.createdAt||0);
     });
-  }, [state.pos, state.suppliers, filter, search, supFilter, dr.startDate, dr.endDate]);
+  }, [state.pos, state.suppliers, state.payTags, filter, search, supFilter, tagF, dr.startDate, dr.endDate]);
   const supFilterObj = supFilter ? (state.suppliers||[]).find(s => s.id === supFilter) : null;
 
   // 📄 แบ่งหน้า — render เฉพาะหน้าที่ดูอยู่ (ยอด/ตัวนับยังอิง filtered ทั้งชุด)
@@ -63155,6 +63361,24 @@ function POList({ state, dispatch, user }){
         supFilter && h('button', { onClick:()=>setSupFilter(''), 'data-po-supfilter':supFilter, title:'กรองตามผู้ขายรายนี้ (สาขานี้เท่านั้น) — กดเพื่อยกเลิก',
           className:'px-2 py-1 rounded text-xs font-medium bg-blue-600 text-white' },
           `ผู้ขาย: ${supFilterObj ? (global.ERP.partyNameWithBranch ? global.ERP.partyNameWithBranch(supFilterObj, state.suppliers) : supFilterObj.name) : supFilter} ✕`),
+        // 🆕 DOC-TAGS D2: ตัวกรองแท็ก (แสดงเมื่อมีแท็กในทะเบียน หรือกำลังกรองอยู่)
+        (((state.payTags || []).some(t => t && t.active !== false)) || tagF !== 'all') && h('label', { className:'flex items-center gap-1 text-xs text-gray-600 whitespace-nowrap' }, '🏷️',
+          h('select', { value:tagF, onChange:e=>setTagF(e.target.value), 'data-testid':'po-tag-filter', className:'px-2 py-1 border rounded text-xs bg-white max-w-[10rem]' },
+            h('option', { value:'all' }, 'ทุกแท็ก'),
+            h('option', { value:'__none__' }, 'ไม่ระบุแท็ก'),
+            (state.payTags || []).filter(t => t && t.active !== false).map(t => h('option', { key:t.id, value:t.id }, t.name)),
+            tagF !== 'all' && tagF !== '__none__' && !(state.payTags || []).some(t => t && t.id === tagF && t.active !== false) && h('option', { value:tagF }, tagF))),
+        // 🆕 DOC-TAGS D2: CSV รายการ PO ตามตัวกรองปัจจุบัน (มีคอลัมน์ "แท็ก")
+        h('button', { type:'button', 'data-testid':'po-csv', disabled: filtered.length === 0, title:'ส่งออกรายการตามตัวกรองปัจจุบันเป็น CSV',
+          onClick:()=>{
+            const out = [['วันที่','เลข PO','ผู้ขาย','ยอดรวม','สถานะ','แท็ก']];
+            filtered.forEach(p => {
+              const sup = (state.suppliers || []).find(x => x.id === p.supplierId);
+              const t = global.ERP.docTagOf(state, p);
+              out.push([p.poDate || '', p.poNumber || '', (sup && global.ERP.partyNameWithBranch(sup, state.suppliers)) || p.supplierName || '', (Number(p.total)||0).toFixed(2), (PO_STATUS[p.status] || [])[0] || p.status || '', t ? t.name : '']);   // UAT N1: ชื่อ+สาขา · สถานะภาษาไทยตามจอ
+            });
+            exportCSV(`po-list-${getToday()}.csv`, out);
+          }, className:'px-2 py-1 rounded text-xs font-medium bg-white border hover:bg-gray-100 disabled:opacity-40' }, '⬇️ CSV'),
       ),
       // 🆕 ร่าง PO ที่ย่อไว้ → กด "สร้าง PO" ซ้ำเด้งร่างเดิมขึ้นมา (showNew ยัง true อยู่ setState ซ้ำจะไม่ re-render)
       canCreate && h(Button, { variant:'primary', onClick:()=>{ if(!global.ERP.restoreMinimized('po:new')) setShowNew(true); } }, '➕ สร้าง PO')
@@ -63195,6 +63419,7 @@ function POList({ state, dispatch, user }){
                       overdue && h('span', { title:'เลยกำหนดส่ง' }, '⚠️ '),
                       p.poNumber,
                       h(global.ERP.RenumBadge, { doc:p }),
+                      p.tagId && h('span', { className:'ml-1 font-sans font-normal' }, h(global.ERP.DocTagChip, { state, doc:p })),   // 🆕 DOC-TAGS D2
                       allRTVs.length > 0 && h('button', {
                         onClick:(e)=>{ e.stopPropagation(); setRtvHistPO(p); },
                         title:`มีการคืนของ ${allRTVs.length} ใบ${activeRTVs.length?` (ค้าง ${activeRTVs.length})`:''} — กดดูสถานะ`,
@@ -63444,6 +63669,7 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
     setPriceMode(m);
   };
   const [note, setNote] = useState('');
+  const [poTag, setPoTag] = useState(null);   // 🆕 DOC-TAGS D2: แท็ก (ไม่บังคับ) { id, name } | null
   const [itemSearch, setItemSearch] = useState('');
   const [itemHi, setItemHi] = useState(0);  // 🆕 U8: keyboard highlight index
   const [attachments, setAttachments] = useState([]); // [{name, size, dataUrl}]
@@ -63636,6 +63862,7 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
       ...(bd.header ? { billDiscount: bd.header } : {}),   // 🆕 BILL-DISC
       status: submit ? 'pending' : 'draft',
       note,
+      ...(poTag ? { tagId: poTag.id, tagName: poTag.name } : {}),   // 🆕 DOC-TAGS D2
       attachments,
       createdBy: user.username,
       createdByName: user.name,
@@ -64128,6 +64355,11 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
         h('label', { className:'block text-xs font-medium mb-1' }, 'หมายเหตุ'),
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
+      ),
+      // 🆕 DOC-TAGS D2: แท็ก (ไม่บังคับ) — ไหลต่อไปเป็นค่าเริ่มตอนตั้งหนี้ · เพิ่มแท็กใหม่ได้จากตรงนี้
+      h('div', { 'data-testid':'po-tag-field' },
+        h('label', { className:'block text-xs font-medium mb-1' }, '🏷️ แท็ก ', h('span', { className:'text-gray-400 font-normal' }, '(ไม่บังคับ · ใช้ดึงรายงาน)')),
+        h(global.ERP.TagSelect, { state, dispatch, user, value:poTag, onChange:setPoTag, testid:'po-tag-select', className:'w-full sm:w-72 px-2 py-1.5 border-2 rounded text-sm bg-white' })
       ),
 
       h('div', { className:'flex gap-2 pt-3 border-t' },
@@ -64935,7 +65167,11 @@ function PODetailModal({ po:poProp, state, dispatch, user, onClose }){
       vatAdjInfo && h(VatAdjustBanner, { info: vatAdjInfo }),
 
       h('div', { className:'flex items-center justify-between gap-2 flex-wrap' },
-        h('span', { className: cls('px-3 py-1 rounded text-sm font-medium', statusClr) }, statusLabel),
+        h('span', { className:'flex items-center gap-2 flex-wrap', 'data-testid':'po-detail-tag' },
+          h('span', { className: cls('px-3 py-1 rounded text-sm font-medium', statusClr) }, statusLabel),
+          // 🆕 DOC-TAGS D5: แท็ก + ปุ่มแก้ทีหลัง (SET_DOC_TAG · ไม่ต้องอนุมัติ ไม่แตะเงิน)
+          h(global.ERP.DocTagChip, { state, doc:po, empty:true }),
+          h(global.ERP.DocTagEdit, { state, dispatch, user, kind:'po', doc:po })),
         h('div', { className:'flex items-center gap-2' },
           // Payment status
           paySum.invs.length > 0 && h('span', {
@@ -65352,6 +65588,11 @@ function EditPOSoftModal({ po:poProp, state, dispatch, user, onClose }){
       h(Field, { label:'ที่อยู่จัดส่ง' },
         h('input', { type:'text', value:shipTo, onChange:e=>setShipTo(e.target.value),
           className:'w-full px-3 py-2 border-2 rounded text-sm' })),
+      h('div', { className:'flex items-center gap-2 text-sm', 'data-testid':'po-edit-tag' },   // 🆕 DOC-TAGS D2
+        h('span', { className:'text-xs font-medium' }, '🏷️ แท็ก:'),
+        h(global.ERP.DocTagChip, { state, doc:po, empty:true }),
+        h(global.ERP.DocTagEdit, { state, dispatch, user, kind:'po', doc:po }),
+        h('span', { className:'text-[11px] text-gray-400' }, 'บันทึกทันที ไม่ต้องกดบันทึกด้านล่าง')),
       h(Field, { label:'หมายเหตุ' },
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
           className:'w-full px-3 py-2 border-2 rounded text-sm' })),
@@ -65692,6 +65933,12 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
           diff > 0 ? 'text-red-700' : 'text-green-700') },
           h('span', null, diff > 0 ? '+' : '', ' จากเดิม ', fmtCur(po.total||0), ':'),
           h('span', { className:'font-mono' }, (diff > 0 ? '+' : '') + fmtCur(diff)))),
+      // 🆕 DOC-TAGS D2: แท็กบันทึกทันทีด้วยปุ่ม 🏷️ (ไม่ต้องใส่เหตุผล/ไม่ต้องอนุมัติ — ไม่แตะเงิน)
+      h('div', { className:'flex items-center gap-2 text-sm', 'data-testid':'po-edit-tag' },
+        h('span', { className:'text-xs font-medium' }, '🏷️ แท็ก:'),
+        h(global.ERP.DocTagChip, { state, doc:po, empty:true }),
+        h(global.ERP.DocTagEdit, { state, dispatch, user, kind:'po', doc:po }),
+        h('span', { className:'text-[11px] text-gray-400' }, 'บันทึกทันที ไม่ต้องกดบันทึกด้านล่าง')),
       h(Field, { label:'หมายเหตุ' },
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
           className:'w-full px-3 py-2 border-2 rounded text-sm' })),
@@ -66623,6 +66870,8 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   const [splitByWHT, setSplitByWHT] = useState(false);  // แยก INV ตาม WHT category ถ้า supplier ให้หลายหมวด
   const [splitCert, setSplitCert] = useState(false);    // 🆕 WHT2: แยกใบ 50ทวิ ต่อบรรทัด WHT
   const [note, setNote] = useState('');
+  const [invTag, setInvTag] = useState(() => global.ERP.poTagDefault(state, [gr.poId]).tag);   // 🆕 DOC-TAGS D3: ค่าเริ่ม = แท็กของ PO ที่ผูก (แก้ได้)
+  const invTagFields = invTag ? { tagId: invTag.id, tagName: invTag.name } : {};
   // 🆕 1.1: ช่องทางการชำระ (ตั้งใจจ่ายทางไหน) — เก็บบน INV เพื่อดึงรายงานภายหลัง
   //   ใช้ชุดเดียวกับตอนจ่ายจริง (PAY_METHODS) → เทียบ "แผน vs จ่ายจริง" ได้
   const [payMethod, setPayMethod] = useState('transfer');
@@ -66984,6 +67233,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
             supTaxInvReceivedAt: Date.now(), supTaxInvReceivedBy: user.username,
           } : (taxInvLater && taxInvNumber.trim() ? { dupTaxInvAttempt: { number: taxInvNumber.trim(), date: taxInvDate || '' } } : {})),   // 🆕 DEPOSIT-VAT verify: เลขที่ติ๊กใส่ทีหลัง → reducer ตรวจซ้ำ ตั้ง paymentBlock
           splitGroup: _splitG,
+          ...invTagFields,   // 🆕 DOC-TAGS D3
           createdBy: user.username, createdAt: Date.now(),
         };
         createdInvs.push(segData);
@@ -67074,6 +67324,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
       supplierVatRegistered: sup ? (sup.vatRegistered !== false) : ((vat||0) > 0),
       ...piDiscInvField,   // 🆕 BILL-DISC §B5 ข้อ 4: ส่วนลดท้ายบิลตามใบกำกับ (โชว์/พิมพ์/audit)
       ...(rtvMode === 'deduct' && rtvsBeforeINV.length ? { rtvDeductIds: rtvsBeforeINV.map(r => r.id) } : {}),   // 💎 verify: ใบคืนที่หักในใบนี้ → buildInvDrLines หักมูลค่าบรรทัด 💎 (ก่อน UPDATE_RTV ผูก)
+      ...invTagFields,   // 🆕 DOC-TAGS D3
       createdBy: user.username, createdAt: Date.now(),
     };
     // 🆕 DEPOSIT-VAT UAT: ADD_INV ถูกปฏิเสธ (ใบกำกับซ้ำ/เกิน 6 เดือน/อนาคต/งวดล็อก) → หยุดก่อน UPDATE_GR/RTV/เครดิต/มัดจำ/PO
@@ -67618,6 +67869,8 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
           src:supInvImage.dataUrl, className:'mt-2 max-h-40 rounded border cursor-pointer',
           onClick:()=>window.open(supInvImage.dataUrl, '_blank') })),
 
+      // 🆕 DOC-TAGS D3: แท็ก (ค่าเริ่มจาก PO · เพิ่มแท็กใหม่ได้)
+      h(global.ERP.InvTagField, { state, dispatch, user, value:invTag, onChange:setInvTag }),
       h(Field, { label:'หมายเหตุ' },
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
@@ -68312,6 +68565,7 @@ function INVList({ state, dispatch, user }){
                   h('td', { className:'px-3 py-2' },
                     h('span', { className:'font-mono text-xs text-red-700 font-semibold' }, i.invNumber),
                     sourceBadge,
+                    i.tagId && h('span', { className:'ml-1' }, h(global.ERP.DocTagChip, { state, doc:i })),   // 🆕 DOC-TAGS D3
                     i.expenseLabel && h('div', { className:'text-[10px] text-gray-500' }, i.expenseLabel)
                   ),
                   h('td', { className: cls('px-3 py-2 text-xs', isOverdue && 'text-red-600 font-bold') },
@@ -68507,6 +68761,7 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
         vatOverridden: false,
         wht: 0,
         net: rc.amount + rc.vat,
+        tag: global.ERP.poTagDefault(state, [gr.poId]).tag,   // 🆕 DOC-TAGS D3: แท็กต่อใบ = แท็กของ PO (แก้ได้ในแถว)
       }}));
     }
   };
@@ -68713,6 +68968,7 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
         netPayable: net, paidAmount: 0,
         paymentStatus: 'unpaid',
         note: row.note || '',
+        ...(row.tag ? { tagId: row.tag.id, tagName: row.tag.name } : {}),   // 🆕 DOC-TAGS D3
         createdBy: user.username, createdAt: Date.now(),
       };
       plan.push({ gr, row, invData, invNumber, vat });
@@ -68861,7 +69117,10 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
                     title:'กาง/หุบ ตาราง VAT ราย line — ปรับอัตราให้ตรงใบกำกับ supplier',
                     className: cls('block text-[10px] px-1 rounded mt-0.5 border',
                       nOv > 0 ? 'bg-amber-100 text-amber-900 border-amber-300' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100') },
-                    `${isExp ? '▾' : '▸'} 🧾 ${(g.lines||[]).length} line${nOv > 0 ? ` · ปรับ ${nOv}` : ''}`)),
+                    `${isExp ? '▾' : '▸'} 🧾 ${(g.lines||[]).length} line${nOv > 0 ? ` · ปรับ ${nOv}` : ''}`),
+                  // 🆕 DOC-TAGS D3: แท็กของใบนี้ (ค่าเริ่มจาก PO)
+                  h('div', { className:'mt-0.5 font-sans' }, h(global.ERP.TagSelect, { state, dispatch, user, value:row.tag || null, onChange:t => updateRow(g.id, { tag:t }),
+                    testid:'batch-inv-tag-select', className:'w-full max-w-[9rem] px-1 py-0.5 border rounded text-[10px] bg-white' }))),
                 h('td', { className:'px-2 py-1' },
                   h('input', { type:'date', value:row.invDate||'', onChange:e=>updateRow(g.id, { invDate:e.target.value }),
                     className:'w-full px-1 py-1 border rounded text-xs' })),
@@ -69044,6 +69303,10 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
   const clearAll = () => setSelectedGRs([]);
 
   const selected = availableGRs.filter(g => selectedGRs.includes(g.id));
+  // 🆕 DOC-TAGS D3: แท็กของใบรวม — ยังไม่แตะ = ตาม PO ของ GR ที่เลือก (PO แท็กเดียวกัน = ใช้ตัวนั้น · ต่างกัน = ว่าง + hint) · แตะแล้ว = ค่าที่เลือก
+  const [invTagPick, setInvTagPick] = useState({ touched:false, tag:null });
+  const invTagDef = global.ERP.poTagDefault(state, selected.map(g => g.poId));
+  const invTag = invTagPick.touched ? invTagPick.tag : invTagDef.tag;
   // 🆕 DOC-GR: ถ้าทุก GR ที่เลือกมีเลขใบกำกับเดียวกัน → prefill (เฉพาะตอนช่องยังว่าง · คนละเลข = ไม่ prefill ให้บัญชีเลือกเอง)
   //    ⚠️ ต้องอยู่หลังประกาศ `selected` และหลัง useState taxInvNumber (ด้านบน) — วางก่อนหน้า = ReferenceError จอขาว (TDZ)
   useEffect(() => {
@@ -69233,6 +69496,7 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
       note,
       // 🆕 1.1: ช่องทางการชำระที่ตั้งใจ
       payMethod, payMethodNote: payMethodNote.trim() || '',
+      ...(invTag ? { tagId: invTag.id, tagName: invTag.name } : {}),   // 🆕 DOC-TAGS D3
       createdBy: user.username,
       createdAt: Date.now(),
       createdDate: getToday(),   // 🆕 DEPOSIT-VAT verify: reducer คำนวณงวดเคลม/6 เดือนจากวันที่กดจริง (replay ข้ามวันได้ผลเดิม)
@@ -69630,6 +69894,9 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
               placeholder:'เช่น เลขเช็ค / ธนาคาร',
               className:'w-full px-3 py-2 border-2 rounded text-sm' }))),
 
+        // 🆕 DOC-TAGS D3: แท็ก (ค่าเริ่มจาก PO ของ GR ที่เลือก)
+        h(global.ERP.InvTagField, { state, dispatch, user, value:invTag, onChange:t => setInvTagPick({ touched:true, tag:t }),
+          hint: !invTag && invTagDef.mixed ? invTagDef.hint : '' }),
         h(Field, { label:'หมายเหตุ' },
           h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
             className:'w-full px-3 py-2 border-2 rounded text-sm' })
@@ -69913,6 +70180,11 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
 
       h('div', { className:'bg-gray-50 border rounded p-3 text-sm space-y-1' },
         h('div', null, h('b', null, 'Supplier: '), supName, sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
+        // 🆕 DOC-TAGS D3/D5: แท็กของใบ + 🏷️ แก้ทีหลัง (SET_DOC_TAG · บันทึกทันที ไม่แตะเงิน/JE)
+        h('div', { className:'flex items-center gap-2 flex-wrap', 'data-testid':'inv-detail-tag' },
+          h('b', { className:'text-xs' }, '🏷️ แท็ก:'),
+          h(global.ERP.DocTagChip, { state, doc:inv, empty:true }),
+          h(global.ERP.DocTagEdit, { state, dispatch, user, kind:'inv', doc:inv })),
         // 🆕 1.3: ถ้าคีย์ชื่อผู้ขายอิสระไว้ตอนตั้งหนี้ (ต่างจากทะเบียน) — แสดงคู่กัน
         sup && inv.supplierNameFreeform && inv.supplierNameFreeform !== sup.name &&
           h('div', { className:'text-xs text-indigo-700' },
@@ -74590,6 +74862,7 @@ function CreateDepositPIModal({ deposit, state, dispatch, user, onClose, onDone 
       depositId: deposit.id,
       supplierId: deposit.supplierId,
       poId: deposit.poId || null,
+      ...((t => t ? { tagId: t.id, tagName: t.name } : {})(global.ERP.poTagDefault(state, [deposit.poId]).tag)),   // 🆕 DOC-TAGS D3: มัดจำตาม PO = แท็กของ PO (แก้ทีหลังที่ 🏷️ ในหน้ารายละเอียด)
       invDate, dueDate,
       amount: hasBill ? amtBase : Number(amount),
       vat: hasBill ? amtVat : 0,
@@ -74850,6 +75123,8 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
   const [whtLines, setWhtLines] = useState([]);
   const [whtForm, setWhtForm] = useState('53');  // ภงด.3 / 53
   const [note, setNote] = useState('');
+  const [invTag, setInvTag] = useState(() => global.ERP.poTagDefault(state, [po.id]).tag);   // 🆕 DOC-TAGS D3: ค่าเริ่ม = แท็กของ PO (แก้ได้)
+  const invTagFields = invTag ? { tagId: invTag.id, tagName: invTag.name } : {};
   // 🆕 แยก INV ตาม WHT category — สร้าง INV หลายใบ ใบละ 1 หมวด WHT
   const [splitByWHT, setSplitByWHT] = useState(false);
   const [splitCert, setSplitCert] = useState(false);    // 🆕 WHT2: แยกใบ 50ทวิ ต่อบรรทัด
@@ -74982,6 +75257,7 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
           paymentStatus: 'unpaid',
           note: `${note ? note + ' ' : ''}(แยก ${idx+1}/${activeLines.length} — ${subLbl||catLabel})`.trim(),
           splitGroup: _splitG,
+          ...invTagFields,   // 🆕 DOC-TAGS D3
           createdBy: user.username, createdAt: Date.now(),
         };
         createdInvs.push(segData);
@@ -75069,6 +75345,7 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
       netPayable, paidAmount: 0,
       paymentStatus: 'unpaid',
       note,
+      ...invTagFields,   // 🆕 DOC-TAGS D3
       createdBy: user.username,
       createdAt: Date.now(),
     };
@@ -75223,6 +75500,8 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
             h('input', { type:'radio', checked:whtForm==='53', onChange:()=>setWhtForm('53') }),
             h('span', null, 'ภ.ง.ด.53 (นิติบุคคล)')))),
 
+      // 🆕 DOC-TAGS D3: แท็ก (ค่าเริ่มจาก PO)
+      h(global.ERP.InvTagField, { state, dispatch, user, value:invTag, onChange:setInvTag }),
       h('div', null,
         h('label', { className:'block text-xs font-medium mb-1' }, 'หมายเหตุ'),
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2,
@@ -75789,6 +76068,7 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       netPayable, paidAmount: 0,
       paymentStatus: 'unpaid',
       note,
+      ...(pdTag ? { tagId: pdTag.id, tagName: pdTag.name } : {}),   // 🆕 DOC-TAGS D3: แท็กของ PI (ช่องเดียวกับ PV เงินสดย่อย)
       createdBy: user.username,
       createdAt: Date.now(),
     };
@@ -75999,7 +76279,7 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
               h('div', { className: cls('text-[11px] font-medium', pdBalance - (isPd ? netPayable : 0) < -0.01 ? 'text-red-700' : 'text-emerald-800') },
                 `คงเหลือ ${fmtCur(pdBalance)}`, isPd && netPayable > 0 && ` → หลังจ่าย ${fmtCur(pdBalance - netPayable)}`,
                 pdMax > 0 && h('span', { className:'text-gray-500 font-normal' }, ` · เพดาน ${fmtCur(pdMax)}/PI`))))),
-        isPd && h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-2' },
+        isPd && h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-2' },
           h('label', { className:'text-sm' }, 'ประเภท',
             h('select', { value:pdKind, onChange:e=>setPdKind(e.target.value), 'data-testid':'pd-kind', className:'w-full px-2 py-1 border rounded text-sm mt-0.5' },
               h('option', { value:'company' }, 'ค่าใช้จ่ายบริษัท'),
@@ -76015,18 +76295,21 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
               h(BEDateInput, { value:pdDate || '', onChange:v => {
                 if(v && String(v) > String(getToday())){ alert('📅 วันที่จ่ายจริงต้องไม่เกินวันนี้ (' + fmtDate(getToday()) + ')'); return; }
                 setPdDateSel(v || null); }, className:'w-full border-emerald-300' })),
-            h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, pdDateSel ? 'วันที่เงินออกจริง (คีย์ย้อนหลังได้)' : 'ค่าเริ่ม = วันที่เอกสาร · แก้ได้ (คีย์ย้อนหลังได้)')),
-          h('label', { className:'text-sm' }, '🏷️ แท็ก',
-            h('select', { value: pdTag ? pdTag.id : '', onChange:e=>onPdTag(e.target.value), 'data-testid':'pd-tag-select',
-              className:'w-full px-2 py-1 border rounded text-sm mt-0.5' + (pdTag ? ' border-violet-400 bg-violet-50' : '') },
-              h('option', { value:'' }, '— ไม่ระบุ —'),
-              pdTags.map(t => h('option', { key:t.id, value:t.id }, t.name)),
-              pdTag && !pdTags.some(t => t.id === pdTag.id) && h('option', { key:pdTag.id, value:pdTag.id }, pdTag.name),
-              (global.ERP.canAddPayTag ? global.ERP.canAddPayTag(user) : false) && h('option', { value:'__new__' }, '＋ เพิ่มแท็กใหม่…')))),
+            h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, pdDateSel ? 'วันที่เงินออกจริง (คีย์ย้อนหลังได้)' : 'ค่าเริ่ม = วันที่เอกสาร · แก้ได้ (คีย์ย้อนหลังได้)'))),
         isPd && pdRecordOnly && netPayable > pdBalance + 0.01 && h('div', { className:'text-[11px] text-amber-800 bg-amber-50 rounded p-1.5' },
           `💵 โหมดบันทึกอย่างเดียว: ยอดเงินสดย่อยในระบบ ${fmtCur(pdBalance)} → หลังจ่าย ${fmtCur(pdBalance - netPayable)} (ติดลบได้ — ยังไม่ต้องเติมเงินเข้าระบบ)`),
         isPd && pdBlockMsg && h('div', { className:'text-[11px] text-red-700 bg-red-50 rounded p-1.5', 'data-testid':'pd-block' }, '⛔ ' + pdBlockMsg),
         isPd && h('div', { className:'text-[10px] text-gray-500' }, 'บันทึกครั้งเดียว = สร้าง PI + PV เงินสดย่อย (self-approved · ผู้อนุมัติตรวจย้อนหลัง) · ใบ 50 ทวิ ออกตามเดิม')),
+
+      // 🆕 DOC-TAGS D3/D4: แท็กช่องเดียว — ติดที่ PI · จ่ายเงินสดย่อยทันที = PV ได้แท็กเดียวกัน (ไม่ต้องเลือก 2 ครั้ง) · testid เดิม pd-tag-select
+      h('div', { 'data-testid':'exp-tag-field' },
+        h('label', { className:'block text-xs font-medium mb-1' }, '🏷️ แท็ก ', h('span', { className:'text-gray-400 font-normal' }, isPd ? '(ไม่บังคับ · ใช้กับทั้ง PI และการจ่ายเงินสดย่อยนี้)' : '(ไม่บังคับ · ใช้ดึงรายงาน · ไหลต่อไปเป็นค่าเริ่มตอนขออนุมัติจ่าย)')),
+        h('select', { value: pdTag ? pdTag.id : '', onChange:e=>onPdTag(e.target.value), 'data-testid':'pd-tag-select',
+          className:'w-full sm:w-72 px-2 py-1.5 border-2 rounded text-sm bg-white' + (pdTag ? ' border-violet-400 bg-violet-50' : '') },
+          h('option', { value:'' }, '— ไม่ระบุ —'),
+          pdTags.map(t => h('option', { key:t.id, value:t.id }, t.name)),
+          pdTag && !pdTags.some(t => t.id === pdTag.id) && h('option', { key:pdTag.id, value:pdTag.id }, pdTag.name),
+          (global.ERP.canAddPayTag ? global.ERP.canAddPayTag(user) : false) && h('option', { value:'__new__' }, '＋ เพิ่มแท็กใหม่…'))),
 
       h(Field, { label:'หมายเหตุ' },
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2, className:'w-full px-3 py-2 border-2 rounded text-sm' })),
@@ -84801,6 +85084,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
   const [showDeposit, setShowDeposit] = useState(false);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [tagF, setTagF] = useState('all');   // 🆕 DOC-TAGS D3: ตัวกรองแท็ก ('all' | '__none__' | tagId)
   const [detail, setDetail] = useState(null);
   const [previewImg, setPreviewImg] = useState(null);  // { src, title }
   const [taxInvEntry, setTaxInvEntry] = useState(null);  // 🆕 F2: INV ที่จะคีย์ Tax INV (paid/unpaid ก็ใส่ได้)
@@ -84821,6 +85105,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
       if(dr.endDate && inv.invDate > dr.endDate) dr.setEndDate(inv.invDate);
     }
     if(search) setSearch('');
+    if(tagF !== 'all') setTagF('all');   // 🆕 DOC-TAGS D3: ตัวกรองแท็กค้าง → แถวเป้าหมายต้องโผล่
     if(statusFilter !== 'all'){
       const pendingPay = (state.payments||[]).some(p => _payInvIds(p).includes(inv.id) && p.approvalStatus === 'pending');
       const st = pendingPay ? 'pending_approval' : (inv.paymentStatus || 'unpaid');
@@ -84853,12 +85138,13 @@ function INVAllOverviewTab({ state, dispatch, user }){
         return st === statusFilter;
       });
     }
+    if(tagF !== 'all') list = list.filter(i => tagF === '__none__' ? !i.tagId : ((global.ERP.docTagOf(state, i) || {}).id === tagF));   // 🆕 DOC-TAGS D3 · UAT S3: id กำพร้า → แท็กชื่อเดียวกัน
     return list.sort((a,b) => {
       const dc = (b.invDate||'').localeCompare(a.invDate||'');
       if(dc !== 0) return dc;
       return (b.createdAt||0) - (a.createdAt||0);
     });
-  }, [state.invoices, state.payments, state.suppliers, search, statusFilter, dr.startDate, dr.endDate]);
+  }, [state.invoices, state.payments, state.suppliers, state.payTags, search, statusFilter, tagF, dr.startDate, dr.endDate]);
   const pg = usePaged(rows, 50);
   const focus = useFocusRow(rows, pg, focusId);
 
@@ -84869,6 +85155,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
     mig_closed:       ['✂️ ปิดยอดค้าง',       'bg-stone-200 text-stone-700'],   // 🆕 MIG_AP_CLOSE C4 (ตัวกรอง = อยู่ใน "จ่ายแล้ว")
     pending_approval: ['⏳ รออนุมัติจ่าย',    'bg-yellow-100 text-yellow-800'],
     cancelled:        ['❌ ยกเลิก',           'bg-gray-100 text-gray-500'],
+    voided:           ['❌ ยกเลิก',           'bg-gray-100 text-gray-500'],   // verify 2: VOID_INV ตั้ง paymentStatus='voided'
   };
 
   return h('div', null,
@@ -84884,6 +85171,36 @@ function INVAllOverviewTab({ state, dispatch, user }){
             className: cls('px-3 py-1 rounded text-xs font-medium',
               statusFilter===s ? 'bg-gray-800 text-white' : 'bg-white border hover:bg-gray-100')
           }, s==='all' ? 'ทั้งหมด' : STATUS_LBL[s]?.[0] || s)),
+        // 🆕 DOC-TAGS D3: ตัวกรองแท็ก + CSV (แถวตามตัวกรองปัจจุบัน · มีคอลัมน์ "แท็ก")
+        (((state.payTags || []).some(t => t && t.active !== false)) || tagF !== 'all') && h('label', { className:'flex items-center gap-1 text-xs text-gray-600 whitespace-nowrap' }, '🏷️',
+          h('select', { value:tagF, onChange:e=>setTagF(e.target.value), 'data-testid':'pi-tag-filter', className:'px-2 py-1 border rounded text-xs bg-white max-w-[10rem]' },
+            h('option', { value:'all' }, 'ทุกแท็ก'),
+            h('option', { value:'__none__' }, 'ไม่ระบุแท็ก'),
+            (state.payTags || []).filter(t => t && t.active !== false).map(t => h('option', { key:t.id, value:t.id }, t.name)),
+            tagF !== 'all' && tagF !== '__none__' && !(state.payTags || []).some(t => t && t.id === tagF && t.active !== false) && h('option', { value:tagF }, tagF))),
+        h('button', { type:'button', 'data-testid':'pi-csv', disabled: rows.length === 0, title:'ส่งออกรายการตามตัวกรองปัจจุบันเป็น CSV',
+          onClick:()=>{
+            const out = [['วันที่','เลข PI','ใบแจ้งหนี้ supplier','Tax INV','PO','Supplier','สุทธิ','จ่ายแล้ว','คงเหลือ','สถานะ','แท็ก']];
+            const _csvSt = (i) => {   // UAT N1: ป้ายเดียวกับคอลัมน์สถานะบนจอ (ตัดอีโมจินำหน้า)
+              const st = i.voided ? 'cancelled' : ((state.payments||[]).some(p => _payInvIds(p).includes(i.id) && p.approvalStatus === 'pending') ? 'pending_approval' : (i.paymentStatus || 'unpaid'));
+              const l = (STATUS_LBL[st === 'paid' && i.migApClose ? 'mig_closed' : st] || [st])[0];
+              return String(l).replace(/^\S+\s+/, '');
+            };
+            rows.forEach(i => {
+              const sup = state.suppliers.find(x => x.id === i.supplierId);
+              const t = global.ERP.docTagOf(state, i);
+              // verify 1: เลข PO แบบเดียวกับแถวบนจอ (i.poId + PO ของ GR ที่ผูก) — i.poNumber มีแค่ใบล่วงหน้า/มัดจำ ใช้เป็นตัวสำรองท้ายสุด
+              const _gIds = Array.isArray(i.grIds) && i.grIds.length ? i.grIds : (i.grId ? [i.grId] : []);
+              let _grs = _gIds.map(gid => (state.grs || []).find(g => g.id === gid)).filter(Boolean);
+              if(_grs.length === 0) _grs = (state.grs || []).filter(g => g.invoiceId === i.id);
+              const _poIds = new Set(); if(i.poId) _poIds.add(i.poId); _grs.forEach(g => { if(g.poId) _poIds.add(g.poId); });
+              const _poTxt = Array.from(_poIds).map(pid => ((state.pos || []).find(p => p.id === pid) || {}).poNumber).filter(Boolean).join(' / ') || i.poNumber || '';
+              out.push([i.invDate || '', i.invNumber || '', i.supInvNumber || '', i.supTaxInvNumber || '', _poTxt,
+                (sup && global.ERP.partyNameWithBranch(sup, state.suppliers)) || i.supplierNameFreeform || '', (i.netPayable||0).toFixed(2), (i.paidAmount||0).toFixed(2),
+                ((i.netPayable||0) - (i.paidAmount||0)).toFixed(2), _csvSt(i), t ? t.name : '']);   // UAT N1: ชื่อ+สาขา · สถานะภาษาไทยตามจอ
+            });
+            exportCSV(`pi-list-${getToday()}.csv`, out);
+          }, className:'px-3 py-1 rounded text-xs font-medium bg-white border hover:bg-gray-100 disabled:opacity-40' }, '⬇️ CSV'),
         DepositModal && h('button', { onClick:()=>setShowDeposit(true),
           className:'px-3 py-1 rounded text-xs font-medium bg-amber-600 text-white hover:bg-amber-700 ml-auto' },
           '💰 บันทึกมัดจำ/จ่ายล่วงหน้า')
@@ -84984,7 +85301,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
                 const po = pos[0] || null;
                 const remain = (i.netPayable||0) - (i.paidAmount||0);
                 const pendingPay = (state.payments||[]).some(p => _payInvIds(p).includes(i.id) && p.approvalStatus === 'pending');
-                const st = pendingPay ? 'pending_approval' : (i.paymentStatus || 'unpaid');
+                const st = i.voided ? 'cancelled' : (pendingPay ? 'pending_approval' : (i.paymentStatus || 'unpaid'));   // verify 2: ใบยกเลิก = ป้ายเดียวกับ CSV
                 const [lbl, clr] = STATUS_LBL[st === 'paid' && i.migApClose ? 'mig_closed' : st] || [st, 'bg-gray-100'];
                 return h('tr', { key:i.id, ref: i.id === focusId ? focus.ref : undefined,
                   className: cls('hover:bg-gray-50 cursor-pointer', focus.cls(i.id)),
@@ -84992,6 +85309,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
                   h('td', { className:'px-3 py-2 text-xs' }, fmtDate(i.invDate)),
                   h('td', { className:'px-3 py-2 font-mono text-xs text-red-700 font-semibold' },
                     i.invNumber,
+                    i.tagId && h('span', { className:'ml-1 font-sans font-normal' }, h(global.ERP.DocTagChip, { state, doc:i })),   // 🆕 DOC-TAGS D3
                     i.supInvImage && h('button', {
                       title:'ดูรูปใบแจ้งหนี้',
                       onClick:(e)=>{ e.stopPropagation();
@@ -85176,6 +85494,7 @@ function RecurringINVTab({ state, dispatch, user }){
       paymentStatus: 'unpaid',
       note: `จาก template: ${t.name}`,
       recurringId: t.id,
+      ...((tg => tg ? { tagId: tg.id, tagName: tg.name } : {})(global.ERP.docTagOf(state, t))),   // 🆕 DOC-TAGS D3: แท็กจาก template
       createdBy: user.username, createdAt: Date.now(),
     };
     // 🆕 DEPOSIT-VAT UAT: ตรวจด่านเดียวกับ reducer ADD_INV ก่อน (งวดปิด ฯลฯ) — ไม่งั้น template ถูก mark สร้างแล้วทั้งที่ไม่มีใบ
@@ -85255,11 +85574,11 @@ function RecurringINVTab({ state, dispatch, user }){
     edit && h(RecurringEditModal, {
       key: edit === 'new' ? 'new' : edit.id,
       template: edit === 'new' ? null : edit,
-      state, dispatch, onClose:()=>setEdit(null) })
+      state, dispatch, user, onClose:()=>setEdit(null) })
   );
 }
 
-function RecurringEditModal({ template, state, dispatch, onClose }){
+function RecurringEditModal({ template, state, dispatch, user, onClose }){
   const { Combobox, WHT_CATEGORIES, WHT_SUB5_TYPES } = global.ERP;
   const [name, setName] = useState(template?.name || '');
   const [supplierId, setSupplierId] = useState(template?.supplierId || '');
@@ -85280,6 +85599,7 @@ function RecurringEditModal({ template, state, dispatch, onClose }){
   const [whtForm, setWhtForm] = useState(template?.whtForm || '53');
   const [dayOfMonth, setDayOfMonth] = useState(template?.dayOfMonth || 1);
   const [active, setActive] = useState(template?.active !== false);
+  const [recTag, setRecTag] = useState(() => global.ERP.docTagOf(state, template));   // 🆕 DOC-TAGS D3: แท็กของ PI ที่สร้างจาก template
 
   const wht = (Number(amount)||0) * (Number(whtRate)||0) / 100;
 
@@ -85318,6 +85638,7 @@ function RecurringEditModal({ template, state, dispatch, onClose }){
       whtLines, whtForm,
       dayOfMonth: Number(dayOfMonth)||1,
       active,
+      ...(recTag ? { tagId: recTag.id, tagName: recTag.name } : {}),   // 🆕 DOC-TAGS D3
       lastGenerated: template?.lastGenerated || null,
     };
     if(template) dispatch({ type:'UPDATE_RECURRING', data });
@@ -85388,6 +85709,7 @@ function RecurringEditModal({ template, state, dispatch, onClose }){
             WHT_SUB5_TYPES.map(s => h('option', { key:s.code, value:s.code }, `${s.label} (${s.rate}%)`)))),
         whtCategory && h('div', { className:'text-xs text-gray-600' },
           `อัตรา ${whtRate}% = WHT ${fmtCur(wht)}`)),
+      h(global.ERP.InvTagField, { state, dispatch, user, value:recTag, onChange:setRecTag, testid:'rec-tag', note:'(ไม่บังคับ · ติดที่ PI ทุกใบที่สร้างจาก template นี้)' }),   // 🆕 DOC-TAGS D3
       h('label', { className:'flex items-center gap-2 text-sm' },
         h('input', { type:'checkbox', checked:active, onChange:e=>setActive(e.target.checked) }),
         h('span', null, 'เปิดใช้งาน')),
@@ -85921,9 +86243,8 @@ function _canEditPayTag(user){
   return !!user && (isSuperUser(user) || hasPerm(user, 'accounting', 'payment', 'edit') || hasPerm(user, 'accounting', 'payApprove', 'approve'));
 }
 // UAT N3: สิทธิ์เพิ่มแท็กใหม่ (ตรงกับ reducer ADD_PAY_TAG) — ไม่มีสิทธิ์ = ซ่อน "＋ เพิ่มแท็กใหม่…"
-function _canAddPayTag(user){
-  return !!user && (hasPerm(user, 'purchase', 'payment', 'create') || hasPerm(user, 'accounting', 'payment', 'create') || hasPerm(user, 'accounting', 'payApprove', 'approve'));
-}
+//   🆕 DOC-TAGS D1: ใช้ตัวกลางใน 00-core (ผู้เปิด/แก้ PO · ตั้งหนี้/แก้ PI เพิ่มแท็กได้ด้วย) — ตรงกับ reducer ADD_PAY_TAG
+function _canAddPayTag(user){ return global.ERP.canAddPayTag(user); }
 function PayTagChip({ state, p, empty }){
   const t = _payTagOf(state, p);
   if(!t) return empty ? h('span', { className:'text-[10px] text-gray-400', 'data-testid':'pay-tag-chip-none' }, '🏷️ ไม่ระบุ') : null;
@@ -88517,7 +88838,14 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   const [note, setNote] = useState('');
   // 🆕 PAY-TAGS T2: แท็กเดียวของรอบนี้ — ทุก PV/คำขอที่เกิดจากการกดส่งครั้งนี้ติด tagId + tagName (snapshot) เหมือนกันหมด
   //   tagSel = { id, name } | null (— ไม่ระบุ —) · เก็บทั้งก้อนไว้เผื่อแท็กที่เพิ่งสร้างยังไม่อยู่ใน state รอบ render นี้
-  const [tagSel, setTagSel] = useState(null);
+  // 🆕 DOC-TAGS D4: ค่าเริ่ม = แท็กร่วมของใบที่เลือก (ทุกใบแท็กเดียวกัน) · ต่างกัน = ไม่ระบุ + บอกจำนวนต่อแท็ก (ไม่แก้แท็กของใบตั้งหนี้)
+  const invTagInfo = global.ERP.commonDocTag(state, invs);
+  const invTagMixedMsg = invTagInfo.mixed && invTagInfo.counts.some(c => c.id)
+    ? 'ใบที่เลือกมีแท็ก: ' + invTagInfo.counts.map(c => `${c.name} (${c.n} ใบ)`).join(' · ') + ' — แท็กที่เลือกด้านบนจะใช้กับการจ่ายทั้งรอบ' : '';
+  // verify 1: ยังไม่แตะ = ตามใบที่เลือกล่าสุดเสมอ (ย่อหน้าต่างแล้วติ๊กใบเพิ่ม → ค่าเริ่มคำนวณใหม่ · แท็กต่างกัน = ไม่ระบุ) · เลือกเองแล้ว = คงค่าที่เลือก
+  const [tagPick, setTagPick] = useState({ touched:false, tag:null });
+  const tagSel = tagPick.touched ? tagPick.tag : invTagInfo.tag;
+  const setTagSel = (x) => setTagPick({ touched:true, tag:x });
   const payTags = (state.payTags || []).filter(t => t && t.active !== false);
   const _tagNorm = (v) => (global.ERP.payTagName ? global.ERP.payTagName(v) : String(v || '').replace(/\s+/g, ' ').trim());
   const onTagChange = (v) => {
@@ -88857,7 +89185,8 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
             payTags.map(t => h('option', { key:t.id, value:t.id }, t.name)),
             tagSel && !payTags.some(t => t.id === tagSel.id) && h('option', { key:tagSel.id, value:tagSel.id }, tagSel.name),
             _canAddPayTag(user) && h('option', { value:'__new__' }, '＋ เพิ่มแท็กใหม่…')),   // UAT N3
-          h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, 'ทุกใบที่ส่งรอบนี้ติดแท็กเดียวกัน — ใช้ดึงรายงาน')
+          h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, invTagInfo.tag && tagSel && tagSel.id === invTagInfo.tag.id ? 'ค่าเริ่มจากแท็กของใบตั้งหนี้ · ทุกใบที่ส่งรอบนี้ติดแท็กเดียวกัน' : 'ทุกใบที่ส่งรอบนี้ติดแท็กเดียวกัน — ใช้ดึงรายงาน'),
+          invTagMixedMsg && h('div', { className:'text-[11px] text-amber-700 mt-0.5', 'data-testid':'pay-tag-mixed' }, '⚠️ ' + invTagMixedMsg)
         ),
       ),
       h('div', { className:'bg-white border rounded overflow-hidden' },
@@ -89277,7 +89606,7 @@ function pettyPayInvoice(state, dispatch, user, inv, amt, opts){
 global.ERP.pettyPayInvoice = pettyPayInvoice;
 global.ERP.pettyBalance = _pettyBalance;
 global.ERP.PETTY_KIND_LABEL = PETTY_KIND_LABEL;
-global.ERP.canAddPayTag = _canAddPayTag;
+// 🆕 DOC-TAGS D1: global.ERP.canAddPayTag ย้ายไป 00-core แล้ว (ไม่เขียนทับที่นี่)
 const _tsToISO = (ts) => { if(!ts) return ''; const d = new Date(ts); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 const _escHtml = (v) => String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const _money = (n) => (Number(n)||0).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
@@ -90204,7 +90533,7 @@ global.ERP.migApCloseAsk = function(state, dispatch, user, inv, undo){
 // ==================== REGISTER ====================
 // 🆕 export AssetEditModal — ให้หน้า "💎 ทรัพย์สินรอบันทึก" ฝั่งคลัง (mod-stock) เปิดฟอร์มลงทะเบียนได้เมื่อโมดูลบัญชีโหลดอยู่
 // 🆕 ACCT-V2: export ExpenseItemEditModal — ให้ DirectExpenseModal (mod-purchase) กด "+ เพิ่มในทะเบียน" เปิดฟอร์มรายการรายจ่ายได้
-global.ERP.registerModule('accounting', { main: AccountingModule, AssetEditModal, ExpenseItemEditModal, TaxInvEntryModal, INVQueueTab, AutoPostModal });   // verify F3/F5: INVQueueTab/AutoPostModal ให้เทสต์เรียกได้   // 🆕 VAT-CLAIM V5: TaxInvEntryModal (claimYm) ให้ป๊อปอัป/เทสต์เรียกได้
+global.ERP.registerModule('accounting', { main: AccountingModule, AssetEditModal, ExpenseItemEditModal, TaxInvEntryModal, INVQueueTab, AutoPostModal, BulkRequestPayModal, INVAllOverviewTab, RecurringEditModal });   // 🆕 DOC-TAGS: ให้เทสต์เปิดได้   // verify F3/F5: INVQueueTab/AutoPostModal ให้เทสต์เรียกได้   // 🆕 VAT-CLAIM V5: TaxInvEntryModal (claimYm) ให้ป๊อปอัป/เทสต์เรียกได้
 
 })(window);
 
