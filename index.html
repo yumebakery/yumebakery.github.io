@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="0f784f965f0d";window.__ERP_BUILT_AT__="2026-10-05T09:28:24";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="2303f517ee6f";window.__ERP_BUILT_AT__="2026-10-05T10:30:20";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -17425,7 +17425,11 @@ function reducer(s, a){
     // 🆕 ---------- สำรองจ่าย (staff/director advance) + เงินสดย่อย (petty cash) ----------
     case 'ADD_STAFF_ADVANCE':    return { ...s, staffAdvances:[...(s.staffAdvances||[]), a.data], seq:{ ...s.seq, adv:(s.seq.adv||1)+1 } };
     case 'UPDATE_STAFF_ADVANCE': return { ...s, staffAdvances:(s.staffAdvances||[]).map(x => x.id===a.data.id ? a.data : x) };
-    case 'ADD_PETTY_TXN':        return { ...s, pettyTxns:[...(s.pettyTxns||[]), a.data] };
+    case 'ADD_PETTY_TXN': {
+      // 🆕 PETTY-DIRECT P2: คีย์ย้อนหลังได้ แต่งวดปิด/อนาคตเกินกำหนด = ปฏิเสธ (สูตรเดียวกับ ADD_PAY / ด่าน client _pettyPayDateBlock)
+      const _pl = a.data && a.data.date ? _checkDateLock(s, a.data.date, 'เงินสดย่อย') : null; if(_pl) return _pl;
+      return { ...s, pettyTxns:[...(s.pettyTxns||[]), a.data] };
+    }
     case 'UPDATE_PETTY_TXN':     return { ...s, pettyTxns:(s.pettyTxns||[]).map(x => x.id===a.data.id ? a.data : x) };
 
     // 🆕 ADD_PO_REFUND — บันทึกรับเงินคืนจาก supplier (PO advance ที่จ่ายแล้วแต่ cancel)
@@ -27100,7 +27104,9 @@ function executeApprovedAction(req, state, dispatch, user){
     // 🆕 FIX(risk): จ่ายเงินจริงหลังอนุมัติ (เดิม modal จ่ายเองโดยไม่ผ่านอนุมัติ)
     case 'petty_topup': {
       const _pm = global.ERP?.MODULES?.purchase;
-      if(_pm && _pm.execPettyTopup) _pm.execPettyTopup(p, state, dispatch, user);
+      // 🆕 PETTY-DIRECT UAT M2: งวดปิด/อนาคต → execPettyTopup คืน false ก่อน dispatch ใด ๆ → ไม่ปิดคำขอเป็น executed
+      if(_pm && _pm.execPettyTopup && _pm.execPettyTopup(p, state, dispatch, user) === false){
+        executeApprovedAction.lastDeny = 'เติมเงินสดย่อยไม่สำเร็จ (งวดปิด/วันที่ไม่ถูกต้อง)'; return false; }
       break;
     }
     case 'reimburse_advance': {
@@ -71777,6 +71783,24 @@ function printWHTCert(inv, state, opts){
     : ((inv.whtCertificates||[]).find(c => !c.voided && c.payeeSnapshot && c.payeeSnapshot.name) || null);
   const sup = global.ERP.whtPayee ? global.ERP.whtPayee(inv, state, _cert) : state.suppliers.find(s => s.id === inv.supplierId);
   const company = state.company || {};
+  // 🆕 PETTY-DIRECT UAT M1: วันที่หัก/วันออกใบ = ลำดับเดียวกับรายงาน ภ.ง.ด.3/53 (mod-accounting A7)
+  //   วันจ่ายจริงแรก (ผ่านอนุมัติ ไม่กลับรายการ) → cert.certDate → invDate · ใบรวม (mergedNote) ส่ง invDate ที่ถูกแล้วมาเอง
+  const _whtDate = (() => {
+    if(opts.mergedNote || !inv || !inv.id) return inv && inv.invDate;
+    const ds = ((state && state.payments) || []).filter(p => p && !p.reversed
+        && p.approvalStatus !== 'pending' && p.approvalStatus !== 'rejected'
+        && (p.invId === inv.id || p.invoiceId === inv.id ||
+            (p.invoiceIds || []).includes(inv.id) || (p.allocations || []).some(a => a && a.invoiceId === inv.id))
+      ).map(p => p.payDate || p.date).filter(Boolean).sort();
+    const c0 = _fCert || _cAll[0] || null;
+    return ds[0] || (c0 && c0.certDate) || inv.invDate;
+  })();
+  // 🆕 PETTY-DIRECT P4: ชื่อผู้หัก (บริษัทเรา) ต้องมี "(สำนักงานใหญ่)" — ตั้งรหัสสาขาภาษีบริษัทอื่นที่ไม่ใช่ 00000 → "(สาขาที่ xxxxx)" · ชื่อมีคำอยู่แล้ว = ไม่ซ้ำ
+  const _coBcRaw = String(company.branchCode || company.taxBranchCode || '').replace(/\D/g, '');
+  const _coBc = _coBcRaw ? _coBcRaw.padStart(5, '0').slice(-5) : '';
+  const _coName = String(company.name || '');
+  const payerName = (!_coName || /สำนักงานใหญ่|สาขาที่/.test(_coName)) ? _coName
+    : _coName + ' (' + ((_coBc && _coBc !== '00000') ? 'สาขาที่ ' + _coBc : 'สำนักงานใหญ่') + ')';
   const thDate = (s) => {
     if(!s) return '';
     const [y,m,d] = s.split('-');
@@ -71848,7 +71872,7 @@ function printWHTCert(inv, state, opts){
   // ยอดในแต่ละแถว — ขึ้นเฉพาะ row ที่ category ตรงกัน
   const showAt = (secCode) => {
     const d = byCategory[secCode];
-    return d ? { date: thDate(inv.invDate), amt: fmtAmt(d.base), tax: fmtAmt(d.tax) } : { date:'', amt:'', tax:'' };
+    return d ? { date: thDate(_whtDate), amt: fmtAmt(d.base), tax: fmtAmt(d.tax) } : { date:'', amt:'', tax:'' };
   };
   // label เพิ่ม sub5 สำหรับ section 5/6
   const section5Data = byCategory['00017'];
@@ -72023,7 +72047,7 @@ ${_internalHtml}
       <span class="id13-label">เลขประจำตัวผู้เสียภาษีอากร (13 หลัก)* ${digits13(company.taxId)}</span>
     </div>
     <div class="row1">
-      <span>ชื่อ</span><span class="val full"><u>${company.name||''}</u></span>
+      <span>ชื่อ</span><span class="val full"><u>${payerName}</u></span>
       <span class="taxid-inline">เลขประจำตัวผู้เสียภาษีอากร ${digits10('')}</span>
     </div>
     <div class="hint">(ให้ระบุว่าเป็น บุคคล นิติบุคคล บริษัท สมาคม หรือคณะบุคคล)</div>
@@ -72133,7 +72157,7 @@ ${_internalHtml}
         <div class="statement">ขอรับรองว่าข้อความและตัวเลขดังกล่าวข้างต้นถูกต้องตรงกับความจริงทุกประการ</div>
         <div class="sign-space"></div>
         <div class="role-line">ลงชื่อ ............................................................ ผู้จ่ายเงิน</div>
-        <div class="date-line">${thDate(inv.invDate)}</div>
+        <div class="date-line">${thDate(_whtDate)}</div>
         <div class="hint">(วัน เดือน ปี ที่ออกหนังสือรับรองฯ)</div>
         <div class="stamp">ประทับตรา<br/>นิติบุคคล<br/>(ถ้ามี)</div>
       </div>
@@ -72166,7 +72190,7 @@ ${_internalHtml}
     }
     const sumBase = section5Lines.reduce((s,l) => s + (Number(l.base)||0), 0);
     const sumTax = section5Lines.reduce((s,l) => s + (Number(l.tax)||0), 0);
-    return renderRow(row5Label, { date: thDate(inv.invDate), amt: fmtAmt(sumBase), tax: fmtAmt(sumTax) });
+    return renderRow(row5Label, { date: thDate(_whtDate), amt: fmtAmt(sumBase), tax: fmtAmt(sumTax) });
   }
 
   if(opts.noOpen) return html;   // 🆕 verify: ผู้เรียกรวมหลายใบลงหน้าต่างเดียวเอง (printWHTCertMerged)
@@ -74242,7 +74266,7 @@ function PettyCashTab({ state, dispatch, user }){
             h('div', { className:'text-xs text-gray-500 mt-1' }, openAdv.length, ' รายการ · ', Object.keys(byPayer).length, ' คน'))
         : h('div', { className:'bg-white rounded-lg shadow p-4 border-l-4 border-indigo-500' },
             h('div', { className:'text-xs text-gray-500' }, '💸 จ่ายจากเงินสดย่อย'),
-            h('div', { className:'text-sm font-medium text-indigo-900 mt-1' }, 'ทำผ่าน PV: บัญชี → 💸 รอจ่าย → ขอจ่าย → 💵 เงินสดย่อย'),
+            h('div', { className:'text-sm font-medium text-indigo-900 mt-1' }, 'ทำผ่าน PV: บัญชี → 💸 เจ้าหนี้ (AP) → 💰 รอจ่าย → ขอจ่าย → 💵 เงินสดย่อย'),
             h('div', { className:'text-[11px] text-gray-500 mt-1' }, 'ตัดยอดทันที · ออกเลข PV · ผู้อนุมัติตรวจย้อนหลังที่ ✅ รายการที่จ่ายแล้ว')),
       h('div', { className:'bg-white rounded-lg shadow p-4 border-l-4 border-blue-500' },
         h('div', { className:'text-xs text-gray-500' }, 'รายการเงินสดย่อยทั้งหมด'),
@@ -74419,6 +74443,9 @@ function execPettyTopup(p, state, dispatch, user){
   const amount = Number(p.amount)||0;
   if(!(amount > 0)) return false;
   const date = p.date || getToday();
+  // 🆕 PETTY-DIRECT UAT M2: เช็กงวดปิด/อนาคตก่อน dispatch ใด ๆ — ไม่งั้น ADD_PETTY_TXN ถูกปฏิเสธแต่ยอดธนาคารถูกหักไปแล้ว
+  //   (งวดอาจถูกปิดระหว่างขออนุมัติ → ผู้อนุมัติกดแล้วต้องไม่ตัดเงินธนาคารลอย ๆ)
+  if(_pettyDateBlocked(state, date, 'เติมเงินสดย่อย')) return false;
   const txnId = p.txnId || genId('pt');
   const txnRef = p.txnRef || ('TOPUP-' + date + '-' + txnId.slice(-4));
   const txn = { id:txnId, date, type:'topup', amount, ref:txnRef,
@@ -75214,7 +75241,9 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
 // DIRECT EXPENSE INV (PI ค่าใช้จ่าย — ไม่มี PO/GR)
 // 🆕 ACCT-V2 B: rebuild แบบ NewPOModal — supplier → สาขา → วันที่ → เอกสาร supplier → บรรทัดจาก "ทะเบียนรายจ่าย" (state.expenseItems)
 //   · ทุกบรรทัดมี จำนวน/หน่วย/ราคา/ส่วนลด/VAT 0|7/WHT/สาขา/บัญชี GL (snapshot จากทะเบียน แก้ได้ต่อบรรทัด)
-//   · ทุก PI → เจ้าหนี้ (AP) แล้วไปจ่ายทีหลังผ่าน PV (โอนธนาคาร หรือเงินสดย่อย) — ไม่มี fundedBy/สำรองจ่าย/เงินสดย่อยในหน้านี้ (user ตัดสิน 2026-09-17)
+//   · ค่าเริ่ม: PI → เจ้าหนี้ (AP) แล้วไปจ่ายทีหลังผ่าน PV (โอนธนาคาร หรือเงินสดย่อย) — ไม่มี fundedBy/สำรองจ่าย (user ตัดสิน 2026-09-17)
+//   · 🆕 PETTY-DIRECT P3 (เจ้าของ 2026-10-05 กลับคำตัดสิน 09-17 เรื่องเงินสดย่อย): ส่วน "วิธีจ่าย" เลือก 💵 จ่ายจากเงินสดย่อยทันทีได้
+//     → สร้าง PI แล้วจ่ายเต็มยอดสุทธิผ่านตัวกลาง global.ERP.pettyPayInvoice (PV petty_cash self-approved · ห้ามใช้ fundedBy แบบเก่า)
 //   · ไม่มีบรรทัด item+ตัดสต๊อก (ของเข้าสต๊อกให้ผ่าน PO/GR) · ไม่มี "แยก INV ตาม WHT" (หลาย WHT ใน PI เดียวออกใบรับรองหลายใบได้อยู่แล้ว)
 //   · Σ lineTotal (ex-VAT หลังส่วนลด) === amount เสมอ → autoPostINV แตก DR ตาม (บัญชี GL, สาขา) ได้
 //   · INV เก่า (expenseLines type 'item'/'free', fundedBy) ยัง render ได้ใน INVDetailModal/printPI ตามเดิม
@@ -75529,6 +75558,115 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
   const removeWHT = (idx) => setWhtLines(whtLines.filter((_,i) => i !== idx));
   const resolveWHT = (line) => (line.whtOverride !== null && line.whtOverride !== undefined) ? Number(line.whtOverride) : (Number(line.base)||0) * (Number(line.rate)||0) / 100;
 
+  // ---- 🆕 PETTY-DIRECT P3: วิธีจ่าย — ตั้งหนี้ (เดิม) หรือ 💵 จ่ายจากเงินสดย่อยทันที (ข้ามหน้ารอจ่าย) ----
+  //   สิทธิ์เดียวกับ canPetty ใน BulkRequestPayModal · ใช้ตัวกลาง global.ERP.pettyPayInvoice (dryRun ก่อนสร้าง PI)
+  const canPettyDirect = !!global.ERP.pettyPayInvoice && (hasPerm(user, 'accounting', 'payment', 'create') || hasPerm(user, 'accounting', 'payApprove', 'approve') || isSuperUser(user));
+  const [payMode, setPayMode] = useState('ap');   // 'ap' = ตั้งหนี้ → 💰 รอจ่าย · 'petty' = จ่ายเงินสดย่อยทันที
+  const [pdKind, setPdKind] = useState('company');
+  const [pdVatClaimable, setPdVatClaimable] = useState(false);
+  const [pdDateSel, setPdDateSel] = useState(null);   // null = ยังไม่แก้ → ตามวันที่เอกสาร
+  const [pdTag, setPdTag] = useState(null);           // { id, name } | null
+  const isPd = canPettyDirect && payMode === 'petty';
+  // ค่าเริ่มวันที่จ่ายจริง = วันที่ใบกำกับ/ใบเสร็จ (ถ้ามีเลข) → วันที่ใบแจ้งหนี้ (ถ้ามีเลข) → วันที่ PI
+  const pdDateDefault = (!taxInvLater && taxInvNumber.trim() && taxInvDate) || (supInvNumber.trim() && supInvDate) || invDate;
+  const pdDate = pdDateSel || pdDateDefault;
+  const pdBalance = global.ERP.pettyBalance ? global.ERP.pettyBalance(state) : 0;
+  const pdMax = Number(state.settings?.pettyPayMax) || 0;
+  const pdRecordOnly = state.settings?.pettyRecordOnly !== false;
+  const pdKindLabel = (global.ERP.PETTY_KIND_LABEL || {})[pdKind] || pdKind;
+  const pdBackdated = !!pdDate && String(pdDate) < String(getToday());
+  // ด่านก่อนบันทึก (ปุ่ม + alert): วันที่ (อนาคต/งวดปิด) · เพดานต่อใบ · ยอดไม่พอ (โหมดบังคับ) · ต้องห้าม+ตัดภาษีซื้อในงวดที่ยื่นแล้ว
+  // verify 1 (#2): ใช้ "งวดที่เคลม" (ใบกำกับมาช้า เดือนเดิมยื่นแล้ว → ADD_INV เคลมเดือนที่เปิด) — สูตรเดียวกับ ADD_INV / หน้ารอจ่าย
+  const _pdTaxDate = taxInvDate || invDate;
+  const pdNdClaimDate = (global.ERP.taxInvClaimDate ? global.ERP.taxInvClaimDate(state, {}, _pdTaxDate, getToday()) : '') || _pdTaxDate;
+  const pdNdLocked = isPd && pdKind === 'non_deductible' && !pdVatClaimable && vat > 0 && !taxInvLater && taxInvNumber.trim()
+    && _vatPeriodLocked(state, pdNdClaimDate);
+  const pdBlockMsg = !isPd ? ''
+    : (global.ERP.pettyPayDateBlock && global.ERP.pettyPayDateBlock(state, pdDate))
+      || (pdMax > 0 && netPayable > pdMax + 0.01 ? `เกินเพดานจ่ายจากเงินสดย่อย ${fmtCur(pdMax)}/PI (ใบนี้ ${fmtCur(netPayable)}) → เลือก "ตั้งหนี้" แล้วขอจ่ายผ่าน 🏦 บัญชีบริษัท` : '')
+      || (!pdRecordOnly && netPayable > pdBalance + 0.01 ? `เงินสดย่อยคงเหลือ ${fmtCur(pdBalance)} ไม่พอ (ต้องจ่าย ${fmtCur(netPayable)}) → เติมเงินสดย่อยที่แท็บ 💵 ก่อน` : '')
+      || (pdKind === 'non_deductible' && !pdVatClaimable && vat > 0 && _vatPeriodLocked(state, pdDate) ? `งวดภาษี ${String(pdDate).slice(0,7)} (วันที่จ่าย) ยื่น ภ.พ.30 แล้ว — เลือกวันที่จ่ายในงวดที่ยังเปิด หรือติ๊ก "ภาษีซื้อเคลมได้ (กรณีพิเศษ)"` : '')
+      || (pdNdLocked ? `งวดภาษีที่เคลมใบกำกับนี้ (${String(pdNdClaimDate).slice(0,7)}) ยื่น ภ.พ.30 แล้ว — ตัดภาษีซื้อย้อนหลังไม่ได้ → ติ๊ก "ภาษีซื้อเคลมได้ (กรณีพิเศษ)" ถ้าบัญชียืนยัน หรือเลือก "ตั้งหนี้"` : '')
+      || '';
+  const pdTags = (state.payTags || []).filter(t => t && t.active !== false);
+  const pdTagNorm = (v) => (global.ERP.payTagName ? global.ERP.payTagName(v) : String(v || '').replace(/\s+/g, ' ').trim());
+  const onPdTag = (v) => {   // สูตรเดียวกับ BulkRequestPayModal (ADD_PAY_TAG · ชื่อซ้ำ = ใช้ตัวเดิม)
+    if(v !== '__new__'){ const t = pdTags.find(x => x.id === v); setPdTag(t ? { id:t.id, name:t.name } : (pdTag && pdTag.id === v ? pdTag : null)); return; }
+    const raw = global.prompt ? global.prompt('🏷️ ชื่อแท็กใหม่ (ไม่เกิน 40 ตัวอักษร)', '') : null;
+    if(raw == null) return;
+    const name = pdTagNorm(raw);
+    if(!name) return alert('⛔ ใส่ชื่อแท็กก่อน');
+    if(name.length > 40) return alert('⛔ ชื่อแท็กยาวเกิน 40 ตัวอักษร');
+    const ex = (state.payTags || []).find(x => x && pdTagNorm(x.name).toLowerCase() === name.toLowerCase());
+    if(ex){ setPdTag({ id:ex.id, name:ex.name }); return; }
+    const act = { type:'ADD_PAY_TAG', data:{ tag:{ id: genId('ptag'), name }, by: user.username, at: Date.now() } };
+    if(global.ERP.reducer && global.ERP.reducer(state, act) === state) return;
+    dispatch(act);
+    setPdTag({ id: act.data.tag.id, name });
+  };
+  // reducer แบบเงียบ (เก็บข้อความ alert ไว้) — ใช้ตรวจล่วงหน้า/หาเลข PV โดยไม่ dispatch
+  const _quietReduce = (st, act) => {
+    let why = null; const _oa = global.alert;
+    try { global.alert = (m) => { why = String(m || ''); }; return { next: global.ERP.reducer(st, act), why }; }
+    catch(e){ return { next: st, why: 'ตรวจไม่สำเร็จ: ' + (e && e.message) }; }
+    finally { global.alert = _oa; }
+  };
+  // บันทึกแบบจ่ายเงินสดย่อยทันที: ยืนยันครั้งเดียว → ตรวจ ADD_INV + การจ่ายบน state ถัดไป → ไม่ผ่าน = ไม่สร้างอะไรเลย
+  const savePettyDirect = (invData0, mainGroup, cleanLines) => {
+    // verify 1 (#4): วันจ่ายก่อนวันที่ PI (คีย์ใบเสร็จเก่า) → เลื่อนวันที่ PI = วันจ่าย (เลข EXP ตามเดือนนั้น · ครบกำหนด = วันจ่าย)
+    //   ไม่งั้น JE จ่าย (DR 2100) ลงเดือนก่อน JE ตั้งหนี้ → ปิดงวดเดือนก่อนเจ้าหนี้ติดลบ + ค่าใช้จ่ายไปตกเดือนถัดไป
+    const pdAlignInv = !!pdDate && !!invData0.invDate && String(pdDate) < String(invData0.invDate);
+    const invData = !pdAlignInv ? invData0 : { ...invData0, invDate: pdDate, dueDate: pdDate,
+      invNumber: global.ERP.genDocNumber('EXP', pdDate, state.invoices||[], 'invNumber'), invDateAlignedFrom: invData0.invDate };
+    // 🆕 PETTY-DIRECT UAT S2: คีย์ใบเสร็จเก่า = วันจ่ายตรงวันที่เอกสาร (ใบกำกับ/ใบเสร็จ) ก่อน PI (วันนี้) เป็นปกติ → ไม่เตือน
+    //   เตือนเฉพาะวันจ่ายที่ไม่ตรงเอกสารใดเลยและอยู่ก่อนวันที่ PI (น่าจะพิมพ์ผิด)
+    const _pdIsDocDate = !!pdDate && ((supInvDate && String(pdDate) === String(supInvDate)) || (taxInvDate && String(pdDate) === String(taxInvDate)));
+    const beforeInv = pdAlignInv && !_pdIsDocDate;
+    const ndVatNote = pdKind === 'non_deductible' && vat > 0 ? (pdVatClaimable
+      ? `\n☑ ภาษีซื้อ ${fmtCur(vat)} ยังเคลมตามปกติ (กรณีพิเศษ)`
+      : `\n⛔ ต้องห้าม: ระบบโอนภาษีซื้อ ${fmtCur(vat)} เป็นค่าใช้จ่ายต้องห้าม (5900) + ตัดออกจากรายงานภาษีซื้อ/ภ.พ.30 (ม.82/5)`) : '';
+    if(!confirm(`💵 สร้าง PI ${invData.invNumber} + จ่ายจากเงินสดย่อยทันที ${fmtCur(netPayable)}`
+      + (wht > 0 ? ` (หัก ณ ที่จ่ายแล้ว ${fmtCur(wht)})` : '')
+      + `\nประเภท: ${pdKindLabel}\n📅 วันที่จ่ายจริง: ${fmtDate(pdDate)}${pdBackdated ? ' (จ่ายย้อนหลัง · คีย์วันนี้ ' + fmtDate(getToday()) + ')' : ''}`
+      + (pdAlignInv ? `\n📅 วันที่ PI ${fmtDate(invData0.invDate)} → ${fmtDate(pdDate)} (ให้ค่าใช้จ่ายลงงวดเดียวกับวันจ่าย · เลข ${invData.invNumber})` : '')
+      + (beforeInv ? `\n⚠️ วันที่จ่ายไม่ตรงวันที่ใบแจ้งหนี้/ใบกำกับ — ตรวจวันที่อีกครั้ง` : '')
+      + (pdTag ? `\n🏷️ แท็ก: ${pdTag.name}` : '')
+      + `\n\n• ไม่ต้องไปหน้า 💰 รอจ่าย · ไม่ผ่านคิวอนุมัติ (self-approved) · ออกเลข PV ทันที`
+      + `\n• ตัดสมุดเงินสดย่อย (คงเหลือ ${fmtCur(pdBalance)} → ${fmtCur(pdBalance - netPayable)})`
+      + `\n• ผู้อนุมัติตรวจย้อนหลังที่ ✅ รายการที่จ่ายแล้ว → 💵 ตรวจเงินสดย่อย` + ndVatNote + `\n\nยืนยัน?`)) return;
+    const payOpts = { payDate: pdDate, pettyKind: pdKind, pettyVatClaimable: pdVatClaimable, note,
+      tagFields: pdTag ? { tagId: pdTag.id, tagName: pdTag.name } : {} };
+    // (1) ตั้งหนี้บน state ถัดไป (reducer ตัวจริง) — ถูกปฏิเสธ = หยุด
+    const r1 = global.ERP.reducer ? _quietReduce(state, { type:'ADD_INV', data: invData }) : { next: null };
+    if(!r1.next || r1.next === state) return alert('⛔ ตั้งหนี้ไม่ได้ — ' + ((r1.why || 'ระบบไม่รับใบนี้').split('\n')[0]) + '\n\nยังไม่ได้บันทึกอะไร (ไม่มี PI / ไม่ตัดเงินสดย่อย)');
+    const next = r1.next;
+    const invN = (next.invoices || []).find(i => i.id === invData.id) || invData;
+    const amt = r2(Number(invN.netPayable) || netPayable);
+    // (2) dry-run การจ่ายบน state นั้น (ตัวกลางเดียวกับหน้ารอจ่าย) — ไม่ผ่าน = ไม่สร้าง PI
+    const dry = global.ERP.pettyPayInvoice(next, () => {}, user, invN, amt, { ...payOpts, dryRun:true });
+    if(!dry || dry.skipped) return alert('⛔ จ่ายจากเงินสดย่อยไม่ได้ — ' + ((dry && dry.skipped) || 'ระบบไม่รับการจ่าย')
+      + '\n\nยังไม่ได้บันทึกอะไร (ไม่มี PI / ไม่ตัดเงินสดย่อย) → แก้ตามเหตุผล หรือเลือก "ตั้งหนี้" แล้วไปขอจ่ายที่ 💰 รอจ่าย');
+    setSaving(true);
+    dispatch({ type:'ADD_INV', data: invData });
+    // verify 1 (#1): พับ JE ตั้งหนี้ของ PI เข้า state ก่อนจ่าย — reclass ต้องห้าม (5900) ต้องเห็น JE นี้เพื่อแยก CR ตาม (บัญชี, สาขา)
+    let cur = next;
+    autoPostINV(invData, state, act => { dispatch(act); const rr = _quietReduce(cur, act); if(rr.next) cur = rr.next; }, user);
+    const res = global.ERP.pettyPayInvoice(cur, dispatch, user, invN, amt, payOpts);
+    if(!res || !res.pay){
+      alert(`⚠️ สร้าง PI ${invData.invNumber} แล้ว แต่จ่ายจากเงินสดย่อยไม่สำเร็จ — ${(res && res.skipped) || ''}\n→ ไปขอจ่ายที่ 💰 รอจ่าย`);
+      return onClose();
+    }
+    // เลข PV ที่ reducer จะออก (คำนวณบน state ถัดไป — เลขจริงดูได้ที่ ✅ รายการที่จ่ายแล้ว)
+    const r3 = _quietReduce(cur, { type:'ADD_PAY', data: res.pay });
+    const pv = ((r3.next && r3.next.payments) || []).find(p => p.id === res.pay.id);
+    const certNos = (invData.whtCertificates || []).map(c => c.certNumber).filter(Boolean);
+    alert(`✅ สร้าง PI + จ่ายจากเงินสดย่อยแล้ว\nPI: ${invData.invNumber} · ${mainGroup.label}${cleanLines.length > 1 ? ` (+${cleanLines.length - 1} รายการ)` : ''}`
+      + `\nPV: ${(pv && pv.pvNumber) || '(ดูที่ ✅ รายการที่จ่ายแล้ว)'} · จ่าย ${fmtCur(amt)} · ${fmtDate(pdDate)}`
+      + (wht > 0 ? `\n🧾 หัก ณ ที่จ่าย ${fmtCur(wht)}` + (certNos.length ? ` · 50 ทวิ ${certNos.join(', ')}` : '') : '')
+      + `\n✓ JE ตั้งหนี้ + JE จ่าย (CR เงินสดย่อย) posted`);
+    onClose();
+  };
+
   // ---- save ----
   const save = () => {
     if(saving) return;
@@ -75541,6 +75679,9 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
     if(!(amount > 0) || !calcs.some(c => c.exVat > 0)) return alert('ยอดรวมต้องมากกว่า 0 — ใส่จำนวน/ราคาให้ครบ');
     const badBranch = lines.find(l => !allowedBranches.some(b => b.id === l.branch));
     if(badBranch) return alert(`บรรทัด "${badBranch.description}" เลือกสาขาไม่ถูกต้อง`);
+    // 🆕 PETTY-DIRECT P3: จ่ายเงินสดย่อยทันที — ด่านหน้าฟอร์ม (ไม่มีอะไรถูกบันทึก)
+    if(isPd && pdBlockMsg) return alert('⛔ ' + pdBlockMsg + '\n\nยังไม่ได้บันทึกอะไร');
+    if(isPd && !(netPayable > 0)) return alert('⛔ ยอดต้องจ่ายสุทธิ 0 — ไม่มีอะไรให้จ่ายจากเงินสดย่อย (เลือก "ตั้งหนี้")');
     // ⚠️ ตรวจ WHT (เดิม) — ฐานรวม/ยอดหักรวม ห้ามเกินยอด INV ก่อน VAT
     const sumWhtBase = whtLines.reduce((s,l) => s + (Number(l.base)||0), 0);
     if(sumWhtBase > amount + 0.01) return alert(`⚠️ รวมฐาน WHT (${fmtCur(sumWhtBase)}) เกินยอด INV (${fmtCur(amount)})\n\nแก้ฐานของแต่ละบรรทัดให้รวมไม่เกินยอด INV ก่อน`);
@@ -75652,13 +75793,14 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       createdAt: Date.now(),
     };
     if(_invCreateBlocked(state, [invData])) return;   // 🆕 DEPOSIT-VAT UAT: ถูกปฏิเสธ = ไม่ขึ้น ✅ + ฟอร์มยังเปิดอยู่
+    if(isPd) return savePettyDirect(invData, mainGroup, cleanLines);   // 🆕 PETTY-DIRECT P3
     setSaving(true);
     dispatch({ type:'ADD_INV', data:invData });
     autoPostINV(invData, state, dispatch, user);
     alert(`✅ สร้าง PI ค่าใช้จ่ายแล้ว\n${invNumber}\n${mainGroup.label}${cleanLines.length > 1 ? ` (+${cleanLines.length - 1} รายการ)` : ''}\nต้องจ่าย: ${fmtCur(netPayable)}` +
       (wht > 0 ? `\n🧾 หัก ณ ที่จ่าย ${fmtCur(wht)}` : '') +
       (invData.whtCertificates?.length > 1 ? `\n⭐ มี ${invData.whtCertificates.length} ใบหัก ณ ที่จ่าย (แยก ภงด.)` : '') +
-      `\n✓ JE posted · ไปขอจ่ายที่ 💸 รอจ่าย`);
+      `\n✓ JE posted · ไปขอจ่ายที่ 💰 รอจ่าย`);
     onClose();
   };
 
@@ -75668,7 +75810,7 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
     h('div', { className:'space-y-4' },
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2.5 text-xs text-blue-800' },
         '💡 ค่าใช้จ่ายที่ไม่ต้องทำ PO (ค่าเช่า · ค่าน้ำไฟ · ค่าขนส่ง · ค่าบริการ) — เลือกรายการจาก ',
-        h('b', null, '🧾 ทะเบียนรายจ่าย'), ' แล้วใส่จำนวน/ราคา · PI ทุกใบเข้าเจ้าหนี้ แล้วไปขอจ่ายที่ 💸 รอจ่าย (โอนธนาคาร หรือ เงินสดย่อย)'),
+        h('b', null, '🧾 ทะเบียนรายจ่าย'), ' แล้วใส่จำนวน/ราคา · PI เข้าเจ้าหนี้ แล้วไปขอจ่ายที่ 💰 รอจ่าย — หรือเลือก "💵 จ่ายจากเงินสดย่อยทันที" ที่ส่วนวิธีจ่ายด้านล่าง'),
 
       // Row 1: Supplier + สาขา
       h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
@@ -75843,11 +75985,55 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
         whtLines.some(l => (Number(l.whtAmount)||0) > 0 && l.form && l.form !== whtForm) && h('div', { className:'mt-1 text-[11px] text-amber-800' },
           '⚠️ มีบรรทัด WHT ที่เลือก ภงด. รายบรรทัดต่างจากแบบนำส่งหัว — ใบ 50ทวิ/รายงาน WHT จะแยกตามบรรทัด')),
 
+      // 🆕 PETTY-DIRECT P3: วิธีจ่าย (โชว์เฉพาะคนที่จ่ายเงินสดย่อยได้)
+      canPettyDirect && h('div', { className:'border-2 rounded-lg p-2.5 space-y-2', 'data-testid':'direct-paymode' },
+        h('div', { className:'text-sm font-medium' }, 'วิธีจ่าย'),
+        h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-2' },
+          h('label', { className: cls('border-2 rounded-lg p-2 text-sm flex gap-2 items-start cursor-pointer', !isPd ? 'border-blue-500 bg-blue-50' : 'border-gray-200') },
+            h('input', { type:'radio', name:'directPayMode', checked:!isPd, onChange:()=>setPayMode('ap'), className:'mt-1', 'data-testid':'paymode-ap' }),
+            h('div', null, h('div', { className:'font-medium' }, '🧾 ตั้งหนี้'),
+              h('div', { className:'text-[11px] text-gray-600' }, 'PI เข้าเจ้าหนี้ → ไปขอจ่ายที่ 💰 รอจ่าย (เดิม)'))),
+          h('label', { className: cls('border-2 rounded-lg p-2 text-sm flex gap-2 items-start cursor-pointer', isPd ? 'border-emerald-500 bg-emerald-50' : 'border-gray-200') },
+            h('input', { type:'radio', name:'directPayMode', checked:isPd, onChange:()=>setPayMode('petty'), className:'mt-1', 'data-testid':'paymode-petty' }),
+            h('div', null, h('div', { className:'font-medium' }, '💵 จ่ายจากเงินสดย่อยทันที'),
+              h('div', { className: cls('text-[11px] font-medium', pdBalance - (isPd ? netPayable : 0) < -0.01 ? 'text-red-700' : 'text-emerald-800') },
+                `คงเหลือ ${fmtCur(pdBalance)}`, isPd && netPayable > 0 && ` → หลังจ่าย ${fmtCur(pdBalance - netPayable)}`,
+                pdMax > 0 && h('span', { className:'text-gray-500 font-normal' }, ` · เพดาน ${fmtCur(pdMax)}/PI`))))),
+        isPd && h('div', { className:'grid grid-cols-1 md:grid-cols-3 gap-2' },
+          h('label', { className:'text-sm' }, 'ประเภท',
+            h('select', { value:pdKind, onChange:e=>setPdKind(e.target.value), 'data-testid':'pd-kind', className:'w-full px-2 py-1 border rounded text-sm mt-0.5' },
+              h('option', { value:'company' }, 'ค่าใช้จ่ายบริษัท'),
+              h('option', { value:'non_deductible' }, '⛔ ค่าใช้จ่ายต้องห้าม')),
+            pdKind === 'non_deductible' && vat > 0 && h('label', { className:'flex items-center gap-1 text-[11px] mt-1' },
+              h('input', { type:'checkbox', checked:pdVatClaimable, onChange:e=>setPdVatClaimable(e.target.checked), 'data-testid':'pd-vat-claimable' }),
+              'ภาษีซื้อเคลมได้ (กรณีพิเศษ)')),
+          h('label', { className:'text-sm' }, '📅 วันที่จ่ายจริง',
+            // 🆕 PETTY-DIRECT UAT S1: ปฏิทิน พ.ศ. แบบเดียวกับ 💰 รอจ่าย (BEDateInput) · testid อยู่ที่ตัวห่อ + data-value
+            //   BEDateInput ไม่มี max → กันวันอนาคตเองตอนเลือก (เงินออกจริงแล้วเท่านั้น)
+            // 🆕 verify 2: ไม่ใส่กรอบที่ตัวห่อ (กันกรอบซ้อน) · [&>div]:w-full ให้ตัวห่อ inline-block ของ BEDateInput กว้างเต็มช่องเท่า select ข้าง ๆ
+            h('div', { 'data-testid':'pd-date', 'data-value':pdDate || '', className:'mt-0.5 [&>div]:w-full' },
+              h(BEDateInput, { value:pdDate || '', onChange:v => {
+                if(v && String(v) > String(getToday())){ alert('📅 วันที่จ่ายจริงต้องไม่เกินวันนี้ (' + fmtDate(getToday()) + ')'); return; }
+                setPdDateSel(v || null); }, className:'w-full border-emerald-300' })),
+            h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, pdDateSel ? 'วันที่เงินออกจริง (คีย์ย้อนหลังได้)' : 'ค่าเริ่ม = วันที่เอกสาร · แก้ได้ (คีย์ย้อนหลังได้)')),
+          h('label', { className:'text-sm' }, '🏷️ แท็ก',
+            h('select', { value: pdTag ? pdTag.id : '', onChange:e=>onPdTag(e.target.value), 'data-testid':'pd-tag-select',
+              className:'w-full px-2 py-1 border rounded text-sm mt-0.5' + (pdTag ? ' border-violet-400 bg-violet-50' : '') },
+              h('option', { value:'' }, '— ไม่ระบุ —'),
+              pdTags.map(t => h('option', { key:t.id, value:t.id }, t.name)),
+              pdTag && !pdTags.some(t => t.id === pdTag.id) && h('option', { key:pdTag.id, value:pdTag.id }, pdTag.name),
+              (global.ERP.canAddPayTag ? global.ERP.canAddPayTag(user) : false) && h('option', { value:'__new__' }, '＋ เพิ่มแท็กใหม่…')))),
+        isPd && pdRecordOnly && netPayable > pdBalance + 0.01 && h('div', { className:'text-[11px] text-amber-800 bg-amber-50 rounded p-1.5' },
+          `💵 โหมดบันทึกอย่างเดียว: ยอดเงินสดย่อยในระบบ ${fmtCur(pdBalance)} → หลังจ่าย ${fmtCur(pdBalance - netPayable)} (ติดลบได้ — ยังไม่ต้องเติมเงินเข้าระบบ)`),
+        isPd && pdBlockMsg && h('div', { className:'text-[11px] text-red-700 bg-red-50 rounded p-1.5', 'data-testid':'pd-block' }, '⛔ ' + pdBlockMsg),
+        isPd && h('div', { className:'text-[10px] text-gray-500' }, 'บันทึกครั้งเดียว = สร้าง PI + PV เงินสดย่อย (self-approved · ผู้อนุมัติตรวจย้อนหลัง) · ใบ 50 ทวิ ออกตามเดิม')),
+
       h(Field, { label:'หมายเหตุ' },
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2, className:'w-full px-3 py-2 border-2 rounded text-sm' })),
 
       h('div', { className:'flex gap-2 pt-3 border-t' },
-        h(Button, { variant:'primary', onClick:save, disabled: saving || lines.length === 0 }, '💾 บันทึก PI + Post JE'),
+        h(Button, { variant:'primary', onClick:save, disabled: saving || lines.length === 0 || (isPd && !!pdBlockMsg), 'data-testid':'direct-save' },
+          isPd ? '💾 บันทึก PI + 💵 จ่ายเงินสดย่อย' : '💾 บันทึก PI + Post JE'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'))),
 
     showAddItem && AccExpenseItemEditModal && h(AccExpenseItemEditModal, {
@@ -88408,8 +88594,13 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   const pettyNonDirect = isPetty && pettyKind === 'non_deductible' ? invs.filter(i => i.source !== 'direct_expense' && (Number(amounts[i.id])||0) > 0) : [];
   // 🆕 UAT (d) period lock: petty จ่าย "วันนี้" เสมอ → ถ้า settings.periodLockUntil > วันนี้ reducer จะปฏิเสธ ADD_PAY/ADD_JE แต่ ADD_PETTY_TXN/UPDATE_INV ไม่มี guard
   //    → เกิด half-state (PI paid + เงินสดย่อยถูกตัด แต่ไม่มี PV/JE และกู้ในแอปไม่ได้) → ต้องหยุดที่ตัวเรียกก่อน dispatch ตัวแรก (สูตรเดียวกับ _checkDateLock / _periodLocked)
-  const _lockUntil = state.settings?.periodLockUntil;
-  const pettyLocked = isPetty && !!_lockUntil && String(getToday()) <= String(_lockUntil);
+  //    🆕 PETTY-DIRECT P2: วันที่จ่ายจริงเลือกได้ (คีย์ย้อนหลัง) → ด่านตาม pettyPayDate (ห้ามอนาคต · ห้ามงวดปิด) แทน "วันนี้"
+  const [pettyPayDate, setPettyPayDate] = useState(getToday());
+  const pettyDateMsg = isPetty ? _pettyPayDateBlock(state, pettyPayDate) : null;
+  const pettyLocked = !!pettyDateMsg;
+  const pettyBackdated = isPetty && !!pettyPayDate && String(pettyPayDate) < String(getToday());
+  // ก่อนวันที่ใบ (invDate) = เตือนยืนยัน ไม่บล็อก
+  const pettyBeforeInv = isPetty && pettyPayDate ? invs.filter(i => i.invDate && String(pettyPayDate) < String(i.invDate)) : [];
   // 🆕 ACCT-V2 (ม.82/5): ต้องห้าม + มี VAT → ภาษีซื้อเคลมไม่ได้ · ระบบโอน VAT (ตามสัดส่วนที่จ่าย) → 5900 (JE DR 5900 / CR 1150) + ตัดออกจากรายงานภาษีซื้อ/ภ.พ.30 อัตโนมัติ
   //   (user ตัดสิน 2026-09-17 — แทนการเตือนให้บัญชีปรับเองแบบเดิม) · opt-out ได้ด้วย checkbox pettyVatClaimable
   const pettyNdVat = isPetty && pettyKind === 'non_deductible' ? invs.filter(i => (Number(i.vat)||0) > 0 && (Number(amounts[i.id])||0) > 0) : [];
@@ -88419,7 +88610,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   //   verify VC2: ต้องใช้ล็อกรวม (periodLockUntil + vatLockUntil) — เดือนที่ยื่นผ่าน FILE_VAT_RETURN แต่ GL ยังเปิดก็ห้ามตัดภาษีซื้อย้อนหลัง
   const pettyNdLockedInvs = (pettyNdVat.length && !pettyVatClaimable)
     ? pettyNdVat.filter(i => { const tp = invTaxPeriodDate(i); return tp && String(i.supTaxInvNumber||'').trim() && global.ERP.vatPeriodLocked(state, tp); }) : [];
-  const pettyBlockMsg = pettyLocked ? `📅 งวด ≤ ${_lockUntil} ถูกปิดแล้ว — จ่ายจากเงินสดย่อยวันนี้ (${getToday()}) ไม่ได้ (ระบบออก PV/JE ไม่ได้) → ให้ admin ปลด period lock ใน ตั้งค่า → 🔒 ความปลอดภัย หรือขอจ่ายผ่าน 🏦 บัญชีบริษัทแทน`
+  const pettyBlockMsg = pettyLocked ? pettyDateMsg
     : pettyNdLockedInvs.length ? `งวดภาษีของใบกำกับ ${pettyNdLockedInvs.map(i => i.invNumber + ' (' + String(invTaxPeriodDate(i)).slice(0,7) + ')').join(', ')} ยื่น ภ.พ.30 แล้ว — ตัดภาษีซื้อย้อนหลังไม่ได้ → ให้ ผจก.บัญชี ขอปลดล็อกงวด (GM/เจ้าของอนุมัติ) แล้วยื่นเพิ่มเติม หรือลง JE ปรับในเดือนที่ยังเปิด หรือติ๊ก "ภาษีซื้อเคลมได้ (กรณีพิเศษ)" ถ้าบัญชียืนยันว่าเคลมได้`
     : pettyOverBal ? `เงินสดย่อยคงเหลือ ${fmtCur(pettyBalance)} ไม่พอ (ต้องจ่าย ${fmtCur(total)}) → เติมเงินสดย่อยที่แท็บ 💵 ก่อน`
     : pettyOverMax.length ? `เกินเพดานจ่ายจากเงินสดย่อย ${fmtCur(pettyPayMax)}/PI: ${pettyOverMax.map(i => i.invNumber).join(', ')} → ขอจ่ายผ่าน 🏦 บัญชีบริษัทแทน`
@@ -88427,70 +88618,9 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
     : '';
   const kindLabel = PETTY_KIND_LABEL[pettyKind] || pettyKind;
 
-  // จ่ายจากเงินสดย่อย 1 ใบ — ลำดับ dispatch ตาม contract: ADD_PAY (approved → reducer ออกเลข PV) → ADD_PETTY_TXN → UPDATE_INV → JE จ่าย → (reclass ต้องห้าม + flag PI) → audit
-  //   ⚠️ ห้าม UPDATE_PAY ทับ record หลัง ADD_PAY ด้วย object ใน closure — ไม่มี pvNumber → reducer จะออกเลข PV ใหม่ซ้ำ
-  const payPetty = (inv, amt, today) => {
-    const sup = (state.suppliers||[]).find(s => s.id === inv.supplierId);
-    const pettyTxnId = genId('pt');
-    const nowTs = Date.now();
-    // 🆕 ACCT-V2 (ม.82/5): ต้องห้าม + ไม่ติ๊ก "เคลมได้" → คำนวณ VAT/ฐานที่จะโอนออกจากภาษีซื้อ "ก่อน" ADD_PAY
-    //   (REVERSE_PAYMENT อ่าน pay.nonDeductibleVat/Base จาก record ใน state → ต้องอยู่ใน object ที่ส่ง ADD_PAY · ห้าม UPDATE_PAY ทีหลัง)
-    const isNd = pettyKind === 'non_deductible';
-    const ndPortion = (isNd && !pettyVatClaimable) ? _pettyNdVatPortion(inv, amt, state) : { vat:0, base:0 };
-    const pay = {
-      id: genId('pay'), invId: inv.id, supplierId: inv.supplierId,
-      date: today, payDate: today, requestedPayDate: today,
-      amount: amt, method:'petty_cash', paySource:'petty', pettyKind, pettyTxnId,
-      ref:'', note, bankId:null, bankName:'', bankNumber:'', slip:null,
-      by: user.username, createdBy: user.username, createdAt: nowTs,
-      approvalStatus:'approved', approvedBy: user.username, approvedAt: nowTs,
-      approvalNote:'จ่ายจากเงินสดย่อย — ไม่ผ่านคิวอนุมัติ', selfApproved:true,
-      ...(isNd ? { pettyVatClaimable: !!pettyVatClaimable, nonDeductibleVat: ndPortion.vat, nonDeductibleVatBase: ndPortion.base } : {}),
-      ...tagFields,   // 🆕 PAY-TAGS T2
-    };
-    // 🆕 DEPOSIT-VAT UAT: dry-run ADD_PAY ก่อน — ถูกปฏิเสธ (paymentBlock/VAT ชน/DP/จ่ายเกินยอด จากอีกเครื่องหลังเปิดฟอร์ม) = ไม่ตัดเงินสดย่อย/ไม่ลง JE · ผู้เรียกสรุปใบที่ข้าม
-    if(global.ERP.reducer){
-      let _why = null; const _oa = global.alert;
-      try { global.alert = (m) => { _why = String(m || ''); };
-        if(global.ERP.reducer(state, { type:'ADD_PAY', data: pay }) === state) return { skipped: (_why || 'ระบบไม่รับการจ่ายใบนี้').split('\n')[0] }; }
-      catch(_e){ return { skipped: 'ตรวจการจ่ายไม่สำเร็จ: ' + (_e && _e.message) }; }
-      finally { global.alert = _oa; }
-    }
-    dispatch({ type:'ADD_PAY', data: pay });
-    dispatch({ type:'ADD_PETTY_TXN', data:{ id: pettyTxnId, date: today, type:'expense', amount: -amt,
-      ref: inv.invNumber, payId: pay.id, invId: inv.id,
-      note: 'จ่าย ' + (inv.invNumber||'') + ' · ' + ((sup && sup.name) || inv.supplierNameFreeform || '-') + (pettyKind === 'non_deductible' ? ' · ค่าใช้จ่ายต้องห้าม' : ''),
-      by: user.username, createdAt: nowTs } });
-    // คลื่น 2 (verify): delta ไม่ใช่เขียนทับทั้งใบ — รวมงานกับเครื่องอื่นได้ · เกินยอดค้างบนใบล่าสุด = ไม่ลง (งานค้าง)
-    dispatch({ type:'PATCH_INV', data:{ id: inv.id, add:{ paidAmount: amt }, recalcStatus:true, guardOverpay:true } });
-    const autoPostPayment = purchaseMod?.autoPostPayment;
-    if(autoPostPayment) autoPostPayment(pay, inv, null, state, dispatch, user);   // PUR: method-aware → CR 1120 เงินสดย่อย
-    else alert('⚠️ ไม่พบ autoPostPayment (โมดูลจัดซื้อ) — JE จ่าย ' + (inv.invNumber||'') + ' ยังไม่ถูก post · ใช้ ⚡ Auto-post ในสมุดรายวันภายหลัง');
-    if(isNd){
-      const reclass = purchaseMod?.postNonDeductibleReclassJE;
-      // 🆕 ACCT-V2 (ม.82/5): postNonDeductibleReclassJE คืน { jeId, ndVat, ndVatBase, ndBase } (PUR รุ่นใหม่) · รุ่นเก่าคืน string jeId / null → รับได้ทั้ง 2 แบบ
-      //   ยอด VAT/ฐานที่บันทึกลง INV = ที่ JE โอนจริง (ถ้า PUR ส่งกลับ) · ไม่งั้นใช้ที่คำนวณไว้บน pay (สูตรเดียวกัน)
-      let jeId = null, ndVat = ndPortion.vat, ndVatBase = ndPortion.base;
-      if(typeof reclass === 'function'){
-        const r = reclass(pay, inv, state, dispatch, user);
-        if(r && typeof r === 'object'){
-          jeId = r.jeId || null;
-          if(r.ndVat != null) ndVat = Number(Number(r.ndVat).toFixed(2)) || 0;
-          if(r.ndVatBase != null) ndVatBase = Number(Number(r.ndVatBase).toFixed(2)) || 0;
-        } else if(typeof r === 'string') jeId = r;
-      }
-      else alert('⚠️ ไม่พบ postNonDeductibleReclassJE (โมดูลจัดซื้อ) — PI ' + (inv.invNumber||'') + ' ถูกติดธง "ต้องห้าม" แล้ว แต่ JE reclass 5900 ยังไม่ถูก post');
-      if(pettyVatClaimable){ ndVat = 0; ndVatBase = 0; }   // ติ๊ก "เคลมได้ (กรณีพิเศษ)" → ไม่ตัดภาษีซื้อ
-      dispatch({ type:'PATCH_INV', data:{ id: inv.id,
-        fields:{ nonDeductible:true, ...(jeId ? { nonDeductibleJeId: jeId } : {}) },
-        add:{ nonDeductibleAmount: amt, nonDeductibleVat: ndVat, nonDeductibleVatBase: ndVatBase } } });
-    }
-    dispatch({ type:'APPEND_AUDIT_LOG', data:{ type:'payment_petty', by:user.username, byName:user.name||user.username,
-      entityId: pay.id, entityRef: inv.invNumber||'-', amount: amt,
-      note: 'จ่ายจากเงินสดย่อย · ' + kindLabel + ' · self-approved · pettyTxn ' + pettyTxnId
-        + (isNd && (Number(inv.vat)||0) > 0 ? (pettyVatClaimable ? ' · ภาษีซื้อเคลมได้ (กรณีพิเศษ)' : ' · ภาษีซื้อไม่เคลม ' + fmtCur(pay.nonDeductibleVat||0) + ' (ม.82/5)') : '') } });
-    return pay;
-  };
+  // 🆕 PETTY-DIRECT P1: จ่ายจากเงินสดย่อย 1 ใบ → ตัวกลาง pettyPayInvoice (ใช้ร่วมกับหน้าคีย์ค่าใช้จ่าย) · คืน { pay } / { skipped }
+  const payPetty = (inv, amt, today) => pettyPayInvoice(state, dispatch, user, inv, amt,
+    { payDate: pettyPayDate, today, pettyKind, pettyVatClaimable, note, tagFields });
 
   const submit = () => {
     if(!payDate) return alert('เลือก "วันที่ต้องการจ่าย" ด้วย');
@@ -88499,7 +88629,9 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
     if(isPetty){
       if(!canPetty) return alert('ไม่มีสิทธิ์จ่ายจากเงินสดย่อย');
       if(pettyBlockMsg) return alert('⛔ ' + pettyBlockMsg);
-      if(!confirm(`💵 จ่ายจากเงินสดย่อยทันที ${invs.length} ใบ · รวม ${fmtCur(total)}\nประเภท: ${kindLabel}\n\n• ไม่ผ่านคิวอนุมัติ (self-approved) · ออกเลข PV ทันที\n• ตัดสมุดเงินสดย่อย (คงเหลือ ${fmtCur(pettyBalance)} → ${fmtCur(pettyBalance - total)})\n• ผู้อนุมัติจะตรวจย้อนหลังที่ ✅ รายการที่จ่ายแล้ว → 💵 ตรวจเงินสดย่อย`
+      // 🆕 PETTY-DIRECT P2: วันที่จ่ายก่อนวันที่ใบ = เตือนยืนยัน (ไม่บล็อก — เช่นจ่ายก่อนได้ใบกำกับ)
+      if(pettyBeforeInv.length && !confirm(`⚠️ วันที่จ่ายจริง ${fmtDate(pettyPayDate)} อยู่ก่อนวันที่ใบ: ${pettyBeforeInv.map(i => i.invNumber + ' (' + fmtDate(i.invDate) + ')').join(', ')}\n\nตรวจวันที่อีกครั้ง — ยืนยันใช้วันที่นี้?`)) return;
+      if(!confirm(`💵 จ่ายจากเงินสดย่อยทันที ${invs.length} ใบ · รวม ${fmtCur(total)}\nประเภท: ${kindLabel}\n📅 วันที่จ่ายจริง: ${fmtDate(pettyPayDate)}${pettyBackdated ? ' (จ่ายย้อนหลัง · คีย์วันนี้ ' + fmtDate(getToday()) + ')' : ''}\n\n• ไม่ผ่านคิวอนุมัติ (self-approved) · ออกเลข PV ทันที\n• ตัดสมุดเงินสดย่อย (คงเหลือ ${fmtCur(pettyBalance)} → ${fmtCur(pettyBalance - total)})\n• ผู้อนุมัติจะตรวจย้อนหลังที่ ✅ รายการที่จ่ายแล้ว → 💵 ตรวจเงินสดย่อย`
         + (pettyNdVat.length ? (pettyVatClaimable
             ? `\n\n☑ ภาษีซื้อ ${fmtCur(pettyNdVatSum)} ของ ${pettyNdVat.map(i => i.invNumber).join(', ')} ยังเคลมตามปกติ (กรณีพิเศษ — ไม่โอนออกจาก 1150)`
             : `\n\n⛔ ต้องห้าม: ระบบจะโอนภาษีซื้อ ${fmtCur(pettyNdVatSum)} ของ ${pettyNdVat.map(i => i.invNumber).join(', ')} เป็นค่าใช้จ่ายต้องห้าม (5900) และตัดออกจากรายงานภาษีซื้อ/ภ.พ.30 ให้อัตโนมัติ (ม.82/5)`) : '')
@@ -88695,11 +88827,17 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
           h(BEDateInput, { value:date, onChange:setDate,
             className:'w-full px-2 py-1 border rounded text-sm mt-0.5' })
         ),
-        // 🆕 1.6: วันที่ต้องการจ่าย (bank) · petty = จ่ายวันนี้เสมอ
+        // 🆕 1.6: วันที่ต้องการจ่าย (bank) · 🆕 PETTY-DIRECT P2: petty = เลือกวันที่จ่ายจริงได้ (คีย์ย้อนหลัง · ห้ามอนาคต/งวดปิด)
         isPetty
-          ? h('div', { className:'text-sm' }, h('span', { className:'font-medium text-emerald-800' }, '💵 วันที่จ่ายจริง'),
-              h('div', { className:'px-2 py-1 border rounded text-sm mt-0.5 bg-gray-50' }, fmtDate(getToday())),
-              h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, 'จ่ายจากเงินสดย่อย = ตัดวันนี้ (JE/เลข PV อิงวันนี้)'))
+          ? h('label', { className:'text-sm', 'data-testid':'petty-paydate' },
+              h('span', { className:'font-medium text-emerald-800' }, '📅 วันที่จ่ายจริง *'),
+              h(BEDateInput, { value:pettyPayDate, onChange:setPettyPayDate,
+                className:'w-full px-2 py-1 border-2 ' + (pettyDateMsg ? 'border-red-400' : 'border-emerald-300') + ' rounded text-sm mt-0.5' }),
+              h('div', { className:'text-[10px] mt-0.5 ' + (pettyDateMsg ? 'text-red-700' : (pettyBackdated || pettyBeforeInv.length) ? 'text-amber-700' : 'text-gray-500') },
+                pettyDateMsg ? '⛔ ' + pettyDateMsg.split('\n')[0]
+                : pettyBeforeInv.length ? '⚠️ ก่อนวันที่ใบ ' + pettyBeforeInv.map(i => i.invNumber).join(', ') + ' — ระบบจะถามยืนยัน'
+                : pettyBackdated ? '↩️ จ่ายย้อนหลัง — JE/เลข PV/สมุดเงินสดย่อย ลงวันที่นี้ · ผู้ตรวจเห็นวันที่คีย์'
+                : 'วันที่เงินออกจริง (ค่าเริ่ม วันนี้) — JE/เลข PV อิงวันที่นี้'))
           : h('label', { className:'text-sm' },
               h('span', { className:'font-medium text-amber-800' }, '📅 วันที่ต้องการจ่าย *'),
               h(BEDateInput, { value:payDate, onChange:setPayDate,
@@ -89037,6 +89175,109 @@ function _pettyNdVatPortion(inv, amt, state){
   const ratio = netPayable > 0 ? Math.min(1, pay / netPayable) : 1;
   return { vat: r2(Math.min(remainVat, vat * ratio)), base: r2(Math.min(remainBase, invVatBase(inv) * ratio)) };
 }
+// 🆕 PETTY-DIRECT P2: ด่าน "📅 วันที่จ่ายจริง" ของเงินสดย่อย (เงินออกแล้วจริง → คีย์ย้อนหลังได้ ห้ามอนาคต)
+//   คืนข้อความบล็อก (string) หรือ null · งวดปิด = สูตรเดียวกับ _payDateBlocked / _checkDateLock (≤ periodLockUntil)
+//   วันที่ก่อนวันที่ใบ (invDate) ไม่บล็อก — ผู้เรียกเตือนยืนยันเอง
+function _pettyPayDateBlock(state, date, today){
+  const t = today || getToday();
+  if(!date) return 'เลือก "📅 วันที่จ่ายจริง" ก่อน';
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) return `วันที่จ่ายจริง "${date}" ไม่ถูกต้อง`;
+  if(String(date) > String(t)) return `📅 วันที่จ่ายจริง ${date} อยู่ในอนาคต — เงินสดย่อยต้องเป็นวันที่เงินออกจริง (ไม่เกินวันนี้ ${t})`;
+  const lock = state && state.settings && state.settings.periodLockUntil;
+  if(lock && String(date) <= String(lock)) return `📅 งวด ≤ ${lock} ถูกปิดแล้ว — จ่ายจากเงินสดย่อยวันที่ ${date} ไม่ได้ (ระบบออก PV/JE ไม่ได้) → ให้ admin ปลด period lock ใน ตั้งค่า → 🔒 ความปลอดภัย หรือเลือกวันที่ในงวดที่ยังเปิด`;
+  return null;
+}
+global.ERP.pettyPayDateBlock = _pettyPayDateBlock;
+// 🆕 PETTY-DIRECT P1: จ่ายจากเงินสดย่อย 1 ใบ — ตัวกลางใช้ร่วม 💰 รอจ่าย (BulkRequestPayModal) + หน้าคีย์ค่าใช้จ่าย (DirectExpenseModal)
+//   ลำดับ dispatch ตาม contract: ADD_PAY (approved → reducer ออกเลข PV ตามเดือนของ payDate) → ADD_PETTY_TXN → PATCH_INV → JE จ่าย → (reclass ต้องห้าม + flag PI) → audit
+//   opts: { payDate (วันที่จ่ายจริง · ค่าเริ่มวันนี้), pettyKind, pettyVatClaimable, note, tagFields, today (วันที่คีย์ · ค่าเริ่ม getToday()), dryRun (ตรวจอย่างเดียว → { ok:true }) }
+//   คืน { pay } เมื่อจ่ายแล้ว / { skipped:'เหตุผล' } เมื่อไม่ dispatch อะไรเลย (ด่านวันที่ หรือ dry-run ADD_PAY ไม่ผ่าน)
+//   ⚠️ ห้าม UPDATE_PAY ทับ record หลัง ADD_PAY ด้วย object ใน closure — ไม่มี pvNumber → reducer จะออกเลข PV ใหม่ซ้ำ
+function pettyPayInvoice(state, dispatch, user, inv, amt, opts){
+  const o = opts || {};
+  const today = o.today || getToday();
+  const payDate = o.payDate || today;
+  const pettyKind = o.pettyKind || 'company';
+  const pettyVatClaimable = !!o.pettyVatClaimable;
+  const note = o.note || '';
+  const tagFields = o.tagFields || {};
+  const kindLabel = PETTY_KIND_LABEL[pettyKind] || pettyKind;
+  const _blk = _pettyPayDateBlock(state, payDate, today);
+  if(_blk) return { skipped: _blk.split('\n')[0] };
+  // verify 1 (#3): ต้องห้าม + ไม่เคลม → JE reclass (CR 1150) ลงวันที่จ่าย — งวดภาษีของวันที่จ่ายยื่น ภ.พ.30 แล้ว = ห้าม (1150 ขยับในเดือนที่ยื่นแล้ว)
+  if(pettyKind === 'non_deductible' && !o.pettyVatClaimable && (Number(inv.vat)||0) > 0
+    && typeof global.ERP.vatPeriodLocked === 'function' && global.ERP.vatPeriodLocked(state, payDate))
+    return { skipped: 'งวดภาษี ' + String(payDate).slice(0,7) + ' ยื่น ภ.พ.30 แล้ว — เลือกวันที่จ่ายในงวดที่ยังเปิด หรือติ๊ก "ภาษีซื้อเคลมได้ (กรณีพิเศษ)"' };
+  const backdated = String(payDate) < String(today);   // P2: คีย์ย้อนหลัง → เก็บวันที่คีย์ไว้ให้ผู้ตรวจเห็น
+  const purchaseMod = global.ERP.MODULES && global.ERP.MODULES.purchase;
+  const sup = (state.suppliers||[]).find(s => s.id === inv.supplierId);
+  const pettyTxnId = genId('pt');
+  const nowTs = Date.now();
+  // 🆕 ACCT-V2 (ม.82/5): ต้องห้าม + ไม่ติ๊ก "เคลมได้" → คำนวณ VAT/ฐานที่จะโอนออกจากภาษีซื้อ "ก่อน" ADD_PAY
+  //   (REVERSE_PAYMENT อ่าน pay.nonDeductibleVat/Base จาก record ใน state → ต้องอยู่ใน object ที่ส่ง ADD_PAY · ห้าม UPDATE_PAY ทีหลัง)
+  const isNd = pettyKind === 'non_deductible';
+  const ndPortion = (isNd && !pettyVatClaimable) ? _pettyNdVatPortion(inv, amt, state) : { vat:0, base:0 };
+  const pay = {
+    id: genId('pay'), invId: inv.id, supplierId: inv.supplierId,
+    date: payDate, payDate, requestedPayDate: payDate,
+    amount: amt, method:'petty_cash', paySource:'petty', pettyKind, pettyTxnId,
+    ref:'', note, bankId:null, bankName:'', bankNumber:'', slip:null,
+    by: user.username, createdBy: user.username, createdAt: nowTs,
+    approvalStatus:'approved', approvedBy: user.username, approvedAt: nowTs,
+    approvalNote:'จ่ายจากเงินสดย่อย — ไม่ผ่านคิวอนุมัติ', selfApproved:true,
+    ...(backdated ? { keyedDate: today, backdated:true } : {}),
+    ...(isNd ? { pettyVatClaimable, nonDeductibleVat: ndPortion.vat, nonDeductibleVatBase: ndPortion.base } : {}),
+    ...tagFields,   // 🆕 PAY-TAGS T2
+  };
+  // 🆕 DEPOSIT-VAT UAT: dry-run ADD_PAY ก่อน — ถูกปฏิเสธ (paymentBlock/VAT ชน/DP/จ่ายเกินยอด/งวดปิด) = ไม่ตัดเงินสดย่อย/ไม่ลง JE · ผู้เรียกสรุปใบที่ข้าม
+  if(global.ERP.reducer){
+    let _why = null; const _oa = global.alert;
+    try { global.alert = (m) => { _why = String(m || ''); };
+      if(global.ERP.reducer(state, { type:'ADD_PAY', data: pay }) === state) return { skipped: (_why || 'ระบบไม่รับการจ่ายใบนี้').split('\n')[0] }; }
+    catch(_e){ return { skipped: 'ตรวจการจ่ายไม่สำเร็จ: ' + (_e && _e.message) }; }
+    finally { global.alert = _oa; }
+  }
+  // 🆕 PETTY-DIRECT P3: dryRun = ตรวจอย่างเดียว (ด่านวันที่ + reducer ADD_PAY) ไม่ dispatch อะไร — หน้าคีย์ค่าใช้จ่ายตรวจก่อนสร้าง PI
+  if(o.dryRun) return { ok:true, pay };
+  dispatch({ type:'ADD_PAY', data: pay });
+  dispatch({ type:'ADD_PETTY_TXN', data:{ id: pettyTxnId, date: payDate, type:'expense', amount: -amt,
+    ref: inv.invNumber, payId: pay.id, invId: inv.id,
+    note: 'จ่าย ' + (inv.invNumber||'') + ' · ' + ((sup && sup.name) || inv.supplierNameFreeform || '-') + (isNd ? ' · ค่าใช้จ่ายต้องห้าม' : ''),
+    by: user.username, createdAt: nowTs, ...(backdated ? { keyedDate: today } : {}) } });
+  // คลื่น 2 (verify): delta ไม่ใช่เขียนทับทั้งใบ — รวมงานกับเครื่องอื่นได้ · เกินยอดค้างบนใบล่าสุด = ไม่ลง (งานค้าง)
+  dispatch({ type:'PATCH_INV', data:{ id: inv.id, add:{ paidAmount: amt }, recalcStatus:true, guardOverpay:true } });
+  const autoPostPayment = purchaseMod && purchaseMod.autoPostPayment;
+  if(autoPostPayment) autoPostPayment(pay, inv, null, state, dispatch, user);   // PUR: method-aware → CR 1120 เงินสดย่อย · JE ลงวันที่ pay.payDate
+  else alert('⚠️ ไม่พบ autoPostPayment (โมดูลจัดซื้อ) — JE จ่าย ' + (inv.invNumber||'') + ' ยังไม่ถูก post · ใช้ ⚡ Auto-post ในสมุดรายวันภายหลัง');
+  if(isNd){
+    const reclass = purchaseMod && purchaseMod.postNonDeductibleReclassJE;
+    // postNonDeductibleReclassJE คืน { jeId, ndVat, ndVatBase, ndBase } (รุ่นใหม่) · รุ่นเก่าคืน string jeId / null → รับได้ทั้ง 2 แบบ · JE ลงวันที่ pay.payDate
+    let jeId = null, ndVat = ndPortion.vat, ndVatBase = ndPortion.base;
+    if(typeof reclass === 'function'){
+      const r = reclass(pay, inv, state, dispatch, user);
+      if(r && typeof r === 'object'){
+        jeId = r.jeId || null;
+        if(r.ndVat != null) ndVat = Number(Number(r.ndVat).toFixed(2)) || 0;
+        if(r.ndVatBase != null) ndVatBase = Number(Number(r.ndVatBase).toFixed(2)) || 0;
+      } else if(typeof r === 'string') jeId = r;
+    }
+    else alert('⚠️ ไม่พบ postNonDeductibleReclassJE (โมดูลจัดซื้อ) — PI ' + (inv.invNumber||'') + ' ถูกติดธง "ต้องห้าม" แล้ว แต่ JE reclass 5900 ยังไม่ถูก post');
+    if(pettyVatClaimable){ ndVat = 0; ndVatBase = 0; }   // ติ๊ก "เคลมได้ (กรณีพิเศษ)" → ไม่ตัดภาษีซื้อ
+    dispatch({ type:'PATCH_INV', data:{ id: inv.id,
+      fields:{ nonDeductible:true, ...(jeId ? { nonDeductibleJeId: jeId } : {}) },
+      add:{ nonDeductibleAmount: amt, nonDeductibleVat: ndVat, nonDeductibleVatBase: ndVatBase } } });
+  }
+  dispatch({ type:'APPEND_AUDIT_LOG', data:{ type:'payment_petty', by:user.username, byName:user.name||user.username,
+    entityId: pay.id, entityRef: inv.invNumber||'-', amount: amt,
+    note: 'จ่ายจากเงินสดย่อย · ' + kindLabel + ' · self-approved · pettyTxn ' + pettyTxnId
+      + (backdated ? ' · จ่ายย้อนหลัง (วันที่จ่าย ' + payDate + ' · คีย์ ' + today + ')' : '')
+      + (isNd && (Number(inv.vat)||0) > 0 ? (pettyVatClaimable ? ' · ภาษีซื้อเคลมได้ (กรณีพิเศษ)' : ' · ภาษีซื้อไม่เคลม ' + fmtCur(pay.nonDeductibleVat||0) + ' (ม.82/5)') : '') } });
+  return { pay };
+}
+global.ERP.pettyPayInvoice = pettyPayInvoice;
+global.ERP.pettyBalance = _pettyBalance;
+global.ERP.PETTY_KIND_LABEL = PETTY_KIND_LABEL;
+global.ERP.canAddPayTag = _canAddPayTag;
 const _tsToISO = (ts) => { if(!ts) return ''; const d = new Date(ts); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 const _escHtml = (v) => String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const _money = (n) => (Number(n)||0).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
@@ -89669,6 +89910,9 @@ function PaidPaymentsTab({ state, dispatch, user }){
                         canReview && h('td', { className:'px-2 py-2 text-center' },
                           !rev && !p.pettyReviewedAt && !mine && h('input', { type:'checkbox', checked, onChange:()=>setSelReview(checked ? selReview.filter(x => x !== r.id) : [...selReview, r.id]) })),
                         h('td', { className:'px-3 py-2 text-xs' }, fmtDate(r.payDate),
+                          // 🆕 PETTY-DIRECT P2: จ่ายย้อนหลัง → ผู้ตรวจเห็นวันที่คีย์ (createdAt) เทียบวันที่จ่ายจริง
+                          (p.backdated || (p.keyedDate && p.keyedDate !== r.payDate)) && h('div', { className:'text-[10px] text-amber-700', 'data-testid':'petty-keyed-date' },
+                            '↩️ คีย์ ' + fmtDate(p.keyedDate || _tsToISO(p.createdAt))),
                           rev && h('div', { className:'text-[10px] text-red-700 font-bold' }, '🔄 REVERSED')),
                         h('td', { className: cls('px-3 py-2 font-mono text-xs font-bold', rev ? 'text-gray-500 line-through' : 'text-purple-700') }, p.pvNumber||'-'),
                         h('td', { className:'px-3 py-2 font-mono text-xs' },
