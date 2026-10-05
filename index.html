@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="e84d7eb38db7";window.__ERP_BUILT_AT__="2026-10-02T18:17:22";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="0f784f965f0d";window.__ERP_BUILT_AT__="2026-10-05T09:28:24";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -5403,6 +5403,90 @@ function buildWHTCerts(validLines, defaultForm, opts){
   });
 }
 
+// 🆕 WHT-MERGE M1 (WHT_MERGE_CONTRACT): รวมใบ 50 ทวิ ของใบตั้งหนี้ที่จ่ายด้วย PV รวมเดียวกัน → 1 ใบต่อแบบ ภ.ง.ด. ต่อผู้ถูกหัก
+//   pure + deterministic (ไม่อ่านเวลา) · คืน { certs, skipped:[{invId, invNumber, reason}], reason? }
+//   opts.paidExcludesPay = true → ยอดจ่ายของใบยังไม่รวม PV นี้ (เรียกจาก UPDATE_PAY ตอนเพิ่งอนุมัติ — PATCH_INV บวกยอดตามมาทีหลัง)
+//   ใบสมาชิก = ใบที่ PV นี้ "ปิดยอด" (กติกาเดียวกับ _pvWhtCarried ของใบสำคัญจ่าย) · ใบจ่ายบางส่วน/มีคำขอแก้ค้าง/รวมกับ PV อื่นอยู่ = ข้าม + เหตุผล
+const _wmR2 = (v) => Number((Number(v) || 0).toFixed(2));
+function _wmPosted(p){
+  return !!p && (p.approvalStatus || 'approved') === 'approved' && (p.status || 'posted') !== 'cancelled' && !p.voided && !p.reversed && !p.isReversal;
+}
+function _wmInvIds(p){ return (p && p.invoiceIds && p.invoiceIds.length) ? p.invoiceIds : (p && p.invId ? [p.invId] : []); }
+function _wmAlloc(p, invId){
+  const al = ((p && p.allocations) || []).find(a => a && a.invoiceId === invId);
+  if(al) return Number(al.amount) || 0;
+  return _wmInvIds(p).length === 1 ? (Number(p && p.amount) || 0) : 0;
+}
+function whtMergeBuild(state, pay, opts){
+  opts = opts || {};
+  const out = { certs: [], skipped: [] };
+  if(!pay){ out.reason = 'ไม่พบรายการจ่าย'; return out; }
+  if(!_wmPosted(pay)){ out.reason = 'PV ยังไม่อนุมัติ/ถูกยกเลิกแล้ว'; return out; }
+  const ids = _wmInvIds(pay);
+  if(ids.length < 2){ out.reason = 'PV นี้จ่ายใบเดียว — ไม่มีอะไรให้รวม'; return out; }
+  const pays = (state && state.payments) || [];
+  const myIdx = pays.findIndex(p => p && p.id === pay.id);
+  const groups = {}, order = [];
+  ids.forEach(invId => {
+    const inv = ((state && state.invoices) || []).find(i => i && i.id === invId);
+    const skip = (reason) => out.skipped.push({ invId, invNumber: (inv && inv.invNumber) || invId, reason });
+    if(!inv || inv.voided) return skip('ไม่พบใบ/ใบถูกยกเลิก');
+    const certs = (inv.whtCertificates || []).map((c, idx) => ({ c, idx }))
+      .filter(x => x.c && !x.c.voided && (Number(x.c.totalAmount != null ? x.c.totalAmount : x.c.whtAmount) || 0) > 0);
+    if(!certs.length) return skip((Number(inv.whtAmount) || 0) > 0 ? 'ไม่มีใบ 50 ทวิ ในระบบ' : 'ไม่มีหัก ณ ที่จ่าย');
+    const other = certs.find(x => x.c.mergedInto && x.c.mergedInto.payId !== pay.id);
+    if(other) return skip('รวมอยู่ในใบ ' + (other.c.mergedInto.certNumber || '') + ' (' + (other.c.mergedInto.pvNumber || '') + ') แล้ว');
+    if(pendingInvChangeReq(state, inv.id)) return skip('มีคำขอแก้ไขใบค้างอยู่');
+    // PV นี้ต้องเป็นตัวปิดยอดของใบ (จ่ายครบด้วย PV นี้) · มี PV ที่อนุมัติหลังจากนี้ = ไม่ใช่ตัวปิด
+    const net = _wmR2(inv.netPayable), alloc = _wmR2(_wmAlloc(pay, inv.id));
+    const after = _wmR2((Number(inv.paidAmount) || 0) + (opts.paidExcludesPay ? alloc : 0));
+    const before = _wmR2(after - alloc);
+    const later = myIdx >= 0 && pays.slice(myIdx + 1).some(p => _wmPosted(p) && _wmInvIds(p).includes(inv.id) && _wmAlloc(p, inv.id) > 0);
+    if(!(alloc > 0) || after < net - 0.01 || before >= net - 0.01 || later) return skip('PV นี้ไม่ได้ปิดยอดใบนี้ (จ่ายบางส่วน)');
+    // 🆕 UAT MF3: เคยจ่ายบางส่วนด้วย PV อื่นมาก่อน = ไม่รวม (รายงาน WHT ลงวันตามการจ่ายครั้งแรก → ใบรวมจะคนละเดือน ภ.ง.ด. กับบรรทัดรายงาน)
+    if(before > 0.01) return skip('เคยจ่ายบางส่วนด้วย PV อื่นแล้ว');
+    certs.forEach(({ c, idx }) => {
+      const payee = whtPayee(inv, state, c) || {};
+      // 🆕 UAT N5: สาขาภาษีเทียบแบบ normalize ("0"/"สำนักงานใหญ่"/"00000" = สาขาเดียวกัน) · supplierId อยู่ในคีย์เสมอ → ผู้ขายคนละระเบียน (ศูนย์การค้าคนละสาขา) ไม่มีทางรวมกัน
+      //   สาขาว่าง = ยังรวมได้ (ระเบียนเดียวกัน = ใบเดี่ยวก็พิมพ์สาขาว่างเหมือนกัน) แต่ UI เตือนให้บัญชีตรวจทะเบียนผู้ขายก่อน
+      const pkey = (inv.supplierId || '') + '|' + (String(payee.taxId || '').trim() || String(payee.name || '').trim()) + '|' + normalizeBranchCode(payee.branchCode);
+      const form = c.form || inv.whtForm || '53';
+      const key = form + '#' + pkey;
+      if(!groups[key]){ groups[key] = { form, payee, members: [] }; order.push(key); }
+      groups[key].members.push({ inv, c, idx });
+    });
+  });
+  order.forEach(key => {
+    const g = groups[key];
+    const invSet = Array.from(new Set(g.members.map(m => m.inv.id)));
+    if(invSet.length < 2){
+      g.members.forEach(m => { if(!out.skipped.some(x => x.invId === m.inv.id))
+        out.skipped.push({ invId: m.inv.id, invNumber: m.inv.invNumber || m.inv.id, reason: 'ไม่มีใบอื่นแบบ ภ.ง.ด.' + g.form + ' ผู้ถูกหักเดียวกันให้รวม' }); });
+      return;
+    }
+    const lines = [], lkeys = {};
+    let totalBase = 0, totalWht = 0;
+    const members = g.members.map(({ inv, c, idx }) => {
+      let base = 0, wht = 0;
+      (c.lines || []).forEach(l => {
+        const lk = [l.category || '', l.sub5 || '', Number(l.rate) || 0, l.customLabel || ''].join('|');
+        if(!lkeys[lk]){ lkeys[lk] = { category: l.category, sub5: l.sub5 || null, rate: Number(l.rate) || 0, base: 0, whtAmount: 0, customLabel: l.customLabel || '' }; lines.push(lkeys[lk]); }
+        lkeys[lk].base = _wmR2(lkeys[lk].base + (Number(l.base) || 0));
+        lkeys[lk].whtAmount = _wmR2(lkeys[lk].whtAmount + (Number(l.whtAmount) || 0));
+        base += Number(l.base) || 0; wht += Number(l.whtAmount) || 0;
+      });
+      if(!(c.lines || []).length) wht = Number(c.totalAmount != null ? c.totalAmount : c.whtAmount) || 0;
+      totalBase += base; totalWht += wht;
+      return { invId: inv.id, invNumber: inv.invNumber || '', certNumber: c.certNumber || '', certIdx: idx, base: _wmR2(base), wht: _wmR2(wht) };
+    });
+    const nums = members.map(m => m.certNumber).filter(Boolean).sort();
+    out.certs.push({ form: g.form, certNumber: nums[0] || '', certDate: pay.payDate || pay.date || '',
+      payeeSnapshot: g.payee && g.payee.name ? g.payee : null, lines, totalBase: _wmR2(totalBase), totalWht: _wmR2(totalWht), members });
+  });
+  if(!out.certs.length && !out.reason) out.reason = 'ไม่มีใบที่รวมได้ (ต้องมี ≥ 2 ใบที่หัก ณ ที่จ่ายแบบเดียวกัน และ PV นี้ปิดยอดทุกใบ)';
+  return out;
+}
+
 // ==================== COMBOBOX (searchable dropdown) ====================
 // 🆕 B2: getSearchText → ค้นหาด้วยหลาย field (เช่น supplier: ชื่อ+รหัส+เลขภาษี) · limit → render แค่ N รายการ (กันแลคตอน 1,000+ ตัว)
 function Combobox({ value, onChange, options, placeholder, disabled, className, renderOption, getLabel, getKey, getSearchText, limit }){
@@ -8715,7 +8799,7 @@ Object.assign(global.ERP, {
   // Constants
   STORAGE_KEY, LEGACY_KEY, APP_VERSION, MODULES, MODULE_FILES, ROLE_SCOPE, LZ,
   PERM_TREE, PERM_ACTION_LABEL, PERM_MODULE_LABEL, ROLE_DEFAULT_PERMS, QUICK_PROFILES,
-  WHT_CATEGORIES, WHT_SUB5_TYPES, WHT_SECTION_LABELS, genWHNumber, buildWHTCerts,
+  WHT_CATEGORIES, WHT_SUB5_TYPES, WHT_SECTION_LABELS, genWHNumber, buildWHTCerts, whtMergeBuild,
   partySnapshot, piVendor, whtPayee,
   findDupSupInv, consumeSupplierCredit,
   // Helpers
@@ -13260,6 +13344,11 @@ function _invKeepProtected(old, nu, allow){
     if(k in out && !_protSame(old[k], out[k])) dropped.push(k);
     if(k in old) out[k] = old[k]; else delete out[k];
   }
+  // 🆕 WHT-MERGE: ใบที่ 50 ทวิ รวมอยู่ในใบรวมของ PV — ใบ 50 ทวิ/ยอดหัก คงค่าเดิม (สำเนาเก่าไม่ลบ mergedInto · แก้ได้หลัง ↩️ แยก)
+  if(_invWhtMergedInto(old)) for(const k of ['whtCertificates', 'whtAmount', 'whtLines', 'whtNumber', 'whtForm']){
+    if(k in out && !_protSame(old[k], out[k])) dropped.push(k);
+    if(k in old) out[k] = old[k]; else delete out[k];
+  }
   if(dropped.length){ try { console.warn('⛔ ฟิลด์ควบคุมของ PI ' + (old.invNumber || old.id) + ' แก้ทางนี้ไม่ได้ — คงค่าเดิม: ' + dropped.join(', ')); } catch(_w){} }
   return { inv: out, dropped };
 }
@@ -13331,6 +13420,8 @@ global.ERP.invUpdateDeny = function(state, old, nu){
     if(global.ERP.invVatInEcount(old) && nu.supTaxInvNumber !== undefined && String(nu.supTaxInvNumber||'').trim()   // 🆕 MIG_VAT_HERE V1
       && String(nu.supTaxInvNumber||'').trim() !== String(old.supTaxInvNumber||'').trim())
       return '⛔ PI นำเข้าจาก Ecount — ยื่นภาษีซื้อในระบบเดิมแล้ว คีย์เลขใบกำกับทางนี้ไม่ได้ (กันเคลมซ้ำ)';
+    // 🆕 WHT-MERGE UAT MF1: ด่านเดียวกับ UPDATE_INV — ใบที่รวมอยู่ใน 50 ทวิ ของ PV แก้ยอดหักไม่ได้
+    if(_invWhtMergedInto(old) && nu.whtAmount !== undefined && !_protSame(old.whtAmount, nu.whtAmount)) return _whtMergedDenyMsg(old);
     return _invFiledFinReason(state, old, nu) || _invGlLockReason(state, old, nu);
   } catch(e){ return 'ตรวจการแก้ใบไม่สำเร็จ: ' + (e && e.message); }
 };
@@ -14285,6 +14376,62 @@ function _freezeCusDocs(s, prev, next){
 function _payTagName(v){ return String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); }
 // UAT M1: หาแท็กในทะเบียนจากชื่อ (ไม่สนตัวพิมพ์/ช่องว่างซ้ำ) — ใช้กันชื่อซ้ำข้ามเครื่อง + โยง tagId ที่ไม่มีในทะเบียนไปตัวที่ชื่อตรงกัน
 function _payTagByName(s, name){ const k = _payTagName(name).toLowerCase(); return k ? ((s && s.payTags) || []).find(x => x && _payTagName(x.name).toLowerCase() === k) || null : null; }
+// 🆕 WHT-MERGE M1/M2: ใบ 50 ทวิ ของใบตั้งหนี้ที่ถูกรวมเข้าใบรวมของ PV (cert.mergedInto) — ใบสมาชิกไม่ voided (รายงานยังเห็นบรรทัด)
+function _invWhtMergedInto(inv){
+  const c = ((inv && inv.whtCertificates) || []).find(x => x && !x.voided && x.mergedInto && x.mergedInto.payId);
+  return c ? c.mergedInto : null;
+}
+function _whtMergedDenyMsg(inv){
+  const m = _invWhtMergedInto(inv);
+  return m ? '⛔ ใบ ' + ((inv && inv.invNumber) || '') + ' รวมอยู่ใน 50 ทวิ เลขที่ ' + (m.certNumber || '-') + ' (' + (m.pvNumber || 'PV') + ') — ↩️ ยกเลิกการรวมก่อน' : '';
+}
+// 🆕 WHT-MERGE UAT MF2: งวดปิด (settings.periodLockUntil) — วันจ่ายของ PV (= วันที่ใบรวม) อยู่ในงวดที่ปิด/ยื่น ภ.ง.ด. แล้ว → รวม/แยกไม่ได้
+//   (เลขใบในรายงานที่ยื่นแล้วจะเปลี่ยน + ใบเดี่ยวเก่ากลับมาพิมพ์ได้) · ใบรวมเดิมดูวันที่ใบรวมด้วย
+function _whtMergeLockReason(s, pay){
+  const lock = String((s && s.settings && s.settings.periodLockUntil) || '');
+  if(!lock || !pay) return '';
+  const ds = [pay.payDate || pay.date || ''];
+  for(const c of ((pay.whtMerge && pay.whtMerge.certs) || [])) if(c && c.certDate) ds.push(c.certDate);
+  const hit = ds.find(d => d && String(d).slice(0, 10) <= lock);
+  return hit ? '📅 งวด ≤ ' + lock + ' ปิดแล้ว (วันจ่าย/วันที่ใบรวม ' + String(hit).slice(0, 10) + ') — ให้ admin ปลด period lock ใน Settings ก่อน' : '';
+}
+// สิทธิ์รวม/แยก 50 ทวิ = คนที่ออก WHT ได้ (accounting.wht.create — PERM_TREE ไม่มี edit) (ตัวตนจากแถวผู้ใช้จริง ไม่เชื่อ payload)
+function _whtMergeCanDo(s){
+  const who = (s.currentUser && s.currentUser.username) || '';
+  const u = who ? _userByRef(s, who) : null, E = global.ERP;
+  return !!u && ((E.isSuperUser && E.isSuperUser(u)) || E.hasPerm(u, 'accounting', 'wht', 'create') || E.hasPerm(u, 'accounting', 'payment', 'edit')
+    || E.hasPerm(u, 'accounting', 'payApprove', 'approve'));
+}
+// รวม: คืน { payment, invoices, audit } หรือ { reason, skipped } · deterministic (at/by จาก payload)
+function _whtMergeApply(s, pay, at, by, opts){
+  const r = global.ERP.whtMergeBuild(s, pay, opts);
+  if(!r.certs.length) return { reason: r.reason || 'ไม่มีใบที่รวมได้', skipped: r.skipped };
+  const tag = {};   // invId → [{ certIdx, mergedInto }]
+  r.certs.forEach(c => c.members.forEach(m => { (tag[m.invId] = tag[m.invId] || []).push({ idx: m.certIdx, mi: { payId: pay.id, pvNumber: pay.pvNumber || '', certNumber: c.certNumber } }); }));
+  const invoices = (s.invoices || []).map(i => {
+    const t = i && tag[i.id]; if(!t) return i;
+    return { ...i, whtCertificates: (i.whtCertificates || []).map((c, idx) => { const hit = t.find(x => x.idx === idx); return hit ? { ...c, mergedInto: hit.mi } : c; }) };
+  });
+  const payment = { ...pay, whtMerge: { at, by, certs: r.certs, skipped: r.skipped }, whtMergeLog: [...(pay.whtMergeLog || []), { action: 'merge', at, by }] };
+  const audit = { id: 'al_whtm_' + _sanId(pay.id) + '_' + Number(at).toString(36), ts: at, type: 'wht_merge', by, entityType: 'payment', entityId: pay.id,
+    entityRef: pay.pvNumber || pay.id, amount: r.certs.reduce((t, c) => t + c.totalWht, 0),
+    note: '🧾 รวม 50 ทวิ ' + r.certs.map(c => c.certNumber + ' (ภ.ง.ด.' + c.form + ' · ' + c.members.length + ' ใบ)').join(', ')
+      + (r.skipped.length ? ' · ไม่รวม: ' + r.skipped.map(x => x.invNumber + ' ' + x.reason).join('; ') : '') };
+  return { payment, invoices, audit };
+}
+// แยก (ยกเลิกการรวม): ลบ whtMerge ของ PV + ลบ mergedInto ที่ชี้ PV นี้
+function _whtUnmergeApply(s, pay, at, by, reason){
+  const invoices = (s.invoices || []).map(i => {
+    if(!i || !(i.whtCertificates || []).some(c => c && c.mergedInto && c.mergedInto.payId === pay.id)) return i;
+    return { ...i, whtCertificates: i.whtCertificates.map(c => { if(!(c && c.mergedInto && c.mergedInto.payId === pay.id)) return c; const { mergedInto: _m, ...rest } = c; return rest; }) };
+  });
+  const { whtMerge: _w, ...rest } = pay;
+  const payment = { ...rest, whtMergeLog: [...(pay.whtMergeLog || []), { action: 'unmerge', at, by, reason: reason || '' }] };
+  const audit = { id: 'al_whtu_' + _sanId(pay.id) + '_' + Number(at).toString(36), ts: at, type: 'wht_unmerge', by, entityType: 'payment', entityId: pay.id,
+    entityRef: pay.pvNumber || pay.id, amount: ((_w && _w.certs) || []).reduce((t, c) => t + (Number(c.totalWht) || 0), 0),
+    note: '↩️ แยก 50 ทวิ ' + ((_w && _w.certs) || []).map(c => c.certNumber).join(', ') + (reason ? ' · ' + reason : '') };
+  return { payment, invoices, audit };
+}
 const _dupById = (coll, get) => (s, d) => { const id = d && get(d); return !!id && (s[coll] || []).some(x => x && x.id === id); };
 const _dupInBranch = (field, get) => (s, d) => {
   const id = d && get(d); if(!id) return false;
@@ -14420,6 +14567,13 @@ const _ADD_DUP = {
                           return !!(inv && d.at != null && (inv.migApCloseLog || []).some(x => x && x.action === 'close' && x.at === Number(d.at))); },
   MIG_AP_CLOSE_UNDO:    (s, d) => { const inv = d && (s.invoices || []).find(i => i && i.id === d.invId);
                           return !!(inv && d.at != null && (inv.migApCloseLog || []).some(x => x && x.action === 'undo' && x.at === Number(d.at))); },
+  // 🆕 WHT-MERGE M2: รวม/แยก 50 ทวิ ครั้งเดียวกัน (at เดิม) ลง whtMergeLog ของ PV แล้ว = ซ้ำ
+  WHT_MERGE_PV:         (s, d) => { const p = d && (s.payments || []).find(x => x && x.id === d.payId);
+                          // 🆕 verify: อีกเครื่องรวมไว้แล้ว (at คนละค่า) = เป้าหมายสำเร็จแล้ว → ซ้ำ ไม่ตกงานค้าง
+                          return !!(p && (p.whtMerge || (d.at != null && (p.whtMergeLog || []).some(x => x && x.action === 'merge' && x.at === Number(d.at))))); },
+  WHT_UNMERGE_PV:       (s, d) => { const p = d && (s.payments || []).find(x => x && x.id === d.payId);
+                          // 🆕 verify: แยกไปแล้ว (เครื่องอื่น/ยกเลิกจ่ายแยกให้อัตโนมัติ) = ไม่มีอะไรทำ → ซ้ำ ไม่ใช่ปฏิเสธ
+                          return !!p && (!p.whtMerge || (d.at != null && (p.whtMergeLog || []).some(x => x && x.action === 'unmerge' && x.at === Number(d.at)))); },
   // verify: รับเอกสาร CN เลขเดิมที่รับแล้วและงวดภาษียื่นแล้ว = ซ้ำ (เครื่องที่สองเล่นซ้ำหลังออฟไลน์) — งวดยังเปิดให้ reducer ทำงาน (แก้รูป/วันที่ได้)
   RECEIVE_CN_DOC:       (s, d) => { if(!d || !d.memoId) return false; const m = (s.supplierMemos || []).find(x => x && x.id === d.memoId);
                           return !!m && m.status !== 'await_doc' && !!m.supMemoNumber && m.supMemoNumber === d.supCnNumber && _vatPeriodLocked(s, m.vatClaimDate || m.supMemoDate); },
@@ -17577,6 +17731,8 @@ function reducer(s, a){
       if(_oldInv){ const _fx = _invFiledFinChange(s, _oldInv, a.data); if(_fx) return _fx; }
       // 🆕 DEPOSIT-VAT verify: งวด GL ของ invDate เดิม/ใหม่ปิดแล้ว → ห้ามเปลี่ยนยอด/วันที่ (JE ใหม่ลงไม่ได้ = AP หายจาก GL)
       if(_oldInv){ const _gl = _invGlLockReason(s, _oldInv, a.data); if(_gl){ alert('⛔ ' + _gl); return s; } }
+      // 🆕 WHT-MERGE: แก้ยอดหัก ณ ที่จ่าย ของใบที่รวมอยู่ใน 50 ทวิ ของ PV (เช่น 🧾 เพิ่ม WHT ย้อนหลัง) → ปฏิเสธ
+      if(_oldInv && _invWhtMergedInto(_oldInv) && a.data.whtAmount !== undefined && !_protSame(_oldInv.whtAmount, a.data.whtAmount)){ alert(_whtMergedDenyMsg(_oldInv)); return s; }
       if(_oldInv){
         const _finF = ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId'];
         const _chg = _finF.filter(f => a.data[f] !== undefined && _oldInv[f] !== a.data[f]);
@@ -17829,6 +17985,7 @@ function reducer(s, a){
       if(certIdx < 0 || certIdx >= certs.length){ alert('ไม่พบ cert'); return s; }
       const oldCert = certs[certIdx];
       if(oldCert.voided){ alert('cert ใบนี้ voided ไปแล้ว — แก้ไม่ได้'); return s; }
+      if(oldCert.mergedInto){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบนี้รวมอยู่ในใบรวมของ PV — แก้เลข/ผู้ถูกหักต้องแยกก่อน
       // เก็บ history เดิมไว้ใน editHistory[]
       const newCert = { ...oldCert, ...fields,
         editedAt: Date.now(), editedBy: by, editReason: reason||'',
@@ -17846,6 +18003,35 @@ function reducer(s, a){
       return { ...s,
         invoices: s.invoices.map(i => i.id === invId ? newInv : i),
         auditLog };
+    }
+    // 🆕 WHT-MERGE M2: 🧾 รวมใบ 50 ทวิ ของ PV รวม (ใบที่ PV นี้ปิดยอด) เป็นใบเดียวต่อแบบ ภ.ง.ด. — a.data = { payId, by, at }
+    //   ใบรวมเก็บที่ pay.whtMerge · ใบสมาชิกได้ mergedInto (ไม่ void) · ทำซ้ำ at เดิม = no-op (_ADD_DUP)
+    case 'WHT_MERGE_PV': {
+      const d = a.data || {};
+      const pay = (s.payments || []).find(p => p && p.id === d.payId);
+      if(!pay){ alert('⛔ ไม่พบรายการจ่ายนี้'); return s; }
+      if(pay.whtMerge && pay.whtMerge.at === Number(d.at)) return s;
+      if(!_whtMergeCanDo(s)){ alert('⛔ ไม่มีสิทธิ์รวมใบหัก ณ ที่จ่าย'); return s; }
+      if(pay.whtMerge){ alert('⛔ ' + (pay.pvNumber || 'PV นี้') + ' รวม 50 ทวิ ไว้แล้ว — ↩️ แยกก่อนถ้าจะรวมใหม่'); return s; }
+      { const _lk = _whtMergeLockReason(s, pay); if(_lk){ alert('⛔ รวม 50 ทวิ ไม่ได้ — ' + _lk); return s; } }
+      const at = Number(d.at) || 0, by = (s.currentUser && s.currentUser.username) || d.by || '';
+      let r;   // 🆕 verify: สร้างใบรวมพัง → ปฏิเสธพร้อมเหตุผล (ไม่ทำให้แอปค้าง)
+      try { r = _whtMergeApply(s, pay, at, by); } catch(e){ r = { reason: 'รวมไม่สำเร็จ: ' + ((e && e.message) || String(e)), skipped: [] }; }
+      if(r.reason){ alert('⛔ รวม 50 ทวิ ไม่ได้ — ' + r.reason + ((r.skipped || []).length ? '\n' + r.skipped.map(x => '• ' + x.invNumber + ': ' + x.reason).join('\n') : '')); return s; }
+      return { ...s, invoices: r.invoices, payments: s.payments.map(p => p.id === pay.id ? r.payment : p), auditLog: [...(s.auditLog || []), r.audit] };
+    }
+    // 🆕 WHT-MERGE M2: ↩️ แยก 50 ทวิ (ยกเลิกการรวม) — a.data = { payId, by, at, reason } · ใบสมาชิกกลับไปพิมพ์แยกใบได้ตามเดิม
+    case 'WHT_UNMERGE_PV': {
+      const d = a.data || {};
+      const pay = (s.payments || []).find(p => p && p.id === d.payId);
+      if(!pay){ alert('⛔ ไม่พบรายการจ่ายนี้'); return s; }
+      if(!pay.whtMerge) return s;   // ไม่ได้รวมอยู่ (หรือแยกไปแล้วจากเครื่องอื่น) = ไม่มีอะไรทำ
+      if(!_whtMergeCanDo(s)){ alert('⛔ ไม่มีสิทธิ์ยกเลิกการรวมใบหัก ณ ที่จ่าย'); return s; }
+      if(!String(d.reason || '').trim()){ alert('⛔ ต้องใส่เหตุผลการแยก 50 ทวิ (ถ้าส่งใบรวมให้ผู้ขายแล้ว ต้องเรียกคืนก่อนพิมพ์ใบเดี่ยว)'); return s; }   // 🆕 UAT SF2
+      { const _lk = _whtMergeLockReason(s, pay); if(_lk){ alert('⛔ แยก 50 ทวิ ไม่ได้ — ' + _lk); return s; } }
+      const at = Number(d.at) || 0, by = (s.currentUser && s.currentUser.username) || d.by || '';
+      const r = _whtUnmergeApply(s, pay, at, by, String(d.reason || '').trim());
+      return { ...s, invoices: r.invoices, payments: s.payments.map(p => p.id === pay.id ? r.payment : p), auditLog: [...(s.auditLog || []), r.audit] };
     }
     // 🆕 PAY-TAGS T1 (PAY_TAGS_CONTRACT): ทะเบียนแท็กการจ่าย — บัญชีเพิ่มเองได้จากหน้าขออนุมัติจ่าย
     //   ชื่อตัดช่องว่าง · ว่าง/ยาวเกิน 40 = ปฏิเสธ · ชื่อซ้ำ (ไม่สนตัวพิมพ์/ช่องว่างซ้ำ) หรือ id ซ้ำ = ไม่สร้างใหม่ (หน้าจอเลือกตัวเดิม)
@@ -17965,7 +18151,8 @@ function reducer(s, a){
         const _p0 = (s.payments||[]).find(x => x && x.id === (a.data && a.data.id));
         const d = { ...a.data };
         // 🆕 PAY-TAGS T2: แท็กการจ่าย (tagId/tagName) มาจาก record เดิมเสมอ — อนุมัติ/แก้ตอนอนุมัติ/ปฏิเสธ/แนบสลิป ไม่ทำแท็กหาย (แก้แท็กใช้ SET_PAY_TAG)
-        if(_p0){ for(const k of ['createdBy','by','tagId','tagName']){ if(k in _p0) d[k] = _p0[k]; else delete d[k]; } }
+        //   🆕 WHT-MERGE: การรวม 50 ทวิ (whtMerge/whtMergeLog) + ความต้องการรวม (whtMergeWanted ตั้งตอนขอจ่าย) มาจาก record เดิมเสมอ — แก้ได้ทาง WHT_MERGE_PV/WHT_UNMERGE_PV
+        if(_p0){ for(const k of ['createdBy','by','tagId','tagName','whtMerge','whtMergeLog','whtMergeWanted']){ if(k in _p0) d[k] = _p0[k]; else delete d[k]; } }
         const _cu = s.currentUser && s.currentUser.username;
         if(_cu && _payPostedOf(d) && !_payPostedOf(_p0)) d.approvedBy = _cu;
         // 🆕 B18 GM-SELF: ป้าย gmSelf บน PV ตั้งได้ที่นี่เท่านั้น — เพิ่งอนุมัติ + คำขอ approve_payment ของใบนี้ที่ GM/เจ้าของประทับเอง (_gmSelfAp) · ไม่เชื่อ payload
@@ -18025,10 +18212,26 @@ function reducer(s, a){
         type:'gm_self_approved', by:payment.gmSelf.by, action:'approve_payment', label:'อนุมัติจ่าย', entityType:'payment', entityId:payment.id, entityRef:payment.pvNumber || payment.id,
         amount:Number(payment.amount) || 0, approvalReqId:null, ...(payment.gmSelf.twoEyeAck ? { twoEyeAck:payment.gmSelf.twoEyeAck } : {}),
         summary:'👑 อนุมัติจ่าย ' + (payment.pvNumber || '') + ' ของตัวเอง — GM/เจ้าของ ทำเองไม่ผ่านอนุมัติ' + (payment.gmSelf.twoEyeAck ? ' (ยืนยันแล้ว: ' + payment.gmSelf.twoEyeAck + ')' : '') }] : [];
+      // 🆕 WHT-MERGE M2: เพิ่งอนุมัติ + ผู้ขอติ๊ก "รวมใบหัก ณ ที่จ่าย" → รวมให้ในการกระทำเดียวกัน (ยอดจ่ายของใบยังไม่รวม PV นี้ — PATCH_INV ตามมา)
+      //   ไม่เข้าเงื่อนไข = ไม่รวม ไม่ล้มการอนุมัติ + audit บอกเหตุผล (id/เวลา จาก approvedAt → deterministic · ต่อท้ายอย่างเดียว)
+      let _wmInv = null; const _wmAu = [];
+      if(isPosted && !_payPostedOf(_p00) && payment.whtMergeWanted === true && !payment.whtMerge){
+        const _wAt = Number(payment.approvedAt) || 0, _wBy = payment.approvedBy || '';
+        const _wPays = (s.payments || []).map(p => p.id === payment.id ? payment : p);
+        const _wLk = _whtMergeLockReason(s, payment);   // 🆕 UAT MF2: งวดปิด → ข้ามการรวม (ไม่ล้มการอนุมัติ) + บอกเหตุผล
+        // 🆕 verify: สร้างใบรวมพัง (ข้อมูลเพี้ยน) → ข้ามการรวม + audit เหตุผล — การอนุมัติจ่ายต้องผ่านเสมอ
+        let _wr;
+        try { _wr = _wLk ? { reason: _wLk, skipped: [] } : _whtMergeApply({ ...s, payments: _wPays }, payment, _wAt, _wBy, { paidExcludesPay: true }); }
+        catch(e){ _wr = { reason: 'รวมไม่สำเร็จ: ' + ((e && e.message) || String(e)), skipped: [] }; }
+        if(_wr.reason) _wmAu.push({ id:'al_whtm_' + _sanId(payment.id) + '_' + _wAt.toString(36), ts:_wAt, type:'wht_merge_skip', by:_wBy, entityType:'payment', entityId:payment.id,
+          entityRef:payment.pvNumber || payment.id, amount:0, note:'🧾 ไม่ได้รวม 50 ทวิ — ' + _wr.reason + ((_wr.skipped || []).length ? ' · ' + _wr.skipped.map(x => x.invNumber + ' ' + x.reason).join('; ') : '') });
+        else { payment = _wr.payment; _wmInv = _wr.invoices; _wmAu.push(_wr.audit); }
+      }
       return { ...s,
         payments: s.payments.map(p => p.id === payment.id ? payment : p),
+        ...(_wmInv ? { invoices: _wmInv } : {}),
         ...(deposits !== (s.deposits || []) ? { deposits } : {}),
-        ...(_gsAu.length ? { auditLog:[...(s.auditLog || []), ..._gsAu] } : {}),
+        ...(_gsAu.length || _wmAu.length ? { auditLog:[...(s.auditLog || []), ..._gsAu, ..._wmAu] } : {}),
         seq: { ...s.seq, pv: seqPv } };
     }
 
@@ -18056,6 +18259,7 @@ function reducer(s, a){
       const inv = (s.invoices||[]).find(i => i.id === d.invId);
       if(!inv){ alert('ไม่พบใบตั้งหนี้'); return s; }
       if(inv.voided){ alert('ใบตั้งหนี้นี้ยกเลิกไปแล้ว'); return s; }
+      if(_invWhtMergedInto(inv)){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบรวมอยู่ใน 50 ทวิ ของ PV
       // 🆕 นำเข้า2569 UAT MF3: เจ้าหนี้ค้างจ่ายยกมา (ยังไม่จ่าย) ยังไม่ออก 50ทวิ — หัก WHT ตอนจ่ายในระบบนี้ได้ · ใบที่จ่ายแล้วใน Ecount = ยื่น ภ.ง.ด. ในระบบเดิมแล้ว
       if(_invIsMigrated(inv) && (['paid','partial'].includes(inv.paymentStatus) || Number(inv.paidAmount) > 0)){ alert('⛔ PI นำเข้าจาก Ecount ที่จ่ายแล้ว — ออก 50ทวิ/ยื่น ภ.ง.ด. ในระบบเดิมแล้ว แก้ WHT ทางนี้ไม่ได้'); return s; }
       if((inv.paidAmount||0) > 0 || ['paid','partial'].includes(inv.paymentStatus)){ alert('⛔ ใบนี้จ่ายไปแล้ว — แก้ WHT ทางนี้ไม่ได้ (ใช้ 🧾 เพิ่ม WHT ย้อนหลัง หรือยกเลิก PV ก่อน)'); return s; }
@@ -18133,6 +18337,7 @@ function reducer(s, a){
       const inv = (s.invoices||[]).find(i => i.id === invId);
       if(!inv) return s;
       if(inv.voided) { alert('INV นี้ยกเลิกไปแล้ว'); return s; }
+      if(_invWhtMergedInto(inv)){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบรวมอยู่ใน 50 ทวิ ของ PV
       // 🆕 MIG_AP_NORMAL N1 (แทน UAT MF2 เดิมที่ห้ามทุกใบ): ใบนำเข้า Ecount ที่ "ยังไม่จ่าย" ย้อนไปตั้งหนี้ได้เหมือนใบปกติ (ด่านเดิมทุกด่านด้านล่าง)
       //   ใบนำเข้าที่จ่ายแล้ว/จ่ายบางส่วน (ใน Ecount) หรือมี PV/คำขอจ่ายในระบบนี้ = เหมือนใบจ่ายแล้ว → ยกเลิกไม่ได้
       const _migV = _invIsMigrated(inv);
@@ -18558,6 +18763,12 @@ function reducer(s, a){
       const auditLog = [...(s.auditLog||[]), { id:'al_'+Date.now().toString(36),
         ts:Date.now(), type:'payment_reverse', by, entityId:paymentId,
         entityRef:pay.invId||'-', amount:pay.amount||0, note:reason||'' }];
+      // 🆕 WHT-MERGE M2: PV ที่รวม 50 ทวิ ไว้ → ยกเลิกการรวมในการกระทำเดียวกัน (ใบสมาชิกกลับเป็นใบเดี่ยว · ใบรวมหายจาก PV)
+      const _rp = payments.find(p => p && p.id === paymentId);
+      if(_rp && _rp.whtMerge){
+        const _u = _whtUnmergeApply({ ...s, invoices: invoicesOut }, _rp, Date.now(), by, 'ยกเลิกการจ่าย ' + (pay.pvNumber || '') + (reason ? ': ' + reason : ''));
+        return { ...s, payments: payments.map(p => p.id === paymentId ? _u.payment : p), invoices: _u.invoices, journalEntries, bankAccounts, pettyTxns, auditLog: [...auditLog, _u.audit] };
+      }
       return { ...s, payments, invoices: invoicesOut, journalEntries, bankAccounts, pettyTxns, auditLog };
     }
 
@@ -23896,6 +24107,8 @@ const ACTION_MERGE = Object.freeze({
   MIG_AP_MARKPAID: { kind:'delta' },   // 🆕 MIG_AP_NORMAL N5 ใบนำเข้า: จ่ายแล้วก่อนตัดระบบ
   MIG_AP_CLOSE: { kind:'delta' },      // 🆕 MIG_AP_CLOSE C3 ใบนำเข้า: ✂️ ปิดยอดค้าง (ไม่ต้องจ่าย)
   MIG_AP_CLOSE_UNDO: { kind:'delta' }, // 🆕 MIG_AP_CLOSE C3 ใบนำเข้า: ↩️ ยกเลิกการปิดยอด
+  WHT_MERGE_PV: { kind:'delta' },      // 🆕 WHT-MERGE M2: 🧾 รวม 50 ทวิ ของ PV รวม (คิดจากใบ/PV ปัจจุบัน · at เดิม = ซ้ำ)
+  WHT_UNMERGE_PV: { kind:'delta' },    // 🆕 WHT-MERGE M2: ↩️ แยก 50 ทวิ
   FILE_VAT_RETURN: { kind:'delta' },     // 🆕 VAT-CLAIM V3a: claimSet คำนวณจาก state ปัจจุบัน · replay ตรวจ inputVatSeen ใหม่
   UNLOCK_VAT_PERIOD: { kind:'delta' },   // 🆕 VAT-CLAIM V3a
   SET_USER_CLOUD_PENDING: { kind:'delta' },
@@ -24083,6 +24296,8 @@ const ACTION_READS = Object.freeze({
   MIG_AP_MARKPAID: ['auditLog','invoices','journalEntries','payments'],
   MIG_AP_CLOSE: ['approvalRequests','auditLog','invoices','journalEntries','payments'],   // 🆕 MIG_AP_CLOSE C3: ด่านคำขอจ่าย/คำขอแก้ใบค้าง · JE ต่อท้าย (settings/users/chartOfAccounts = หมวดคุม)
   MIG_AP_CLOSE_UNDO: ['approvalRequests','auditLog','invoices','journalEntries','payments'],   // ตัวตรวจร่วมกับ MIG_AP_CLOSE
+  WHT_MERGE_PV: ['approvalRequests','auditLog','invoices','payments','suppliers'],   // 🆕 WHT-MERGE M2: คำขอแก้ใบค้าง (pendingInvChangeReq) · ผู้ถูกหักจากทะเบียน (whtPayee)
+  WHT_UNMERGE_PV: ['auditLog','invoices','payments'],
   FILE_VAT_RETURN: ['approvalRequests','auditLog','invoices','returns','supplierMemos','vatFilings'],   // VAT-DEFER D2: คำขอเลื่อน/เคลมคืนค้าง = ต้องรับทราบ     // 🆕 VAT-CLAIM V3a (B4.6 · deposits ตัดออก: T-READS ไม่อ่าน — D2 ค่อยเพิ่ม)
   UNLOCK_VAT_PERIOD: ['approvalRequests','auditLog','vatFilings'],
 
@@ -24133,6 +24348,8 @@ const APPEND_ONLY_READS = Object.freeze({
   MIG_AP_MARKPAID: ['auditLog'],
   MIG_AP_CLOSE: ['auditLog'],      // 🆕 MIG_AP_CLOSE C3: ต่อท้าย audit อย่างเดียว (กันซ้ำด้วย migApCloseLog)
   MIG_AP_CLOSE_UNDO: ['auditLog'],
+  WHT_MERGE_PV: ['auditLog'],      // 🆕 WHT-MERGE M2: ต่อท้าย audit อย่างเดียว (กันซ้ำด้วย whtMergeLog)
+  WHT_UNMERGE_PV: ['auditLog'],
   FILE_VAT_RETURN: ['auditLog'],     // 🆕 VAT-CLAIM V3a
   UNLOCK_VAT_PERIOD: ['auditLog'],
   GM_SELF_APPROVE_REQUEST: ['auditLog'],   // 🆕 GM-SELF: ต่อท้าย gm_self_approved อย่างเดียว
@@ -69647,6 +69864,13 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
   // 🆕 WHT-EDIT: ปุ่ม ✏️ แก้ WHT — โชว์เมื่อ ยังไม่ยกเลิก · ยังไม่จ่าย (paidAmount 0 + status ไม่ใช่ paid/partial) · ไม่ใช่ PI นำเข้า · มีสิทธิ์แก้ INV
   //   เหตุที่ใช้ไม่ได้ชั่วคราว (คำขอจ่ายค้าง / งวดปิด) → ปุ่ม disabled + บอกเหตุผล (mirror reducer ADJUST_INV_WHT)
   const showWhtEdit = !inv.voided && (inv.paidAmount||0) === 0 && !['paid','partial'].includes(inv.paymentStatus) && hasPerm(user,'purchase','inv','edit');   // 🆕 นำเข้า2569 MF3: เจ้าหนี้ยกมาที่ยังไม่จ่าย แก้ WHT ได้ (50ทวิ ออกตอนจ่าย)
+  // 🆕 WHT-MERGE M3: ใบ 50 ทวิ ที่รวมอยู่ในใบรวมของ PV + พิมพ์ใบรวม (ตามแบบ ภ.ง.ด. ของใบนั้น)
+  const _whtMergedCert = (inv.whtCertificates||[]).find(c => c && !c.voided && c.mergedInto && c.mergedInto.payId) || null;
+  const _printWhtMerged = (c) => {
+    const pay = (state.payments||[]).find(p => p && p.id === c.mergedInto.payId);
+    if(!pay || !pay.whtMerge) return alert('⛔ ไม่พบใบ 50 ทวิ รวมของ ' + (c.mergedInto.pvNumber || 'PV') + ' (อาจถูกแยกแล้ว)');
+    printWHTCertMerged(pay, state, c.form || inv.whtForm || null, c.mergedInto.certNumber || null);
+  };
   const whtEditBlock = hasPendingPay ? 'มีคำขอจ่ายค้างอยู่ — ยกเลิกคำขอจ่ายก่อน'
     : _periodLocked(state, getToday()) ? `งวด ≤ ${fmtDate(state.settings?.periodLockUntil)} ปิดแล้ว — ลง JE วันนี้ไม่ได้ (ให้ admin ปลด period lock)`
     : _periodLocked(state, inv.invDate) ? `งวดภาษีของใบนี้ (${String(inv.invDate||'').slice(0,7)}) ปิด/ยื่น ภ.ง.ด. แล้ว — ให้ admin ปลดล็อกงวดแล้วยื่นเพิ่มเติม`
@@ -69934,11 +70158,22 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
               c.supName && h('div', { className:'text-[10px] text-gray-500 mt-0.5' }, '👤 ', c.supName,
                 c.supTaxId && ` · TIN: ${c.supTaxId}`),
               c.editHistory && c.editHistory.length > 0 && h('div', { className:'text-[10px] text-amber-700' },
-                '✏️ แก้ไข ', c.editHistory.length, ' ครั้ง')),
+                '✏️ แก้ไข ', c.editHistory.length, ' ครั้ง'),
+              // 🆕 WHT-MERGE M3: ใบนี้รวมอยู่ในใบ 50 ทวิ รวมของ PV (ใบเดิมไม่ void — ยอดในรายงาน ภ.ง.ด. เท่าเดิม)
+              c.mergedInto && h('div', { className:'text-[10px] text-teal-800 mt-0.5', 'data-testid':'inv-wht-merged-into' },
+                '🧾 รวมอยู่ในใบ 50 ทวิ เลขที่ ', h('b', { className:'font-mono' }, c.mergedInto.certNumber || '-'), ' (', c.mergedInto.pvNumber || 'PV', ')')),
+            c.mergedInto ? h('button', { onClick:()=>_printWhtMerged(c),
+              'data-testid':'inv-wht-print-merged', title:'พิมพ์ใบ 50 ทวิ รวมของ ' + (c.mergedInto.pvNumber || 'PV') + ' — แก้ใบนี้ได้หลัง ↩️ แยก 50 ทวิ ที่ ✅ รายการที่จ่ายแล้ว',
+              className:'text-[10px] px-2 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded' }, '🖨️ พิมพ์ใบรวม') :
+            h('span', { className:'flex gap-1' },
+            // 🆕 verify: ใบเดี่ยวที่ไม่ได้รวม → พิมพ์เฉพาะใบนี้ (ตามแบบ ภ.ง.ด.) — ใช้ส่งผู้ขายได้ แม้อีกแบบของใบแจ้งหนี้เดียวกันถูกรวมไปแล้ว
+            !c.voided && h('button', { onClick:()=>printWHTCert(inv, state, { form: c.form || inv.whtForm || null, certNumber: c.certNumber || null }),
+              'data-testid':'inv-wht-print-cert', title:'พิมพ์ใบ 50 ทวิ เลขที่ ' + (c.certNumber || '-') + ' (ภ.ง.ด.' + (c.form || '-') + ')',
+              className:'text-[10px] px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded' }, '🖨️'),
             h('button', { onClick:()=>setEditWhtCertIdx(ci),
               title:'แก้ไขข้อมูล cert (เลข/ชื่อ/TIN/ภงด.) — ไม่กระทบ JE',
               className:'text-[10px] px-2 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded' },
-              '✏️ แก้ไข')))
+              '✏️ แก้ไข'))))
         ),
         h('div', { className:'flex justify-between font-bold pt-1 border-t' },
           h('span', null, 'สุทธิ:'),
@@ -70294,14 +70529,24 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
             onClick:()=>{ if(!global.ERP.restoreMinimized || !global.ERP.restoreMinimized('inv:wht:'+inv.id)) setShowAdjustWht(true); } },
             '✏️ แก้ WHT')),
         showWhtEdit && whtEditBlock && h('div', { className:'basis-full text-[11px] text-gray-600 -mt-1' }, '✏️ แก้ WHT ใช้ไม่ได้: ', whtEditBlock),
+        // 🆕 WHT-MERGE M3: ใบที่รวมอยู่ใน 50 ทวิ รวม → ปุ่มหลักพิมพ์ใบรวม · ใบเดี่ยวยังพิมพ์ได้แต่ต้องยืนยันว่าจะไม่ส่งให้ผู้ขายซ้ำ
+        (inv.whtAmount||0) > 0 && _whtMergedCert && h(Button, { variant:'secondary', 'data-testid':'inv-wht-print-merged-main',
+          onClick:()=>_printWhtMerged(_whtMergedCert) }, '🖨️ พิมพ์ใบรวม'),
         (inv.whtAmount||0) > 0 && h(Button, { variant:'secondary',
-          onClick:()=>printWHTCert(inv, state) }, '🖨️ พิมพ์ใบ WHT'),
+          onClick:()=>{ if(_whtMergedCert && !confirm('ใบนี้รวมอยู่ในใบ 50 ทวิ เลขที่ ' + (_whtMergedCert.mergedInto.certNumber || '-') + ' (' + (_whtMergedCert.mergedInto.pvNumber || 'PV') + ') แล้ว\nพิมพ์ใบเดี่ยวเพื่อเก็บเป็นหลักฐานภายในเท่านั้น — ห้ามส่งให้ผู้ขายซ้ำ\n\nพิมพ์ใบเดี่ยว?')) return;
+            printWHTCert(inv, state);
+            if(_whtMergedCert){ const _at = Date.now();   // 🆕 UAT SF3: บันทึกว่าใครพิมพ์ใบเดี่ยวของใบที่รวมแล้ว (สำเนาภายใน)
+              dispatch({ type:'ADD_AUDIT_LOG', data:{ id:'al_whtpi_' + inv.id + '_' + _at.toString(36), ts:_at, type:'wht_print_internal', by:user.username, byName:user.name || user.username,
+                entityType:'invoice', entityId:inv.id, entityRef:inv.invNumber, amount:Number(inv.whtAmount) || 0,
+                note:'🖨️ พิมพ์ใบ 50 ทวิ เดี่ยว (สำเนาภายใน) — รวมอยู่ในเลขที่ ' + (_whtMergedCert.mergedInto.certNumber || '-') + ' (' + (_whtMergedCert.mergedInto.pvNumber || 'PV') + ')' } }); } } }, _whtMergedCert ? '🖨️ ใบเดี่ยว (ภายใน)' : '🖨️ พิมพ์ใบ WHT'),
         // 🆕 RW: เพิ่ม WHT ย้อนหลัง — ทุก status รวม paid
         !inv.voided && hasPerm(user,'purchase','inv','edit') &&
-          h(Button, { variant:'warning',
-            onClick:()=>setShowAddWHT(true),
-            title:'เพิ่ม WHT ย้อนหลัง — เผื่อลืมเปิดตอนตั้ง PI' },
+          h(Button, { variant:'warning', disabled: !!_whtMergedCert, 'data-testid':'inv-add-wht-retro',
+            onClick:()=>{ if(_whtMergedCert) return; setShowAddWHT(true); },
+            title: _whtMergedCert ? '↩️ แยก 50 ทวิ ที่ ✅ รายการที่จ่ายแล้วก่อน' : 'เพิ่ม WHT ย้อนหลัง — เผื่อลืมเปิดตอนตั้ง PI' },
             '🧾 เพิ่ม WHT ย้อนหลัง'),
+        !inv.voided && hasPerm(user,'purchase','inv','edit') && _whtMergedCert &&
+          h('div', { className:'basis-full text-[11px] text-gray-600 -mt-1' }, '🧾 เพิ่ม WHT ย้อนหลังใช้ไม่ได้: ↩️ แยก 50 ทวิ ที่ ✅ รายการที่จ่ายแล้วก่อน'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'),
       )
     ),
@@ -70537,6 +70782,9 @@ function AddWHTRetroModal({ inv, state, dispatch, user, onClose, onDone }){
             paidStatus: inv.paymentStatus,
             certNumbers: newCerts.map(c => c.certNumber) }],
       };
+      // 🆕 WHT-MERGE UAT MF1: ตรวจด่านเดียวกับ UPDATE_INV ก่อนลง JE/เครดิตผู้ขาย (ใบรวม 50 ทวิ · งวดปิด)
+      { const _ud = global.ERP.invUpdateDeny ? global.ERP.invUpdateDeny(state, inv, updated) : null;
+        if(_ud){ alert('⛔ เพิ่ม WHT ย้อนหลังไม่ได้ — ' + _ud); return; } }
       dispatch({ type:'UPDATE_INV', data: updated });
 
       const coa = state.chartOfAccounts || [];
@@ -71504,10 +71752,29 @@ function AdjustINVWhtModal({ inv:invProp, state, dispatch, user, onClose, onDone
 // ================================================================
 // WHT CERTIFICATE PRINT (หนังสือรับรองการหักภาษี ณ ที่จ่าย — ม.50 ทวิ)
 // ================================================================
-function printWHTCert(inv, state){
+// 🆕 WHT-MERGE M3: opts.mergedNote = บรรทัดเล็กใต้ตาราง "รวมใบแจ้งหนี้: …" (ใบรวมของ PV) · แบบฟอร์มเดิมทุกอย่าง
+function printWHTCert(inv, state, opts){
+  opts = opts || {};
+  // 🆕 verify (รวมบางแบบ): opts.form = พิมพ์เฉพาะใบ 50 ทวิ ของ ภ.ง.ด. นั้น (ใบที่มีทั้ง 3 และ 53 แต่รวมแค่แบบเดียว)
+  //   → บรรทัด/เลข/ผู้ถูกหัก/ลายน้ำ ของใบแบบนั้นเท่านั้น · ไม่ระบุ = ทั้งใบแจ้งหนี้ (เหมือนเดิม)
+  //   opts.certNumber = เลือกใบตามเลข (แบบเดียวกัน 2 ใบได้) → แบบของใบนั้น
+  const _cAll = ((inv && inv.whtCertificates) || []).filter(c => c && !c.voided);
+  const _fByNo = opts.certNumber ? (_cAll.find(c => c.certNumber === opts.certNumber) || null) : null;
+  const _fSel = opts.form ? String(opts.form) : (_fByNo && _fByNo.form ? String(_fByNo.form) : '');
+  const _fCert = _fByNo || (_fSel ? (_cAll.find(c => String(c.form) === _fSel) || null) : null);
+  // 🆕 UAT SF3: ใบสมาชิกที่รวมอยู่ใน 50 ทวิ รวมของ PV → พิมพ์ใบเดี่ยว = สำเนาภายใน (ลายน้ำ + หัวกระดาษ ห้ามส่งผู้ขาย)
+  const _mInto = opts.mergedNote ? null
+    : _fSel ? ((_fCert && _fCert.mergedInto && _fCert.mergedInto.payId) ? _fCert.mergedInto : null)
+    : (((inv && inv.whtCertificates) || []).find(c => c && !c.voided && c.mergedInto && c.mergedInto.payId) || {}).mergedInto;
+  const _escI = (x) => String(x == null ? '' : x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const _internalHtml = _mInto
+    ? '<div class="internal-banner" style="border:2px solid #b91c1c;color:#b91c1c;font-weight:bold;font-size:10pt;text-align:center;padding:4px;margin:4px 0">สำเนาภายใน — รวมใน 50 ทวิ เลขที่ ' + _escI(_mInto.certNumber || '-') + ' (' + _escI(_mInto.pvNumber || 'PV') + ') ห้ามส่งผู้ขาย</div>'
+      + '<div class="internal-wm" style="position:fixed;top:40%;left:0;right:0;text-align:center;transform:rotate(-30deg);font-size:64pt;color:rgba(185,28,28,0.15);font-weight:bold;pointer-events:none;z-index:50">สำเนาภายใน</div>'
+    : '';
   const { WHT_CATEGORIES, WHT_SUB5_TYPES } = global.ERP;
   // 🆕 PARTY-BRANCH (verify): ผู้ถูกหัก = payeeSnapshot ของใบ 50ทวิ ที่ออกไป (ชื่อ/เลขภาษี/ที่อยู่/สาขา ชุดเดียวกัน) → snapshot PI → ทะเบียนสด
-  const _cert = (inv.whtCertificates||[]).find(c => !c.voided && c.payeeSnapshot && c.payeeSnapshot.name) || null;
+  const _cert = (_fCert && _fCert.payeeSnapshot && _fCert.payeeSnapshot.name) ? _fCert
+    : ((inv.whtCertificates||[]).find(c => !c.voided && c.payeeSnapshot && c.payeeSnapshot.name) || null);
   const sup = global.ERP.whtPayee ? global.ERP.whtPayee(inv, state, _cert) : state.suppliers.find(s => s.id === inv.supplierId);
   const company = state.company || {};
   const thDate = (s) => {
@@ -71527,6 +71794,10 @@ function printWHTCert(inv, state){
       whtAmount: inv.whtAmount,
     }];
   }
+  // 🆕 verify: เลือกแบบ → เหลือเฉพาะบรรทัดของแบบนั้น — กรองเฉพาะใบที่บรรทัดมีหลายแบบจริง (≥2) · บรรทัดไม่มี form = เก็บไว้เสมอ
+  //   (verify 2) ใบเก่าที่ header/บรรทัด/ใบรับรอง ขัดกัน (บรรทัดไม่มี form · header 53 · ใบรับรอง 3) → ห้ามกรองทิ้งจนยอด 0.00
+  const _lf = new Set(lines.map(l => l && l.form).filter(Boolean).map(String));
+  if(_fSel && _lf.size > 1) lines = lines.filter(l => !(l && l.form) || String(l.form) === _fSel);
 
   // รวมยอดตาม category code — ถ้ามีหลาย lines ของ category เดียวกันจะ sum (ยกเว้น section 5 ที่แยก sub5)
   const byCategory = {};
@@ -71562,7 +71833,8 @@ function printWHTCert(inv, state){
     ? '<span class="cb"><span class="ck">✓</span></span>'
     : '<span class="cb"></span>';
   // UAT: อ่านจากใบรับรองที่ยังไม่ void ก่อน (ที่เดียวกับที่รายงาน WHT/CSV ใช้ผ่าน l.form) — กัน PI เก่าที่ header/line ขัดกัน ใบ 50ทวิ ติ๊กคนละแบบกับยอดยื่น
-  const pickedForm = (inv.whtCertificates||[]).find(c => !c.voided)?.form || (inv.whtLines||[]).find(l => l.form)?.form || inv.whtForm || '';
+  //   (verify 2) ใบรับรองที่เลือก (ตามเลข/แบบ) ชนะเสมอ · แบบที่ส่งมาใช้ก็ต่อเมื่อใบมีหลายแบบจริง · ไม่งั้นใบรับรองที่ยังไม่ void ชนะ (กฎ UAT เดิม)
+  const pickedForm = (_fCert && _fCert.form) || (_lf.size > 1 ? _fSel : '') || (inv.whtCertificates||[]).find(c => !c.voided)?.form || _fSel || (inv.whtLines||[]).find(l => l.form)?.form || inv.whtForm || '';
   // ถ้ามี category 40(4) → ติ๊ก ภ.ง.ด.2 อัตโนมัติ
   const anySec4 = lines.some(l => (WHT_CATEGORIES.find(c=>c.code===l.category)?.section===4));
   const f1k = false, f1ksp = false;
@@ -71593,7 +71865,7 @@ function printWHTCert(inv, state){
   const row6Label = `6. อื่น ๆ (ระบุ) <span class="dotfill">${customOtherLabel ? _escC(customOtherLabel) : ''}</span>`;
 
   // 🆕 WHT-EDIT: เลขที่ใบ = ใบรับรองที่ยังไม่ void ใบแรก (หลังแก้ WHT ใบเดิม void แล้ว inv.whtNumber ยังเป็นเลขชุดเก่า) → fallback whtNumber/invNumber
-  const bookNumber = ((inv.whtCertificates||[]).find(c => !c.voided) || {}).certNumber || inv.whtNumber || inv.invNumber;
+  const bookNumber = (_fCert && _fCert.certNumber) || ((inv.whtCertificates||[]).find(c => !c.voided) || {}).certNumber || inv.whtNumber || inv.invNumber;
 
   // Render N digit boxes — fill from tax ID (strip non-digits), pad blank
   const digitBoxes = (tid, count, cls) => {
@@ -71718,6 +71990,7 @@ function printWHTCert(inv, state){
   .noprint .hint { display: inline-block; margin-left: 10px; font-size: 9pt; color: #555; }
 </style></head>
 <body>
+${_internalHtml}
 <div class="noprint">
   <button onclick="window.print()">🖨️ Print (A4)</button>
   <button onclick="window.close()">ปิด</button>
@@ -71830,6 +72103,7 @@ function printWHTCert(inv, state){
       </tr>
     </tbody>
   </table>
+  ${opts.mergedNote ? '<div class="merged-note" style="font-size:9px;margin:2px 4px;color:#333">' + String(opts.mergedNote).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>' : ''}
 
   <!-- Bottom block (amount in words + pension + payer type + footer) ใช้ border เดียวกัน -->
   <div class="bottom-block">
@@ -71895,9 +72169,46 @@ function printWHTCert(inv, state){
     return renderRow(row5Label, { date: thDate(inv.invDate), amt: fmtAmt(sumBase), tax: fmtAmt(sumTax) });
   }
 
+  if(opts.noOpen) return html;   // 🆕 verify: ผู้เรียกรวมหลายใบลงหน้าต่างเดียวเอง (printWHTCertMerged)
   const win = window.open('', '_blank');
+  if(!win){ alert('⛔ เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาต pop-up แล้วกดใหม่'); return html; }   // 🆕 UAT N1: บอกผู้ใช้ (เดิมเงียบ) · คืน html ให้เทสต์ตรวจได้
   win.document.write(html);
   win.document.close();
+  return html;
+}
+
+// 🆕 WHT-MERGE M3: พิมพ์ใบ 50 ทวิ รวมของ PV (pay.whtMerge.certs) — ใช้แบบฟอร์มเดียวกับ printWHTCert ทุกอย่าง
+//   เลข = certNumber รวม · วันที่ = certDate (วันจ่ายจริง) · ผู้ถูกหัก = payee ของสมาชิก · ตารางเงินได้ = บรรทัดรวม · ใต้ตาราง "รวมใบแจ้งหนี้: …"
+//   form = '3'/'53' เลือกใบ (PV ผสม 2 แบบ) · ไม่ระบุ = ทุกใบ (หน้าต่างเดียว ขึ้นหน้าใหม่ทีละใบ)
+//   certNumber (verify) = เลือกใบรวมตามเลข — PV เดียวมีใบรวมแบบเดียวกัน 2 ใบได้ (ผู้ถูกหักคนละชุด) → เลขก่อน แล้วค่อยกรองตามแบบ
+function printWHTCertMerged(pay, state, form, certNumber){
+  const _all = (pay && pay.whtMerge && pay.whtMerge.certs) || [];
+  const _byNo = certNumber ? _all.filter(c => c && c.certNumber === certNumber) : [];
+  const certs = _byNo.length ? _byNo : _all.filter(c => c && (!form || String(c.form) === String(form)));
+  if(!certs.length){ alert('⛔ ' + ((pay && pay.pvNumber) || 'PV นี้') + ' ยังไม่ได้รวมใบ 50 ทวิ'); return null; }
+  const out = certs.map(c => {
+    const m0 = (c.members || [])[0] || {};
+    const base = ((state && state.invoices) || []).find(i => i && i.id === m0.invId) || { supplierId: pay.supplierId };
+    const lines = (c.lines || []).map(l => ({ ...l, form: c.form }));
+    const cert = { certNumber: c.certNumber, form: c.form, payeeSnapshot: c.payeeSnapshot || ((base.whtCertificates || []).find(x => x && !x.voided) || {}).payeeSnapshot || null, lines, totalAmount: c.totalWht };
+    // ใบสังเคราะห์: ใช้ผู้ขาย/ผู้ถูกหักของสมาชิกแรก แต่ตัวเลข/วันที่/เลขเป็นของใบรวม
+    const inv = { ...base, invDate: c.certDate || pay.payDate || base.invDate, whtLines: lines, whtCategory: null, whtAmount: c.totalWht,
+      whtForm: c.form, whtNumber: c.certNumber, whtCertificates: [cert], note: '' };
+    const note = 'รวมใบแจ้งหนี้: ' + (c.members || []).map(m => m.invNumber + (m.certNumber && m.certNumber !== c.certNumber ? ' (50 ทวิ เดิม ' + m.certNumber + ')' : '')).join(', ')
+      + ' (' + (pay.pvNumber || pay.id) + ')';
+    return printWHTCert(inv, state, { mergedNote: note, noOpen: certs.length > 1 });
+  });
+  if(out.length === 1) return out[0];
+  // 🆕 verify: หลายใบ (ภ.ง.ด.3 + 53) → หน้าต่างเดียว ขึ้นหน้าใหม่ทีละใบ (เปิดหลายหน้าต่าง = ใบที่ 2 โดนบล็อก pop-up)
+  const _body = (x) => { const a = x.indexOf('<body>'), b = x.lastIndexOf('</body>'); return a >= 0 && b > a ? x.slice(a + 6, b) : x; };
+  const _strip = (x) => x.replace(/<div class="noprint">[\s\S]*?<\/div>/, '');
+  const head = out[0].slice(0, out[0].indexOf('<body>') + 6);
+  const html = head + out.map((x, i) => (i ? '<div style="page-break-before:always;break-before:page"></div>' + _strip(_body(x)) : _body(x))).join('\n') + '</body></html>';
+  const win = window.open('', '_blank');
+  if(!win){ alert('⛔ เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาต pop-up แล้วกดใหม่'); return html; }
+  win.document.write(html);
+  win.document.close();
+  return html;
 }
 
 // แปลงตัวเลขเป็นคำไทย (สำหรับใบ WHT)
@@ -77283,6 +77594,7 @@ global.ERP.registerModule('purchase', {
   execReimburse,
   PettyCashTab,
   printWHTCert,
+  printWHTCertMerged,   // 🆕 WHT-MERGE M3
   printPayApprovalSheet,
   printPO, printGR, printRTV, printPI, printPV,
   printEcountPV,                // 🆕 PV-A5 (P2): ใบสำคัญจ่ายของบิลที่จ่ายใน Ecount (รวมตามเลขใบจ่าย)
@@ -77326,6 +77638,7 @@ const {
   // 🆕 ACCT-V2: helper กลางจาก 00-core — Combobox supplier (filter/picker) · ป้าย ⛔ ต้องห้าม
   supplierComboProps, isDisallowedExpense,
   ymOf,   // 🆕 VAT-CLAIM V2
+  partyBranchLabel, normalizeBranchCode,   // 🆕 WHT-MERGE UAT N5
 } = global.ERP;
 // 🆕 ACCT-V2: props ของ Combobox supplier — ห่อ helper กลางไว้ชั้นเดียว (core รุ่นเก่าไม่มี → options เปล่า ไม่ crash · ห้าม re-implement ที่นี่)
 const _supCombo = (opts) => typeof supplierComboProps === 'function' ? supplierComboProps(opts)
@@ -83504,7 +83817,10 @@ function WHTReport({ state }){
         const whtDate = firstPay || cert?.certDate || i.invDate;
         if(!inDateRange(whtDate, dr.startDate, dr.endDate)) return;
         const pending = !firstPay && !cert?.certDate;   // ยังไม่จ่ายจริง+ไม่มีวันบนใบรับรอง → ตกไป invDate (ยังไม่ถึงกำหนดยื่น)
-        const certNumber = cert?.certNumber || i.whtNumber || '-';
+        // 🆕 WHT-MERGE M3: ใบสมาชิกของ 50 ทวิ รวม → แสดงเลขใบรวม (ยอด/บรรทัดเท่าเดิม · เลขเดิมเก็บไว้ที่ origCertNumber)
+        const mergedInto = (cert && cert.mergedInto && cert.mergedInto.payId) ? cert.mergedInto : null;
+        const certNumber = (mergedInto && mergedInto.certNumber) || cert?.certNumber || i.whtNumber || '-';
+        const origCertNumber = cert?.certNumber || i.whtNumber || '-';
         // 🆕 (verify): ผู้ถูกหัก = payeeSnapshot ของใบ 50ทวิ (ตรงกับหนังสือรับรองที่ออกไป) → snapshot PI → ทะเบียนสด
         const payee = global.ERP.whtPayee ? global.ERP.whtPayee(i, state, cert && cert.payeeSnapshot && cert.payeeSnapshot.name ? cert : null) : null;
         const pp = _vatPartyFrom(payee, sup, i.supplierNameFreeform);
@@ -83517,6 +83833,8 @@ function WHTReport({ state }){
           whtAmount: Number(l.whtAmount)||0,
           form: lineForm,           // per-line form
           certNumber,               // per-line cert number
+          origCertNumber, mergedInto,   // 🆕 WHT-MERGE M3
+          certMatched: !!cert,      // 🆕 verify 2: แถวนี้จับคู่ใบรับรองจริง (ไม่ใช่เลข whtNumber สำรอง)
           whtDate, pending,         // 🆕 A7
         });
       });
@@ -83618,7 +83936,11 @@ function WHTReport({ state }){
                     className: cls('hover:bg-gray-50', isContinued && 'bg-pink-50/30') },
                     h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, idx+1),
                     h('td', { className:'px-2 py-1.5 font-mono text-xs text-pink-700 font-semibold' },
-                      isContinued ? h('span', { className:'text-gray-400' }, '↳') : r.certNumber),
+                      isContinued ? h('span', { className:'text-gray-400' }, '↳') : r.certNumber,
+                      // 🆕 WHT-MERGE M3: บรรทัดของใบที่รวมอยู่ใน 50 ทวิ รวม
+                      !isContinued && r.mergedInto && h('div', { className:'text-[10px] font-normal text-teal-700 whitespace-nowrap', 'data-testid':'wht-report-merged',
+                        title:'รวมอยู่ในใบ 50 ทวิ ' + r.certNumber + ' (' + (r.mergedInto.pvNumber || 'PV') + ') · ใบเดิมของใบแจ้งหนี้นี้ ' + r.origCertNumber },
+                        '🧾 รวม · ', r.mergedInto.pvNumber || '', r.origCertNumber !== r.certNumber ? ' · เดิม ' + r.origCertNumber : '')),
                     h('td', { className:'px-2 py-1.5 font-mono text-xs text-blue-700' },
                       isContinued ? h('span', { className:'text-gray-400' }, '↳') : r.inv.invNumber,
                       r.totalLines > 1 && !isContinued && h('span', {
@@ -83653,8 +83975,11 @@ function WHTReport({ state }){
                       h('span', { className:'text-xs px-1.5 py-0.5 rounded bg-gray-100' }, formTag)),
                     h('td', { className:'px-2 py-1.5 text-center' },
                       !isContinued && printWHT && h('button', {
-                        onClick:()=>printWHT(r.inv, state),
-                        title:'พิมพ์ใบหัก ณ ที่จ่าย',
+                        onClick:()=>{   // 🆕 WHT-MERGE M3: ใบสมาชิก → พิมพ์ใบรวมของ PV
+                          const _mp = r.mergedInto && (state.payments||[]).find(p => p && p.id === r.mergedInto.payId);
+                          if(_mp && _mp.whtMerge && purchaseMod?.printWHTCertMerged) return purchaseMod.printWHTCertMerged(_mp, state, r.form, r.mergedInto.certNumber || r.certNumber || null);
+                          printWHT(r.inv, state, r.form ? { form: r.form, certNumber: r.certMatched ? (r.origCertNumber || null) : null } : undefined); },   // (verify 2) ส่งเลขเฉพาะแถวที่จับคู่ใบรับรองจริง ห้ามส่ง whtNumber สำรอง   // 🆕 verify: พิมพ์เฉพาะใบของแบบในแถวนี้
+                        title: r.mergedInto ? 'พิมพ์ใบ 50 ทวิ รวม ' + r.certNumber : 'พิมพ์ใบหัก ณ ที่จ่าย',
                         className:'px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-medium'
                       }, '🖨️')));
                 }),
@@ -86281,7 +86606,17 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
     };
     { const _gi = gmPayIntent(state, pay, user); if(_gi === null) return; Object.assign(updatedPay, _gi); }   // 🆕 B18: GM/เจ้าของ อนุมัติคำขอจ่ายของตัวเอง (ใบ 2 คน = ถามยืนยัน)
     // 🆕 DEPOSIT-VAT review: dry-run reducer ก่อน — ถูกปฏิเสธ (อนุมัติคำขอของตัวเองบนใบ DP/paymentBlock · เกินยอดค้าง ฯลฯ) → หยุดก่อนตัดธนาคาร/บวกยอดจ่าย/ลง JE
-    if(global.ERP.reducer && global.ERP.reducer(state, { type:'UPDATE_PAY', data: updatedPay }) === state) return;   // reducer แจ้งเหตุผลแล้ว
+    const _dry = global.ERP.reducer ? global.ERP.reducer(state, { type:'UPDATE_PAY', data: updatedPay }) : null;
+    if(_dry === state) return;   // reducer แจ้งเหตุผลแล้ว
+    // 🆕 UAT SF1: ผลการรวม 50 ทวิ ตอนอนุมัติ (จากผล dry-run — logic เดียวกับที่บันทึกจริง)
+    let _wmLine = '';
+    if(pay.whtMergeWanted === true && _dry) try {   // 🆕 verify: สรุปผลรวมพัง = ไม่บอกผล แต่ยังอนุมัติได้
+      const _dp = (_dry.payments || []).find(x => x && x.id === pay.id), _wm = _dp && _dp.whtMerge;
+      const _au = !_wm && (_dry.auditLog || []).filter(a => a && a.type === 'wht_merge_skip' && a.entityId === pay.id).slice(-1)[0];
+      _wmLine = _wm ? '\n🧾 รวม 50 ทวิ แล้ว: ' + _wm.certs.map(c => c.certNumber + ' (ภ.ง.ด.' + c.form + ' · ' + c.members.length + ' ใบ)').join(', ')
+          + ((_wm.skipped || []).length ? '\n⚠️ ไม่ได้รวม: ' + _wm.skipped.map(x => x.invNumber + ' — ' + x.reason).join('; ') + ' (ใช้ใบเดี่ยว)' : '')
+        : '\n⚠️ ไม่ได้รวม 50 ทวิ: ' + ((_au && String(_au.note || '').replace(/^🧾 ไม่ได้รวม 50 ทวิ — /, '')) || '-') + ' — ใช้ใบเดี่ยวของแต่ละใบ';
+    } catch(_e){ _wmLine = '\n⚠️ ไม่ได้รวม 50 ทวิ: รวมไม่สำเร็จ — ใช้ใบเดี่ยวของแต่ละใบ'; }
     dispatch({ type:'UPDATE_PAY', data: updatedPay });
 
     if(bank && method === 'transfer'){
@@ -86296,7 +86631,7 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
     if(autoPostPayment) autoPostPayment(updatedPay, inv, bank, state, dispatch, user);
 
     const _piList = members.map(m => m.inv.invNumber).join(', ');
-    alert(`✅ อนุมัติแล้ว ${fmtCur(pay.amount)} · ${isGroup ? `PV รวม ${members.length} ใบ: ${_piList}` : inv.invNumber}\n📅 วันที่จ่ายจริง ${fmtDate(updatedPay.payDate)} · JE จ่ายลงตามวันที่นี้${isGroup ? ' (1 PV · 1 JE)' : ''}`);
+    alert(`✅ อนุมัติแล้ว ${fmtCur(pay.amount)} · ${isGroup ? `PV รวม ${members.length} ใบ: ${_piList}` : inv.invNumber}\n📅 วันที่จ่ายจริง ${fmtDate(updatedPay.payDate)} · JE จ่ายลงตามวันที่นี้${isGroup ? ' (1 PV · 1 JE)' : ''}` + _wmLine);
     onClose();
   };
 
@@ -88057,6 +88392,12 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
     return Object.entries(m).filter(([, l]) => l.length > 1)
       .map(([sid, l]) => ({ supplierId:sid, name: supNameOf(sid, l[0].inv), items:l, total: Number(l.reduce((s,x) => s + x.amt, 0).toFixed(2)) }));
   })();
+  // 🆕 WHT-MERGE M2: กลุ่ม PV รวมที่มี ≥2 ใบหัก ณ ที่จ่าย → ติ๊กรวม 50 ทวิ เป็นใบเดียวต่อผู้ขาย (ค่าเริ่ม ติ๊ก · เก็บ whtMergeWanted บนคำขอรวม · รวมจริงตอนอนุมัติ)
+  const [whtMergeWanted, setWhtMergeWanted] = useState(true);
+  const _whtN = (l) => l.filter(x => (Number(x.inv.whtAmount) || 0) > 0).length;
+  const whtMergeGroups = bankGroups.filter(g => _whtN(g.items) >= 2);
+  // 🆕 UAT N5: ป้ายสาขาภาษีของผู้ขาย (ศูนย์การค้าหลายสาขาเลขภาษีเดียวกัน) · ว่าง → เตือนให้ตรวจทะเบียนก่อนรวม
+  const _wmSupBr = (sid) => { const sp = (state.suppliers||[]).find(s => s.id === sid); return (sp && partyBranchLabel(sp) !== 'สาขา ไม่ระบุ') ? partyBranchLabel(sp) : '⚠️ สาขา ไม่ระบุ — ตรวจทะเบียนผู้ขายก่อน'; };
   const bankReqCount = isPetty ? invs.length : (invs.filter(i => (Number(amounts[i.id])||0) > 0).length - bankGroups.reduce((s,g) => s + g.items.length, 0) + bankGroups.length);
   // guards petty (ปิดปุ่มส่ง + บอกเหตุผล): (a) ยอดรวม > เงินสดย่อยคงเหลือ (b) เพดานต่อ PI เมื่อตั้งไว้ (c) ต้องห้าม ใช้ได้เฉพาะ PI ค่าใช้จ่าย (ไม่มี PO)
   // 🆕 ACCT-V2 (user 2026-09-18): โหมด "บันทึกอย่างเดียว" (settings.pettyRecordOnly ≠ false = ค่าตั้งต้น) → ไม่บังคับให้เติมเงินเข้าระบบก่อน ยอดคงเหลือติดลบได้ (แค่เตือน)
@@ -88235,8 +88576,9 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         if(items.length < 2){ singles.push(items[0]); continue; }
         const gTotal = Number(items.reduce((s,x) => s + x.amt, 0).toFixed(2));
         // record คำขอรวม (วางบิล): invId:null · supplierId เดียว · invoiceIds[] · allocations[{invoiceId, amount}] · amount = Σ allocations (reducer ADD_PAY ตรวจ Σ + supplier เดียว)
+        const _wm = whtMergeWanted && _whtN(items) >= 2 ? { whtMergeWanted: true } : {};   // 🆕 WHT-MERGE M2
         dispatch({ type:'ADD_PAY', data: mkPay({ invId:null, supplierId:sid,
-          invoiceIds: items.map(x => x.inv.id), allocations: items.map(x => ({ invoiceId:x.inv.id, amount:x.amt })), amount: gTotal }) });
+          invoiceIds: items.map(x => x.inv.id), allocations: items.map(x => ({ invoiceId:x.inv.id, amount:x.amt })), amount: gTotal, ..._wm }) });
         requests.push({ group:true, label: supNameOf(sid, items[0].inv), nos: items.map(x => x.inv.invNumber), total:gTotal });
         sent += items.length;
       }
@@ -88338,7 +88680,12 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
                 h('span', { className:'ml-1 font-mono text-[10px] text-indigo-700' }, '(', g.items.map(x => x.inv.invNumber).join(', '), ')'))))
           : h('div', { className:'mt-1 text-[11px] text-gray-600' }, 'ไม่มีกลุ่มที่รวมได้ (ต้องมี PI ของ supplier เดียวกัน ≥2 ใบ ที่ยอดขอจ่าย > 0)')),
         groupBySup && bankGroups.length > 0 && h('div', { className:'mt-1 text-[11px] text-indigo-800' },
-          `รวม ${bankReqCount} คำขอ · ผู้อนุมัติเห็นคำขอรวมเป็น 1 แถว (กด ▸ ดูรายการ PI) · อนุมัติ = ทุกใบจ่ายพร้อมกัน · ยกเลิกคำขอ = ปล่อยทุกใบกลับคิว`)),
+          `รวม ${bankReqCount} คำขอ · ผู้อนุมัติเห็นคำขอรวมเป็น 1 แถว (กด ▸ ดูรายการ PI) · อนุมัติ = ทุกใบจ่ายพร้อมกัน · ยกเลิกคำขอ = ปล่อยทุกใบกลับคิว`),
+        // 🆕 WHT-MERGE M2: รวมใบ 50 ทวิ เป็นใบเดียวต่อผู้ขาย (ต่อแบบ ภ.ง.ด.) — รวมให้ตอนอนุมัติ · ใบที่จ่ายไม่ครบ/ไม่เข้าเงื่อนไข คงใบเดิม
+        groupBySup && whtMergeGroups.length > 0 && h('label', { className:'mt-1 flex items-start gap-1 cursor-pointer text-[11px] text-indigo-900', 'data-testid':'wht-merge-wanted-row' },
+          h('input', { type:'checkbox', className:'mt-0.5', checked:whtMergeWanted, onChange:e=>setWhtMergeWanted(e.target.checked), 'data-testid':'wht-merge-wanted' }),
+          h('span', null, h('b', null, '🧾 รวมใบหัก ณ ที่จ่าย (50 ทวิ) เป็นใบเดียวต่อผู้ขาย'),
+            ` — ${whtMergeGroups.map(g => g.name + ' (' + _wmSupBr(g.supplierId) + ') ' + _whtN(g.items) + ' ใบ').join(' · ')} · รวมให้ตอนอนุมัติจ่าย (เลขใบ = เลขเดิมที่น้อยที่สุด · วันที่ = วันจ่ายจริง) · แยกคืนได้ที่ ✅ รายการที่จ่ายแล้ว`))),
       // 🆕 ใบที่รอปรับ VAT/แก้ไข — ไม่รวมในคำขอนี้ (ยอดค้างจะเปลี่ยนหลังอนุมัติ)
       heldInvs.length > 0 && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900' },
         h('div', { className:'font-semibold' }, `⏳ ไม่รวม ${heldInvs.length} ใบ — รอปรับ VAT/แก้ไข ขอจ่ายหลังอนุมัติ`),
@@ -89094,11 +89441,66 @@ function PaidPaymentsTab({ state, dispatch, user }){
     if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
     // 🆕 PV-GROUP: PV รวม → reducer REVERSE_PAYMENT คืน paidAmount ทุกใบตาม allocations (ยกเลิกทั้ง PV — แยกใบไม่ได้)
     const _grp = _isGroupPay(p); const _nos = _grp ? _payPiNos(state, p) : [];
-    if(!confirm(`⚠️ ยกเลิก Payment ${fmtCur(p.amount||0)}${_grp ? ` (PV รวม ${_nos.length} ใบ: ${_nos.join(', ')})` : ''}?\n\nระบบจะ:\n• คืน paidAmount ใน INV${_grp ? ' ทุกใบตามยอดที่จัดสรร' : ''}\n• Post reverse JE\n• Mark payment เป็น reversed (ไม่ลบ)${p.method === 'petty_cash' ? '\n• คืนเงินเข้าเงินสดย่อย' : ''}\n\nเหตุผล: ${reason}`)) return;
+    // 🆕 verify: PV ที่รวม 50 ทวิ ไว้ → ยกเลิกจ่าย = แยกใบรวมอัตโนมัติ (reducer) — บอกให้เรียกใบรวมคืนถ้าส่งผู้ขายแล้ว
+    const _wmTxt = (p.whtMerge && (p.whtMerge.certs || []).length)
+      ? '\n• แยกใบ 50 ทวิ รวม ' + p.whtMerge.certs.map(c => c.certNumber).join(', ') + ' กลับเป็นใบเดี่ยว — ถ้าส่งใบรวมให้ผู้ขายแล้ว ต้องเรียกคืน' : '';
+    if(!confirm(`⚠️ ยกเลิก Payment ${fmtCur(p.amount||0)}${_grp ? ` (PV รวม ${_nos.length} ใบ: ${_nos.join(', ')})` : ''}?\n\nระบบจะ:\n• คืน paidAmount ใน INV${_grp ? ' ทุกใบตามยอดที่จัดสรร' : ''}\n• Post reverse JE\n• Mark payment เป็น reversed (ไม่ลบ)${p.method === 'petty_cash' ? '\n• คืนเงินเข้าเงินสดย่อย' : ''}${_wmTxt}\n\nเหตุผล: ${reason}`)) return;
     dispatch({ type:'REVERSE_PAYMENT', data:{ paymentId:p.id, reason, by:user.username, bySuper: isSuperUser(user) } });   // bySuper → reducer ยกเว้น dual-eye ให้ superuser (PV เงินสดย่อยของตัวเอง)
-    alert(`✅ ยกเลิก payment เรียบร้อย\nINV ${_grp ? `ทั้ง ${_nos.length} ใบ` : ''}กลับเป็นค้างจ่าย — ออก payment ใหม่ได้`);
+    alert(`✅ ยกเลิก payment เรียบร้อย\nINV ${_grp ? `ทั้ง ${_nos.length} ใบ` : ''}กลับเป็นค้างจ่าย — ออก payment ใหม่ได้${_wmTxt}`);
   };
   const printPV = (r) => { const fn = purchaseMod?.printPV; if(fn) fn(r.p, r.inv, state); else alert('printPV ยังไม่พร้อม'); };
+  // 🆕 WHT-MERGE M3: ปุ่ม 50 ทวิ รวม ของแถว PV รวม — 🖨️ พิมพ์ใบรวม / 🧾 รวม (ยังไม่รวมแต่เข้าเงื่อนไข) / ↩️ แยก · สิทธิ์ = แก้/พิมพ์ WHT ได้ (reducer ตรวจซ้ำจากผู้ใช้จริง)
+  const canWhtMerge = isSuperUser(user) || hasPerm(user, 'accounting', 'wht', 'create') || hasPerm(user, 'accounting', 'payment', 'edit') || hasPerm(user, 'accounting', 'payApprove', 'approve');
+  // 🆕 UAT SF1: ผู้ขอติ๊กรวมไว้แต่ไม่ได้รวม (หรือรวมได้บางใบ) → ป้ายเทาบอกเหตุผล (จาก audit wht_merge_skip / แยกแล้ว / ลองคิดใหม่)
+  const whtMergeNote = (p) => {
+    if(!p || !((p.invoiceIds || []).length > 1)) return null;
+    let txt = '';
+    if(p.whtMerge && (p.whtMerge.skipped || []).length) txt = 'บางใบไม่ได้รวม 50 ทวิ: ' + p.whtMerge.skipped.map(x => x.invNumber + ' — ' + x.reason).join('; ') + ' (ใช้ใบเดี่ยวของใบนั้น)';
+    else if(p.whtMergeWanted === true && !p.whtMerge){
+      const lg = (p.whtMergeLog || []).slice(-1)[0];
+      const au = (state.auditLog || []).filter(a => a && a.type === 'wht_merge_skip' && a.entityId === p.id).slice(-1)[0];
+      let why = '';
+      if(lg && lg.action === 'unmerge') why = '↩️ แยกแล้ว' + (lg.reason ? ' (' + lg.reason + ')' : '');
+      else if(au && au.note) why = String(au.note).replace(/^🧾 ไม่ได้รวม 50 ทวิ — /, '');
+      else if(global.ERP.whtMergeBuild){ try { const pre = global.ERP.whtMergeBuild(state, p); why = pre.reason || (pre.skipped || []).map(x => x.invNumber + ' ' + x.reason).join('; '); } catch(_e){} }
+      txt = 'ไม่ได้รวม 50 ทวิ: ' + (why || '-') + ' — ใช้ใบเดี่ยวของแต่ละใบ';
+    }
+    return txt ? h('span', { 'data-testid':'paid-wht-merge-note', className:'inline-block max-w-[240px] truncate align-middle text-[10px] text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5', title:txt }, txt) : null;
+  };
+  // 🆕 UAT N5: ชื่อ + สาขาภาษีผู้ถูกหักของใบรวม (ศูนย์การค้าหลายสาขาเลขภาษีเดียวกัน — บัญชีต้องเห็นว่ารวมของสาขาไหน)
+  const _wmNoBr = (c) => !normalizeBranchCode(c && c.payeeSnapshot && c.payeeSnapshot.branchCode);
+  const _wmPayeeTxt = (c) => { const ps = (c && c.payeeSnapshot) || {}; return (ps.name || '-') + ' (' + (_wmNoBr(c) ? '⚠️ สาขา ไม่ระบุ' : partyBranchLabel(ps)) + ')'; };
+  const whtMergeBtns = (p) => {
+    if(!p || !((p.invoiceIds || []).length > 1)) return null;
+    const _b = 'text-[10px] px-1.5 py-1 rounded no-underline border ';
+    if(p.whtMerge && (p.whtMerge.certs || []).length){
+      const nos = p.whtMerge.certs.map(c => c.certNumber + ' (ภ.ง.ด.' + c.form + ')').join(', ');
+      const _pyt = p.whtMerge.certs.map(_wmPayeeTxt).filter((x, i, a) => a.indexOf(x) === i).join(' · ');
+      return h('span', { className:'contents' },
+        h('button', { onClick:()=>{ const fn = purchaseMod?.printWHTCertMerged; if(fn) fn(p, state); else alert('printWHTCertMerged ยังไม่พร้อม'); },
+          'data-testid':'paid-wht-merged-print', title:'พิมพ์ใบ 50 ทวิ รวม ' + nos + ' · ผู้ถูกหัก ' + _pyt + ' — ใบเดียวต่อแบบ ภ.ง.ด. แทนใบแยกของแต่ละใบแจ้งหนี้', 'data-wm-payee': _pyt,
+          className:_b + 'bg-teal-50 hover:bg-teal-100 text-teal-800 border-teal-300' }, '🖨️ 50 ทวิ รวม' + (p.whtMerge.certs.some(_wmNoBr) ? ' ⚠️' : '')),
+        canWhtMerge && h('button', { onClick:()=>{
+            // 🆕 UAT SF2: แยก = ยกเลิกเอกสารภาษีที่อาจส่งผู้ขายไปแล้ว → บังคับเหตุผล + เตือนเรียกใบรวมคืน
+            const reason = global.prompt ? global.prompt('↩️ แยก 50 ทวิ รวม ' + nos + ' กลับเป็นใบเดิมของแต่ละใบแจ้งหนี้\n⚠️ ถ้าส่งใบรวมให้ผู้ขายแล้ว ต้องเรียกใบรวมคืนก่อนพิมพ์ใบเดี่ยว\nเหตุผล (บังคับ):', '') : '';
+            if(reason == null) return;
+            if(!String(reason).trim()){ alert('⛔ ต้องใส่เหตุผลการแยก 50 ทวิ'); return; }
+            dispatch({ type:'WHT_UNMERGE_PV', data:{ payId:p.id, by:user.username, at:Date.now(), reason:String(reason).trim() } }); },
+          'data-testid':'paid-wht-unmerge', title:'ยกเลิกการรวม — ใบ 50 ทวิ ของแต่ละใบแจ้งหนี้กลับมาใช้แยกเหมือนเดิม',
+          className:_b + 'bg-white hover:bg-gray-50 text-gray-700 border-gray-300' }, '↩️ แยก 50 ทวิ'));
+    }
+    if(!canWhtMerge || !global.ERP.whtMergeBuild) return null;
+    let pre = null; try { pre = global.ERP.whtMergeBuild(state, p); } catch(_e){ pre = null; }   // 🆕 verify: สร้างพัง = ไม่โชว์ปุ่ม (ไม่ล้มทั้งแท็บ)
+    if(!pre || !(pre.certs || []).length) return null;
+    return h('button', { onClick:()=>{
+        const msg = '🧾 รวมใบ 50 ทวิ ของ ' + (p.pvNumber || 'PV') + '\n' + pre.certs.map(c => '• ภ.ง.ด.' + c.form + ' เลข ' + c.certNumber + ' · ' + _wmPayeeTxt(c) + ' · ' + c.members.length + ' ใบ (' + c.members.map(m => m.invNumber).join(', ') + ') · ภาษี ' + fmtCur(c.totalWht)).join('\n')
+          + (pre.certs.some(c => _wmNoBr(c)) ? '\n⚠️ ผู้ถูกหักไม่ได้ระบุสาขาภาษี — ถ้าเป็นศูนย์การค้าหลายสาขาเลขภาษีเดียวกัน ให้ตรวจ/แก้สาขาในทะเบียนผู้ขายก่อนรวม' : '')
+          + (pre.skipped.length ? '\nไม่รวม: ' + pre.skipped.map(x => x.invNumber + ' — ' + x.reason).join('; ') : '') + '\n\nยืนยัน?';
+        if(global.confirm && !global.confirm(msg)) return;
+        dispatch({ type:'WHT_MERGE_PV', data:{ payId:p.id, by:user.username, at:Date.now() } }); },
+      'data-testid':'paid-wht-merge', title:'รวมใบ 50 ทวิ ของใบแจ้งหนี้ใน PV นี้เป็นใบเดียวต่อแบบ ภ.ง.ด. (เลข = เลขเดิมที่น้อยที่สุด · วันที่ = วันจ่าย)',
+      className:_b + 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300' }, '🧾 รวม 50 ทวิ');
+  };
   const printPI = (inv) => { const fn = purchaseMod?.printPI; if(fn) fn(inv, state); else alert('printPI ยังไม่พร้อม'); };
   // 🆕 PV-A5 (P2): แถว 📥 จ่ายใน Ecount → ใบสำคัญจ่าย · รวมทุกบิลที่เลขใบจ่าย Ecount เดียวกัน+ผู้ขายเดียวกัน (ไม่มีเลข = ทีละบิล)
   const printEcountPV = (r) => {
@@ -89392,6 +89794,8 @@ function PaidPaymentsTab({ state, dispatch, user }){
                         h('td', { className:'px-3 py-2 text-center no-underline space-x-1 whitespace-nowrap' },
                           r.kind === 'pv' && p.pvNumber && !r.reversed && h('button', { onClick:()=>printPV(r), title:'พิมพ์ใบสำคัญจ่าย (PV)',
                             className:'text-[10px] px-1.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 rounded no-underline' }, '🖨️ ใบสำคัญจ่าย'),   // 🆕 PV-A5 (P3)
+                          r.kind === 'pv' && !r.reversed && whtMergeBtns(p),   // 🆕 WHT-MERGE M3
+                          r.kind === 'pv' && !r.reversed && whtMergeNote(p),   // 🆕 UAT SF1
                           r.kind === 'ecount' && h('button', { onClick:()=>printEcountPV(r), title: (r.ep && r.ep.voucher) ? `พิมพ์ใบสำคัญจ่าย (เลขใบจ่าย Ecount ${r.ep.voucher} — รวมทุกบิลในใบจ่ายเดียวกัน)` : 'พิมพ์ใบสำคัญจ่าย (ไม่มีใบจ่ายใน Ecount — ถือว่าจ่ายแล้ว)',   // 🆕 PV-A5 (P2)
                             className:'text-[10px] px-1.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 rounded no-underline' }, '🖨️ ใบสำคัญจ่าย'),
                           inv && !r.ecGroup && h('button', { onClick:()=>printPI(inv), title: r.group ? `พิมพ์ใบตั้งหนี้ใบแรก (${inv.invNumber}) — ใบอื่นเปิดจากคอลัมน์ PI` : 'พิมพ์ใบตั้งหนี้ (PI)',   // 🆕 PV-GROUP
