@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="09a18ccad755";window.__ERP_BUILT_AT__="2026-10-06T17:20:37";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="5efa3b6ff300";window.__ERP_BUILT_AT__="2026-10-06T17:52:37";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -453,6 +453,54 @@ function allocProRata(amount, weights){
     out[i] = got;
   }
   return out;
+}
+
+// ==================== 🎟️ OFF-INV-DISC: ส่วนลดนอกใบกำกับ (คูปอง/คะแนน) — OFF_INV_DISCOUNT_CONTRACT §B3 ====================
+//   VAT เคลมตามใบกำกับ (ไม่แตะ) · ค่าใช้จ่าย/ต้นทุนลงตามจ่ายจริง · pure ทั้งหมด · ไม่มี key = 0
+function offInvDiscAmt(inv){ return bdR2(inv && inv.offInvDiscount && inv.offInvDiscount.amount) || 0; }
+// น้ำหนัก = มูลค่าก่อน VAT หลังส่วนลดท้ายบิล (exVat ถ้ามี ไม่งั้น lineTotal) · 💎 / ของแถม / GR นำเข้า = 0
+function offInvDiscWeights(src){
+  return (((src && src.lines) || [])).map(l => {
+    if(!l || l.capex || l.freebie || l.isFreebie || l.migOpening) return 0;
+    const v = Number(l.exVat != null ? l.exVat : l.lineTotal);
+    return (v > 0 && isFinite(v)) ? bdR2(v) : 0;
+  });
+}
+// เกลี่ยส่วนลดตามน้ำหนัก (allocProRata · เศษไปบรรทัดน้ำหนักสูงสุด) → { allocs, max, error } · เกิน max = error (ไม่ clamp เงียบ)
+function offInvDiscAlloc(src, amount){
+  const lines = (src && src.lines) || [];
+  const w = offInvDiscWeights(src);
+  const max = bdR2(w.reduce((t, x) => t + x, 0));
+  const A = bdR2(amount);
+  if(!(A > 0)) return { allocs: [], max, error: '' };
+  if(!(max > 0)) return { allocs: [], max, error: 'ไม่มีบรรทัดที่ลดได้ (ทรัพย์สิน 💎/ของแถมทั้งหมด)' };
+  if(A > max + 0.005) return { allocs: [], max, error: 'เกินมูลค่าก่อน VAT ของบรรทัดที่ลดได้' };
+  const isGr = src && src.kind === 'gr';
+  const allocs = [];
+  allocProRata(A, w).forEach((amt, i) => {
+    if(!(amt > 0)) return;
+    const l = lines[i] || {};
+    allocs.push(isGr ? { grId: l.grId, lineIdx: l.lineIdx != null ? l.lineIdx : i, amount: amt }
+      : { expLineId: l.id, lineIdx: i, amount: amt });
+  });
+  return { allocs, max, error: '' };
+}
+// ตรวจที่บล็อก (§B8 ข้อ 1/2/3/5/8) → ข้อความ error หรือ '' · ใช้ร่วม create/edit · cap ไม่ส่ง = amount+vat−wht−creditUsed
+function offInvDiscCheck(p){
+  const o = p || {};
+  const raw = Number(o.disc);
+  if(o.disc != null && o.disc !== '' && !isFinite(raw)) return 'ส่วนลดนอกใบกำกับต้องเป็นตัวเลข';
+  const disc = bdR2(raw);
+  if(disc < 0) return 'ส่วนลดนอกใบกำกับต้องไม่ติดลบ';
+  if(!(disc > 0)) return '';
+  if(o.max != null && disc > bdR2(o.max) + 0.005) return 'ส่วนลดนอกใบกำกับเกินมูลค่าก่อน VAT ของบรรทัดที่ลดได้ (สูงสุด ฿' + bdR2(o.max).toFixed(2) + ')';
+  const cap = o.cap != null ? bdR2(o.cap)
+    : bdR2((Number(o.amount) || 0) + (Number(o.vat) || 0) - (Number(o.wht) || 0) - (Number(o.creditUsed) || 0));
+  if(disc > cap + 0.005) return 'ส่วนลดนอกใบกำกับเกินยอดที่ต้องจ่าย (สูงสุด ฿' + Math.max(0, cap).toFixed(2) + ')';
+  if(o.netOverrideOn) return 'ใช้ส่วนลดนอกใบกำกับร่วมกับการแก้ยอดสุทธิเองไม่ได้ — ล้างช่องยอดสุทธิก่อน';
+  if(Math.abs(Number(o.roundingAdj) || 0) > 0.005) return 'ใช้ส่วนลดนอกใบกำกับร่วมกับยอดปรับปัดเศษไม่ได้ — ล้างยอดปัดเศษก่อน';
+  if(o.kind === 'other' && !String(o.note || '').trim()) return 'ประเภทอื่น ๆ ต้องระบุหมายเหตุ';
+  return '';
 }
 
 // น้ำหนักของ PO line = มูลค่าหลังส่วนลดบรรทัด (price basis ตาม priceMode) · ของแถม = 0
@@ -3703,7 +3751,7 @@ function invCapexGrLine(state, inv, gr, l, idx){
 //   คืน { lines, baseAcc } · lines = Dr ฝั่งสินค้า/ค่าใช้จ่าย/ทรัพย์สิน (ยังไม่รวม VAT/AP/WHT/ปัดเศษ) · ไม่มี baseAcc → lines ว่าง
 //   opts.desc: คำอธิบายบรรทัด Dr หลัก (AutoPostModal ส่ง "บันทึกตั้งหนี้ …" · ไม่ส่ง = inv.description ตามเดิมของ autoPostINV)
 //   ยอดทรัพย์สิน = capexLineExVat (ไม่รวม VAT หลังส่วนลด) · เลือกบรรทัดด้วย grLineIsCapex (noStock freeze / เกณฑ์ต่อหน่วย)
-function buildInvDrLines(inv, state, opts){
+function _buildInvDrLinesRaw(inv, state, opts){
   const o = opts || {};
   const accounts = state.chartOfAccounts || [];
   const find = (type, hint) => accounts.find(a => a.type===type && (a.name||'').includes(hint)) || accounts.find(a => a.type===type);
@@ -3730,7 +3778,7 @@ function buildInvDrLines(inv, state, opts){
       const migAmt = _migGrs.length === _grs.length || !(allSum > 0) ? amt : Number((amt * migSum / allSum).toFixed(2));
       const rest = Number((amt - migAmt).toFixed(2));
       const restIds = _grs.filter(g => !grMigOpening(g)).map(g => g.id);
-      const sub = rest > 0.005 ? buildInvDrLines({ ...inv, amount: rest, grIds: restIds, grId: restIds[0] || null }, state, { ...o, _noMig: true }).lines : [];
+      const sub = rest > 0.005 ? _buildInvDrLinesRaw({ ...inv, amount: rest, grIds: restIds, grId: restIds[0] || null }, state, { ...o, _noMig: true }).lines : [];
       lines.push(...sub);
       if(migAmt > 0.005) lines.push({ accountId:obe.id, accountCode:obe.code, accountName:obe.name, debit: migAmt, credit: 0, branchId: br0,
         description: 'ยอดยกมา (ของรับก่อนตัดระบบ ' + _migGrs.map(g => g.grNumber || g.id).join(', ') + ')', migOpening: true });
@@ -3834,6 +3882,64 @@ function buildInvDrLines(inv, state, opts){
       debit: inv.amount, credit: 0, branchId: br0, description: mainDesc });
   }
   return { lines, baseAcc };
+}
+
+// 🎟️ OFF-INV-DISC §B5: ตัวห่อ — raw + หักส่วนลดนอกใบกำกับ · ไม่มีส่วนลด = คืนผล raw ตัวเดิม (ทุกไบต์)
+function buildInvDrLines(inv, state, opts){
+  const r = _buildInvDrLinesRaw(inv, state, opts);
+  if(!(offInvDiscAmt(inv) > 0) || !r.lines.length) return r;
+  return { ...r, lines: applyOffInvDiscDr(r.lines, inv, state, r.baseAcc) };
+}
+// 🎟️ §B5: ค่าใช้จ่าย (direct_expense) → ลด Dr บรรทัดค่าใช้จ่ายตาม alloc · PI จาก GR → Cr 5120/5100/cogs หนึ่งบรรทัด (ไม่แตะ 1300/16xx/3900)
+//   pure · คืน array ใหม่ · Σ Dr − Σ Cr ลดลงเท่าส่วนลดพอดีเสมอ (เหลือจับคู่ไม่ได้ = Cr baseAcc)
+function applyOffInvDiscDr(rawLines, inv, state, baseAcc){
+  const d = offInvDiscAmt(inv);
+  const lines = (rawLines || []).map(l => ({ ...l }));
+  if(!(d > 0) || !lines.length) return lines;
+  const accounts = (state && state.chartOfAccounts) || [];
+  const br0 = inv.branch || (state && state.currentBranch);
+  const fmt = n => bdR2(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  if(inv.source !== 'direct_expense'){
+    const acc = accounts.find(a => a.code === '5120') || accounts.find(a => a.code === '5100')
+      || accounts.find(a => a.type === 'cogs') || baseAcc;
+    if(!acc) return lines;
+    lines.push({ accountId:acc.id, accountCode:acc.code, accountName:acc.name, debit:0, credit:d, branchId: br0,
+      description: 'ส่วนลดนอกใบกำกับ (คูปอง/คะแนน) ' + (inv.invNumber || ''), offInvDisc:true });
+    return lines;
+  }
+  // หา key แบบเดียวกับ raw (accByCode = เฉพาะ type expense · ไม่เจอ = expAcc)
+  const find = (type, hint) => accounts.find(a => a.type===type && (a.name||'').includes(hint)) || accounts.find(a => a.type===type);
+  const expAcc = find('expense', 'ค่าใช้จ่าย') || accounts.find(a => a.type==='expense');
+  const accByCode = code => code ? accounts.find(a => a.code === code && a.type === 'expense') : null;
+  const cut = new Array(lines.length).fill(0);
+  const ok = l => l && (Number(l.debit) || 0) > 0 && !l.expLineId && !l.migOpening;
+  const take = (i, want) => { const room = bdR2((Number(lines[i].debit) || 0) - cut[i]); const t = bdR2(Math.min(room, want)); if(t > 0) cut[i] = bdR2(cut[i] + t); return t > 0 ? t : 0; };
+  let left = d;
+  for(const a of ((inv.offInvDiscount && inv.offInvDiscount.allocs) || [])){
+    if(!(left > 0.005)) break;
+    let want = bdR2(Math.min(Number(a && a.amount) || 0, left));
+    if(!(want > 0)) continue;
+    const el = (inv.expenseLines || []).find(x => x && a && x.id === a.expLineId);
+    if(!el) continue;
+    const acc = accByCode(el.accountCode || inv.accountCode || '5300') || expAcc;
+    if(!acc) continue;
+    const key = acc.code + '|' + (el.branch || br0);
+    for(let i = 0; i < lines.length && want > 0.005; i++){
+      if(!ok(lines[i]) || (lines[i].accountCode + '|' + lines[i].branchId) !== key) continue;
+      const t = take(i, want); want = bdR2(want - t); left = bdR2(left - t);
+    }
+  }
+  // ส่วนที่จับคู่ไม่ได้ (เช่น Σ lineTotal ≠ amount → raw ลง Dr ก้อนเดียว) → บรรทัดที่ใหญ่สุด (ไม่ใช่ 💎/ยอดยกมา) ไม่ให้ติดลบ
+  if(left > 0.005){
+    let bi = -1;
+    lines.forEach((l, i) => { if(ok(l) && (bi < 0 || (Number(l.debit) - cut[i]) > (Number(lines[bi].debit) - cut[bi]))) bi = i; });
+    if(bi >= 0) left = bdR2(left - take(bi, left));
+  }
+  lines.forEach((l, i) => { if(cut[i] > 0){ l.debit = bdR2(Number(l.debit) - cut[i]); l.description = (l.description || '') + ' (หักส่วนลดนอกใบกำกับ ฿' + fmt(cut[i]) + ')'; } });
+  // ยังเหลือ (ไม่ควรเกิด · §B8 กันไว้) → Cr baseAcc ให้ JE balance เสมอ
+  if(left > 0.005 && baseAcc) lines.push({ accountId:baseAcc.id, accountCode:baseAcc.code, accountName:baseAcc.name, debit:0, credit:left, branchId: br0,
+    description: 'ส่วนลดนอกใบกำกับ (คูปอง/คะแนน) ' + (inv.invNumber || ''), offInvDisc:true });
+  return lines;
 }
 
 // 💎 FA-S5: บรรทัดค่าใช้จ่ายใน PI เป็นทรัพย์สินไหม — ใช้ค่าที่ freeze ตอนตั้งหนี้ (capBelowThreshold) ไม่คำนวณเกณฑ์ใหม่
@@ -9206,7 +9312,7 @@ Object.assign(global.ERP, {
   findDupSupInv, consumeSupplierCredit,
   // Helpers
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines,
-  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, grMigApHeld, grMigOpening, invVatExactOk, migInvBackDeny, migEcountPaidOrig, invEcountVoucher, invPaySplit, invMigClosed, setPayCenterPrefill, takePayCenterPrefill, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
+  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, _buildInvDrLinesRaw, offInvDiscAmt, offInvDiscWeights, offInvDiscAlloc, offInvDiscCheck, applyOffInvDiscDr, grMigApHeld, grMigOpening, invVatExactOk, migInvBackDeny, migEcountPaidOrig, invEcountVoucher, invPaySplit, invMigClosed, setPayCenterPrefill, takePayCenterPrefill, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
   readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, unitUsage, unitUsageAdvice, getBaseUnit, findItemUnit, toBaseQty, rtvReturnBaseQty, rtvLineBaseQty, rtvReplaceBaseQty, unitsForPurpose,
@@ -13830,7 +13936,7 @@ function _invFiledFinChange(s, old, nu){
 // 🆕 DEPOSIT-VAT UAT: เหตุผลที่ UPDATE_INV จะปฏิเสธ (แบบเงียบ) — EditINVModal / executor edit_inv ตรวจก่อนลง JE-VOID (ไม่งั้น JE กลับรายการ+JE ใหม่ลงทั้งที่ใบไม่ถูกแก้)
 // 🆕 DEPOSIT-VAT verify: แก้ฟิลด์การเงิน/วันที่ของ PI = กลับ JE เดิม (วันนี้) + ลง JE ใหม่ลงวันที่ invDate → ถ้า invDate เดิม/ใหม่อยู่ในงวด GL ที่ปิด
 //   ADD_JE ตัวใหม่ถูกปฏิเสธ = AP/VAT ของใบหายจาก GL (บันทึกครึ่งเดียว) → ปฏิเสธตั้งแต่ต้น (invUpdateDeny ก่อน JE-VOID + UPDATE_INV ชั้นสุดท้าย)
-const _INV_GL_FIN = Object.freeze(['amount','netPayable','vat','vatTotal','vatRate','whtAmount','invDate','roundingAdjustment','supplierId']);
+const _INV_GL_FIN = Object.freeze(['amount','netPayable','vat','vatTotal','vatRate','whtAmount','invDate','roundingAdjustment','supplierId','offInvDiscount']);   // 🎟️ OFF-INV-DISC: ส่วนลดนอกใบกำกับ = แก้เงิน (เทียบด้วย _protSame)
 function _invGlLockReason(s, old, nu){
   if(!old || !nu) return null;
   const lock = s && s.settings && s.settings.periodLockUntil;
@@ -13843,6 +13949,30 @@ function _invGlLockReason(s, old, nu){
   }
   return null;
 }
+// 🎟️ OFF-INV-DISC verify 1: JE ของใบตั้งหนี้ที่ "ถูกกลับรายการแล้ว" — กันแก้ใบครั้งที่ 2 กลับ JE ตั้งหนี้เดิมซ้ำ
+//   ① JE กลับรายการรุ่นใหม่มี reversesJeId ชี้ JE ต้นทาง
+//   ② JE กลับรายการรุ่นเก่า (ไม่มี reversesJeId) → จับคู่กับ JE ต้นทางที่ยังเปิดอยู่ตัวเก่าสุดที่เลขตรง (JE-VOID-<เลขเดิม>) และยอดสะท้อนกัน · ไม่เจอเลขตรง → ยอดสะท้อนกันตัวเก่าสุด
+//   deterministic (ไล่ตามลำดับใน journalEntries) · ใช้ทั้งหน้าแก้ใบ / executor / WHT ย้อนหลัง / VOID_INV / ย้าย VAT ต้องห้าม
+global.ERP.invReversedJeIds = function(journalEntries, invId){
+  const jes = journalEntries || [];
+  const isOrig = j => j && !j.voidedReversal && !j.voided && !j.reversed && j.status === 'posted' && ((j.source === 'inv' && j.sourceId === invId) || j.refId === invId);
+  const isRev = j => j && j.voidedReversal && (j.sourceId === invId || j.refId === invId);
+  const done = new Set();
+  for(const r of jes) if(isRev(r) && r.reversesJeId) done.add(r.reversesJeId);
+  const near = (a, b) => Math.abs((Number(a)||0) - (Number(b)||0)) < 0.01;
+  for(const r of jes){
+    if(!isRev(r) || r.reversesJeId) continue;
+    const open = jes.filter(j => isOrig(j) && !done.has(j.id) && near(j.totalDebit, r.totalCredit) && near(j.totalCredit, r.totalDebit));
+    const hit = open.find(j => r.jeNumber && r.jeNumber === 'JE-VOID-' + (j.jeNumber || '')) || open[0];
+    if(hit) done.add(hit.id);
+  }
+  return done;
+};
+// JE ตั้งหนี้ (source 'inv') ของใบที่ยังไม่ถูกกลับรายการ — ตัวที่ต้องกลับตอนแก้ใบ/เพิ่ม WHT ย้อนหลัง
+global.ERP.invOpenJes = function(journalEntries, invId){
+  const rev = global.ERP.invReversedJeIds(journalEntries, invId);
+  return (journalEntries || []).filter(j => j.source === 'inv' && j.sourceId === invId && j.status === 'posted' && !j.voidedReversal && !j.voided && !j.reversed && !rev.has(j.id));
+};
 global.ERP.invUpdateDeny = function(state, old, nu){
   try {
     if(!old || !nu) return 'ไม่พบใบตั้งหนี้';
@@ -18278,13 +18408,15 @@ function reducer(s, a){
       // 🆕 WHT-MERGE: แก้ยอดหัก ณ ที่จ่าย ของใบที่รวมอยู่ใน 50 ทวิ ของ PV (เช่น 🧾 เพิ่ม WHT ย้อนหลัง) → ปฏิเสธ
       if(_oldInv && _invWhtMergedInto(_oldInv) && a.data.whtAmount !== undefined && !_protSame(_oldInv.whtAmount, a.data.whtAmount)){ alert(_whtMergedDenyMsg(_oldInv)); return s; }
       if(_oldInv){
-        const _finF = ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId'];
-        const _chg = _finF.filter(f => a.data[f] !== undefined && _oldInv[f] !== a.data[f]);
+        const _finF = ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId','offInvDiscount'];
+        // 🎟️ OFF-INV-DISC: offInvDiscount เป็น object → เทียบด้วย _protSame (object ใหม่ !== เสมอ) · ฟิลด์อื่นเทียบแบบเดิม
+        const _chg = _finF.filter(f => a.data[f] !== undefined && (f === 'offInvDiscount' ? !_protSame(_oldInv[f], a.data[f]) : _oldInv[f] !== a.data[f]));
+        const _odTxt = v => (v && Number(v.amount) > 0) ? (Number(v.amount) + ' (' + (v.kind || '-') + ')') : '0';
         if(_chg.length > 0){
           const _wasPaid = (_oldInv.paidAmount||0) > 0 || _oldInv.paymentStatus === 'paid' || _oldInv.paymentStatus === 'partial';
           const _rev = { rev: ((_oldInv.revisionHistory||[]).length)+1, ts: Date.now(),
             by: a.data._editedBy || 'system', wasPaid: _wasPaid,
-            changes: _chg.map(f => f + ': ' + _oldInv[f] + ' → ' + a.data[f]).join(' · ').slice(0,500) };
+            changes: _chg.map(f => f === 'offInvDiscount' ? (f + ': ' + _odTxt(_oldInv[f]) + ' → ' + _odTxt(a.data[f])) : (f + ': ' + _oldInv[f] + ' → ' + a.data[f])).join(' · ').slice(0,500) };
           _newInv = { ..._newInv, revisionHistory: [...(_oldInv.revisionHistory||[]), _rev] };
           if(_wasPaid){
             try { console.warn('⚠️ แก้ field การเงินของ PI ที่จ่ายแล้ว:', _oldInv.invNumber||_oldInv.id, _rev.changes); } catch(_w){}
@@ -19104,12 +19236,14 @@ function reducer(s, a){
       // post reverse JE — ทำเหมือน reverse payment
       const origJes = (s.journalEntries||[]).filter(je =>
         (je.source === 'inv' && je.sourceId === invId) || je.refId === invId);
+      const _invRev = global.ERP.invReversedJeIds(s.journalEntries, invId);
       let journalEntries = s.journalEntries || [];
       if(origJes.length > 0){
         const reverseJes = origJes
-          .filter(j => !j.voidedReversal && j.status === 'posted')
+          .filter(j => !j.voidedReversal && j.status === 'posted' && !_invRev.has(j.id))   // 🎟️ verify 1: JE ที่กลับไปแล้ว (แก้ใบ/WHT ย้อนหลัง) ห้ามกลับซ้ำ
           .map(j => ({
             id: 'je_void_' + Date.now().toString(36) + Math.random().toString(36).slice(2,5),
+            reversesJeId: j.id,   // 🎟️ verify 1: ชี้ JE ต้นทาง
             jeNumber: 'JE-VOID-' + (j.jeNumber || ''),
             date: getToday(),
             description: `ยกเลิก ${j.description || 'INV ' + (inv.invNumber||'')} — ${reason || '-'}`,
@@ -19137,7 +19271,7 @@ function reducer(s, a){
         // 🆕 MIG_AP_NORMAL UAT MF1: ยอดค้างเดิมตอนยกมา = ยอดค้างปัจจุบัน + ผล 2100 สุทธิของ JE ปรับ (ADJUST_INV_WHT/VAT · source 'inv') ที่เพิ่งกลับรายการข้างบน
         //   (เช่น ปรับ WHT: Dr 2100 W ลด netPayable W → กลับรายการ Cr 2100 W แล้ว → je_migvoid_ ต้อง Dr 2100 เต็ม N ไม่งั้น 2100/3900 ค้าง W)
         const _is2100 = l => l && (l.accountCode === '2100' || (_ap && l.accountId === _ap.id));
-        const _adj2100 = origJes.filter(j => !j.voidedReversal && j.status === 'posted' && j.id !== 'je_migvoid_' + invId)
+        const _adj2100 = origJes.filter(j => !j.voidedReversal && j.status === 'posted' && j.id !== 'je_migvoid_' + invId && !_invRev.has(j.id))
           .reduce((t, j) => t + (j.lines||[]).filter(_is2100).reduce((u, l) => u + (Number(l.debit)||0) - (Number(l.credit)||0), 0), 0);
         const _out = Number(((Number(inv.netPayable)||0) - (Number(inv.paidAmount)||0) + _adj2100).toFixed(2));
         if(_out > 0.005 && _ap && _obe && !journalEntries.some(j => j.id === 'je_migvoid_' + invId)){
@@ -27485,6 +27619,7 @@ function executeApprovedAction(req, state, dispatch, user){
       if(je.status === 'posted' && !je.voidedReversal){
         dispatch({ type:'ADD_JE', data:{
           id: 'je_void_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+          reversesJeId: je.id,   // 🎟️ verify 1: ชี้ JE ต้นทาง
           jeNumber: 'JE-VOID-'+(je.jeNumber||''),
           date: getToday(),
           description: `ยกเลิก ${je.description||je.jeNumber} — ${p.reason || req.reason || '-'}`,
@@ -27594,12 +27729,11 @@ function executeApprovedAction(req, state, dispatch, user){
       { const _cur0 = (state.invoices||[]).find(i => i.id === p.updatedInv.id);
         const _ud = global.ERP.invUpdateDeny ? global.ERP.invUpdateDeny(state, _cur0, p.updatedInv) : null;
         if(_ud){ alert(_ud); return false; } }
-      const oldJEs = (state.journalEntries||[]).filter(j =>
-        j.source === 'inv' && j.sourceId === p.updatedInv.id &&
-        j.status === 'posted' && !j.voidedReversal);
+      const oldJEs = global.ERP.invOpenJes(state.journalEntries, p.updatedInv.id);   // 🎟️ verify 1: ข้าม JE ที่กลับไปแล้ว
       for(const je of oldJEs){
         dispatch({ type:'ADD_JE', data:{
           id: 'je_void_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+          reversesJeId: je.id,   // 🎟️ verify 1: ชี้ JE ต้นทาง
           jeNumber: 'JE-VOID-'+(je.jeNumber||''),
           date: getToday(),
           description: `แก้ไข INV ${p.updatedInv.invNumber} — reverse JE เก่า`,
@@ -27607,14 +27741,16 @@ function executeApprovedAction(req, state, dispatch, user){
           source:'inv_void', sourceId: p.updatedInv.id,
           status:'posted', postedBy:user.username, postedAt:Date.now(),
           voidedReversal:true,
+          branchId: je.branchId,   // 🎟️ OFF-INV-DISC R2: คงสาขาแบบ VOID_INV
           lines:(je.lines||[]).map(l => ({ accountId:l.accountId, accountCode:l.accountCode, accountName:l.accountName,
-            debit:l.credit||0, credit:l.debit||0, description:l.description })),
+            debit:l.credit||0, credit:l.debit||0, description:l.description, ...(l.branchId ? { branchId: l.branchId } : {}) })),
           totalDebit:je.totalCredit||0, totalCredit:je.totalDebit||0,
         }});
       }
       dispatch({ type:'UPDATE_INV', data: p.updatedInv });
       const purchaseMod = global.ERP.MODULES.purchase;
-      if(purchaseMod?.autoPostINV) purchaseMod.autoPostINV(p.updatedInv, state, dispatch, user);
+      // 🎟️ OFF-INV-DISC R1/R7: JE ลงยอดก่อนหัก CN/RTV memo (jeNetPayable) · คำขอเก่าไม่มี field = เหมือนเดิม
+      if(purchaseMod?.autoPostINV) purchaseMod.autoPostINV({ ...p.updatedInv, netPayable: p.jeNetPayable ?? p.updatedInv.netPayable }, state, dispatch, user);
       break;
     }
     // 🆕 VAT-FIX: ปรับ VAT ใบตั้งหนี้ตามใบกำกับ — reducer ADJUST_INV_VAT ตรวจซ้ำทุกเงื่อนไข (จ่ายแล้ว/คำขอจ่ายค้าง/งวดล็อก/ยอดไม่ตรง)
@@ -28757,14 +28893,13 @@ function AppUpdateBanner(){
 
 function WipeImportBanner({ state }){
   const lw = state && state.settings && state.settings.lastWipe;
-  // 🆕 นำเข้า2569 UAT ชุด 2 N1: แถบอยู่จนนับสต๊อกครั้งแรกหลังล้าง (④ ยอดยกมา) — ไม่ใช่หายทันทีที่มีสินค้า · + คำเตือนสาขา · ตัวใหญ่ขึ้นบนแท็บเล็ต
-  if(!lw || (state.stockCounts || []).some(c => c && !c._migrated)) return null;
-  const imported = (state.items || []).length > 0;
-  return h('div', { className:'bg-yellow-100 border-b border-yellow-400 text-yellow-900 text-sm md:text-base px-3 py-2 leading-snug', 'data-testid':'wipe-import-banner', 'data-stage': imported ? 'count' : 'import', role:'status' },
-    imported
-      ? h('span', null, '🧹 นำเข้าข้อมูลจากระบบเก่าแล้ว — รอนับสต๊อกจริงเป็นยอดยกมา · ', h('b', null, 'อย่าเพิ่งคีย์รับของ/เบิก/โอน'), ' จนกว่าหัวหน้าจะแจ้งว่านับสต๊อกเสร็จ')
-      : h('span', null, '🧹 ระบบถูกล้างข้อมูลเก่าแล้ว (' + new Date(lw.at).toLocaleDateString('th-TH') + ') — กำลังรอนำเข้าข้อมูลจากระบบเก่า · ',
-          h('b', null, 'อย่าเพิ่งคีย์ผู้ขาย/สินค้า/PO'), ' จนกว่าหัวหน้า/ผู้ดูแลจะแจ้งว่านำเข้าเสร็จ (คีย์ตอนนี้จะซ้ำกับข้อมูลที่นำเข้า)'),
+  // 🆕 WIPE_BANNER_OFF B1 (เจ้าของ 2026-10-06: "นำเข้าข้อมูลจากระบบเก่าแล้ว — รอนับสต๊อก อันนี้เอาออกได้เลย
+  //   เดี๋ยวถ้าเริ่มระบบสต๊อกจะนับใส่เอง"): มีสินค้าแล้ว (นำเข้าแล้ว) → ไม่มีแถบ ไม่ว่ามีใบนับหรือไม่
+  //   เหลือเฉพาะ stage 'import' (ล้างแล้วยังไม่นำเข้า) ไว้ใช้ตอนล้างครั้งหน้า · + คำเตือนสาขา · ตัวใหญ่ขึ้นบนแท็บเล็ต
+  if(!lw || (state.items || []).length > 0) return null;
+  return h('div', { className:'bg-yellow-100 border-b border-yellow-400 text-yellow-900 text-sm md:text-base px-3 py-2 leading-snug', 'data-testid':'wipe-import-banner', 'data-stage':'import', role:'status' },
+    h('span', null, '🧹 ระบบถูกล้างข้อมูลเก่าแล้ว (' + new Date(lw.at).toLocaleDateString('th-TH') + ') — กำลังรอนำเข้าข้อมูลจากระบบเก่า · ',
+      h('b', null, 'อย่าเพิ่งคีย์ผู้ขาย/สินค้า/PO'), ' จนกว่าหัวหน้า/ผู้ดูแลจะแจ้งว่านำเข้าเสร็จ (คีย์ตอนนี้จะซ้ำกับข้อมูลที่นำเข้า)'),
     h('div', { className:'mt-0.5' }, h('b', null, 'สาขา: ห้ามรับของ/นำเข้า POS/ตัดของเสีย จนหัวหน้าแจ้ง'), ' · สงสัยติดต่อหัวหน้า'));
 }
 // 🆕 MW-0.2: แถบ "มีงานที่บันทึกไม่ขึ้น" — หลังชนแล้วโหลดใหม่ ชี้ไปหน้า 🧾 งานค้าง แทนสั่งให้คนคีย์ซ้ำ
@@ -63077,7 +63212,10 @@ function billDiscMultiHint(tid){
   return h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 text-xs text-amber-900', 'data-testid':'billdisc-multi-hint-' + tid },
     '🏷️ ใบกำกับมีส่วนลดท้ายบิล? ฟอร์มนี้ยังใส่ส่วนลดท้ายบิลไม่ได้ — ถ้าส่วนลดเป็นของเฉพาะกลุ่ม (เช่น สินค้าไม่มี VAT) ',
     h('b', null, 'ให้ตั้งหนี้ทีละ GR'), ' (มีช่อง "ส่วนลดท้ายบิลตามใบกำกับ" เลือกใช้กับกลุ่มได้) หรือแก้ VAT ตามใบกำกับหลังตั้งหนี้ — ',
-    'การแก้ยอดรวมตรงช่องมูลค่าจะเฉลี่ย VAT ตามสัดส่วน ทำให้ภาษีซื้อไม่ตรงใบกำกับ');
+    'การแก้ยอดรวมตรงช่องมูลค่าจะเฉลี่ย VAT ตามสัดส่วน ทำให้ภาษีซื้อไม่ตรงใบกำกับ',
+    // 🎟️ OFF-INV-DISC §B4-4 (R13): ไม่มีช่องตอนสร้าง → ตั้งหนี้รวมแล้วแก้ใบ (แยกใบชนด่านเลขใบกำกับซ้ำ)
+    h('div', { className:'mt-1 text-emerald-900', 'data-testid':'offdisc-multi-hint' },
+      '🎟️ มีคูปอง/คะแนน (ใบกำกับคิด VAT เต็ม)? → ตั้งหนี้รวมตามปกติ แล้วกด ✏️ แก้ไขใบ → ใส่ 🎟️ ส่วนลดนอกใบกำกับ · อย่าใส่ในช่องปรับยอด/ปัดเศษ'));
 }
 
 // 🆕 BILL-DISC §B6: ส่วนลดท้ายบิลเปลี่ยนไหม (ไม่มี object = mode '' / value 0 / amount 0)
@@ -64191,6 +64329,52 @@ function BillDiscountBox({ billDisc, setBillDisc, bd, priceMode, totals, disable
       row(inc ? 'รวมหลังส่วนลด (รวม VAT):' : 'รวมหลังส่วนลด:', fmtCur(E.bdR2(bd.sumBase - bd.amount)), T+'-after'),
       inc && row('มูลค่าก่อน VAT:', fmtCur(totals.subtotal), T+'-exvat'))
   );
+}
+
+// 🎟️ OFF-INV-DISC §B4: ส่วนลดนอกใบกำกับ (คูปอง/คะแนน) — VAT เคลมตามใบกำกับ (ไม่แตะ) · ค่าใช้จ่าย/ต้นทุนลงตามจ่ายจริง
+//   ต่างจาก BillDiscountBox (ส่วนลดที่พิมพ์บนใบกำกับ → VAT ลดตาม) · ไม่แก้ BillDiscountBox
+//   value = null | { amount (string ที่พิมพ์), kind, note } · บาทอย่างเดียว (ไม่มี % / ก่อน-รวม VAT)
+const OFFDISC_KINDS = [['coupon','คูปอง/บัตรกำนัลที่ได้ฟรีจากร้าน'], ['points','คะแนนสะสม'], ['other','อื่น ๆ']];
+// 🎟️ S4: ป้ายสั้นสำหรับแสดงผล/พิมพ์ "คูปอง · VC-123" — ไม่มีส่วนลด = ''
+function offDiscLabel(inv){
+  const d = inv && inv.offInvDiscount; if(!d) return '';
+  const k = { coupon:'คูปอง/บัตรกำนัล', points:'คะแนนสะสม', other:'อื่น ๆ' }[d.kind] || 'คูปอง/บัตรกำนัล';
+  return k + (d.note ? ' · ' + String(d.note) : '');
+}
+function OffInvDiscountBox({ value, setValue, max, disabledWhy, err, hasWht, dupWarn, tid }){
+  const T = tid || 'offdisc';
+  const v = value || {};
+  const amt = global.ERP.bdR2(Number(v.amount) || 0);
+  const upd = (patch) => { const n = { kind:'coupon', note:'', ...(value || {}), ...patch };
+    setValue((n.amount === '' || n.amount == null) && !n.note && n.kind === 'coupon' ? null : n); };
+  if(disabledWhy) return h('div', { className:'text-xs text-gray-500 bg-gray-100 rounded px-2 py-1', 'data-testid':T+'-box' },
+    '🎟️ ส่วนลดนอกใบกำกับ (คูปอง/คะแนน): ', h('span', { 'data-testid':T+'-why' }, disabledWhy));
+  return h('div', { className:'border border-emerald-200 bg-emerald-50/60 rounded p-2 space-y-1', 'data-testid':T+'-box' },
+    h('div', { className:'flex flex-wrap justify-between items-center gap-2 text-sm' },
+      h('span', { className:'font-medium text-emerald-900' }, '🎟️ ส่วนลดนอกใบกำกับ (คูปอง/คะแนน)'),
+      h('span', { className:'font-mono font-bold text-emerald-800' }, amt > 0 ? '− ' + fmtCur(amt) : '—')),
+    h('label', { className:'flex flex-wrap items-center gap-2 text-xs' },
+      h('span', null, 'ยอดที่ไม่ได้จ่ายจริง (บาท ตามสลิป · ไม่ต้องถอด VAT)'),
+      h('input', { type:'number', min:0, step:'0.01', value: v.amount ?? '', placeholder:'0.00', 'data-testid':T+'-amt',
+        onChange:e => upd({ amount: e.target.value }), className:'w-28 px-2 py-1 border rounded text-right font-mono text-xs' }),
+      max != null && h('span', { className:'text-gray-500' }, 'สูงสุด ' + fmtCur(max))),
+    amt > 0 && h('div', { className:'flex flex-wrap items-center gap-2 text-xs' },
+      h('select', { value: v.kind || 'coupon', 'data-testid':T+'-kind', onChange:e => upd({ kind: e.target.value }),
+        className:'px-1.5 py-1 border rounded text-xs' },
+        OFFDISC_KINDS.map(([k, lb]) => h('option', { key:k, value:k }, lb))),
+      h('input', { type:'text', maxLength:120, value: v.note || '', 'data-testid':T+'-note',
+        placeholder: v.kind === 'other' ? 'หมายเหตุ (บังคับ)' : 'เลขคูปอง/หมายเหตุ (ถ้ามี)',
+        onChange:e => upd({ note: e.target.value }), className:'flex-1 min-w-[10rem] px-2 py-1 border rounded text-xs' })),
+    amt > 0 && v.kind === 'other' && h('div', { className:'text-[11px] text-amber-800' }, '💡 ผู้ขายลดให้หลังออกใบ → ขอใบลดหนี้ (CN) แทน'),
+    h('div', { className:'text-[11px] text-gray-600' },
+      'ใบกำกับคิด VAT เต็ม แต่จ่ายน้อยกว่าเพราะคูปอง/คะแนน → ใส่ที่นี่ · ส่วนลดที่พิมพ์บนใบกำกับ (VAT ลดตาม) → ใช้ช่องส่วนลดท้ายบิลด้านบน'),
+    amt > 0 && h('div', { className:'text-[11px] text-gray-600', 'data-testid':T+'-voucher-hint' },
+      'บัตรกำนัลที่บริษัทซื้อมาเอง ไม่ใช่ส่วนลด — อย่าใช้ช่องนี้ (ลงเป็นการจ่ายด้วยบัตรกำนัล/ตัดบัญชีบัตรกำนัล)'),
+    err && h('div', { className:'text-xs text-red-700 font-medium', 'data-testid':T+'-err' }, '⛔ ' + err),
+    dupWarn && h('div', { className:'text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1', 'data-testid':T+'-dup-warn' },
+      '⚠️ ใส่ส่วนลดเดียวกันซ้ำ 2 ช่องหรือเปล่า? ช่องบน = VAT ลดตาม · ช่องนี้ = VAT เต็ม'),
+    hasWht && amt > 0 && h('div', { className:'text-[11px] text-indigo-800', 'data-testid':T+'-wht-hint' },
+      '💡 หัก ณ ที่จ่ายคิดจากฐานตามใบกำกับ (ไม่หักคูปอง) — ตรวจฐาน WHT ด้านล่างให้ตรงกับที่ตกลงกับผู้ขาย'));
 }
 
 // 🆕 BILL-DISC §V2: ช่องส่วนลดบรรทัด + ป้ายสถานะ VAT + สลับกรอกรวม/ก่อน VAT (เฉพาะบรรทัดมี VAT)
@@ -67638,8 +67822,43 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   };
   // 🆕 WHT-ROW6 verify 1: ยอดหัวใบ = ผลรวมบรรทัดที่ปัดสตางค์แล้ว (ตรงกับ whtLines ที่บันทึก · ข้อ 5+6 = รวม บนใบ 50 ทวิ)
   const wht = whtLines.reduce((s,l) => s + Math.round((Number(l.whtAmount)||0) * 100 + 1e-6), 0) / 100;
-  const netCalc = amount + vat - wht - (Number(useCredit)||0);
+  // 🎟️ OFF-INV-DISC §B4-2: ส่วนลดนอกใบกำกับ (คูปอง/คะแนน) — ไม่ผ่าน grV/piGrPatch/UPDATE_GR (ฐาน VAT คงตามใบกำกับ)
+  //   น้ำหนัก = ก่อน VAT ราย GR line หลังส่วนลดท้ายบิล (vb จาก grV) · 💎 / ของแถม / GR นำเข้า = 0
+  const [offDisc, setOffDisc] = useState(null);
+  const _r2 = global.ERP.bdR2;
+  const offSrc = { kind:'gr', lines: vb.lines.map((x, i) => { const gl = (grV.lines||[])[i] || {};
+    return { grId: gr.id, lineIdx: i, exVat: x.exVat, freebie: !!x.isFreebie, migOpening: global.ERP.grMigOpening(gr),
+      capex: !!(gl.isAsset && global.ERP.grLineIsCapex(state, gr, gl)) }; }) };
+  const offW = global.ERP.offInvDiscWeights(offSrc);
+  const offDisabledWhy = splitByWHT ? 'แยก INV ตามหมวด WHT — ใช้ตั้งหนี้ใบเดียว'
+    : gr.linkedAdvanceInv ? 'GR ผูกกับ INV จ่ายล่วงหน้าแล้ว'
+    : global.ERP.grMigOpening(gr) ? 'GR นำเข้ายอดยกมา — ใส่ส่วนลดไม่ได้'
+    : !offW.some(w => w > 0) ? 'ไม่มีบรรทัดที่ลดได้ (ทรัพย์สิน 💎/ของแถมทั้งหมด)' : '';
+  const offAmtRaw = (!offDisabledWhy && offDisc) ? Number(offDisc.amount) || 0 : 0;
+  const offA = global.ERP.offInvDiscAlloc(offSrc, offAmtRaw);
+  const offMax = amountOverride !== null ? Math.min(offA.max, _r2(amount)) : offA.max;   // RTV หักยอด: ไม่เกินมูลค่าที่ตั้งหนี้
+  const offAmt = offAmtRaw > 0 && !offA.error ? _r2(offAmtRaw) : 0;
+  // R6/R8: เพดาน = ยอดค้างหลังหัก CN ขาดส่ง (await_doc) + ใบลดหนี้ RTV ที่ระบบหักต่อหลัง ADD_INV (ค่าเดียวกับที่ใช้หักจริงด้านล่าง)
+  const _cnAutoAmt = linkedCNs.filter(cn => cn.status === 'await_doc' && cn.source === 'auto_short_receive').reduce((t, cn) => t + (Number(cn.netAmount)||0), 0);
+  const _rtvCnAmtRaw = rtvCreditMemo ? Math.max(0, Number(rtvCreditMemo.netAmount)||0) : 0;
+  const offCap = _r2(amount + vat - wht - (Number(useCredit)||0) - _cnAutoAmt - _rtvCnAmtRaw);
+  const offErr = offDisabledWhy ? '' : ((offAmtRaw > 0 && offA.error) || global.ERP.offInvDiscCheck({ amount, vat, wht, creditUsed: Number(useCredit)||0,
+    disc: offDisc && offDisc.amount, max: offMax, cap: offCap, kind: offDisc && offDisc.kind, note: offDisc && offDisc.note, netOverrideOn: netOverride !== null }));
+  const offDup = offAmtRaw > 0 && piDiscAmt > 0 && [piBd.amount, piBd.header && piBd.header.enteredAmount]
+    .some(x => x != null && Math.abs(Number(x) - offAmtRaw) <= 1);
+  const offMisplaced = piDiscAmt > 0 && vatOverride !== null && Number(vatOverride) > vatCalc + 0.5;   // §B8-9 (R15)
+  const moveMisplaced = () => {
+    const x = (piBd.header && piBd.header.enteredAmount != null) ? piBd.header.enteredAmount : piBd.amount;
+    setOffDisc({ amount: String(_r2(x)), kind:'coupon', note:'' }); setPiDisc(null); setVatOverride(null);
+    setTimeout(() => { const el = document.querySelector('[data-testid="offdisc-amt"]'); if(el) el.focus(); }, 0);
+  };
+  const netCalc = amount + vat - wht - (Number(useCredit)||0) - offAmt;
   const netPayable = netOverride !== null ? Number(netOverride) : netCalc;
+  // R11: พิมพ์ยอดสุทธิต่ำกว่าสูตรเกินเพดานปัดเศษ = ซ่อนส่วนลด/JE ไม่ balance → บล็อก + ปุ่มย้ายไป 🎟️ (ใช้กับทุกใบ)
+  const _netAbsLimit = Number(state.settings?.priceEditAbsLimit ?? 1.00);
+  const netOvDiff = netOverride !== null ? _r2(netCalc - Number(netOverride)) : 0;
+  const netOvBlock = netOvDiff > _netAbsLimit + 0.005;
+  const moveNetOverride = () => { setOffDisc({ kind:'coupon', note:'', ...(offDisc || {}), amount: String(_r2(offAmt + netOvDiff)) }); setNetOverride(null); };
 
   // WHT line ops
   // ตรรกะใหม่: line 1 = ใส่ full amount; line 2+ = ใส่ remaining (0 ถ้าหมดแล้ว)
@@ -67719,6 +67938,10 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
     if(!piDiscDisabledWhy && piDisc && piBd.error){
       return alert('⚠️ ส่วนลดท้ายบิลตามใบกำกับ: ' + billDiscErrorText(piBd, _piPm) + ' — แก้ก่อนบันทึก');
     }
+    // 🎟️ OFF-INV-DISC §B8: ส่วนลดนอกใบกำกับผิด / พิมพ์ยอดสุทธิต่ำกว่าใบกำกับ → บันทึกไม่ได้
+    if(offErr) return alert('⛔ ส่วนลดนอกใบกำกับ: ' + offErr);
+    if(netOvBlock) return alert('⛔ ยอดจ่ายน้อยกว่าใบกำกับ ' + fmtCur(netOvDiff) + ' — ถ้าเป็นคูปอง/คะแนน ใช้ช่อง 🎟️ ส่วนลดนอกใบกำกับ (หรือกด ↺ คืนยอดจากสูตร)'
+      + '\n→ ถ้าไม่ใช่คูปอง/คะแนน หรือช่อง 🎟️ ใช้ไม่ได้ → ตั้งหนี้ตามใบกำกับ แล้วขอใบลดหนี้ (CN) จากผู้ขาย');
     // 🆕 DUP-INV: ตรวจ GR สดจาก state ตอนกดบันทึก — GR นี้ถูกตั้งหนี้ไปแล้ว (จากหน้าต่างอื่น/อีกเครื่อง/advance back-fill) → ห้ามตั้งซ้ำ
     const liveGr = (state.grs||[]).find(g => g.id === gr.id) || gr;
     if(liveGr.voided){ alert('⛔ GR ' + (liveGr.grNumber||'') + ' ถูกยกเลิกแล้ว (' + (liveGr.voidReason||'-') + ') — ตั้งหนี้ไม่ได้ ปิดหน้าต่างนี้'); return; }
@@ -67945,6 +68168,9 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
       // 🆕 supplier vat status snapshot (สะดวกตอน report)
       supplierVatRegistered: sup ? (sup.vatRegistered !== false) : ((vat||0) > 0),
       ...piDiscInvField,   // 🆕 BILL-DISC §B5 ข้อ 4: ส่วนลดท้ายบิลตามใบกำกับ (โชว์/พิมพ์/audit)
+      // 🎟️ OFF-INV-DISC §B2: ส่วนลดนอกใบกำกับ — amount/vat ไม่หัก · netPayable หักแล้ว · allocs ราย GR line (ไว้ ADJUST_INV_PRICE อนาคต)
+      ...(offAmt > 0 ? { offInvDiscount: { v:1, amount: offAmt, kind: offDisc.kind || 'coupon', note: String(offDisc.note || '').trim().slice(0,120),
+        allocs: offA.allocs } } : {}),
       ...(rtvMode === 'deduct' && rtvsBeforeINV.length ? { rtvDeductIds: rtvsBeforeINV.map(r => r.id) } : {}),   // 💎 verify: ใบคืนที่หักในใบนี้ → buildInvDrLines หักมูลค่าบรรทัด 💎 (ก่อน UPDATE_RTV ผูก)
       ...invTagFields,   // 🆕 DOC-TAGS D3
       createdBy: user.username, createdAt: Date.now(),
@@ -68033,8 +68259,8 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
 
     // 🆕 หักมัดจำ/จ่ายล่วงหน้า (FIFO: PO-bound ของ PO นี้ก่อน) — DR เจ้าหนี้ / CR เงินมัดจำ
     // verify คลื่น 2 (บัญชี): เพดานหักมัดจำ = ยอดหลังหักใบลดหนี้ที่เพิ่ง apply ด้านบน (เดิมใช้ยอดก่อนหัก → มัดจำถูกใช้เกินบิล · 2100 ค้างเดบิต)
-    const _cnAutoAmt = linkedCNs.filter(cn => cn.status === 'await_doc' && cn.source === 'auto_short_receive').reduce((t, cn) => t + (Number(cn.netAmount)||0), 0);
-    const _rtvCnAmt = rtvCreditMemo ? Math.max(0, Math.min(Number(rtvCreditMemo.netAmount)||0, netPayable)) : 0;
+    //   🎟️ OFF-INV-DISC R8: _cnAutoAmt / _rtvCnAmtRaw คำนวณครั้งเดียวด้านบน (ใช้ทั้งเพดานส่วนลดและตรงนี้)
+    const _rtvCnAmt = Math.max(0, Math.min(_rtvCnAmtRaw, netPayable));
     const _netAfterCn = Math.max(0, Number((netPayable - _cnAutoAmt - _rtvCnAmt).toFixed(2)));
     if((Number(useDepositAmt)||0) > 0.01){
       let remain = Math.min(Number(useDepositAmt)||0, totalDepositAvail, _netAfterCn);
@@ -68346,7 +68572,9 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
         piDiscAmt > 0 && amountOverride !== null && h('div', { className:'text-[11px] text-amber-800' },
           '⚠️ มีการแก้ "มูลค่าสินค้า" เอง — ระบบใช้ยอดที่แก้ (กด ↺ เพื่อใช้ยอดหลังส่วนลด)'),
         piDiscAmt > 0 && h('div', { className:'text-[11px] text-yellow-900 bg-yellow-50 border border-yellow-300 rounded p-1.5', 'data-testid':'pi-billdisc-fifo-warn' },
-          '⚠️ ต้นทุนล็อตที่รับเข้าแล้วไม่ถูกปรับตามส่วนลดนี้ (DR สินค้าคงเหลือ = ยอดตั้งหนี้) — ถ้ารู้ก่อนรับของ ให้ใส่ใน PO')),
+          '⚠️ ต้นทุนล็อตที่รับเข้าแล้วไม่ถูกปรับตามส่วนลดนี้ (DR สินค้าคงเหลือ = ยอดตั้งหนี้) — ถ้ารู้ก่อนรับของ ให้ใส่ใน PO'),
+        h('div', { className:'text-[11px] text-emerald-800', 'data-testid':'offdisc-pointer' },
+          'ใบกำกับคิด VAT เต็ม แต่จ่ายน้อยกว่าเพราะคูปอง/คะแนน? → ช่อง 🎟️ ด้านล่าง')),   // 🎟️ OFF-INV-DISC R14
 
       // 🆕 VAT-FIX: ตาราง VAT ราย line — บัญชีปรับอัตรา 0/7 ต่อ line ให้ตรงใบกำกับ supplier ได้โดยไม่ต้องย้อน PO/GR
       hasMixedVat && h(PIVatLineTable, { vb, state, fromLabel:'PO/GR',
@@ -68401,7 +68629,17 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
               className:'text-xs text-blue-600 hover:underline' }, '↺')
           )
         ),
-        h('div', { className:'flex justify-between items-center' },
+        // 🎟️ OFF-INV-DISC §B8-9 (R15): ส่วนลดท้ายบิล + ทับ VAT กลับเต็ม = คูปองใส่ผิดช่อง → ปุ่มย้ายไป 🎟️
+        offMisplaced && h('div', { className:'text-xs text-amber-900 bg-amber-50 border border-amber-300 rounded p-1.5 flex flex-wrap items-center gap-2', 'data-testid':'offdisc-misplaced' },
+          h('span', null, '⚠️ ใบกำกับคิด VAT เต็มทั้งที่มีส่วนลด = ส่วนลดนอกใบกำกับ (คูปอง/คะแนน)'),
+          !offDisabledWhy && h('button', { type:'button', onClick: moveMisplaced, 'data-testid':'offdisc-misplaced-move',
+            className:'px-2 py-0.5 bg-emerald-600 text-white rounded text-xs' }, 'ย้ายไปช่อง 🎟️')),
+        h('div', { className:'flex justify-between items-center pt-1 border-t' },
+          h('span', null, h('span', { className:'font-bold' }, 'รวมตามใบกำกับ'), h('span', { className:'ml-1 text-[11px] text-gray-500' }, 'ต้องเท่ายอดบนใบกำกับ')),
+          h('span', { className:'font-mono font-bold', 'data-testid':'offdisc-invtotal' }, fmtCur(_r2(amount + vat)))),
+        h(OffInvDiscountBox, { value: offDisc, setValue: setOffDisc, max: offMax, disabledWhy: offDisabledWhy, err: offErr,
+          hasWht: wht > 0, dupWarn: offDup }),
+        h('div', { className:'flex justify-between items-center', 'data-testid':'pi-wht-row' },
           h('span', null, 'หัก ณ ที่จ่ายรวม (' + whtLines.filter(l=>l.whtAmount>0).length + ' รายการ):'),
           h('span', { className:'font-medium text-red-600' }, '- ' + fmtCur(wht))
         ),
@@ -68419,7 +68657,18 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
               title:'คืนยอดจากสูตร',
               className:'text-xs text-blue-600 hover:underline' }, '↺')
           )
-        )
+        ),
+        // 🎟️ OFF-INV-DISC §A2 (UAT S1): บอกว่าส่วนลดลงบัญชีไหน — PI จาก GR ต้นทุนล็อตคงเดิม ส่วนลดเข้า 5120/5100
+        offAmt > 0 && h('div', { className:'text-[11px] text-gray-600 text-right', 'data-testid':'offdisc-cost' },
+          (() => { const _coa = state.chartOfAccounts || [];
+            const _acc = _coa.find(a => a.code === '5120') || _coa.find(a => a.code === '5100');
+            return `ต้นทุนล็อตไม่เปลี่ยน — ส่วนลดลงบัญชี ${_acc ? _acc.code : '5100'} ${fmtCur(offAmt)} · VAT เคลมเต็ม ${fmtCur(vat)}`; })()),
+        // 🎟️ OFF-INV-DISC R11: ยอดสุทธิที่พิมพ์ต่ำกว่าสูตรเกินเพดานปัดเศษ → บล็อก (โชว์เฉพาะเมื่อเกิน)
+        netOvBlock && h('div', { className:'text-xs text-red-800 bg-red-50 border border-red-300 rounded p-1.5 flex flex-wrap items-center gap-2', 'data-testid':'net-override-err' },
+          h('span', null, `⛔ ยอดจ่ายน้อยกว่าใบกำกับ ${fmtCur(netOvDiff)} — ถ้าเป็นคูปอง/คะแนน ใช้ช่อง 🎟️ ส่วนลดนอกใบกำกับ · ถ้าไม่ใช่คูปอง/คะแนน หรือช่อง 🎟️ ใช้ไม่ได้ → ตั้งหนี้ตามใบกำกับ แล้วขอใบลดหนี้ (CN) จากผู้ขาย`),
+          offDisabledWhy ? h('span', { className:'text-gray-600' }, '(ช่อง 🎟️ ใช้ไม่ได้: ' + offDisabledWhy + ')')
+            : h('button', { type:'button', onClick: moveNetOverride, 'data-testid':'net-override-move',
+                className:'px-2 py-0.5 bg-emerald-600 text-white rounded text-xs' }, `ย้าย ${fmtCur(netOvDiff)} ไปช่อง 🎟️`))
       ),
 
       // 💳 Credit Note carry-over — supplier นี้มี credit ค้างไหม
@@ -70500,6 +70749,9 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
           ),
           roundAdjNum !== 0 && h('div', { className:'text-[11px] text-yellow-800 bg-yellow-50 border border-yellow-300 rounded px-2 py-1' },
             `ผลต่างปัดทศนิยม ${roundAdjNum > 0 ? '+' : ''}${fmtCur(roundAdjNum)} จะลงบัญชี 5390 ผลต่างปัดทศนิยม`),
+          // 🎟️ OFF-INV-DISC R13: ปัดเศษเกิน 1 บาท มักเป็นคูปอง/คะแนนที่ใส่ผิดช่อง (ไม่บล็อก)
+          Math.abs(roundAdjNum) > 1 && h('div', { className:'text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1', 'data-testid':'rounding-offdisc-warn' },
+            '⚠️ ปัดเศษเกิน 1 บาท — ถ้าเป็นคูปอง/คะแนน (ใบกำกับคิด VAT เต็ม) ให้ล้างช่องนี้ ตั้งหนี้แล้วกด ✏️ แก้ไขใบ → ใส่ 🎟️ ส่วนลดนอกใบกำกับ'),
           h('div', { className:'flex justify-between font-bold text-lg pt-1 border-t' },
             h('span', null, 'สุทธิ:'),
             h('span', { className:'text-blue-900' }, fmtCur(netPayable))
@@ -71037,6 +71289,15 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose }){
               title:'ภาษีซื้อของค่าใช้จ่ายต้องห้ามเคลมไม่ได้ (ม.82/5) — โอนเข้า 5900 แล้ว · รายงานภาษีซื้อ/ภ.พ.30 นับเฉพาะส่วนที่เคลมได้' },
               `⛔ ไม่เคลม ${fmtCur(inv.nonDeductibleVat)} · เคลมได้ ${fmtCur(global.ERP.invClaimableVat ? global.ERP.invClaimableVat(inv) : Math.max(0, (inv.vat||0) - (inv.nonDeductibleVat||0)))}`))
         ),
+        // 🎟️ OFF-INV-DISC §B7: รวมตามใบกำกับ + ส่วนลดนอกใบกำกับ (VAT ไม่ลด · ยอดจ่ายลด) — ใบเก่าไม่มี field = ไม่แสดง
+        global.ERP.offInvDiscAmt(inv) > 0 && h('div', { className:'flex justify-between text-gray-700', 'data-testid':'inv-offdisc-total' },
+          h('span', null, 'รวมตามใบกำกับ:'), h('span', null, fmtCur(global.ERP.bdR2((inv.amount||0) + (inv.vat||0))))),
+        global.ERP.offInvDiscAmt(inv) > 0 && h('div', { className:'flex justify-between text-emerald-700', 'data-testid':'inv-offdisc-row',
+          title:'ส่วนลดที่ไม่ได้พิมพ์บนใบกำกับ — VAT เคลมตามใบกำกับ · ค่าใช้จ่าย/ต้นทุนลงตามจ่ายจริง' },
+          h('span', null, `🎟️ ส่วนลดนอกใบกำกับ (${offDiscLabel(inv)}):`),
+          h('span', null, '- ' + fmtCur(global.ERP.offInvDiscAmt(inv)))),
+        global.ERP.offInvDiscAmt(inv) > 0 && linkedRTVs.length > 0 && h('div', { className:'text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1', 'data-testid':'inv-offdisc-rtv-warn' },
+          '⚠️ ใบนี้มีทั้งส่วนลดนอกใบกำกับและการคืนของ (RTV) — ตรวจยอดค้างจ่าย/ใบลดหนี้ให้ตรงกับที่ผู้ขายคืนเงินจริง'),
         (inv.whtAmount||0) > 0 && h('div', { className:'flex justify-between text-red-600' },
           h('span', null, `หัก ณ ที่จ่าย (${inv.whtRate||0}%):`),
           h('span', null, '- ' + fmtCur(inv.whtAmount||0))
@@ -71655,11 +71916,11 @@ function AddWHTRetroModal({ inv, state, dispatch, user, onClose, onDone }){
       // 🆕 DEPOSIT-VAT verify: ตรวจด่านเดียวกับ UPDATE_INV ก่อนลง JE-VOID ตัวแรก (งวด GL ปิด / งวดภาษียื่นแล้ว)
       { const _ud = global.ERP.invUpdateDeny ? global.ERP.invUpdateDeny(state, inv, updated) : null;
         if(_ud){ alert('⛔ เพิ่ม WHT ย้อนหลังไม่ได้ — ' + _ud); return; } }
-      const oldJEs = (state.journalEntries||[]).filter(j =>
-        j.source === 'inv' && j.sourceId === inv.id && j.status === 'posted' && !j.voidedReversal);
+      const oldJEs = global.ERP.invOpenJes(state.journalEntries, inv.id);   // 🎟️ verify 1: ข้าม JE ที่กลับไปแล้ว
       for(const j of oldJEs){
         dispatch({ type:'ADD_JE', data:{
           id: 'je_void_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+          reversesJeId: j.id,   // 🎟️ verify 1: ชี้ JE ต้นทาง
           jeNumber: 'JE-VOID-'+(j.jeNumber||''),
           date: getToday(),
           description: `เพิ่ม WHT ย้อนหลัง — reverse JE เก่า ${j.jeNumber}`,
@@ -71667,8 +71928,9 @@ function AddWHTRetroModal({ inv, state, dispatch, user, onClose, onDone }){
           source:'inv_void', sourceId: inv.id,
           status:'posted', postedBy: user.username, postedAt: Date.now(),
           voidedReversal: true,
+          branchId: j.branchId,   // 🎟️ OFF-INV-DISC R2: คงสาขาแบบ VOID_INV
           lines:(j.lines||[]).map(l => ({ accountId:l.accountId, accountCode:l.accountCode, accountName:l.accountName,
-            debit:l.credit||0, credit:l.debit||0, description:l.description })),
+            debit:l.credit||0, credit:l.debit||0, description:l.description, ...(l.branchId ? { branchId: l.branchId } : {}) })),
           totalDebit: j.totalCredit||0, totalCredit: j.totalDebit||0,
         }});
       }
@@ -72163,7 +72425,18 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
   const [whtAmount, setWhtAmount] = useState(inv.whtAmount || 0);
   const [note, setNote] = useState(inv.note || '');
   // 🆕 CG-6: ปรับยอดทศนิยม (supplier บิลปัดยอด — ลง 5390 ผลต่างปัดทศนิยม)
-  const [roundingAdj, setRoundingAdj] = useState(inv.roundingAdjustment || 0);
+  // 🎟️ OFF-INV-DISC verify 1: ใบเก่าที่ตั้งหนี้ด้วย "ปัดยอดสุทธิ" ≤ ฿1 (netOverride ไม่เก็บ roundingAdjustment) → ส่วนต่างค้างใน netPayable
+  //   ยกส่วนต่างเข้า "ปรับยอดทศนิยม" ตั้งต้น → JE ใหม่ (jeNet) = ยอดเก็บ (netPayable) · ไม่งั้นเจ้าหนี้ 2100 ค้างส่วนต่างตลอดไป
+  //   ส่วนต่าง = ยอดเก็บ + ยอดที่หักภายหลัง (CN/RTV) − (มูลค่า + VAT − WHT − เครดิต + ปัดเดิม − ส่วนลดนอกใบกำกับ) · เกินเกณฑ์ปัด = ไม่แตะ (เป็นรายการอื่น)
+  const roundOld = (() => {
+    const E = global.ERP, _r2 = E.bdR2;
+    const r0 = Number(inv.roundingAdjustment)||0;
+    const base = (Number(inv.amount)||0) + (Number(inv.vat)||0) - (Number(inv.whtAmount)||0) - (Number(inv.creditUsed)||0) + r0 - E.offInvDiscAmt(inv);
+    const resid = _r2((Number(inv.netPayable)||0) + (Number(inv.creditApplied)||0) + (Number(inv.returnedAmount)||0) - base);
+    const lim = Number(state.settings?.priceEditAbsLimit ?? 1.00);
+    return (Math.abs(resid) > 0.005 && Math.abs(resid) <= lim + 0.005) ? _r2(r0 + resid) : r0;
+  })();
+  const [roundingAdj, setRoundingAdj] = useState(roundOld);
 
   // 🆕 VAT-FIX R2: ใบที่ VAT คิดราย line / ปรับ VAT ราย line / ปรับตามใบกำกับแล้ว → ห้ามคำนวณ VAT ใหม่จาก header rate เงียบ ๆ
   //   (เดิม vat = amount × vatRate/100 ทับยอดที่ปรับไว้ + vatableBase/hasMixedVat ค้างค่าเก่า)
@@ -72186,7 +72459,43 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
     ? (amountChanged && origAmt > 0 ? Number((origVatBase * Number(amount) / origAmt).toFixed(2)) : Number(origVatBase.toFixed(2)))
     : (Number(vatRate) > 0 ? Number(amount) : 0);
   const exemptBase = Number(Math.max(0, Number(amount) - vatableBase).toFixed(2));
-  const netPayable = Number(amount) + vat - Number(whtAmount) + Number(roundingAdj);
+  // 🎟️ OFF-INV-DISC §B4-3: ส่วนลดนอกใบกำกับ — น้ำหนักจาก inv.expenseLines หรือ GR ทุกใบใน inv.grIds (ใบรวมได้)
+  const E = global.ERP, _r2 = E.bdR2;
+  const offOld = E.offInvDiscAmt(inv);
+  const [offDisc, setOffDisc] = useState(() => inv.offInvDiscount && offOld > 0
+    ? { amount: String(offOld), kind: inv.offInvDiscount.kind || 'coupon', note: inv.offInvDiscount.note || '' } : null);
+  const offSrc = (() => {
+    if(inv.source === 'po_advance' || inv.type === 'deposit_pi') return { kind:'gr', lines: [] };
+    if((inv.expenseLines||[]).length) return { kind:'exp', lines: inv.expenseLines.map(l => ({ id: l.id, lineTotal: Number(l.lineTotal)||0, capex: E.expLineIsCapex(l) })) };
+    const gids = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+    const lines = [];
+    gids.forEach(gid => {
+      const g = (state.grs||[]).find(x => x.id === gid); if(!g) return;
+      const gpo = g.poId ? (state.pos||[]).find(p => p.id === g.poId) : null;
+      const ov = {}; (inv.vatLineOverrides||[]).forEach(o => { if(o && (o.grId === gid || (!o.grId && gids.length === 1))) ov[o.lineIdx] = o.to; });
+      calcGRVatBreakdown(g, ov, inv.vatRate, gpo && gpo.priceMode).lines.forEach((x, i) => { const gl = (g.lines||[])[i] || {};
+        lines.push({ grId: gid, lineIdx: i, exVat: x.exVat, freebie: !!x.isFreebie, migOpening: E.grMigOpening(g),
+          capex: !!(gl.isAsset && E.grLineIsCapex(state, g, gl)) }); });
+    });
+    return { kind:'gr', lines };
+  })();
+  const offDisabledWhy = E.offInvDiscWeights(offSrc).some(w => w > 0) ? ''
+    : 'ไม่มีบรรทัดที่ลดได้ (จ่ายล่วงหน้า/มัดจำ/ทรัพย์สิน 💎/ของแถม/GR นำเข้า)';
+  const offAmtRaw = (!offDisabledWhy && offDisc) ? Number(offDisc.amount) || 0 : 0;
+  const offA = E.offInvDiscAlloc(offSrc, offAmtRaw);
+  const offMax = Math.min(offA.max, _r2(amount));
+  const offAmt = offAmtRaw > 0 && !offA.error ? _r2(offAmtRaw) : 0;
+  // R1/R7: base(x) = amount + vat − wht − creditUsed + roundingAdj − ส่วนลด · jeNet = base(ใหม่) (ลง JE) · ยอดเก็บ = เดิม + ส่วนต่าง (คง CN/RTV memo ที่หักแล้ว)
+  const _cu = Number(inv.creditUsed)||0;
+  const baseNew0 = Number(amount) + vat - Number(whtAmount) - _cu + Number(roundingAdj);
+  const baseOld0 = (Number(inv.amount)||0) + (Number(inv.vat)||0) - (Number(inv.whtAmount)||0) - _cu + roundOld;   // verify 1: ปัดเดิม + ส่วนต่างที่ยกมา
+  const jeNet = _r2(baseNew0 - offAmt);
+  const netPayable = _r2((Number(inv.netPayable)||0) + (baseNew0 - offAmt) - (baseOld0 - offOld));
+  const offCap = _r2((Number(inv.netPayable)||0) + baseNew0 - baseOld0 + offOld);
+  const offErr = offDisabledWhy ? '' : ((offAmtRaw > 0 && offA.error) || E.offInvDiscCheck({ amount: Number(amount), vat, wht: Number(whtAmount), creditUsed: _cu,
+    disc: offDisc && offDisc.amount, max: offMax, cap: offCap, kind: offDisc && offDisc.kind, note: offDisc && offDisc.note, roundingAdj: Number(roundingAdj)||0 }));
+  const offChanged = Math.abs(offAmt - offOld) > 0.005;
+  const offLostBlock = !!offDisabledWhy && offOld > 0.005;   // UAT S2
 
   // 🆕 CG-3: threshold guard — บัญชีแก้ได้เฉพาะ "ปัดทศนิยม" (≤1 บาท หรือ ≤0.5%) ไม่เกินนั้นต้องส่งคืนจัดซื้อ
   const ABS_LIMIT = Number(state.settings?.priceEditAbsLimit ?? 1.00);    // บาท
@@ -72201,6 +72510,12 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
   const save = () => {
     if((inv.paidAmount||0) > 0) return alert('INV นี้มีการจ่ายแล้ว แก้ไขไม่ได้');
     if(Number(amount) <= 0) return alert('มูลค่าต้อง > 0');
+    // 🎟️ OFF-INV-DISC §B8: ส่วนลดนอกใบกำกับผิด / ยอดค้างไม่พอหัก → บันทึกไม่ได้
+    if(offErr) return alert('⛔ ส่วนลดนอกใบกำกับ: ' + offErr);
+    // UAT S2: ใบเดิมมีส่วนลด แต่ตอนนี้ใส่ส่วนลดไม่ได้ (GR หาย/กลายเป็นทรัพย์สิน·ของแถมหมด) → ห้ามบันทึก ไม่งั้นส่วนลดหายเงียบ ยอดค้างเพิ่ม
+    if(offLostBlock) return alert('⛔ ใบนี้มีส่วนลดนอกใบกำกับ ' + fmtCur(offOld) + ' แต่ตอนนี้ใส่ส่วนลดไม่ได้ (' + offDisabledWhy + ')'
+      + '\n→ บันทึกแล้วส่วนลดจะหาย ยอดค้างจ่ายเพิ่ม ' + fmtCur(offOld) + ' — ให้ยกเลิก INV แล้วตั้งหนี้ใหม่ หรือแจ้ง ผจก.บัญชี');
+    if(netPayable < -0.005) return alert('⛔ ยอดค้างไม่พอหักส่วนลด (สุทธิใหม่ ' + fmtCur(netPayable) + ')');
     // 🆕 DEPOSIT-VAT review (R1): ใบกำกับอยู่ในงวดที่ยื่น ภ.พ.30 แล้ว → เปลี่ยนมูลค่า/อัตรา/VAT/วันที่ไม่ได้ (reducer UPDATE_INV ปฏิเสธซ้ำ) — ข้อความเดียวกับปรับ VAT
     if(_invTaxPeriodLocked(state, inv)){
       const _near = (x, y) => Math.abs((Number(x)||0) - (Number(y)||0)) < 0.005;
@@ -72247,12 +72562,14 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
         whtAmount: inv.whtAmount, netPayable: inv.netPayable,
         supInvNumber: inv.supInvNumber, supInvDate: inv.supInvDate,
         invDate: inv.invDate, dueDate: inv.dueDate, vatableBase: inv.vatableBase,
+        ...(offOld > 0 || offAmt > 0 ? { offInvDiscount: offOld } : {}),   // 🎟️ OFF-INV-DISC
       },
       after: {
         amount: Number(amount), vatRate: Number(vatRate), vat,
         whtAmount: Number(whtAmount), netPayable,
         supInvNumber: supInvNumber.trim()||'-', supInvDate,
         invDate, dueDate, vatableBase,
+        ...(offOld > 0 || offAmt > 0 ? { offInvDiscount: offAmt } : {}),
       },
     };
 
@@ -72270,6 +72587,9 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
       whtAmount: Number(whtAmount),
       roundingAdjustment: Number(roundingAdj)||0,  // 🆕 CG-6
       netPayable,
+      // 🎟️ OFF-INV-DISC §B4-3: ส่งเสมอเมื่อใบมี/เคยมี · ลบ = null · allocs คิดใหม่จากน้ำหนักปัจจุบัน
+      ...(offAmt > 0 ? { offInvDiscount: { v:1, amount: offAmt, kind: offDisc.kind || 'coupon', note: String(offDisc.note || '').trim().slice(0,120), allocs: offA.allocs } }
+        : (inv.offInvDiscount ? { offInvDiscount: null } : {})),
       note,
       editedBy: user.username,
       editedAt: Date.now(),
@@ -72291,13 +72611,12 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
 
     // 🆕 reverse-JE pattern (แทน DELETE_JE) — เก็บ audit trail
     //    post reverse JE สำหรับของเก่า + autoPostINV สร้าง JE ใหม่
-    const oldJEs = (state.journalEntries||[]).filter(j =>
-      j.source === 'inv' && j.sourceId === inv.id &&
-      j.status === 'posted' && !j.voidedReversal);
+    const oldJEs = global.ERP.invOpenJes(state.journalEntries, inv.id);   // 🎟️ verify 1: ข้าม JE ที่กลับไปแล้ว (แก้ใบครั้งที่ 2 ไม่กลับ JE แรกซ้ำ)
     const _eiActs = [];   // verify F2: สร้างทุกขั้นก่อน → GM ลอง reducer ก่อนประทับ 👑 (directAct) · ทางตรงลองซ้ำก่อน dispatch
     for(const j of oldJEs){
       _eiActs.push({ type:'ADD_JE', data:{
         id: 'je_void_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+        reversesJeId: j.id,   // 🎟️ verify 1: ชี้ JE ต้นทาง
         jeNumber: 'JE-VOID-'+(j.jeNumber||''),
         date: getToday(),
         description: `แก้ไข INV ${inv.invNumber} — reverse JE เก่า`,
@@ -72305,8 +72624,9 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
         source:'inv_void', sourceId: inv.id,
         status:'posted', postedBy:user.username, postedAt:Date.now(),
         voidedReversal:true,
+        branchId: j.branchId,   // 🎟️ OFF-INV-DISC R2: คงสาขาแบบ VOID_INV (P&L รายสาขาไม่เพี้ยน)
         lines:(j.lines||[]).map(l => ({ accountId:l.accountId, accountCode:l.accountCode, accountName:l.accountName,
-          debit:l.credit||0, credit:l.debit||0, description:l.description })),
+          debit:l.credit||0, credit:l.debit||0, description:l.description, ...(l.branchId ? { branchId: l.branchId } : {}) })),
         totalDebit:j.totalCredit||0, totalCredit:j.totalDebit||0,
       }});
     }
@@ -72319,15 +72639,16 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
         isIncrease, wasPaid,
         reason:`แก้ INV: ${inv.invNumber} · ยอดเดิม ${fmtCur(inv.netPayable||0)} → ใหม่ ${fmtCur(netPayable)}` +
           (isIncrease ? ` (⬆️ เพิ่ม ${fmtCur(Math.abs(diff))})` : ` (⬇️ ลด ${fmtCur(Math.abs(diff))})`) +
+          (offChanged ? ` · ส่วนลดนอกใบกำกับ ฿${offOld.toFixed(2)} → ฿${offAmt.toFixed(2)}` : '') +   // 🎟️ R12
           (wasPaid ? ' · ⚠️ INV นี้เคยจ่ายแล้ว' : ''),
-        payload:{ updatedInv: updated, oldNetPayable: inv.netPayable }
+        payload:{ updatedInv: updated, oldNetPayable: inv.netPayable, jeNetPayable: jeNet }
       }
     });
     if(sent === 'blocked') return;   // ทำไม่ได้ (reducer แจ้งเหตุแล้ว) — ไม่ปิดหน้าต่าง
     if(sent){ onClose(); return; }
     if(!global.ERP.gmDirectApply(state, _eiActs, dispatch, user, 'แก้ INV ' + inv.invNumber + ' ไม่สำเร็จ')) return;
 
-    autoPostINV(updated, state, dispatch, user);
+    autoPostINV({ ...updated, netPayable: jeNet }, state, dispatch, user);   // 🎟️ R1/R7: JE ลงยอดก่อนหัก CN/RTV memo (มี JE ของตัวเอง)
 
     alert(`✅ แก้ไข INV แล้ว\n${inv.invNumber}\nสุทธิใหม่: ${fmtCur(netPayable)}\n✓ Reverse JE เก่า + post JE ใหม่ (เก็บ audit trail)`);
     onClose();
@@ -72423,7 +72744,10 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
             placeholder:'0.00',
             onChange:e=>setRoundingAdj(Number(e.target.value)||0),
             className: cls('w-full px-2 py-1 border rounded text-sm mt-0.5 text-right',
-              roundingAdj !== 0 && 'bg-yellow-50 border-yellow-400') })
+              roundingAdj !== 0 && 'bg-yellow-50 border-yellow-400') }),
+          // 🎟️ OFF-INV-DISC R13: ปัดเศษเกิน 1 บาท มักเป็นคูปอง/คะแนนที่ใส่ผิดช่อง (ไม่บล็อก)
+          Math.abs(Number(roundingAdj)||0) > 1 && h('div', { className:'text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1 mt-1', 'data-testid':'rounding-offdisc-warn' },
+            '⚠️ ปัดเศษเกิน 1 บาท — ถ้าเป็นคูปอง/คะแนน (ใบกำกับคิด VAT เต็ม) ให้ล้างช่องนี้แล้วใช้ช่อง 🎟️ ส่วนลดนอกใบกำกับ')
         ),
       ),
       h('label', { className:'text-sm block' }, 'หมายเหตุ',
@@ -72434,6 +72758,14 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
         h('div', { className:'flex justify-between' }, h('span',null,'มูลค่า:'), h('span',null,fmtCur(amount))),
         h('div', { className:'flex justify-between' },
           h('span',null, keepLineVat ? 'VAT (ราย line — คงเดิม):' : `VAT (${vatRate}%):`), h('span',null,'+ '+fmtCur(vat))),
+        // 🎟️ OFF-INV-DISC §B4-3: รวมตามใบกำกับ → ช่อง 🎟️ → WHT
+        h('div', { className:'flex justify-between pt-1 border-t' },
+          h('span', null, h('span', { className:'font-bold' }, 'รวมตามใบกำกับ'), h('span', { className:'ml-1 text-[11px] text-gray-500' }, 'ต้องเท่ายอดบนใบกำกับ')),
+          h('span', { className:'font-mono font-bold', 'data-testid':'offdisc-invtotal' }, fmtCur(_r2(Number(amount) + vat)))),
+        h(OffInvDiscountBox, { value: offDisc, setValue: setOffDisc, max: offMax, disabledWhy: offDisabledWhy, err: offErr,
+          hasWht: (Number(whtAmount)||0) > 0 }),
+        offLostBlock && h('div', { className:'text-xs text-red-800 bg-red-50 border border-red-300 rounded p-1.5', 'data-testid':'offdisc-lost' },
+          `⛔ ใบนี้มีส่วนลดนอกใบกำกับ ${fmtCur(offOld)} แต่ตอนนี้ใส่ไม่ได้ — บันทึกการแก้ไม่ได้ (ส่วนลดจะหาย) · ยกเลิก INV แล้วตั้งหนี้ใหม่ หรือแจ้ง ผจก.บัญชี`),
         (whtAmount||0) > 0 && h('div', { className:'flex justify-between text-red-600' },
           h('span',null,'หัก ณ ที่จ่าย:'), h('span',null,'- '+fmtCur(whtAmount))),
         h('div', { className:'flex justify-between font-bold pt-1 border-t' },
@@ -73586,6 +73918,7 @@ function printPayApprovalSheet(pay, inv, state){
     <div class="row"><div class="l">เลขผู้เสียภาษี</div><div class="v">${sup?.taxId||'-'}${_supBranchHtml(sup)}</div></div>
     <div class="row"><div class="l">INV เลขที่</div><div class="v"><b>${inv.invNumber}</b> · Supplier Inv: ${inv.supInvNumber||'-'}</div></div>
     <div class="row"><div class="l">วันครบกำหนด</div><div class="v">${thDate(inv.dueDate)}</div></div>
+    ${global.ERP.offInvDiscAmt(inv) > 0 ? `<div class="row"><div class="l">🎟️ ส่วนลดนอกใบกำกับ</div><div class="v">−${fmtAmt(global.ERP.offInvDiscAmt(inv))} บาท (VAT ตามใบกำกับ ${fmtAmt((Number(inv.amount)||0) + (Number(inv.vat)||0))})</div></div>` : ''}
     <div class="row"><div class="l">มูลค่า INV สุทธิ</div><div class="v">${fmtAmt(inv.netPayable||0)} บาท</div></div>
     <div class="row"><div class="l">จ่ายไปแล้ว</div><div class="v">${fmtAmt(paidSoFar)} บาท</div></div>
     ${inv.note ? `<div class="row"><div class="l">หมายเหตุ INV</div><div class="v">${inv.note}</div></div>` : ''}
@@ -74180,7 +74513,9 @@ function printPI(inv, state, popts){   // PRINT-MARK: popts.onPrinted (แท็
   const subtotal = Number(inv.subtotal||inv.amount||0);
   const vat = Number(inv.vatAmount||inv.vat||0);
   const wht = Number(inv.whtAmount||0);
-  const netPayable = Number(inv.netPayable||(subtotal+vat-wht));
+  // 🎟️ OFF-INV-DISC §B7: netPayable = 0 ได้จริง (จ่ายด้วยเครดิต/คูปองเต็ม) → เช็ก null แทน falsy
+  const _offD = global.ERP.offInvDiscAmt(inv);
+  const netPayable = inv.netPayable != null ? Number(inv.netPayable) : (subtotal + vat - wht - _offD);
   const paid = Number(inv.paidAmount||0);
   const remaining = Math.max(0, netPayable - paid);
   // 🆕 BILL-DISC §B7: แถวส่วนลดท้ายบิลตามใบกำกับ (หักในยอดแล้ว) · แยกกลุ่ม VAT เมื่อเลือก "ใช้กับ"
@@ -74240,6 +74575,9 @@ function printPI(inv, state, popts){   // PRINT-MARK: popts.onPrinted (แท็
   <div class="totals">${_piBdRow}
     <div class="row"><span>ยอดก่อน VAT:</span><span>${fmtAmt(subtotal)}</span></div>
     <div class="row"><span>VAT:</span><span>${fmtAmt(vat)}</span></div>
+    ${_offD > 0 ? `<div class="row"><span>รวมตามใบกำกับ:</span><span>${fmtAmt(subtotal + vat)}</span></div>
+    <div class="row" data-testid="pi-offdisc-row"><span>🎟️ ส่วนลดนอกใบกำกับ (${_esc(offDiscLabel(inv))}):</span><span style="color:#047857">−${fmtAmt(_offD)}</span></div>
+    <div class="row" style="font-size:10px;color:#555"><span>(VAT เคลมตามใบกำกับ · ค่าใช้จ่ายลงตามจ่ายจริง)</span><span></span></div>` : ''}
     ${wht > 0 ? `<div class="row"><span>หัก ณ ที่จ่าย (WHT):</span><span style="color:#c00">−${fmtAmt(wht)}</span></div>` : ''}
     <div class="row final"><span>ยอดสุทธิที่ต้องจ่าย:</span><span>${fmtAmt(netPayable)}</span></div>
     ${paid > 0 ? `<div class="row" style="font-size:9pt;color:#666"><span>ชำระแล้ว:</span><span>${fmtAmt(paid)}</span></div>` : ''}
@@ -74413,6 +74751,9 @@ function pvVoucherModel(pay, inv, state){
   // 🆕 UAT S4: แถวที่จ่ายบางส่วน (ยอดในแถว < ยอดใบ) → ป้ายอธิบายท้ายใบ
   const partRows = rows.filter(r => r.partial);
   if(partRows.length) badges.push(`⚠️ จ่ายบางส่วน ${partRows.length} ใบ (${partRows.map(r => r.taxInvNo).join(', ')}) — ยอดในแถว = ส่วนที่จ่ายในใบสำคัญนี้ ยังเหลือค้างจ่าย`);
+  // 🎟️ OFF-INV-DISC §B7: ยอดแถวมาจาก alloc (สุทธิแล้ว) → แค่บอกว่าใบไหนมีส่วนลดนอกใบกำกับ (VAT ยังตามใบกำกับ)
+  invs.forEach(iv => { const d = global.ERP.offInvDiscAmt(iv);
+    if(d > 0) badges.push(`🎟️ ส่วนลดนอกใบกำกับ −${fmtAmt(d)} (VAT ตามใบกำกับ)` + (rows.length > 1 ? ` · ${_pvTaxInvNo(iv) || iv.invNumber || ''}` : '') + ` · ${offDiscLabel(iv)}`); });
   if(pay.gmSelf && pay.gmSelf.by) badges.push('👑 GM อนุมัติเอง (ไม่ผ่านคิวอนุมัติ · บันทึกให้ตรวจย้อนหลัง)');
   if(pay.selfApproved) badges.push('💵 จ่ายจากเงินสดย่อย · self-approved (ไม่ผ่านคิวอนุมัติ)' + (pay.pettyReviewedAt
     ? ` · ✔ ตรวจแล้วโดย ${(userOf(pay.pettyReviewedBy) || {}).name || pay.pettyReviewedBy || ''} ${thPrintDate(new Date(pay.pettyReviewedAt).toISOString().slice(0, 10))}`
@@ -74907,7 +75248,10 @@ function postNonDeductibleReclassJE(pay, inv, state, dispatch, user){
   const ndVat = (vatPortion > 0 && acc1150) ? vatPortion : 0;
   const ndVatBase = ndVat > 0 ? basePortion : 0;
   // บรรทัดค่าใช้จ่าย (expense/cogs) ของ JE ตั้งหนี้ — prorate ตามสัดส่วนที่จ่ายรอบนี้
-  const invJe = (state.journalEntries||[]).find(j => j.source === 'inv' && j.sourceId === inv.id && j.status === 'posted');
+  // 🎟️ OFF-INV-DISC verify 1: JE ตั้งหนี้ "ตัวล่าสุดที่ยังไม่ถูกกลับรายการ" (หลังแก้ใบ JE แรกถูกกลับแล้ว — .find() เดิมได้ยอดก่อนแก้) · ข้าม JE ปรับ WHT/VAT (ไม่มีบรรทัดค่าใช้จ่าย)
+  const invJe = (global.ERP.invOpenJes ? global.ERP.invOpenJes(state.journalEntries, inv.id)
+      : (state.journalEntries||[]).filter(j => j.source === 'inv' && j.sourceId === inv.id && j.status === 'posted'))
+    .filter(j => j.refType !== 'wht_adjust' && j.refType !== 'inv_vat_adjust' && !j.migApVoid).slice(-1)[0];
   const expLines = (invJe?.lines||[]).filter(l => (l.debit||0) > 0 && ['expense','cogs'].includes((accByCode(l.accountCode)||{}).type));
   const crLines = [];
   if(expLines.length){
@@ -74930,7 +75274,9 @@ function postNonDeductibleReclassJE(pay, inv, state, dispatch, user){
     console.warn('[nondeductible] ไม่พบบรรทัดค่าใช้จ่ายใน JE ตั้งหนี้ของ', inv.invNumber, '→ CR 5300 ทั้งก้อน');
     const a5300 = accByCode(inv.accountCode) || accByCode('5300') || accounts.find(a => a.type === 'expense');
     if(!a5300) return null;
-    const base = r2((Number(inv.amount) || Number(inv.netPayable) || payAmt) * ratio);
+    // 🎟️ OFF-INV-DISC §B5: ค่าใช้จ่ายลงตามจ่ายจริง → หักส่วนลดนอกใบกำกับออกจากฐาน (ไม่มีส่วนลด = เดิม)
+    const _offD = global.ERP.offInvDiscAmt(inv);
+    const base = r2(((Number(inv.amount) ? Number(inv.amount) - _offD : 0) || Number(inv.netPayable) || payAmt) * ratio);
     if(base <= 0) return null;
     crLines.push({ accountId:a5300.id, accountCode:a5300.code, accountName:a5300.name, debit:0, credit:base,
       description:`โอนออกเป็นค่าใช้จ่ายต้องห้าม ${inv.invNumber}` });
@@ -76499,7 +76845,25 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
   const vatableBase = vatOverride === null ? vatableBaseCalc : resolveVatableBase(vat, vatCalc, vatableBaseCalc, amount, 7);
   const exemptBase = r2(Math.max(0, amount - vatableBase));
   const wht = r2(whtLines.reduce((s,l) => s + (Number(l.whtAmount)||0), 0));
-  const netPayable = r2(amount + vat - wht);
+  // 🎟️ OFF-INV-DISC §B4-1: ส่วนลดนอกใบกำกับ — น้ำหนัก = ก่อน VAT หลังส่วนลดท้ายบิล (calcs) · 💎 ซ่อมใหญ่ = 0 · ไม่แตะ amount/vat
+  const [offDisc, setOffDisc] = useState(null);
+  const offSrc = { kind:'exp', lines: linesBD.map((l, i) => ({ id: l.id, lineTotal: r2(calcs[i].exVat), exVat: r2(calcs[i].exVat),
+    capex: !!(l.assetId && l.capMode === 'add_to' && !(_capThr > 0 && r2(calcs[i].exVat) < _capThr - 0.005)) })) };
+  const offAmtRaw = offDisc ? Number(offDisc.amount) || 0 : 0;
+  const offA = global.ERP.offInvDiscAlloc(offSrc, offAmtRaw);
+  const offAmt = offAmtRaw > 0 && !offA.error ? r2(offAmtRaw) : 0;
+  const offLineAmt = lines.map((l, i) => { const a = offA.allocs.find(x => x.lineIdx === i); return a ? a.amount : 0; });
+  const offErr = (offAmtRaw > 0 && offA.error) || global.ERP.offInvDiscCheck({ amount, vat, wht, disc: offDisc && offDisc.amount, max: offA.max,
+    kind: offDisc && offDisc.kind, note: offDisc && offDisc.note });
+  const offDup = offAmtRaw > 0 && expBd.amount > 0 && [expBd.amount, expBd.header && expBd.header.enteredAmount]
+    .some(x => x != null && Math.abs(Number(x) - offAmtRaw) <= 1);
+  const offMisplaced = expBd.amount > 0 && vatOverride !== null && r2(vatOverride) > vatCalc + 0.5;
+  const moveMisplaced = () => {
+    const x = (expBd.header && expBd.header.enteredAmount != null) ? expBd.header.enteredAmount : expBd.amount;
+    setOffDisc({ amount: String(r2(x)), kind:'coupon', note:'' }); setBillDisc(null); setVatOverride(null);
+    setTimeout(() => { const el = document.querySelector('[data-testid="offdisc-amt"]'); if(el) el.focus(); }, 0);
+  };
+  const netPayable = r2(amount + vat - wht - offAmt);
 
   // ---- WHT derive จากบรรทัด: group (category, sub5, rate) → seed whtLines · re-seed เฉพาะกลุ่มที่ user ไม่ได้แก้ (_auto) ----
   const linesSig = JSON.stringify(lines.map((l,i) => [_whtKeyOf(l.wht), r2(calcs[i].exVat)]));
@@ -76677,6 +77041,7 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
     if(lines.some(l => !(l.description||'').trim())) return alert('ทุกบรรทัดต้องมีรายละเอียด');
     if(billDisc && expBd.error) return alert(billDiscSaveErr(expBd, 'exclusive'));   // 🆕 verify #3: ส่วนลดท้ายบิลผิด → บันทึกไม่ได้
     if(!(amount > 0) || !calcs.some(c => c.exVat > 0)) return alert('ยอดรวมต้องมากกว่า 0 — ใส่จำนวน/ราคาให้ครบ');
+    if(offErr) return alert('⛔ ' + offErr);   // 🎟️ OFF-INV-DISC §B8: ส่วนลดนอกใบกำกับผิด → บันทึกไม่ได้
     const badBranch = lines.find(l => !allowedBranches.some(b => b.id === l.branch));
     if(badBranch) return alert(`บรรทัด "${badBranch.description}" เลือกสาขาไม่ถูกต้อง`);
     // 🆕 PETTY-DIRECT P3: จ่ายเงินสดย่อยทันที — ด่านหน้าฟอร์ม (ไม่มีอะไรถูกบันทึก)
@@ -76786,6 +77151,9 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       ...(expBd.amount > 0 && expBd.header ? { billDiscount: { ...expBd.header, source: 'direct_expense',
         allocs: expAllocs.map((a, i) => ({ lineIdx: i, amount: a })).filter(x => x.amount > 0),
         byVat: global.ERP.billDiscByVatGroup(linesBD) } } : {}),   // 🆕 verify #3
+      // 🎟️ OFF-INV-DISC §B2: ส่วนลดนอกใบกำกับ — amount/vat/vatableBase คงตามใบกำกับ · allocs ผูก expLineId ของ cleanLines (index เดียวกัน)
+      ...(offAmt > 0 ? { offInvDiscount: { v:1, amount: offAmt, kind: offDisc.kind || 'coupon', note: String(offDisc.note || '').trim().slice(0,120),
+        allocs: offA.allocs.filter(a => cleanLines[a.lineIdx]).map(a => ({ expLineId: cleanLines[a.lineIdx].id, lineIdx: a.lineIdx, amount: a.amount })) } } : {}),
       netPayable, paidAmount: 0,
       paymentStatus: 'unpaid',
       note,
@@ -76921,6 +77289,10 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
           : h(Fragment, null,
               h(ExpenseLinesTable, { lines, calcs, branches: allowedBranches, accounts: expenseAccounts, unitNames, whtOpts, onUpdate: updateLine, onRemove: removeLine }),
               h(ExpenseLinesMobile, { lines, calcs, branches: allowedBranches, accounts: expenseAccounts, unitNames, whtOpts, onUpdate: updateLine, onRemove: removeLine }),
+              // 🎟️ OFF-INV-DISC §B4-1: ส่วนลดนอกใบกำกับที่เกลี่ยลงแต่ละบรรทัด (ค่าใช้จ่ายลด · VAT ไม่ลด)
+              offAmt > 0 && h('div', { className:'mt-1 text-[11px] text-emerald-800 space-y-0.5' },
+                lines.map((l, i) => offLineAmt[i] > 0 && h('div', { key: l.id || i, 'data-testid':`exp-offdisc-line-${i}` },
+                  `${i+1}. ${l.description || '-'} · คูปอง −${fmtCur(offLineAmt[i])} → ค่าใช้จ่าย ${fmtCur(r2(calcs[i].exVat - offLineAmt[i]))}`))),
               // 💎 FA-S5 (D14 · B5.2): ผูกเครื่อง (ซ่อมปกติ = ค่าใช้จ่าย → ประวัติซ่อม) · ติ๊ก 💎 ซ่อมใหญ่ = ลงบัญชีทรัพย์สิน แล้วบัญชีเพิ่มเข้าเครื่องเดิม
               _expAssets.length > 0 && h('div', { className:'mt-2 border border-violet-200 bg-violet-50/60 rounded p-2 space-y-1.5', 'data-testid':'exp-asset-panel' },
                 h('div', { className:'flex flex-wrap items-center gap-2 text-xs font-medium text-violet-900' }, '🔧 ผูกเครื่อง (ถ้าเป็นค่าซ่อม) — ซ่อมปกติลงค่าใช้จ่ายตามเดิม · ซ่อมใหญ่ที่ทำให้ใช้ได้นานขึ้น ติ๊ก 💎',
@@ -76948,6 +77320,8 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       h('div', { className:'bg-gray-50 rounded p-3 space-y-1.5' },
         lines.length > 0 && h(BillDiscountBox, { billDisc, setBillDisc, bd: expBd, priceMode:'exclusive', totals:{ subtotal: amount },
           lines: _expProbe, tid:'exp-billdisc', label:'ส่วนลดท้ายบิลตามใบกำกับ' }),   // 🆕 verify #3
+        lines.length > 0 && h('div', { className:'text-[11px] text-emerald-800', 'data-testid':'offdisc-pointer' },
+          'ใบกำกับคิด VAT เต็ม แต่จ่ายน้อยกว่าเพราะคูปอง/คะแนน? → ช่อง 🎟️ ด้านล่าง'),   // 🎟️ OFF-INV-DISC R14
         h('div', { className:'flex justify-between items-center text-sm' },
           h('span', { className:'font-medium' }, 'รวมก่อน VAT'),
           h('span', { className:'font-mono font-bold text-lg' }, fmtCur(amount))),
@@ -76963,12 +77337,23 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
             vatOverride !== null && h('button', { type:'button', onClick:()=>setVatOverride(null), className:'text-xs text-blue-600' }, '↺'))),
         vatOverride !== null && h('div', { className:'text-xs text-amber-700 bg-amber-50 rounded p-1' },
           '⚠️ ใช้ค่า override — ระบบไม่ปัดเศษให้', h('span', { className:'ml-1 text-gray-600' }, `· ฐาน VAT ${fmtCur(vatableBase)} · ยกเว้น ${fmtCur(exemptBase)}`)),
+        // 🎟️ OFF-INV-DISC §B8-9 (R15): คูปองใส่ผิดช่อง (ส่วนลดท้ายบิล + ทับ VAT กลับเต็ม) → ปุ่มย้ายไป 🎟️
+        offMisplaced && h('div', { className:'text-xs text-amber-900 bg-amber-50 border border-amber-300 rounded p-1.5 flex flex-wrap items-center gap-2', 'data-testid':'offdisc-misplaced' },
+          h('span', null, '⚠️ ใบกำกับคิด VAT เต็มทั้งที่มีส่วนลด = ส่วนลดนอกใบกำกับ (คูปอง/คะแนน)'),
+          h('button', { type:'button', onClick: moveMisplaced, 'data-testid':'offdisc-misplaced-move',
+            className:'px-2 py-0.5 bg-emerald-600 text-white rounded text-xs' }, 'ย้ายไปช่อง 🎟️')),
         h('div', { className:'flex justify-between items-center text-sm pt-1 border-t' },
+          h('span', null, h('span', { className:'font-bold' }, 'รวมตามใบกำกับ'), h('span', { className:'ml-1 text-[11px] text-gray-500' }, 'ต้องเท่ายอดบนใบกำกับ')),
+          h('span', { className:'font-mono font-bold', 'data-testid':'offdisc-invtotal' }, fmtCur(r2(amount + vat)))),
+        lines.length > 0 && h(OffInvDiscountBox, { value: offDisc, setValue: setOffDisc, max: offA.max, err: offErr, hasWht: wht > 0, dupWarn: offDup }),
+        h('div', { className:'flex justify-between items-center text-sm pt-1 border-t', 'data-testid':'exp-wht-row' },
           h('span', { className:'text-red-700 font-medium' }, 'หัก ณ ที่จ่าย รวม:'),
           h('span', { className:'font-bold text-red-700' }, '- ' + fmtCur(wht))),
         h('div', { className:'flex justify-between text-base font-bold text-blue-900 pt-2 border-t' },
           h('span', null, 'ต้องจ่ายสุทธิ:'),
-          h('span', null, fmtCur(netPayable)))),
+          h('span', null, fmtCur(netPayable))),
+        offAmt > 0 && h('div', { className:'text-[11px] text-gray-600 text-right', 'data-testid':'offdisc-cost' },
+          `บันทึกค่าใช้จ่าย ${fmtCur(r2(amount - offAmt))} · VAT เคลมเต็ม ${fmtCur(vat)}`)),
 
       // WHT — derive จากบรรทัด (แก้ยอด/เพิ่มได้)
       h('div', null,
@@ -83451,6 +83836,7 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
         amount: i.amount || 0,
         vat: i.vat || 0,
         wht: i.whtAmount || 0,
+        offDisc: global.ERP.offInvDiscAmt(i),   // 🎟️ OFF-INV-DISC §B11: ส่วนลดนอกใบกำกับ (ไม่ลด VAT)
         netPayable: i.netPayable || 0,
         paidAmount: totalPaid,
         balance: (i.netPayable || 0) - totalPaid,
@@ -83486,14 +83872,16 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
     amount: acc.amount + r.amount,
     vat: acc.vat + r.vat,
     wht: acc.wht + r.wht,
+    offDisc: acc.offDisc + r.offDisc,
     netPayable: acc.netPayable + r.netPayable,
     paidAmount: acc.paidAmount + r.paidAmount,
     balance: acc.balance + r.balance,
-  }), { amount:0, vat:0, wht:0, netPayable:0, paidAmount:0, balance:0 });
+  }), { amount:0, vat:0, wht:0, offDisc:0, netPayable:0, paidAmount:0, balance:0 });
 
   const doExport = () => {
     const out = [['#','วันที่ INV','เลข INV (ระบบ)','เลข INV Sup','📄 Tax INV','วันที่ Tax INV','Supplier','TaxID','ประเภท','คำอธิบาย',
-      'ยอดก่อน VAT','VAT','WHT','ยอดสุทธิ','จ่ายแล้ว','ค้างจ่าย','สถานะ','วันที่จ่าย','วิธี','Bank Ref','WH Cert']];
+      'ยอดก่อน VAT','VAT','WHT','ยอดสุทธิ','จ่ายแล้ว','ค้างจ่าย','สถานะ','วันที่จ่าย','วิธี','Bank Ref','WH Cert',
+      'ส่วนลดนอกใบกำกับ']];   // UAT S4: คอลัมน์ใหม่ไว้ท้ายสุด — template Excel เดิมไม่เลื่อน
     rows.forEach((r, idx) => {
       out.push([idx+1,
         r.i.invDate || '',
@@ -83507,12 +83895,13 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
         r.amount.toFixed(2), r.vat.toFixed(2), r.wht.toFixed(2),
         r.netPayable.toFixed(2), r.paidAmount.toFixed(2), r.balance.toFixed(2),
         r.paymentStatus, r.payDates, r.payMethods, r.bankRefs, r.whtCertNumbers,
+        r.offDisc.toFixed(2),
       ]);
     });
     out.push(['','','','','','','','','','รวม',
       totals.amount.toFixed(2), totals.vat.toFixed(2), totals.wht.toFixed(2),
       totals.netPayable.toFixed(2), totals.paidAmount.toFixed(2), totals.balance.toFixed(2),
-      '','','','','']);
+      '','','','','', totals.offDisc.toFixed(2)]);
     exportCSV(`expense-by-invoice-${dr.startDate}_${dr.endDate}.csv`, out);
   };
 
@@ -83589,6 +83978,7 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
                   h('th', { className:'px-2 py-2 text-right' }, 'ก่อน VAT'),
                   h('th', { className:'px-2 py-2 text-right' }, 'VAT'),
                   h('th', { className:'px-2 py-2 text-right' }, 'WHT'),
+                  h('th', { className:'px-2 py-2 text-right', title:'คูปอง/คะแนนสะสมที่ไม่ได้พิมพ์บนใบกำกับ — VAT ไม่ลด' }, 'ส่วนลดนอกใบกำกับ'),
                   h('th', { className:'px-2 py-2 text-right' }, 'สุทธิ'),
                   h('th', { className:'px-2 py-2 text-right' }, 'จ่ายแล้ว'),
                   h('th', { className:'px-2 py-2 text-right' }, 'ค้าง'),
@@ -83623,6 +84013,7 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
                     h('td', { className:'px-2 py-1.5 text-right font-mono' }, fmtCur(r.amount)),
                     h('td', { className:'px-2 py-1.5 text-right font-mono text-blue-700' }, r.vat ? fmtCur(r.vat) : '-'),
                     h('td', { className:'px-2 py-1.5 text-right font-mono text-pink-700' }, r.wht ? fmtCur(r.wht) : '-'),
+                    h('td', { className:'px-2 py-1.5 text-right font-mono text-emerald-700', 'data-testid':'expinv-offdisc' }, r.offDisc ? '−' + fmtCur(r.offDisc) : '-'),
                     h('td', { className:'px-2 py-1.5 text-right font-mono font-bold' }, fmtCur(r.netPayable)),
                     h('td', { className:'px-2 py-1.5 text-right font-mono text-green-700' }, r.paidAmount ? fmtCur(r.paidAmount) : '-'),
                     h('td', { className: cls('px-2 py-1.5 text-right font-mono',
@@ -83638,6 +84029,7 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
                   h('td', { className:'px-2 py-2 text-right font-mono' }, fmtCur(totals.amount)),
                   h('td', { className:'px-2 py-2 text-right font-mono text-blue-700' }, fmtCur(totals.vat)),
                   h('td', { className:'px-2 py-2 text-right font-mono text-pink-700' }, fmtCur(totals.wht)),
+                  h('td', { className:'px-2 py-2 text-right font-mono text-emerald-700', 'data-testid':'expinv-offdisc-total' }, totals.offDisc ? '−' + fmtCur(totals.offDisc) : '-'),
                   h('td', { className:'px-2 py-2 text-right font-mono' }, fmtCur(totals.netPayable)),
                   h('td', { className:'px-2 py-2 text-right font-mono text-green-700' }, fmtCur(totals.paidAmount)),
                   h('td', { className:'px-2 py-2 text-right font-mono text-red-700' }, fmtCur(totals.balance)),
@@ -83667,20 +84059,38 @@ function ExpenseByCategory({ state }){
     byCat[key].count += count; byCat[key].amount += amount; byCat[key].vat += vat; byCat[key].net += net;
   };
   const labelOf = (key, fallback) => fallback || cats.find(c=>c.id===key)?.label || expItems.find(x=>x.id===key)?.name || 'ไม่ระบุ';
+  // 🎟️ OFF-INV-DISC §B11: ฐาน = ค่าใช้จ่ายตามจ่ายจริง (หักส่วนลดนอกใบกำกับ) · VAT คงตามใบกำกับ
+  //   ส่วนลดของแต่ละกลุ่ม = Σ alloc ของบรรทัดในกลุ่ม (expLineId → รายการทะเบียน → กลุ่ม) · หาไม่ได้ → ตามสัดส่วน amount
+  const groupIdOfLine = (l) => { const it = l && expItems.find(x => x.id === l.expenseItemId);
+    return it ? (it.categoryId || it.id) : ((l && l.expenseItemId) || 'misc'); };
+  const offDiscByType = (i, types) => {
+    const d = global.ERP.offInvDiscAmt(i); if(!(d > 0)) return types.map(() => 0);
+    const tsum = types.reduce((a,t) => a + (Number(t.amount)||0), 0);
+    const allocs = (i.offInvDiscount && i.offInvDiscount.allocs) || [];
+    const lines = i.expenseLines || [];
+    const out = types.map(() => 0); let mapped = 0;
+    allocs.forEach(al => { const l = lines.find(x => x && x.id === al.expLineId); if(!l) return;
+      const k = types.findIndex(t => t.id === groupIdOfLine(l)); if(k < 0) return;
+      out[k] += Number(al.amount)||0; mapped += Number(al.amount)||0; });
+    if(Math.abs(mapped - d) < 0.005) return out;
+    return types.map(t => tsum > 0 ? d * (Number(t.amount)||0) / tsum : 0);
+  };
   for(const i of invs){
-    if(i.source !== 'direct_expense'){ add('__po__', '🛍️ ซื้อสินค้า/วัตถุดิบ (PO)', 1, i.amount||0, i.vat||0, i.netPayable||0); continue; }
+    const _od = global.ERP.offInvDiscAmt(i);
+    if(i.source !== 'direct_expense'){ add('__po__', '🛍️ ซื้อสินค้า/วัตถุดิบ (PO)', 1, (i.amount||0) - _od, i.vat||0, i.netPayable||0); continue; }
     // 🆕 ACCT-V2: PI ค่าใช้จ่ายจากทะเบียน (บรรทัดครอบคลุม >1 กลุ่ม) → กระจายฐานตาม expenseTypes[] · VAT/สุทธิ prorate ตามสัดส่วนฐาน
     const types = Array.isArray(i.expenseTypes) ? i.expenseTypes.filter(t => t && (Number(t.amount)||0) > 0) : [];
     const tsum = types.reduce((a,t) => a + (Number(t.amount)||0), 0);
     if(types.length > 1 && tsum > 0){
+      const tDisc = offDiscByType(i, types);
       types.forEach((t, idx) => {
         const share = (Number(t.amount)||0) / tsum;
-        add(t.id || 'uncategorized', labelOf(t.id, t.label), idx === 0 ? 1 : 0, Number(t.amount)||0, (i.vat||0) * share, (i.netPayable||0) * share);
+        add(t.id || 'uncategorized', labelOf(t.id, t.label), idx === 0 ? 1 : 0, (Number(t.amount)||0) - tDisc[idx], (i.vat||0) * share, (i.netPayable||0) * share);
       });
       continue;
     }
     const key = i.expenseType || 'uncategorized';
-    add(key, labelOf(key, i.expenseLabel), 1, i.amount||0, i.vat||0, i.netPayable||0);
+    add(key, labelOf(key, i.expenseLabel), 1, (i.amount||0) - _od, i.vat||0, i.netPayable||0);
   }
   const rows = Object.values(byCat).sort((a,b) => b.net - a.net);
   const total = rows.reduce((s,r) => s + r.net, 0);
@@ -89308,7 +89718,12 @@ function TaxInvPendingTab({ invs, state, setDetail, setTaxInvEntry, includeUnpai
                   inv.source === 'direct_expense'
                     ? h('span', { className:'text-purple-700' }, '📝 ', inv.expenseLabel || 'ค่าใช้จ่าย')
                     : h('span', null, '🛍️ จัดซื้อ')),
-                h('td', { className:'px-3 py-2 text-right font-mono' }, fmtCur(inv.netPayable)),
+                // 🎟️ OFF-INV-DISC §B7: มีส่วนลดนอกใบกำกับ → ยอดหลัก = ยอดตามใบกำกับ (ตรงกับกระดาษ) · ตัวรอง = จ่ายจริง
+                global.ERP.offInvDiscAmt(inv) > 0
+                  ? h('td', { className:'px-3 py-2 text-right font-mono', 'data-testid':'taxinv-pending-offdisc' },
+                      h('div', null, fmtCur((Number(inv.amount)||0) + (Number(inv.vat)||0))),
+                      h('div', { className:'text-[10px] text-emerald-700' }, '🎟️ ค้างจ่าย/สุทธิ ' + fmtCur(inv.netPayable)))
+                  : h('td', { className:'px-3 py-2 text-right font-mono' }, fmtCur(inv.netPayable)),
                 h('td', { className:'px-3 py-2 text-center text-xs' }, fmtDate(payDate)),
                 h('td', { className: cls('px-3 py-2 text-center text-xs', sevColor) },
                   `${daysSince} วัน`),
@@ -89464,7 +89879,10 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
         h('div', { className:'text-xs text-blue-700' },
           `Supplier: ${sup?.name || inv.supplierNameFreeform || '-'} · `,
           `INV Sup: ${inv.supInvNumber || '-'} · `,
-          `ยอด: ${fmtCur(inv.netPayable)}`)
+          global.ERP.offInvDiscAmt(inv) > 0   // 🎟️ OFF-INV-DISC §B7: ยอดตามใบกำกับเป็นหลัก · จ่ายจริงเป็นตัวรอง
+            ? h('span', { 'data-testid':'taxinv-entry-offdisc' }, `ยอดตามใบกำกับ: ${fmtCur((Number(inv.amount)||0) + (Number(inv.vat)||0))}`,
+                h('span', { className:'text-emerald-700' }, ` · 🎟️ จ่ายจริง ${fmtCur(inv.netPayable)}`))
+            : `ยอด: ${fmtCur(inv.netPayable)}`)
       ),
       // 🆕 DEPOSIT-VAT verify: ใบแยกตาม WHT (spl_) ใช้ใบกำกับแผ่นเดียวกัน — แก้เลข/วันที่ใบนี้แล้วต้องแก้ใบพี่น้องให้ตรงกันด้วย
       (() => { const _sib = String(inv.splitGroup||'').startsWith('spl_') ? (state.invoices||[]).filter(x => x && x.id !== inv.id && !x.voided && x.splitGroup === inv.splitGroup) : [];
@@ -105252,7 +105670,7 @@ function calcMonthKPI(state, period){
   // 7. Expenses เดือนนี้ (Direct INV + ค่าเสื่อม + อื่นๆ)
   const expenses = (state.invoices||[]).filter(i =>
     !i.voided && i.source === 'direct_expense' && inMonth(i.invDate, period))
-    .reduce((s,i) => s + (Number(i.amount)||0), 0);
+    .reduce((s,i) => s + (Number(i.amount)||0) - global.ERP.offInvDiscAmt(i), 0);   // 🎟️ OFF-INV-DISC §B11: ค่าใช้จ่ายตามจ่ายจริง
   const depExpense = (state.assets||[]).reduce((s,a) =>
     s + (a.depreciationHistory||[]).filter(e => e.period === period)
       .reduce((x,e) => x + (Number(e.depAmount)||0), 0), 0);
