@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="2f24f0830385";window.__ERP_BUILT_AT__="2026-10-06T15:59:53";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="09a18ccad755";window.__ERP_BUILT_AT__="2026-10-06T17:20:37";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -13923,6 +13923,24 @@ function _taxInvWindow(inv, date, claim, today){
   const ref = claim && String(claim).slice(0,10) > String(today).slice(0,10) ? claim : today;
   return E.taxInvClaimWindow(paper, ref);
 }
+// 🆕 TAXINV-ANYWHERE R3: ด่าน SET_TAX_INV/CLEAR_TAX_INV + TaxInvEntryModal = ด่านหมดสิทธิ์ก่อน แล้วค่อย _taxInvDenyReason
+//   VAT หมดสิทธิ์โอน 1150→ค่าใช้จ่ายแล้ว (I3b · JE ยังมีผล) = สถานะปลายทาง → ห้ามคีย์ครั้งแรก/แก้/ลบ
+//   (คีย์ครั้งแรกก็ห้าม — SET_TAX_INV ตั้งงวดเคลมให้ = เคลมซ้ำกับ VAT ที่โอนเป็นค่าใช้จ่ายแล้ว) · กลับ JE ก่อน → ใบกลับเป็น 🔴 แล้วคีย์/แก้ได้
+//   บันทึกซ้ำค่าเดิม/แนบรูปก็ห้าม (I3b = ดูอย่างเดียว · modal ขึ้นเหตุผลตั้งแต่เปิด) · แยกจาก _taxInvDenyReason เพื่อให้ ADD_INV ไม่ต้องอ่าน journalEntries (ใบใหม่ไม่มี vatExpiredAt)
+//   ข้อความ R3 ใช้ตัวเดียว (_taxInvR3Msg) ทั้ง reducer + ช่อง 🔒 ในตาราง (taxInvCellLock) กันข้อความเพี้ยนกัน
+//   UAT S1: โชว์เลข JE (jeNumber) ที่ค้นในสมุดรายวันได้ + บอกขั้นต่อไป · ไม่มี jeId (fail-safe) = ติดต่อ ผจก.บัญชี
+function _taxInvR3Msg(s, inv){
+  const _ve = inv && !inv.voided && inv.vatExpiredAt;
+  if(!_ve || (_ve.jeId && !global.ERP.vatExpireJeLive(s, _ve.jeId))) return null;
+  if(!_ve.jeId) return 'VAT หมดสิทธิ์โอนเป็นค่าใช้จ่ายแล้ว (ไม่พบเลข JE) — ติดต่อ ผจก.บัญชี ให้ตรวจก่อนคีย์ใบกำกับ';
+  const je = ((s && s.journalEntries) || []).find(j => j && j.id === _ve.jeId);
+  return 'VAT หมดสิทธิ์โอนเป็นค่าใช้จ่ายแล้ว (JE ' + ((je && je.jeNumber) || _ve.jeId) + ') — แจ้ง ผจก.บัญชี กลับรายการ JE นี้ที่ บัญชี → สมุดรายวัน ก่อน แล้วจึงคีย์ใบกำกับได้';
+}
+function _taxInvDenyReasonR3(s, inv, op, d, u, opts){
+  const _r3 = _taxInvR3Msg(s, inv);
+  if(_r3) return _r3;
+  return _taxInvDenyReason(s, inv, op, d, u, opts);
+}
 // เหตุผลที่คีย์/แก้/ลบใบกำกับของใบนี้ไม่ได้ (reducer SET_TAX_INV/CLEAR_TAX_INV/ADD_INV + TaxInvEntryModal ใช้ตัวเดียวกัน) · null = ทำได้
 //   op 'set' + d:{ taxInvNumber, taxInvDate, today, expectNumber?, expectDate?, pending? } · u = ผู้ทำ (แก้/ลบเลขที่มีอยู่แล้วต้องมีสิทธิ์ accounting.vat.edit)
 //   op 'clear' ต้องมีสิทธิ์ accounting.vat.edit · opts.creating = ใบใหม่ (ADD_INV — ยังไม่อยู่ใน state)
@@ -14011,7 +14029,8 @@ function _taxInvDenyReason(s, inv, op, d, u, opts){
   }
   return null;
 }
-global.ERP.taxInvDenyReason = function(state, inv, op, d, u){ try { return _taxInvDenyReason(state, inv, op, d, u); } catch(e){ return 'ตรวจใบกำกับไม่สำเร็จ: ' + (e && e.message); } };
+global.ERP.taxInvR3Msg = function(state, inv){ try { return _taxInvR3Msg(state, inv); } catch(e){ return 'ตรวจใบกำกับไม่สำเร็จ: ' + (e && e.message); } };
+global.ERP.taxInvDenyReason = function(state, inv, op, d, u){ try { return _taxInvDenyReasonR3(state, inv, op, d, u); } catch(e){ return 'ตรวจใบกำกับไม่สำเร็จ: ' + (e && e.message); } };
 global.ERP.taxInvClaimDate = function(state, inv, date, today, claimYm){ try { return _taxInvClaimDate(state, inv || {}, date, today || getToday(), claimYm); } catch(e){ return date; } };
 
 // ==================== 🆕 VAT-CLAIM V3a: บันทึกยื่น ภ.พ.30 / ปลดล็อกงวด (สัญญา VAT_CLAIM_CONTRACT v1.1 §B4.3 / §B4.4) ====================
@@ -19401,7 +19420,7 @@ function reducer(s, a){
       const d = a.data || {};
       const { invId, taxInvImage, by } = d;
       const inv = (s.invoices||[]).find(i => i.id === invId);
-      const _deny = _taxInvDenyReason(s, inv, 'set', d, _actorOf(s, by));
+      const _deny = _taxInvDenyReasonR3(s, inv, 'set', d, _actorOf(s, by));
       if(_deny){ alert('⛔ ' + _deny); return s; }
       const taxInvNumber = String(d.taxInvNumber||'').trim(), taxInvDate = String(d.taxInvDate||'');
       const _same = taxInvNumber === String(inv.supTaxInvNumber||'').trim() && taxInvDate === String(inv.supTaxInvDate||'');
@@ -19473,7 +19492,7 @@ function reducer(s, a){
       const inv = (s.invoices||[]).find(i => i.id === d.invId);
       if(!inv || !String(inv.supTaxInvNumber||'').trim()) return s;
       const u = _actorOf(s, d.by);
-      const _deny = _taxInvDenyReason(s, inv, 'clear', d, u);
+      const _deny = _taxInvDenyReasonR3(s, inv, 'clear', d, u);
       if(_deny){ alert('⛔ ' + _deny); return s; }
       // replay/สองเครื่อง: ลบได้เฉพาะเลขที่ผู้ใช้เห็นตอนกด (expectNumber) — อีกเครื่องเพิ่งคีย์เลขใหม่ → ไม่ลบทับ
       if(d.expectNumber !== undefined && String(d.expectNumber||'').trim() !== String(inv.supTaxInvNumber||'').trim()){
@@ -24961,8 +24980,8 @@ const ACTION_READS = Object.freeze({
   CLEAR_ASSET_STOCK: ['auditLog','fifoLayers','grs','items','movements'],   // 💎 FA-S3: อ่าน/เขียนหมวดเหล่านี้ + settings/users (หมวดคุม)
   ADD_JE: ['auditLog','invoices','journalEntries'],   // DEPOSIT-VAT E-5 R5: JE ของใบตั้งหนี้ต้องมีใบจริง
   ADJUST_INV_VAT: ['auditLog','grs','invoices','journalEntries','payments','pos','returns'],
-  SET_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],     // 🆕 DEPOSIT-VAT E-5 R1/R2 (งวดล็อกอยู่ใน settings = หมวดคุม)
-  CLEAR_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],
+  SET_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],     // 🆕 DEPOSIT-VAT E-5 R1/R2 (งวดล็อกอยู่ใน settings = หมวดคุม)
+  CLEAR_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],   // 🆕 TAXINV-ANYWHERE R3: + journalEntries (vatExpireJeLive)
   DEFER_VAT_CLAIM: ['approvalRequests','auditLog','invoices'],       // 🆕 VAT-CLAIM V5 (B4.6 · ล็อก/สิทธิ์อยู่ใน settings/users = หมวดคุม) · D2: คำขออนุมัติ (กฎ = หมวดคุม)
   CLAIM_VAT_IN_PERIOD: ['approvalRequests','auditLog','invoices','journalEntries'],   // verify VC2: ตรวจ JE โอน VAT หมดสิทธิ์ยังมีผล
   MARK_VAT_EXPIRED: ['auditLog','invoices','journalEntries'],   // 🆕 VAT-CLAIM V8 (B4.8 · ตรวจ JE Cr 1150)
@@ -79253,7 +79272,7 @@ function AccountingModule({ state, dispatch }){
       gl:         ()=>h(GLByAccountTab, { state, dispatch, user }),
       coa:        ()=>h(COATab,         { state, dispatch, user }),
       bank:       ()=>h(BankTab,        { state, dispatch, user }),
-      wht:        ()=>h(WHTReport,      { state }),
+      wht:        ()=>h(WHTReport,      { state, dispatch, user }),
       whtVoided:  ()=>h(VoidedWHTReport, { state }),
       vatClaims:  ()=>h(VatClaimRegisterTab, { state, dispatch, user }),   // 🆕 VAT-CLAIM V6
       vat:        ()=>h(VATReport,      { state, dispatch, user }),   // dispatch/user → คีย์ Tax INV จากกล่อง ⏳ รอใบกำกับ ได้เลย
@@ -79265,7 +79284,7 @@ function AccountingModule({ state, dispatch }){
       cashFore:   ()=>h(CashForecastReport, { state }),
       bs:         ()=>h(BalanceSheet,   { state }),
       expCat:     ()=>h(ExpenseByCategory, { state }),
-      expByInv:   ()=>h(ExpenseByInvoiceReport, { state }),
+      expByInv:   ()=>h(ExpenseByInvoiceReport, { state, dispatch, user }),
       audit:      ()=>h(AuditLogTab, { state, dispatch, user }),
       actlog:     ()=>h(ActionLogTab, { state, user }),
       approvals:  ()=>h(ApprovalRequestsTab, { state, dispatch, user }),
@@ -82740,7 +82759,12 @@ function vatClaimRegisterCols(state, v, o){
     { key:'sup', label:'ผู้ขาย', sortable:true, sortValue:r => (supOf(r.d) || {}).name || r.d.supplierNameFreeform || '',
       render:r => { const s = supOf(r.d); return h('span', null, (s && s.name) || r.d.supplierNameFreeform || '-', s && E.PartyBranchChip && h(E.PartyBranchChip, { party:s, parties:state.suppliers })); } },
     { key:'invDate', label:'วันที่ตั้งหนี้', sortable:true, hideBelow:'xl', sortValue:r => r.d.invDate || r.d.createdDate || '', render:r => fmtDate(r.d.invDate || r.d.createdDate || r.d.date) },
-    { key:'taxNo', label:'เลขใบกำกับ', render:r => h('span', { className:'font-mono text-xs' }, r.d.supTaxInvNumber || r.d.supMemoNumber || '-') },
+    { key:'taxNo', label:'เลขใบกำกับ', render:r => {
+      const txt = h('span', { className:'font-mono text-xs' }, r.d.supTaxInvNumber || r.d.supMemoNumber || '-');
+      if(r.d._t !== 'inv') return txt;   // memo (CN/DN) → เลขใบลดหนี้ตัวหนังสือเดิม
+      // 🆕 TAXINV-ANYWHERE (B3): PI ทุกสถานะ → ช่องกดคีย์/แก้ได้ (vatExpiredAt + JE live = 🔒 อ่านอย่างเดียวใน TaxInvCell)
+      const live = (state.invoices || []).find(i => i.id === r.d.id);
+      return live ? h(TaxInvCell, { inv:live, state, user:o.user, onOpen: o.canEntry ? (id => o.open('entry', live, { fromCell:true })) : null, readOnly:txt }) : txt; } },
     { key:'taxDate', label:'วันที่ใบกำกับ', sortable:true, sortValue:r => r.d.supTaxInvDate || r.d.supMemoDate || '',
       render:r => (r.d.supTaxInvDate || r.d.supMemoDate) ? fmtDate(r.d.supTaxInvDate || r.d.supMemoDate) : '-' },
     { key:'vat', label:'VAT', align:'right', card:'value', sortable:true, sortValue:r => r.vat,
@@ -82781,7 +82805,7 @@ function VatClaimRegisterTab({ state, dispatch, user }){
   const mgr = !!(dispatch && user && E.taxInvOverrideApprover(user));
   const canExport = isSuperUser(user) || hasPerm(user, 'accounting', 'vatClaims', 'export') || hasPerm(user, 'accounting', 'vat', 'export');
   const canGL = isSuperUser(user) || hasPerm(user, 'accounting', 'je', 'view');
-  const t = vatClaimRegisterCols(state, v, { mgr, canEntry: !!(dispatch && user), open:(kind, inv) => setModal({ kind, inv }) });
+  const t = vatClaimRegisterCols(state, v, { mgr, canEntry: !!(dispatch && user), user, open:(kind, inv, x) => setModal({ kind, inv, fromCell: !!(x && x.fromCell) }) });
   const gl = canGL ? vcGl1150(state) : 0, sys = canGL ? vcStatusSum1150(v.rows) : 0, diff = Math.round((gl - sys) * 100) / 100;
   const K = [['pending','⏳','amber'], ['received','📥','blue'], ['deferred','⏸','purple'], ['near_expiry','🟠','orange'], ['expired','🔴','red'], ['claimed','✅','green']];
   const chips = [{ key:'action', label:'ต้องจัดการ', count:v.cnt('action'), urgent:true }, { key:'received', label:'📥 รอยื่น', count:v.cnt('received') }, { key:'all', label:'ทั้งหมด', count:v.cnt('all') }]
@@ -82823,7 +82847,8 @@ function VatClaimRegisterTab({ state, dispatch, user }){
     pf && dispatch && user && h(VatPreFileModal, { key:pf.ym, state, dispatch, user, ym0:pf.ym, onClose:() => setPf(null),
       onViewReport:(ym) => E.navigateTo('accounting', { acct:'vat' }),   // ทะเบียนไม่มีช่วงวันที่ → ไปรายงานสรุปเดือน (อ่านอย่างเดียว)
       onFile: mgr ? (ym, ack, ackAp) => { setPf(null); setFiling({ ym, amendOf:null, ack, ackAp }); } : null }),
-    modal && modal.kind === 'entry' && h(TaxInvEntryModal, { key:inv.id, inv, state, dispatch, user, onClose:close }),
+    modal && modal.kind === 'entry' && h(TaxInvEntryModal, { key:inv.id, inv, state, dispatch, user, onClose:close,
+      blankDate: modal.fromCell || undefined, onSaved: modal.fromCell ? () => {} : undefined }),   // 🆕 TAXINV-ANYWHERE: เปิดจากช่อง → วันที่ว่าง + ไม่ alert (ปุ่ม vc-entry คงเดิม)
     modal && modal.kind === 'defer' && h(VatDeferModal, { state, dispatch, user, inv, onClose:close }),
     modal && modal.kind === 'claim' && h(VatClaimInModal, { state, dispatch, user, inv, onClose:close }),
     modal && modal.kind === 'expire' && h(VatExpireGuideModal, { state, dispatch, user, inv, onClose:close }),
@@ -83019,6 +83044,8 @@ function VatBranchCell({ r, onFix }){
 function VATByInvoiceReport({ state, dispatch, user }){
   const dr = useDateRange(31);
   const [taxInvEntry, setTaxInvEntry] = useState(null);
+  const [taxInvFromCell, setTaxInvFromCell] = useState(false);   // 🆕 TAXINV-ANYWHERE: เปิดจากช่องในตารางหลัก → วันที่ว่าง + ไม่ alert (PendingTaxInvBox คงเดิม)
+  const _tiOpen = (dispatch && user) ? (id) => { const _i = (state.invoices||[]).find(x => x.id === id); if(!_i) return; setTaxInvFromCell(true); setTaxInvEntry(_i); } : null;
   // 🆕 UAT S4: แก้สาขาผู้ขายบน PI ที่ snapshot ว่าง (เฉพาะผู้มีสิทธิ์อนุมัติ) — reducer ตรวจเลขภาษี/งวดปิด/เหตุผล + ลง audit log
   const canFixBr = isSuperUser(user) || hasPerm(user, 'accounting', 'approvals', 'approve');
   // 🆕 VAT-CLAIM V7: ป๊อปอัปตรวจก่อนยื่น (เปิดเองเมื่อดูเต็มเดือนที่จบแล้ว) + บันทึกยื่นต่อจากป๊อปอัป (ผจก.)
@@ -83084,7 +83111,7 @@ function VATByInvoiceReport({ state, dispatch, user }){
           i: { id: 'cn_'+m.id, invDate: m.supMemoDate, invNumber: m.memoNumber,
                supInvNumber: m.supMemoNumber, supTaxInvNumber: m.supMemoNumber,
                supTaxInvDate: m.supMemoDate,
-               refTaxInvNo: m.refTaxInvNo || '' },              // 🆕 อ้างอิงใบกำกับเดิม (ม.86/10)
+               refTaxInvNo: m.refTaxInvNo || ((m.refInvId && (state.invoices||[]).find(x => x.id === m.refInvId)) || {}).supTaxInvNumber || '' },   // 🆕 อ้างอิงใบกำกับเดิม (ม.86/10) · TAXINV-ANYWHERE B3.5: snapshot ว่าง → เลขของ INV ที่ผูก
           ..._vatPartyBranch(m, sup),   // ใบลดหนี้/เพิ่มหนี้: snapshot ของ memo (ถ้ามี) ไม่งั้นทะเบียนสด
           total: -(amt + vat), vatableBase: -base, vatAmt: -vat,
           vatableTotal: -(base + vat), wht: 0,
@@ -83105,7 +83132,7 @@ function VATByInvoiceReport({ state, dispatch, user }){
           i: { id: 'dn_'+m.id, invDate: m.supMemoDate, invNumber: m.memoNumber,
                supInvNumber: m.supMemoNumber, supTaxInvNumber: m.supMemoNumber,
                supTaxInvDate: m.supMemoDate,
-               refTaxInvNo: m.refTaxInvNo || '' },              // 🆕 อ้างอิงใบกำกับเดิม (ม.86/9)
+               refTaxInvNo: m.refTaxInvNo || ((m.refInvId && (state.invoices||[]).find(x => x.id === m.refInvId)) || {}).supTaxInvNumber || '' },   // 🆕 อ้างอิงใบกำกับเดิม (ม.86/9) · TAXINV-ANYWHERE B3.5: snapshot ว่าง → เลขของ INV ที่ผูก
           ..._vatPartyBranch(m, sup),   // ใบลดหนี้/เพิ่มหนี้: snapshot ของ memo (ถ้ามี) ไม่งั้นทะเบียนสด
           total: amt + vat, vatableBase: base, vatAmt: vat,
           vatableTotal: base + vat, wht: 0,
@@ -83207,12 +83234,18 @@ function VATByInvoiceReport({ state, dispatch, user }){
                 h('td', { className:'px-2 py-1.5 font-mono text-xs text-red-700' }, r.i.invNumber),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs' }, r.i.supInvNumber||'-'),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs bg-amber-50/30' },
-                  r.i.supTaxInvNumber
-                    ? h('div', null,
-                        h('div', { className:'text-green-800 font-semibold' }, '✓ ', r.i.supTaxInvNumber))   // 🆕 VAT-CLAIM V2: ตัดวันที่ใต้เลข — ซ้ำกับคอลัมน์แรกแล้ว
-                    : (r.i.paymentStatus === 'paid'
-                        ? h('span', { className:'text-orange-600 font-medium' }, '⏳ รอ')
-                        : h('span', { className:'text-gray-400' }, '-'))),
+                  (() => {
+                    const _old = r.i.supTaxInvNumber
+                      ? h('div', null,
+                          h('div', { className:'text-green-800 font-semibold' }, '✓ ', r.i.supTaxInvNumber))   // 🆕 VAT-CLAIM V2: ตัดวันที่ใต้เลข — ซ้ำกับคอลัมน์แรกแล้ว
+                      : (r.i.paymentStatus === 'paid'   // UAT S3: จ่ายแล้วยังไม่มีเลข → ⏳ รอ (สัญญาณตามเอกสาร สำหรับคนไม่มีสิทธิ์คีย์)
+                          ? h('span', { className:'text-orange-600 font-medium' }, '⏳ รอ')
+                          : h('span', { className:'text-gray-400' }, '-'));
+                    // 🆕 TAXINV-ANYWHERE: แถว PI → ช่องกดคีย์/แก้ได้ (lookup PI จริง) · แถว CN/DN คงตัวหนังสือเดิม
+                    if(r.isCN || r.isDN) return _old;
+                    const _pi = (state.invoices||[]).find(x => x.id === r.i.id);
+                    return _pi ? h(TaxInvCell, { inv:_pi, state, user, onOpen:_tiOpen, readOnly:_old }) : _old;
+                  })()),
                 h('td', { className:'px-2 py-1.5 text-xs' }, r.supName),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs' }, r.taxId),
                 h('td', { className:'px-2 py-1.5' }, h(VatBranchCell, { r, onFix: (canFixBr && !r.isCN && !r.isDN) ? fixBranch : null })),
@@ -83243,7 +83276,8 @@ function VATByInvoiceReport({ state, dispatch, user }){
       onFile: canFile ? (ym, ack, ackAp) => { setPf(null); setFiling({ ym, ack, ackAp }); } : null }),
     filing && canFile && h(VatFilingModal, { key:filing.ym, state, dispatch, user, ym0:filing.ym, ack0:filing.ack, ackAp0:filing.ackAp, onClose:() => setFiling(null) }),
     taxInvEntry && dispatch && user && h(TaxInvEntryModal, { key:taxInvEntry.id, inv:taxInvEntry, state, dispatch, user,
-      onClose:()=>setTaxInvEntry(null) })
+      blankDate: taxInvFromCell || undefined, onSaved: taxInvFromCell ? () => {} : undefined,
+      onClose:()=>{ setTaxInvEntry(null); setTaxInvFromCell(false); } })
   );
 }
 
@@ -83384,8 +83418,9 @@ function VATByPaymentReport({ state }){
 // 📋 EXPENSE BY INVOICE REPORT (สำหรับ reconcile กับ Bank Statement)
 // แสดงทุก INV (PO + Direct) พร้อมข้อมูล payment + bank ref
 // ================================================================
-function ExpenseByInvoiceReport({ state }){
+function ExpenseByInvoiceReport({ state, dispatch, user }){
   const dr = useDateRange(31);
+  const tx = useTaxInvEntry(state, dispatch, user);   // 🆕 TAXINV-ANYWHERE (B4): ไม่มี dispatch/user → ตัวหนังสือเดิม
   const [filterStatus, setFilterStatus] = useState('all'); // all|paid|partial|unpaid
   const [filterSource, setFilterSource] = useState('all'); // all|po_gr|direct_expense
   const [filterSupplier, setFilterSupplier] = useState('');
@@ -83570,11 +83605,12 @@ function ExpenseByInvoiceReport({ state }){
                     h('td', { className:'px-2 py-1.5 font-mono text-blue-700 font-semibold' }, r.i.invNumber),
                     h('td', { className:'px-2 py-1.5 font-mono text-gray-600' }, r.i.supInvNumber || '-'),
                     h('td', { className:'px-2 py-1.5 font-mono bg-amber-50/30' },
+                      h(TaxInvCell, { inv:r.i, state, user, onOpen:tx.open, readOnly:
                       r.i.supTaxInvNumber
                         ? h('span', { className:'text-green-800 font-semibold' }, '✓ ', r.i.supTaxInvNumber)
                         : (r.paymentStatus === 'paid'
                             ? h('span', { className:'text-orange-600' }, '⏳ รอ')
-                            : h('span', { className:'text-gray-400' }, '-'))),
+                            : h('span', { className:'text-gray-400' }, '-')) })),
                     h('td', { className:'px-2 py-1.5' },
                       h('div', { className:'font-medium' }, r.supName, r.supObj && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:r.supObj, parties:state.suppliers })),
                       h('div', { className:'text-[10px] text-gray-500 font-mono' }, r.taxId)),
@@ -83611,7 +83647,8 @@ function ExpenseByInvoiceReport({ state }){
             )
           ),
           h(Pager, { pg, label:'INV' })
-        )
+        ),
+    tx.modal
   );
 }
 
@@ -84969,8 +85006,9 @@ function VoidedWHTReport({ state }){
   );
 }
 
-function WHTReport({ state }){
+function WHTReport({ state, dispatch, user }){
   const dr = useDateRange(90);
+  const tx = useTaxInvEntry(state, dispatch, user);   // 🆕 TAXINV-ANYWHERE (B4): ไม่มี dispatch/user → ตัวหนังสือเดิม
   const purchaseMod = global.ERP.MODULES.purchase;
   const printWHT = purchaseMod?.printWHTCert;
   const { WHT_CATEGORIES, WHT_SUB5_TYPES } = global.ERP;
@@ -85148,11 +85186,12 @@ function WHTReport({ state }){
                     h('td', { className:'px-2 py-1.5 font-mono text-xs bg-amber-50/30' },
                       isContinued
                         ? h('span', { className:'text-gray-400' }, '↳')
-                        : (r.inv.supTaxInvNumber
+                        : h(TaxInvCell, { inv:r.inv, state, user, onOpen:tx.open, readOnly:   // 🆕 TAXINV-ANYWHERE: เฉพาะบรรทัดแรกของใบ (↳ คงเดิม)
+                          (r.inv.supTaxInvNumber
                             ? h('span', { className:'text-green-800 font-semibold' }, '✓ ', r.inv.supTaxInvNumber)
                             : (r.inv.paymentStatus === 'paid'
                                 ? h('span', { className:'text-orange-600' }, '⏳')
-                                : h('span', { className:'text-gray-400' }, '-')))),
+                                : h('span', { className:'text-gray-400' }, '-'))) })),
                     h('td', { className:'px-2 py-1.5 text-xs' }, isContinued ? '' : fmtDate(r.inv.invDate)),
                     h('td', { className:'px-2 py-1.5' },
                       isContinued ? h('span', { className:'text-gray-400 text-xs' }, '↳')
@@ -85193,7 +85232,8 @@ function WHTReport({ state }){
             )
           ),
           h(Pager, { pg, label:'บรรทัด WHT' })
-        )
+        ),
+    tx.modal
   );
 }
 
@@ -87973,6 +88013,7 @@ function PaymentCenter({ state, dispatch, user }){
   global.ERP.useReloadDraft('paymentCenter', selectedIds.length > 0);   // 🌊 คลื่น 3: รายการที่ติ๊กเลือกค้าง (จ่ายรวม/อนุมัติเป็นชุด) ห้ามโหลดใหม่อัตโนมัติ
   const [showBulk, setShowBulk] = useState(false);
   const [taxInvEntry, setTaxInvEntry] = useState(null); // INV ที่จะบันทึก Tax INV
+  const [taxInvFromCell, setTaxInvFromCell] = useState(false);   // 🆕 TAXINV-ANYWHERE: เปิดจากช่องในคิวจ่าย → วันที่ว่าง + ไม่ alert (ทาง 📄 รอ Tax INV คงเดิม)
   const [tab, setTab] = usePersistedTab('acct_pay', 'tobay');
   // 🆕 PAY-REQ-COLLAPSE: กล่อง "INV ที่ส่งขออนุมัติจ่ายอยู่" ย่อ/ขยาย — ค่าเริ่ม ย่อ · จำต่อเครื่อง (localStorage อ่าน/เขียนไม่ได้ = ย่อ ไม่พัง)
   const REQ_BOX_KEY = 'erp_v5__ui__pay_req_box';
@@ -88187,7 +88228,8 @@ function PaymentCenter({ state, dispatch, user }){
 
     tab === 'tobay'
       ? h(PayQueue, { invs:invsToPayF, state, dispatch, user, setDetail, canPay, today,
-          selectedIds, setSelectedIds, q, setQ })
+          selectedIds, setSelectedIds, q, setQ,
+          onTaxInv: (id) => { const _i = (state.invoices||[]).find(x => x.id === id); if(!_i) return; setTaxInvFromCell(true); setTaxInvEntry(_i); } })
       : tab === 'taxinv'
         ? h('div', null,
           // 🆕 VAT-CLAIM V6 (STF-3): แท็บนี้คงไว้ไล่ใบเสร็จ/บิลไม่มี VAT · บิลที่มี VAT ดูที่ทะเบียน
@@ -88208,7 +88250,8 @@ function PaymentCenter({ state, dispatch, user }){
     }),
     taxInvEntry && h(TaxInvEntryModal, {
       key: taxInvEntry.id, inv: taxInvEntry, state, dispatch, user,
-      onClose: () => setTaxInvEntry(null),
+      blankDate: taxInvFromCell || undefined, onSaved: taxInvFromCell ? () => {} : undefined,
+      onClose: () => { setTaxInvEntry(null); setTaxInvFromCell(false); },
     }),
     detail && INVDetailModal && h(INVDetailModal, {
       key:detail.id, inv:detail, state, dispatch, user, onClose:()=>setDetail(null)
@@ -88536,6 +88579,7 @@ function SupplierMemoTab({ state, dispatch, user }){
   const [receiveDoc, setReceiveDoc] = useState(null); // 🆕 F1-7: memo to receive sup doc
   const [settleRefund, setSettleRefund] = useState(null); // 🆕 F3: settle refund
   const CDMModal = global.ERP.MODULES.purchase?.CreditDebitMemoModal;
+  const tx = useTaxInvEntry(state, dispatch, user);   // 🆕 TAXINV-ANYWHERE (B3): คีย์เลขใบกำกับของ INV ที่ผูก (เฉพาะยังไม่มีเลข + มี VAT)
   // ยกเลิก CN/DN = กลับ JE ที่ post แล้ว + ถอดออกจากรายงานภาษีซื้อ → ต้องมีสิทธิ์ระดับ "ลบ" (ไม่ใช่แค่ดูแท็บ) และผ่านกฎอนุมัติ void_sup_memo ถ้าตั้งไว้
   const canVoidMemo = !!user && (isSuperUser(user) || hasPerm(user,'accounting','je','delete') || hasPerm(user,'purchase','inv','delete'));
   // 🆕 UI-v2 openDoc: palette เลือก CN (kind 'cn') / DN (kind 'dn') — แท็บนี้ไม่มีหน้าต่างรายละเอียด memo (มีแต่ฟอร์มจัดการ: หัก INV / ใส่เลขเอกสาร / รับคืน)
@@ -88696,7 +88740,11 @@ function SupplierMemoTab({ state, dispatch, user }){
                     })(),
                     refPo && h('div', { className:'font-mono text-blue-700' }, refPo.poNumber),
                     refInv && h('div', { className:'font-mono text-red-700' }, refInv.invNumber),
-                    !m.refTaxInvNo && refInv && !refInv.supTaxInvNumber && h('div', { className:'text-[10px] text-amber-700' }, '⏳ INV ยังไม่มี Tax INV'),
+                    // verify 1: สัญญา B3 = state add เท่านั้น — INV ล็อก (Ecount/ยกเลิก/กรณี B/D) คงคำเตือนเดิม ไม่โชว์ปุ่ม 🔒
+                    !m.refTaxInvNo && refInv && !refInv.supTaxInvNumber && ((Number(refInv.vat)||0) > 0.005 && !taxInvCellLock(state, refInv)
+                      ? h('div', { className:'mt-0.5' }, h(TaxInvCell, { inv:refInv, state, user, onOpen:tx.open,   // 🆕 TAXINV-ANYWHERE: add อย่างเดียว · ไม่มีสิทธิ์ = ข้อความเดิม
+                          readOnly:h('span', { className:'text-[10px] text-amber-700' }, '⏳ INV ยังไม่มี Tax INV') }))
+                      : h('div', { className:'text-[10px] text-amber-700' }, '⏳ INV ยังไม่มี Tax INV')),
                     !refPo && !refInv && m.noRefInvReason && h('div', { className:'text-[10px] text-gray-500', title:m.noRefInvReason }, '— ไม่ผูก INV')),
                   h('td', { className:'px-3 py-2 text-right font-mono' }, fmtCur(m.netAmount),
                     m.status === 'refund_pending' && (Number(m.refundAmount)||0) > 0 && h('div', { className:'text-[10px] text-amber-700' },
@@ -88817,7 +88865,8 @@ function SupplierMemoTab({ state, dispatch, user }){
       onClose: ()=>setReceiveDoc(null) }),
     // 🆕 F3-3: settle refund
     settleRefund && h(SettleRefundModal, { key: settleRefund.id, memo: settleRefund, state, dispatch, user,
-      onClose: ()=>setSettleRefund(null) })
+      onClose: ()=>setSettleRefund(null) }),
+    tx.modal
   );
 }
 
@@ -89281,7 +89330,8 @@ function TaxInvPendingTab({ invs, state, setDetail, setTaxInvEntry, includeUnpai
 // 📄 TAX INV ENTRY MODAL — บันทึกเลขใบกำกับภาษี/ใบเสร็จ ที่ supplier ออกหลังรับเงิน
 // ================================================================
 // 🆕 VAT-CLAIM V5 (B4.5): claimYm = งวดที่เลือกจากป๊อปอัปตรวจก่อนยื่น (วันที่เริ่มว่าง · ไม่ alert · onSaved(invId) ให้แถวขึ้น ✓)
-function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm, onSaved }){
+// 🆕 TAXINV-ANYWHERE B2(5): blankDate = เปิดจากช่องในตาราง (คีย์ย้อนหลัง) → วันที่เริ่มว่าง · onSaved (ฟังก์ชัน) → ไม่ alert
+function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm, onSaved, blankDate }){
   // อ่าน INV สดจาก state (prop อาจค้างจากตอนเปิด — หลังปรับ VAT ผ่าน AdjustVatModal badge/ยอด/ตัว guard ต้อง refresh) · pattern เดียวกับ AdjustINVVatModal
   const inv = (state.invoices||[]).find(i => i.id === invProp.id) || invProp;
   const sup = state.suppliers.find(s => s.id === inv.supplierId);
@@ -89291,7 +89341,7 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
   // 🆕 F1: ไม่ pre-fill จาก supInvNumber (กัน false positive ที่ user save โดยไม่ได้ตั้งใจ)
   //        ใช้ supTaxInvNumber ที่มีอยู่จริงเท่านั้น · ถ้ายังไม่มี → ว่าง
   const [taxInvNumber, setTaxInvNumber] = useState(inv.supTaxInvNumber || '');
-  const [taxInvDate, setTaxInvDate] = useState(inv.supTaxInvDate || (claimYm ? '' : getToday()));   // V5: มาจากป๊อปอัป → ไม่เติมวันนี้ (STF-1)
+  const [taxInvDate, setTaxInvDate] = useState(inv.supTaxInvDate || ((claimYm || blankDate) ? '' : getToday()));   // V5: มาจากป๊อปอัป → ไม่เติมวันนี้ (STF-1)
   const [reason, setReason] = useState('');            // V5: เหตุผล (เปลี่ยนเดือนใบที่เลื่อน/ย้ายงวด · ลบใบที่เลื่อน · บันทึกหมดสิทธิ์)
   const [redOk, setRedOk] = useState(false);           // V5: ยืนยันกล่องแดง "ใบลงวันที่หลังงวดที่เลือก"
   const _E = global.ERP, _isApprover = !!(_E.taxInvOverrideApprover && _E.taxInvOverrideApprover(user)), _keptDefer = !String(inv.supTaxInvNumber || '').trim() && !!(inv.vatDefer && inv.vatDefer.keptOnClear && !inv.vatDefer.expiredOnEntry), _deferred = _keptDefer || !!(_E.vatDeferred && _E.vatDeferred(inv));   // verify MUST: ลบใบกำกับแล้วยังเลื่อนอยู่
@@ -89384,7 +89434,7 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
   const _win = (taxInvDate && _claimPreview && typeof global.ERP.taxInvClaimWindow === 'function') ? global.ERP.taxInvClaimWindow(taxInvDate, _claimPreview) : null;
   const save = (acceptExpired) => {
     if(!taxInvNumber.trim()) return alert(`ใส่เลข ${docType} ก่อน`);
-    if(!taxInvDate) return alert('ใส่วันที่');
+    if(!taxInvDate) return alert('ใส่วันที่ใบกำกับ (ตามวันที่บนกระดาษ)');
     if(acceptExpired !== true && setDenyReason) return alert('⛔ ' + setDenyReason);
     if(acceptExpired === true && !_canAcceptExpired) return alert('⛔ ' + (_acceptDeny || setDenyReason));
     if(_dateAfterYm && !redOk) return;   // V5: ต้องติ๊กยืนยันในกล่องแดงก่อน (ไม่ใช้ alert)
@@ -89401,8 +89451,8 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
     }};
     try { if(global.ERP.reducer && global.ERP.reducer(state, _act) === state){ onClose(); return; } } catch(_e){}   // ค่าเดิม = ไม่มีอะไรเปลี่ยน · ถูกปฏิเสธ = reducer แจ้งแล้ว
     dispatch(_act);
-    if(claimYm){ if(typeof onSaved === 'function') onSaved(inv.id); }   // V5: จากป๊อปอัป → แถวขึ้น ✓ แทน alert
-    else alert(`✅ บันทึก ${docType} เรียบร้อย\n${taxInvNumber.trim()} · ${fmtDate(taxInvDate)}`);
+    if(typeof onSaved === 'function') onSaved(inv.id);   // V5 + TAXINV-ANYWHERE: มี onSaved → แถวขึ้น ✓ แทน alert
+    else if(!claimYm) alert(`✅ บันทึก ${docType} เรียบร้อย\n${taxInvNumber.trim()} · ${fmtDate(taxInvDate)}`);
     onClose();
   };
 
@@ -89558,6 +89608,86 @@ function TaxInvEntryModal({ inv:invProp, state, dispatch, user, onClose, claimYm
       state, dispatch, user,
       onClose:()=>setShowVatAdjust(false) })
   );
+}
+
+// ================================================================
+// 🆕 TAXINV-ANYWHERE (B2) — ช่องเลขใบกำกับภาษีซื้อกดคีย์/แก้ได้จากทุกตาราง (ใช้ TaxInvEntryModal + SET_TAX_INV เดิม)
+// ================================================================
+// (1) ใครเห็นปุ่ม (UI gate เท่านั้น · guard จริงอยู่ที่ reducer/_taxInvDenyReason)
+function canKeyTaxInv(user){
+  if(!user) return false;
+  return isSuperUser(user)
+    || hasPerm(user,'accounting','vat','view') || hasPerm(user,'accounting','vat','edit')
+    || hasPerm(user,'accounting','vatClaims','view')
+    || hasPerm(user,'accounting','invAll','view')
+    || hasPerm(user,'accounting','payment','view');
+}
+// (2) เหตุผลล็อกแบบเบา (ไม่เรียก findDupTaxInv ต่อแถว) → null | { reason, readOnly }
+function taxInvCellLock(state, inv){
+  const E = global.ERP || {};
+  if(!inv) return { reason:'ไม่พบใบตั้งหนี้', readOnly:true };
+  if(inv.voided) return { reason:'ใบตั้งหนี้นี้ยกเลิกแล้ว', readOnly:false };
+  if(typeof E.invVatInEcount === 'function' && E.invVatInEcount(inv)) return { reason:'PI นำเข้าจาก Ecount — ยื่นภาษีซื้อในระบบเดิมแล้ว', readOnly:false };
+  const _r3 = inv.vatExpiredAt && typeof E.taxInvR3Msg === 'function' ? E.taxInvR3Msg(state, inv) : null;
+  if(_r3) return { reason:_r3, readOnly:true };   // reducer ปฏิเสธด้วย (R3 · _taxInvDenyReasonR3) · ช่องนี้ไม่เปิด modal เลย
+  if(inv.taxInvRefId) return { reason:'ใช้ใบกำกับเต็มของมัดจำ (กรณี B)', readOnly:false };
+  if(inv.vatConflict && !inv.vatConflict.resolvedAt) return { reason:'VAT มัดจำชนกับใบกำกับเต็ม (กรณี D) ค้างอยู่', readOnly:false };
+  if(String(inv.supTaxInvNumber || '').trim() && typeof E.invTaxFiled === 'function' && E.invTaxFiled(state, inv)) return { reason:'อยู่ในงวดที่ปิด/ยื่น ภ.พ.30 แล้ว', readOnly:false };
+  return null;
+}
+// (3) ช่องเดียวใช้ทุกตาราง · inv = PI จริงจาก state.invoices · readOnly = node ตัวหนังสือเดิมของตาราง (ไม่มีสิทธิ์/ไม่มี onOpen)
+function TaxInvCell({ inv, state, user, onOpen, showDate, readOnly }){
+  if(!inv) return readOnly != null ? readOnly : '-';
+  const curNo = String(inv.supTaxInvNumber || '').trim();
+  const _da = { 'data-testid':'taxinv-cell', 'data-inv-id':inv.id };
+  if(!onOpen || !canKeyTaxInv(user)){
+    return h('span', { ..._da, 'data-taxinv-state':'none' }, readOnly != null ? readOnly : (curNo || '-'));
+  }
+  const click = (e) => { e.stopPropagation(); e.preventDefault(); onOpen(inv.id); };
+  const stop = (e) => e.stopPropagation();
+  const lock = taxInvCellLock(state, inv);
+  if(lock){
+    const txt = '🔒 ' + (curNo || 'ล็อก');
+    // แตะบนแท็บเล็ตต้องเห็นเหตุผล (title โชว์แค่ตอน hover) — ไม่เปิด modal ไม่ dispatch
+    if(lock.readOnly) return h('span', { ..._da, 'data-taxinv-state':'lock', 'data-taxinv-readonly':'1', title:lock.reason, onClick:(e)=>{ e.stopPropagation(); alert('🔒 ' + lock.reason); },
+      className:'text-xs text-slate-400 cursor-not-allowed whitespace-nowrap' }, txt);
+    return h('button', { ..._da, 'data-taxinv-state':'lock', type:'button', title:lock.reason, onClick:click,
+      className:'text-xs text-slate-500 hover:text-slate-700 whitespace-nowrap' }, txt);
+  }
+  const hasVat = (Number(inv.vat)||0) > 0.005;
+  if(curNo){
+    const _E = global.ERP || {};
+    const mgrOnly = hasVat && !hasPerm(user,'accounting','vat','edit') && !isSuperUser(user) && inv.supTaxInvReceivedBy !== user.username
+      && !(typeof _E.taxInvOverrideApprover === 'function' && _E.taxInvOverrideApprover(user));
+    return h('button', { ..._da, 'data-taxinv-state':'edit', type:'button', onClick:click,
+      // UAT S2: โชว์วันที่ใบกำกับใน tooltip เสมอ — บัญชีใช้ตรวจเดือนเคลมก่อนจ่าย (คิวรอจ่ายไม่ส่ง showDate)
+      title: (mgrOnly ? 'แก้ได้เฉพาะ ผจก.บัญชี' : 'กดเพื่อแก้เลขใบกำกับ')
+        + ` · ใบกำกับภาษี ${curNo}${inv.supTaxInvDate ? ' · ลงวันที่ ' + fmtDate(inv.supTaxInvDate) : ''}`,
+      className:'group text-left text-green-700 hover:underline hover:decoration-dashed' },
+      h('span', { className:'font-mono text-xs whitespace-nowrap' }, '✓ ' + curNo),
+      h('span', { className:'hidden group-hover:inline ml-1 text-xs' }, '✏️'),
+      showDate && inv.supTaxInvDate ? h('div', { className:'text-[10px] text-slate-500' }, fmtDate(inv.supTaxInvDate)) : null);
+  }
+  if(hasVat){
+    const paid = inv.paymentStatus === 'paid';
+    return h('button', { ..._da, 'data-taxinv-state':'add', type:'button', onClick:click,
+      title: paid ? 'จ่ายแล้วแต่ยังไม่ได้ใบกำกับ — ตามผู้ขาย' : 'คีย์เลขใบกำกับภาษีซื้อ',
+      className:'text-xs whitespace-nowrap px-1.5 py-0.5 rounded border ' + (paid ? 'border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100' : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100') },
+      '+ เลขใบกำกับ');
+  }
+  // UAT S3: บิลจ่ายแล้วแต่ยังไม่มีเลขใบเสร็จ → ปุ่มสีส้ม (ตามเอกสาร) เหมือน + เลขใบกำกับ
+  const paidNv = inv.paymentStatus === 'paid';
+  return h('button', { ..._da, 'data-taxinv-state':'add', type:'button', onClick:click,
+    title: paidNv ? 'จ่ายแล้วแต่ยังไม่ได้ใบเสร็จ — ตามผู้ขาย' : 'คีย์เลขใบเสร็จ — ถ้าใบกำกับจริงมี VAT ปรับ VAT ได้ในหน้าต่าง (เฉพาะบิลยังไม่จ่าย)',
+    className:'text-[11px] whitespace-nowrap px-1 py-0.5 rounded border ' + (paidNv ? 'border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100' : 'border-slate-200 text-slate-500 hover:bg-slate-50') }, '+ ใบเสร็จ');
+}
+// (4) hook สำหรับหน้าที่ยังไม่มี modal ของตัวเอง → { open(invId), modal, enabled } · เก็บ id (ไม่เก็บ object)
+function useTaxInvEntry(state, dispatch, user){
+  const [id, setId] = useState(null);
+  const enabled = !!(dispatch && user && canKeyTaxInv(user));
+  const inv = id ? (state.invoices || []).find(i => i.id === id) : null;
+  const modal = enabled && inv ? h(TaxInvEntryModal, { key:id, inv, state, dispatch, user, blankDate:true, onSaved:() => {}, onClose:() => setId(null) }) : null;
+  return { open: enabled ? (x => setId(x)) : null, modal, enabled };
 }
 
 function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone }){
@@ -89997,7 +90127,8 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   );
 }
 
-function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selectedIds, setSelectedIds, q, setQ }){
+function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selectedIds, setSelectedIds, q, setQ, onTaxInv }){
+  const _tiOn = !!(onTaxInv && canKeyTaxInv(user));   // 🆕 TAXINV-ANYWHERE: ช่องเลขใบกำกับกดคีย์/แก้ได้
   const canVoid = user && (isSuperUser(user) || hasPerm(user,'purchase','inv','delete'));
   const pg = usePaged(invs, 50);
   const voidINV = (i, back) => {
@@ -90110,10 +90241,14 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
             // 🆕 เลขใบกำกับภาษี · ยังไม่คีย์ → เลขใบแจ้งหนี้ (เทา) · ไม่มีทั้งคู่ → "ยังไม่ได้รับ" (อำพัน)
             h('td', { className:'px-3 py-2 font-mono text-xs' },
               i.supTaxInvNumber
-                ? h('span', { className:'text-gray-900', title:`ใบกำกับภาษี ${i.supTaxInvNumber}${i.supTaxInvDate ? ' · ลงวันที่ '+fmtDate(i.supTaxInvDate) : ''}` }, i.supTaxInvNumber)
+                ? (_tiOn ? h(TaxInvCell, { inv:(state.invoices||[]).find(x => x.id === i.id) || i, state, user, onOpen:onTaxInv })
+                  : h('span', { className:'text-gray-900', title:`ใบกำกับภาษี ${i.supTaxInvNumber}${i.supTaxInvDate ? ' · ลงวันที่ '+fmtDate(i.supTaxInvDate) : ''}` }, i.supTaxInvNumber))
                 : i.supInvNumber
-                  ? h('span', { className:'text-gray-500', title:`ยังไม่ได้คีย์เลขใบกำกับ — นี่คือเลขใบแจ้งหนี้ ${i.supInvNumber} (คีย์ใบกำกับที่แท็บ 📄 รอ Tax INV)` }, i.supInvNumber, h('span', { className:'font-sans text-[10px] text-amber-600 ml-1' }, '(ใบแจ้งหนี้)'))
-                  : h('span', { className:'text-amber-600 font-sans', title:'ยังไม่ได้รับใบกำกับจาก supplier — คีย์ได้ที่แท็บ 📄 รอ Tax INV' }, 'ยังไม่ได้รับ'),
+                  ? h('span', { className:'text-gray-500', title:`ยังไม่ได้คีย์เลขใบกำกับ — นี่คือเลขใบแจ้งหนี้ ${i.supInvNumber} ${_tiOn ? '(กด + เลขใบกำกับ)' : '(คีย์ใบกำกับที่แท็บ 📄 รอ Tax INV)'}` }, i.supInvNumber, h('span', { className:'font-sans text-[10px] text-amber-600 ml-1' }, '(ใบแจ้งหนี้)'))
+                  : h('span', { className:'text-amber-600 font-sans', title:'ยังไม่ได้รับใบกำกับจาก supplier — ' + (_tiOn ? 'กด + เลขใบกำกับ' : 'คีย์ได้ที่แท็บ 📄 รอ Tax INV') }, 'ยังไม่ได้รับ'),
+              // 🆕 TAXINV-ANYWHERE: ยังไม่มีเลข → ปุ่ม + เลขใบกำกับ / + ใบเสร็จ ใต้เลขใบแจ้งหนี้
+              !i.supTaxInvNumber && _tiOn && h('div', { className:'mt-0.5 font-sans' },
+                h(TaxInvCell, { inv:(state.invoices||[]).find(x => x.id === i.id) || i, state, user, onOpen:onTaxInv })),
               // 🆕 MIG_VAT_HERE UAT N1: เจ้าหนี้ยกมา (ภาษีซื้อเคลมในระบบนี้) ยังไม่คีย์ใบกำกับ → ปรับ VAT ทศนิยมได้เฉพาะก่อนจ่าย
               !String(i.supTaxInvNumber || '').trim() && global.ERP.invVatHereMoved && global.ERP.invVatHereMoved(i) && (Number(i.vat) || 0) > 0
                 && h('div', { className:'text-[10px] text-sky-700 font-sans', 'data-testid':'pay-vathere-hint',
@@ -90384,7 +90519,34 @@ function PaidPaymentsTab({ state, dispatch, user }){
   const dr = useDateRange(90);                                       // คลัง PV → default 90 วัน
   const [focusPvId, setFocusPvId] = useFocusId();
   const [detail, setDetail] = useState(null);
-  const [taxInvEntry, setTaxInvEntry] = useState(null);
+  // 🆕 TAXINV-ANYWHERE (C4): ช่องเลขใบกำกับในคอลัมน์ ⋯ ใช้ TaxInvCell + modal กลาง (วันที่ว่าง · ไม่ alert) · PV รวม = รายการต่อบิล
+  const tx = useTaxInvEntry(state, dispatch, user);
+  const [taxInvOpen, setTaxInvOpen] = useState({});                // { [paymentId]: true } = แถว PV รวมที่กางรายการใบกำกับต่อบิล
+  const liveInv = (id, fb) => (state.invoices || []).find(i => i.id === id) || fb;   // ส่ง PI สดจาก state เข้า TaxInvCell (ห้าม pseudo-row)
+  // ตัวเลขใน ⋯ เล็กลง 10px ให้ช่องไม่ถ่าง (paid_layout: ตารางไม่ล้นที่ 1470)
+  const txCell = (inv) => h('span', { className:'inline-block [&_span]:text-[10px] [&_button]:text-[10px] no-underline' },
+    h(TaxInvCell, { inv, state, user, onOpen: tx.open }));
+  const taxInvNode = (r) => {
+    if(!r.group) return r.inv ? txCell(liveInv(r.inv.id, r.inv)) : null;
+    // PV รวม: ปุ่มสรุป 'ใบกำกับ k/n' → กางรายการต่อบิล (เลข PI + ช่องของบิลนั้น) — เดิมเปิดได้แค่บิลแรก
+    const ms = (r.members || []).map(m => liveInv(m.invoiceId, m.inv)).filter(Boolean);
+    // UAT S2: ไม่มีบิลในกลุ่ม = ไม่ขึ้นป้าย (เดิม 0/0 เขียวเหมือนครบ)
+    if(!ms.length) return h('span', { 'data-testid':'paid-taxinv-group-empty', className:'text-[10px] text-gray-400' }, '—');
+    const k = ms.filter(i => String(i.supTaxInvNumber || '').trim()).length, open = !!taxInvOpen[r.id];
+    // UAT S2: บิลที่ยังไม่มีเลขแต่ล็อก 🔒 ดูอย่างเดียว (R3 VAT หมดสิทธิ์ · JE ยังมีผล) คีย์ไม่ได้อยู่แล้ว → นับว่าจบ ไม่ค้างเหลืองตลอดไป
+    const lk = ms.filter(i => !String(i.supTaxInvNumber || '').trim() && (taxInvCellLock(state, i) || {}).readOnly).length;
+    const done = k + lk >= ms.length;
+    return h('div', { className:'flex flex-col items-center gap-0.5' },
+      h('button', { type:'button', 'data-testid':'paid-taxinv-group', 'data-done':String(k), 'data-locked':String(lk), 'data-total':String(ms.length),
+        onClick:(e) => { e.stopPropagation(); setTaxInvOpen(o => ({ ...o, [r.id]: !o[r.id] })); },
+        title: `ใบกำกับ/ใบเสร็จ คีย์แล้ว ${k} จาก ${ms.length} บิล` + (lk ? ` · 🔒 ${lk} บิลคีย์ไม่ได้ (VAT หมดสิทธิ์โอนเป็นค่าใช้จ่ายแล้ว)` : '') + ` — กดเพื่อ${open ? 'ซ่อน' : 'ดู/คีย์'}รายบิล`,
+        className:'text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap no-underline ' + (done ? 'bg-green-50 text-green-800 border-green-200' : 'bg-amber-100 text-amber-800 border-amber-300') },
+        `📄 ใบกำกับ ${k}/${ms.length}${lk ? ` (🔒${lk})` : ''} ${open ? '▾' : '▸'}`),
+      open && h('div', { 'data-testid':'paid-taxinv-list', className:'flex flex-col items-start gap-0.5 border-t border-gray-200 pt-0.5' },
+        ms.map(i => h('div', { key:i.id, 'data-testid':'paid-taxinv-member', 'data-inv-id':i.id, className:'text-left leading-tight' },
+          h('div', { className:'text-[9px] text-gray-500 font-mono whitespace-nowrap no-underline' }, i.invNumber || i.id),
+          txCell(i)))));
+  };
   const [hideReversed, setHideReversed] = useState(false);
   // 🆕 PAY-TAGS T4: ตัวกรองแท็ก 'all' = ทั้งหมด · '__none__' = ไม่ระบุ (เฉพาะ PV ในระบบ — UAT S1) · อื่น = tagId
   const [tagF, setTagF] = useState('all');
@@ -91191,11 +91353,8 @@ function PaidPaymentsTab({ state, dispatch, user }){
                           r.kind === 'pv'
                             ? h('div', { className:'flex gap-1 justify-center items-center flex-wrap' },
                                 h(SlipCell, { p, dispatch, user }),
-                                inv && (inv.supTaxInvNumber
-                                  ? h('button', { onClick:()=>setTaxInvEntry(inv), title:'แก้ Tax INV',
-                                      className:'text-[10px] px-1.5 py-0.5 bg-green-50 text-green-800 rounded hover:bg-green-100 font-mono no-underline whitespace-nowrap' }, '✓ ', inv.supTaxInvNumber.substring(0,15))   // verify 1: เลขใบกำกับบรรทัดเดียว (เดิมหัก IV6910- / 000…) · 10px ให้ช่อง ⋯ ไม่ถ่างจนตารางล้นที่ 1470
-                                  : h('button', { onClick:()=>setTaxInvEntry(inv), title:'บันทึกเลขใบกำกับภาษีจาก supplier',
-                                      className:'text-xs px-2 py-1 bg-amber-100 text-amber-800 rounded hover:bg-amber-200 border border-amber-300 no-underline' }, '📄 Tax INV')),
+                                // 🆕 TAXINV-ANYWHERE (C4): บิลเดี่ยว = TaxInvCell · PV รวม = 'ใบกำกับ k/n' กางรายบิล (verify 1: เลขบรรทัดเดียว 10px)
+                                taxInvNode(r),
                                 !r.reversed && hasPerm(user, 'purchase','payment','delete') && (ownPetty
                                   ? h('span', { className:'text-[10px] text-orange-600 bg-orange-100 rounded px-1.5 py-1 no-underline',
                                       title:'คุณเป็นคนจ่าย PV เงินสดย่อยใบนี้ — ยกเลิกเองไม่ได้ ต้องให้ผู้อนุมัติคนอื่นยกเลิก (dual-eye)' }, '🔒 ตัวเอง — ให้คนอื่นยกเลิก')
@@ -91219,7 +91378,7 @@ function PaidPaymentsTab({ state, dispatch, user }){
                     })))),
           h(Pager, { pg, label: view === 'petty' ? 'PV เงินสดย่อย' : 'รายการที่จ่ายแล้ว' })),
 
-    taxInvEntry && h(TaxInvEntryModal, { key: taxInvEntry.id, inv: taxInvEntry, state, dispatch, user, onClose: () => setTaxInvEntry(null) }),
+    tx.modal,
     detail && INVDetailModal && h(INVDetailModal, { key:detail.id, inv:detail, state, dispatch, user, onClose:()=>setDetail(null) })
   );
 }
@@ -91347,7 +91506,7 @@ global.ERP.migApCloseAsk = function(state, dispatch, user, inv, undo){
 // ==================== REGISTER ====================
 // 🆕 export AssetEditModal — ให้หน้า "💎 ทรัพย์สินรอบันทึก" ฝั่งคลัง (mod-stock) เปิดฟอร์มลงทะเบียนได้เมื่อโมดูลบัญชีโหลดอยู่
 // 🆕 ACCT-V2: export ExpenseItemEditModal — ให้ DirectExpenseModal (mod-purchase) กด "+ เพิ่มในทะเบียน" เปิดฟอร์มรายการรายจ่ายได้
-global.ERP.registerModule('accounting', { main: AccountingModule, AssetEditModal, ExpenseItemEditModal, TaxInvEntryModal, INVQueueTab, AutoPostModal, BulkRequestPayModal, INVAllOverviewTab, RecurringEditModal });   // 🆕 DOC-TAGS: ให้เทสต์เปิดได้   // verify F3/F5: INVQueueTab/AutoPostModal ให้เทสต์เรียกได้   // 🆕 VAT-CLAIM V5: TaxInvEntryModal (claimYm) ให้ป๊อปอัป/เทสต์เรียกได้
+global.ERP.registerModule('accounting', { main: AccountingModule, AssetEditModal, ExpenseItemEditModal, TaxInvEntryModal, TaxInvCell, taxInvCellLock, canKeyTaxInv, useTaxInvEntry, INVQueueTab, AutoPostModal, BulkRequestPayModal, INVAllOverviewTab, RecurringEditModal });   // 🆕 DOC-TAGS: ให้เทสต์เปิดได้   // verify F3/F5: INVQueueTab/AutoPostModal ให้เทสต์เรียกได้   // 🆕 VAT-CLAIM V5: TaxInvEntryModal (claimYm) ให้ป๊อปอัป/เทสต์เรียกได้
 
 })(window);
 
