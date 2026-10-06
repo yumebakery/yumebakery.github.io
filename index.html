@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="5efa3b6ff300";window.__ERP_BUILT_AT__="2026-10-06T17:52:37";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="001f47a53a20";window.__ERP_BUILT_AT__="2026-10-06T19:28:49";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -9294,10 +9294,186 @@ function InvTagField({ state, dispatch, user, value, onChange, hint, note, testi
     hint && h('div', { className:'text-[11px] text-amber-700 mt-1', 'data-testid':(testid || 'inv-tag') + '-hint' }, '⚠️ ', hint));
 }
 
+// ==================== 🆕 AMOUNT-INCL-VAT (AMOUNT_INCL_VAT_CONTRACT B2) ====================
+//   ตารางบัญชีแสดง "ยอดรวม VAT" (ตามใบกำกับ) + "ยอดโอน" (เงินออกจริง เทียบ bank statement)
+//   แสดงผลอย่างเดียว · pure (อ่านเฉพาะ argument) · ไม่แตะ reducer/ข้อมูล · รับประกัน gross − ded.total === ยอดโอน
+const amtR2 = bdR2;
+// ยอดต้องจ่ายสุทธิของใบ · ใบนำเข้ารุ่นเก่ามี total ไม่มี netPayable → ใช้ total · ห้าม NaN
+function invNetPayable(inv){
+  if(!inv) return 0;
+  const v = inv.netPayable != null ? Number(inv.netPayable) : Number(inv.total);
+  return Number.isFinite(v) ? bdR2(v) : 0;
+}
+// 🎟️ ส่วนลดนอกใบกำกับ (off-inv-discount · merge แล้ว → ใช้ ERP.offInvDiscAmt) · ไม่มี field = 0
+function invOffInvDisc(inv){
+  if(!inv) return 0;
+  const E = global.ERP || {};
+  if(typeof E.offInvDiscAmt === 'function') return bdR2(E.offInvDiscAmt(inv)) || 0;
+  return bdR2(inv.offInvDiscount && inv.offInvDiscount.amount) || 0;
+}
+// ยอดรวม VAT ตามใบ = ก่อน VAT + VAT + ปัดเศษ · ใบนำเข้าที่ไม่มี VAT/amount → ประมาณจากยอดนำเข้า (src 'recon')
+function invGrossInclVat(inv){
+  const i = inv || {};
+  const exVat = bdR2(i.amount), vat = bdR2(i.vat), round = bdR2(i.roundingAdjustment);
+  let gross = bdR2(exVat + vat + round), src = 'doc';
+  const mig = !!(i._migrated || i.createdBy === 'migration');
+  if((mig && !vat && Number(i.vatRate) > 0) || i.amount == null){
+    const recon = bdR2(invNetPayable(i) + (Number(i.whtAmount) || 0) + (Number(i.creditUsed) || 0) + (Number(i.creditApplied) || 0)
+      + (Number(i.depositUsed) || 0) + invOffInvDisc(i));
+    if(recon > exVat + vat + round + 0.01){ gross = recon; src = 'recon'; }
+  }
+  return { gross, exVat, vat, round, src };
+}
+// รายการหักระหว่างยอดรวม VAT → ยอดโอน · rtv = ส่วนคืนของที่ลด AP จริง · adj = ✂️ ปิดยอด/netOverride
+function invDeductions(inv){
+  const i = inv || {};
+  const g = invGrossInclVat(i).gross, np = invNetPayable(i);
+  const wht = bdR2(i.whtAmount), credit = bdR2((Number(i.creditUsed) || 0) + (Number(i.creditApplied) || 0));
+  const deposit = bdR2(i.depositUsed), offInv = invOffInvDisc(i);
+  // มัดจำมี 2 ทาง: (ก) ตั้งหนี้แบบไม่มี GR หัก netPayable ตรง · (ข) ตั้งหนี้จาก GR บวกเข้า paidAmount (netPayable ไม่ลด)
+  //   ทาง (ข) → depOut = ส่วนมัดจำที่ยังอยู่ใน netPayable · ยอดโอน = netPayable − depOut (มัดจำโอนไปแล้วตอนจ่าย DP)
+  //   คืนของ (RTV) ลด netPayable ด้วย → หักออกก่อน ไม่งั้นทาง (ข)+คืนของ จะถูกอ่านเป็นมัดจำทาง (ก)
+  const pre0 = bdR2(g - wht - credit - offInv - np - (Number(i.returnedAmount) || 0));
+  const depOut = deposit > 0.005 ? bdR2(Math.min(deposit, Math.max(0, deposit - Math.max(0, pre0)))) : 0;
+  const tr = bdR2(np - depOut);
+  const pre = bdR2(g - wht - credit - deposit - offInv - tr);
+  const rtv = bdR2(Math.min(Number(i.returnedAmount) || 0, Math.max(0, pre)));
+  const adj = bdR2(pre - rtv);
+  return { wht, credit, rtv, deposit, offInv, adj, total: bdR2(g - tr), depOut };
+}
+// transfer = ยอดโอนทั้งใบ (ไม่นับมัดจำที่โอนไปแล้วตอนจ่าย DP) · paidCash = จ่ายแล้วเฉพาะที่โอน (paid − มัดจำทาง ข)
+//   รับประกัน gross − ded.total − paidCash === remain
+function invAmtView(inv){
+  const G = invGrossInclVat(inv), np = invNetPayable(inv), paid = bdR2(inv && inv.paidAmount), ded = invDeductions(inv);
+  const transfer = bdR2(np - ded.depOut);
+  return { gross:G.gross, exVat:G.exVat, vat:G.vat, round:G.round, src:G.src, transfer, paid, paidCash:bdR2(paid - ded.depOut), remain:bdR2(np - paid),
+    ded, differs: Math.abs(G.gross - transfer) > 0.005, isDeposit: !!(inv && inv.type === 'deposit_pi') };
+}
+const AMT_DED_KEYS = ['wht','credit','rtv','deposit','offInv','adj'];
+const AMT_DED_LABEL = { wht:'หัก ณ ที่จ่าย', credit:'CN/เครดิต', rtv:'คืนของ (RTV)', deposit:'มัดจำ', offInv:'🎟️', adj:'ปรับยอด' };
+// ข้อความบรรทัด 2 "หัก ณ ที่จ่าย 90.00 · CN/เครดิต 100.00 · 🎟️ 50.00" (เฉพาะตัวที่ ≠ 0)
+function dedText(ded){
+  if(!ded) return '';
+  return AMT_DED_KEYS.filter(k => Math.abs(Number(ded[k]) || 0) > 0.005)
+    .map(k => AMT_DED_LABEL[k] + ' ' + (k === 'adj' && ded[k] < 0 ? '+' + fmtCur(-ded[k]) : fmtCur(ded[k]))).join(' · ');
+}
+// allocation ต่อใบของ payment (สำเนา _payAllocs ใน mod-accounting · core ต้อง pure ไม่พึ่งโมดูล)
+function _amtPayAllocs(p){
+  if(!p) return [];
+  if(p.invId) return [{ invoiceId:p.invId, amount:Number(p.amount) || 0 }];
+  const ids = Array.isArray(p.invoiceIds) && p.invoiceIds.length ? p.invoiceIds : (p.invoiceId ? [p.invoiceId] : []);
+  if(Array.isArray(p.allocations) && p.allocations.length)
+    return ids.map(id => { const a = p.allocations.find(x => x.invoiceId === id); return { invoiceId:id, amount: a ? (Number(a.amount) || 0) : 0 }; });
+  return ids.map(id => ({ invoiceId:id, amount: ids.length === 1 ? (Number(p.amount) || 0) : 0 }));
+}
+// key ของชิปแหล่งเงิน: 'petty' · 'bank:<bankId|requestedBankId|bankNumber|bankName|_none>' · 'other' (เงินสด ฯลฯ)
+function paySourceKey(p){
+  const m = p && p.method;
+  if(m === 'petty_cash') return 'petty';
+  if(!m || m === 'transfer' || m === 'cheque') return 'bank:' + (p.bankId || p.requestedBankId || p.bankNumber || p.bankName || '_none');
+  return 'other';
+}
+function paySourceLabel(state, p){
+  const k = paySourceKey(p);
+  if(k === 'petty') return '💵 เงินสดย่อย';
+  if(k === 'other') return '💴 เงินสด/อื่น ๆ';
+  if(k === 'bank:_none') return '⚠️ ไม่ระบุบัญชี';
+  const b = ((state && state.bankAccounts) || []).find(x => x.id === (p.bankId || p.requestedBankId));
+  const nm = p.bankName || (b && b.name) || '', no = p.bankNumber || (b && b.accountNumber) || '';
+  return ('🏦 ' + nm + ' ' + no).trim();
+}
+// PV: ยอดโอน = p.amount (ไม่เปลี่ยนเด็ดขาด) · รวม VAT ตามสัดส่วน alloc/netPayable ต่อสมาชิก (ปัดต่อสมาชิก) · เศษลง adj
+function payAmtView(state, p){
+  const invs = (state && state.invoices) || [];
+  const transfer = bdR2(p && p.amount);
+  const ded = { wht:0, credit:0, rtv:0, deposit:0, offInv:0, adj:0 };
+  let gross = 0;
+  const members = _amtPayAllocs(p).map(a => {
+    const inv = invs.find(i => i.id === a.invoiceId) || null;
+    if(!inv){ gross = bdR2(gross + a.amount); return { inv:null, alloc:a.amount, gross:bdR2(a.amount), transfer:bdR2(a.amount) }; }
+    const d0 = invDeductions(inv), np = bdR2(invNetPayable(inv) - d0.depOut), ratio = np > 0 ? a.amount / np : 1;   // ฐานยอดโอนของใบ
+    const g = bdR2(invGrossInclVat(inv).gross * ratio), d = d0;
+    AMT_DED_KEYS.forEach(k => { ded[k] = bdR2(ded[k] + bdR2(d[k] * ratio)); });
+    gross = bdR2(gross + g);
+    return { inv, alloc:bdR2(a.amount), gross:g, transfer:bdR2(a.amount) };
+  });
+  if(!members.length) gross = transfer;
+  const sumDed = AMT_DED_KEYS.reduce((s, k) => s + ded[k], 0);
+  ded.adj = bdR2(ded.adj + bdR2(gross - sumDed - transfer));
+  ded.total = bdR2(gross - transfer);
+  return { transfer, gross, ded, members, source:paySourceKey(p), sourceLabel:paySourceLabel(state, p), differs: Math.abs(gross - transfer) > 0.005 };
+}
+// แถวหน้า ✅ จ่ายแล้ว ทุกชนิด (pv / petty_legacy / ecount) · opt.sub = แถวย่อยใน ecGroup (ไม่คิดหัก ณ ที่จ่าย)
+function paidRowAmtView(state, r, opt){
+  if(!r) return null;
+  if(r.kind === 'pv') return { ...payAmtView(state, r.p), noPayDate:false };
+  if(r.kind === 'petty_legacy'){
+    const gross = invGrossInclVat(r.inv).gross, transfer = bdR2(r.amount), ded = invDeductions(r.inv);
+    return { transfer, gross, ded:{ ...ded, adj:bdR2(ded.adj + bdR2(gross - ded.total - transfer)), total:bdR2(gross - transfer) },
+      source:'petty', sourceLabel:'💵 เงินสดย่อย', differs: Math.abs(gross - transfer) > 0.005, noPayDate:false };
+  }
+  const gross = bdR2(r.amount), wht = (opt && opt.sub) ? 0 : bdR2(r.src && r.src.wht);
+  const bank = (r.ep && r.ep.bank) || '';
+  return { transfer:bdR2(gross - wht), gross, ded:{ wht, credit:0, rtv:0, deposit:0, offInv:0, adj:0, total:wht },
+    source: r.noPayDate ? 'nodate' : ('ecount:' + (bank || '_none')),
+    sourceLabel: r.noPayDate ? '📅 ไม่มีวันจ่าย (Ecount)' : ('📥 Ecount ' + (bank || 'ไม่ระบุบัญชี')),
+    differs: wht > 0.005, noPayDate: !!r.noPayDate };
+}
+// ชิปแยกแหล่งเงินหน้า ✅ จ่ายแล้ว · ข้าม reversed · ชิป bank แนบ topup (เติมเงินสดย่อยจากบัญชีนั้นในช่วงวันที่ · แสดงเท่านั้น)
+const _AMT_SRC_ORDER = (k) => k.startsWith('bank:') ? (k === 'bank:_none' ? 1 : 0) : k.startsWith('ecount:') ? 4 : ({ petty:2, other:3, nodate:5 }[k] ?? 6);
+function paidSrcSplit(state, rows, range){
+  const m = new Map();
+  for(const r of (rows || [])){
+    if(!r || r.reversed) continue;
+    const v = paidRowAmtView(state, r);
+    if(!m.has(v.source)) m.set(v.source, { key:v.source, label:v.sourceLabel, transfer:0, gross:0, count:0 });
+    const c = m.get(v.source);
+    c.transfer = bdR2(c.transfer + v.transfer); c.gross = bdR2(c.gross + v.gross); c.count++;
+  }
+  const rg = range || {};
+  const out = Array.from(m.values()).sort((a, b) => _AMT_SRC_ORDER(a.key) - _AMT_SRC_ORDER(b.key) || String(a.label).localeCompare(String(b.label), 'th'));
+  out.forEach(c => {
+    if(!c.key.startsWith('bank:') || c.key === 'bank:_none') return;
+    const bid = c.key.slice(5);
+    const tx = ((state && state.pettyTxns) || []).filter(t => t.type === 'topup' && !t.reversed && t.bankId === bid
+      && (!rg.from || String(t.date || '') >= rg.from) && (!rg.to || String(t.date || '') <= rg.to));
+    if(tx.length) c.topup = { n:tx.length, total:bdR2(tx.reduce((s, t) => s + (Number(t.amount) || 0), 0)) };
+  });
+  return out;
+}
+// CN/DN memo: ยอดรวม VAT ตามใบ (amount + vatAmount คงที่) · remaining = netAmount (ถูกเขียนทับเมื่อใช้ไม่หมด) · CN ลบ / DN บวก
+function memoAmtView(memo){
+  const mm = memo || {};
+  const exVat = bdR2(mm.amount), gross = bdR2(exVat + (Number(mm.vatAmount) || 0));
+  const remaining = mm.netAmount != null ? bdR2(mm.netAmount) : gross;
+  return { gross, exVat, vat:bdR2(gross - exVat), remaining, sign: mm.type === 'credit' ? -1 : 1, cancelled: mm.status === 'cancelled',
+    partial: Math.abs(remaining - gross) > 0.005 };
+}
+// GR รอตั้งหนี้: VAT รายบรรทัด (7%/0%, ราคารวม/แยก VAT) — สูตรเดียวกับ calcGRVatBreakdown (mod-purchase · โหลดแบบ lazy จึงคัดสูตรไว้ที่นี่)
+//   อัตราบรรทัด = l.vatRate ถ้ามี ไม่งั้นอัตราหัว PO · มีส่วนลดท้ายบิล (totalValue ≠ Σ lineTotal) → ย่อตามสัดส่วน
+function grGrossInclVat(gr, po){
+  const g = gr || {}, rate = Number(po && po.vatRate) || 0, inc = (g.priceMode || (po && po.priceMode) || 'exclusive') === 'inclusive';
+  const tv = bdR2(g.totalValue), ls = g.lines || [];
+  const sumLt = ls.reduce((s, l) => s + (Number(l.lineTotal) || 0), 0);
+  const base = (ls.length && sumLt > 0) ? ls.map(l => ({ lt:Number(l.lineTotal) || 0, r: l.vatRate !== undefined ? (Number(l.vatRate) || 0) : rate }))
+    : [{ lt:tv, r:rate }];
+  let ex = 0, vat = 0;
+  for(const x of base){
+    if(x.r > 0){ if(inc){ const e = x.lt * 100 / (100 + x.r); ex += e; vat += x.lt - e; } else { ex += x.lt; vat += x.lt * x.r / 100; } }
+    else ex += x.lt;
+  }
+  const k = (ls.length && sumLt > 0 && tv > 0 && Math.abs(tv - sumLt) > 0.005) ? tv / sumLt : 1;
+  const exVat = bdR2(ex * k), v = bdR2(vat * k);
+  return { gross:bdR2(exVat + v), exVat, vat:v };
+}
+// รวมท้ายตาราง: ปัดต่อแถวแล้วค่อยรวม (ตัวเลขบนจอบวกกันได้ตรง)
+function sumAmt(rows, pick){ return bdR2((rows || []).reduce((s, r) => s + bdR2(pick(r)), 0)); }
+
 // ==================== EXPORT ====================
 global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
   docRenumFrom, docNumMatches, RenumBadge,
+  amtR2, invNetPayable, invOffInvDisc, invGrossInclVat, invDeductions, invAmtView, dedText, AMT_DED_KEYS, AMT_DED_LABEL, paySourceKey, paySourceLabel, payAmtView, paidRowAmtView, paidSrcSplit, memoAmtView, grGrossInclVat, sumAmt,   // 🆕 AMOUNT-INCL-VAT B2
   canAddPayTag, canSetDocTag, docTagOf, commonDocTag, poTagDefault, InvTagField, DocTagChip, TagSelect, DocTagEdit,   // 🆕 DOC-TAGS D1/D5
   invVatInEcount, invVatHereMoved, invVatHereAuto, MIG_VAT_HERE_FROM_YM,   // 🆕 MIG_VAT_HERE V1
   siIsMigrated, siVatExcluded, siAwaitingDue, siOverdue, siArUnsettled,   // 🆕 SALES_HISTORY: ใบขายประวัติ Ecount
@@ -69415,7 +69591,7 @@ function INVList({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'ครบกำหนด'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'Supplier'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'Sup Inv'),
-                h('th', { className:'px-3 py-2 text-right text-xs' }, 'Net'),
+                h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดรวม VAT ตามใบกำกับ · บรรทัดเล็ก = ยอดโอนหลังหัก ณ ที่จ่าย/CN/คืนของ' }, 'ยอดรวม VAT'),   // 🆕 AMOUNT-INCL-VAT B3.5
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'จ่ายแล้ว'),
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'คงเหลือ'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
@@ -69451,7 +69627,11 @@ function INVList({ state, dispatch, user }){
                       : i.supInvNumber
                   ),
                   h('td', { className:'px-3 py-2 text-right font-medium' },
-                    fmtCur(i.netPayable||0),
+                    (() => { const E = global.ERP, v = E.invAmtView(i);   // 🆕 AMOUNT-INCL-VAT B3.5: ยอดรวม VAT + บรรทัด 2 โอน/หัก
+                      return h('div', { 'data-testid':'pi-amt', title:`ก่อน VAT ${fmtCur(v.exVat)} · VAT ${fmtCur(v.vat)}` },
+                        h('div', { 'data-testid':'amt-main' }, fmtCur(v.gross)),
+                        v.differs && h('div', { className:'text-[10px] text-blue-700 font-normal', 'data-testid':'amt-sub' },
+                          'โอน ', fmtCur(v.transfer), E.dedText(v.ded) ? ` (${E.dedText(v.ded)})` : '')); })(),
                     (i.returnedAmount||0) > 0 && h('div', { className:'text-[10px] text-red-600' },
                       `↓ หัก RTV ${fmtCur(i.returnedAmount)}`)
                   ),
@@ -69470,7 +69650,18 @@ function INVList({ state, dispatch, user }){
                   )
                 );
               })
-            )
+            ),
+            filtered.length > 0 && (() => { const E = global.ERP, live = filtered.filter(i => !i.voided);   // 🆕 AMOUNT-INCL-VAT B3.5: บรรทัดรวม (Σ รวม VAT ไม่นับ DP)
+              const dp = live.filter(i => i.type === 'deposit_pi');
+              return h('tfoot', { className:'bg-gray-50 border-t-2' }, h('tr', { 'data-testid':'invlist-total' },
+                h('td', { colSpan:4, className:'px-3 py-2 text-right text-xs text-gray-600' }, `รวม ${live.length} ใบ`,
+                  dp.length > 0 && h('span', { className:'ml-2 text-amber-700' }, 'มัดจำ (DP) ', fmtCur(E.sumAmt(dp, i => E.invGrossInclVat(i).gross)))),
+                h('td', { className:'px-3 py-2 text-right' },
+                  h('div', { className:'font-bold' }, fmtCur(E.sumAmt(live.filter(i => i.type !== 'deposit_pi'), i => E.invGrossInclVat(i).gross))),
+                  h('div', { className:'text-[10px] text-blue-700' }, 'โอน ', fmtCur(E.sumAmt(live, i => E.invAmtView(i).transfer)))),
+                h('td', { className:'px-3 py-2 text-right text-xs text-green-700' }, fmtCur(E.sumAmt(live, i => i.paidAmount || 0))),
+                h('td', { className:'px-3 py-2 text-right text-red-600 font-bold' }, fmtCur(E.sumAmt(live, i => (i.netPayable || 0) - (i.paidAmount || 0)))),
+                h('td', { colSpan:2 }, ''))); })()
           ),
           h(Pager, { pg, label:'ใบตั้งหนี้ (INV)' })
         ),
@@ -70924,6 +71115,13 @@ function InvPaySummaryBox({ inv, state, user, grs, pos, onClose }){
     h('div', { className:'flex items-center gap-2 mb-1' },
       h('h4', { className:'font-bold text-sm' }, '💰 สรุปการจ่าย'),
       h('span', { className:cls('px-1.5 py-0.5 rounded text-xs', stCls), 'data-testid':'inv-paysum-status' }, stLabel)),
+    // 🆕 AMOUNT-INCL-VAT B3.5: ไล่จาก "ยอดรวม VAT" → หักทีละรายการ → "= ยอดโอน" (เฉพาะบรรทัด ≠ 0)
+    E.invAmtView && (() => { const v = E.invAmtView(inv);
+      return h('div', { 'data-testid':'inv-paysum-ladder', className:'space-y-0.5 pb-1 mb-1 border-b border-dashed' },
+        row('ยอดรวม VAT', v.gross, '', 'inv-paysum-gross', `(ก่อน VAT ${fmtCur(v.exVat)} + VAT ${fmtCur(v.vat)}${Math.abs(v.round) > 0.005 ? ' ± ปัดเศษ ' + fmtCur(v.round) : ''})`),
+        v.differs && E.AMT_DED_KEYS.filter(k => Math.abs(v.ded[k] || 0) > 0.005).map(k =>
+          h('div', { key:k }, row((k === 'adj' && v.ded[k] < 0 ? '+ ' : '− ') + E.AMT_DED_LABEL[k], Math.abs(v.ded[k]), 'text-gray-600', 'inv-paysum-ded-' + k))),
+        v.differs && row('= ยอดโอน', v.transfer, 'font-bold text-blue-700', 'inv-paysum-transfer')); })(),
     row('ยอดสุทธิ', sp.closedInfo ? sp.origNet : sp.net, '', 'inv-paysum-net', sp.closedInfo ? '(ตามใบเดิม)' : ''),
     sp.live > 0.005 && row('จ่ายแล้ว — ในระบบนี้', sp.live, 'text-green-700', 'inv-paysum-live'),
     sp.ecount > 0.005 && row('จ่ายแล้ว — ใน Ecount', sp.ecount, 'text-green-700', 'inv-paysum-ecount', sp.voucher ? `(${sp.voucher})` : '(ก่อนตัดระบบ)'),
@@ -76094,8 +76292,10 @@ function PaymentList({ state, dispatch, user }){
     [state.payments, dr.startDate, dr.endDate]);
 
   // ⚠️ ยอดรวม/เดือนนี้ คิดจาก pays ทั้งชุดเสมอ (ห้ามเปลี่ยนเป็น pg.shown — ตัวเลขเงินจะผิด)
-  const total = pays.reduce((s,p) => s + (p.amount||0), 0);
-  const thisMonth = pays.filter(p => p.date?.slice(0,7) === getToday().slice(0,7));
+  // 🆕 AMOUNT-INCL-VAT UAT M1: นับเฉพาะ PV ที่มีผลจริง (ไม่ void/กลับรายการ/ยกเลิก/รออนุมัติ/ถูกปฏิเสธ) — ชุดเดียวกับ ReportBySupplier
+  const live = pays.filter(p => !p.voided && !p.reversed && (p.approvalStatus||'approved') === 'approved' && (p.status||'posted') !== 'cancelled');
+  const total = live.reduce((s,p) => s + (p.amount||0), 0);
+  const thisMonth = live.filter(p => p.date?.slice(0,7) === getToday().slice(0,7));
   const thisMonthTotal = thisMonth.reduce((s,p) => s + (p.amount||0), 0);
 
   // 📄 แบ่งหน้า
@@ -76128,7 +76328,7 @@ function PaymentList({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'Supplier'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'วิธี'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'อ้างอิง'),
-                h('th', { className:'px-3 py-2 text-right text-xs' }, 'จำนวน'),
+                h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดโอน = เงินออกจริง (รวม VAT แล้ว หลังหัก ณ ที่จ่าย/CN) · บรรทัดเล็ก = ยอดรวม VAT' }, 'ยอดโอน'),   // 🆕 AMOUNT-INCL-VAT B4.6
               )
             ),
             h('tbody', { className:'divide-y' },
@@ -76141,10 +76341,18 @@ function PaymentList({ state, dispatch, user }){
                   h('td', { className:'px-3 py-2 text-sm' }, sup?.name||'-', sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
                   h('td', { className:'px-3 py-2 text-xs' }, PAY_METHODS.find(m => m.v === p.method)?.label||p.method),
                   h('td', { className:'px-3 py-2 font-mono text-xs' }, p.ref||'-'),
-                  h('td', { className:'px-3 py-2 text-right font-medium text-green-700' }, fmtCur(p.amount||0))
+                  h('td', { className:'px-3 py-2 text-right font-medium text-green-700' }, fmtCur(p.amount||0),
+                    (() => { const v = global.ERP.payAmtView ? global.ERP.payAmtView(state, p) : null;   // 🆕 AMOUNT-INCL-VAT B4.6: บรรทัด 2 รวม VAT/หัก
+                      return v && v.differs ? h('div', { className:'text-[10px] text-gray-500 font-normal', 'data-testid':'amt-sub' },
+                        'รวม VAT ', fmtCur(v.gross), global.ERP.dedText(v.ded) ? ' · ' + global.ERP.dedText(v.ded) : '') : null; })())
                 );
               })
-            )
+            ),
+            pays.length > 0 && global.ERP.sumAmt && h('tfoot', { className:'bg-gray-50 border-t-2' },
+              h('tr', { 'data-testid':'paylist-total' },
+                h('td', { colSpan:5, className:'px-3 py-2 text-right text-xs text-gray-600' }, `รวม ${live.length} รายการ (ไม่นับ PV ยกเลิก/รออนุมัติ) · รวม VAT `,
+                  fmtCur(global.ERP.sumAmt(live, x => global.ERP.payAmtView(state, x).gross))),
+                h('td', { className:'px-3 py-2 text-right font-bold text-green-700' }, fmtCur(total))))
           ),
           h(Pager, { pg, label:'ใบจ่ายเงิน (PV)' })
         )
@@ -78577,13 +78785,16 @@ function ReportBySupplier({ state, pos, invs, grs, pays, rtvs, dr }){
         supplier: sup, poCount:0, poValue:0,
         grCount:0, grValue:0, invCount:0, invValue:0,
         paidAmount:0, unpaidAmount:0, rtvValue:0,
+        grGross:0, invGross:0,   // 🆕 AMOUNT-INCL-VAT A3 แถว 16: รวม VAT (CSV ต่อท้าย)
       };
     }
     for(const p of pos){ if(map[p.supplierId]){ map[p.supplierId].poCount++; map[p.supplierId].poValue += p.total||0; }}
-    for(const g of grs){ if(map[g.supplierId]){ map[g.supplierId].grCount++; map[g.supplierId].grValue += g.totalValue||0; }}
+    for(const g of grs){ if(map[g.supplierId]){ map[g.supplierId].grCount++; map[g.supplierId].grValue += g.totalValue||0;
+      map[g.supplierId].grGross = Number((map[g.supplierId].grGross + global.ERP.grGrossInclVat(g, (state.pos||[]).find(p => p.id === g.poId)).gross).toFixed(2)); }}
     for(const i of invs){ if(map[i.supplierId]){
       map[i.supplierId].invCount++;
       map[i.supplierId].invValue += i.netPayable||0;
+      if(i.type !== 'deposit_pi') map[i.supplierId].invGross = Number((map[i.supplierId].invGross + global.ERP.invGrossInclVat(i).gross).toFixed(2));   // ไม่นับ DP
       map[i.supplierId].paidAmount += i.paidAmount||0;
       map[i.supplierId].unpaidAmount += (i.netPayable||0) - (i.paidAmount||0);
     }}
@@ -78610,7 +78821,7 @@ function ReportBySupplier({ state, pos, invs, grs, pays, rtvs, dr }){
   const totalPO = data.reduce((s,d) => s + d.poValue, 0);
 
   const doExport = () => {
-    const rows = [['Supplier','# PO','ยอดซื้อ','% share','# GR','ยอดรับ','# INV','ตั้งหนี้','จ่ายแล้ว','ค้างจ่าย','นัดจ่ายถัดไป','จ่ายล่าสุด','RTV']];
+    const rows = [['Supplier','# PO','ยอดซื้อ','% share','# GR','ยอดรับ','# INV','ตั้งหนี้','จ่ายแล้ว','ค้างจ่าย','นัดจ่ายถัดไป','จ่ายล่าสุด','RTV','ยอดรับรวม VAT','ตั้งหนี้ยอดรวม VAT']];
     for(const d of data){
       rows.push([
         d.supplier.name, d.poCount, d.poValue.toFixed(2),
@@ -78620,6 +78831,7 @@ function ReportBySupplier({ state, pos, invs, grs, pays, rtvs, dr }){
         d.paidAmount.toFixed(2), d.unpaidAmount.toFixed(2),
         d.nextPayDate || '', d.lastPaidDate || '',   // 🆕 ACCT-V2 G
         d.rtvValue.toFixed(2),
+        d.grGross.toFixed(2), d.invGross.toFixed(2),   // 🆕 AMOUNT-INCL-VAT: ต่อท้าย
       ]);
     }
     exportCSV(`purchase-by-supplier-${dr.startDate}_${dr.endDate}.csv`, rows);
@@ -78873,16 +79085,17 @@ function ReportAPAging({ state, dr }){
   }), { b0_30:0, b31_60:0, b61_90:0, b90plus:0, total:0, count:0 });
 
   const doExport = () => {
-    const rows = [['Supplier','# INV','0-30 วัน','31-60 วัน','61-90 วัน','>90 วัน','รวม']];
+    const rows = [['Supplier','# INV','0-30 วัน','31-60 วัน','61-90 วัน','>90 วัน','รวม','ยอดรวม VAT ทั้งใบ']];   // 🆕 AMOUNT-INCL-VAT: ต่อท้าย
+    const gOf = (d) => global.ERP.sumAmt(d.invs.filter(i => i.type !== 'deposit_pi'), i => global.ERP.invGrossInclVat(i).gross);
     for(const d of data){
       rows.push([
         d.supplier?.name || '-', d.count,
         d.b0_30.toFixed(2), d.b31_60.toFixed(2),
-        d.b61_90.toFixed(2), d.b90plus.toFixed(2), d.total.toFixed(2)
+        d.b61_90.toFixed(2), d.b90plus.toFixed(2), d.total.toFixed(2), gOf(d).toFixed(2)
       ]);
     }
     rows.push(['รวม', totals.count, totals.b0_30.toFixed(2), totals.b31_60.toFixed(2),
-      totals.b61_90.toFixed(2), totals.b90plus.toFixed(2), totals.total.toFixed(2)]);
+      totals.b61_90.toFixed(2), totals.b90plus.toFixed(2), totals.total.toFixed(2), global.ERP.sumAmt(data, gOf).toFixed(2)]);
     exportCSV(`ap-aging-${today}.csv`, rows);
   };
 
@@ -79217,6 +79430,37 @@ const {
 // 🆕 ACCT-V2: props ของ Combobox supplier — ห่อ helper กลางไว้ชั้นเดียว (core รุ่นเก่าไม่มี → options เปล่า ไม่ crash · ห้าม re-implement ที่นี่)
 const _supCombo = (opts) => typeof supplierComboProps === 'function' ? supplierComboProps(opts)
   : { options: (opts && opts.allLabel != null ? [{ id:'', name: opts.allLabel }] : []).concat((opts && opts.suppliers) || []), getKey: s => s.id, getLabel: s => s.name };
+
+// ==================== 🆕 AMOUNT-INCL-VAT: เซลล์ยอดเงิน 2 บรรทัด (AMOUNT_INCL_VAT_CONTRACT B2 "UI ร่วม") ====================
+//   main = ตัวเลขหลัก · sub = บรรทัดเล็กในเซลล์เดิม (ไม่เพิ่มคอลัมน์ · ห้ามดันความกว้าง) · tip = tooltip ก่อน VAT/VAT
+const _AE = global.ERP;
+const _dedText = (d) => (typeof _AE.dedText === 'function' ? _AE.dedText(d) : '');
+function AmtCell({ main, sub, tip, testid, subCls, mainCls }){
+  return h('div', { className:'text-right', title: tip || undefined, 'data-testid': testid || undefined },
+    h('div', { className: mainCls || 'font-medium', 'data-testid':'amt-main' }, fmtCur(main)),
+    sub ? h(_AmtSub, { sub, subCls }) : null);
+}
+// บรรทัด 2: ตัดบรรทัดได้เฉพาะระหว่างรายการ (" · ") แต่ละรายการ nowrap → ไม่ดันความกว้างคอลัมน์ (paid-layout)
+function _AmtSub({ sub, subCls }){
+  const parts = String(sub).split(' · ');
+  return h('div', { className: cls('text-[10px] leading-tight font-normal', subCls || 'text-blue-700'), 'data-testid':'amt-sub' },
+    parts.map((t, k) => { const m = /^(.*\s)([+−-]?[\d,]+\.\d\d)$/.exec(t);   // ตัวเลขห้ามหัก · ป้ายตัดบรรทัดได้
+      return h('span', { key:k }, k ? ' · ' : '', m ? m[1] : t, m ? h('span', { className:'whitespace-nowrap' }, m[2]) : null); }));
+}
+// tooltip ฝั่งใบตั้งหนี้: "ก่อน VAT x · VAT y (· ปัดเศษ z)"
+const _amtTip = (v) => !v ? '' : `ก่อน VAT ${fmtCur(v.exVat)} · VAT ${fmtCur(v.vat)}` + (Math.abs(v.round || 0) > 0.005 ? ` · ปัดเศษ ${fmtCur(v.round)}` : '')
+  + (v.src === 'recon' ? ' · ⓘ ประมาณจากยอดนำเข้า' : '');
+// บรรทัด 2 ฝั่งจ่าย: "รวม VAT X · หัก … (· จ่ายแล้ว Y)" เมื่อยอดต่างกัน
+const _paySub = (v, paid) => (v && (v.differs || paid > 0.005))
+  ? ['รวม VAT ' + fmtCur(v.gross), _dedText(v.ded), paid > 0.005 ? 'จ่ายแล้ว ' + fmtCur(paid) : ''].filter(Boolean).join(' · ') : '';
+// PI ประจำ: สูตรเดียวกับตอน generate INV (vat = amount × vatRate/100 · wht = Σ whtLines) แล้วปัด 2 ตำแหน่ง
+const _recurAmt = (t) => { const ex = Number(t.amount) || 0, vat = ex * (Number(t.vatRate) || 0) / 100, wht = (t.whtLines || []).reduce((s, l) => s + (Number(l.whtAmount) || 0), 0);
+  const gross = Number((ex + vat).toFixed(2)); return { exVat:ex, gross, wht, transfer:Number((gross - wht).toFixed(2)) }; };
+// กล่องรวมฝั่งจ่าย: " (รวม VAT Y)" ต่อท้ายยอดโอน เฉพาะเมื่อต่างกัน
+const _grossNote = (transfer, gross) => (gross != null && Math.abs((Number(gross) || 0) - (Number(transfer) || 0)) > 0.005)
+  ? h('span', { className:'text-[10px] text-gray-500 font-normal ml-1', 'data-testid':'gross-note' }, `(รวม VAT ${fmtCur(gross)})`) : null;
+// บรรทัด 2 ฝั่งใบตั้งหนี้: "โอน X (หัก …)"
+const _invSub = (v) => (v && v.differs) ? `โอน ${fmtCur(v.transfer)}` + (_dedText(v.ded) ? ` (${_dedText(v.ded)})` : '') : '';
 
 // ==================== 🆕 UI-v2 openDoc (Command palette Ctrl+K → เปิดเอกสารในหน้ารายการ) ====================
 // palette เรียก requestOpenDoc(kind, id, nav): เก็บ id ไว้ที่ erp_v5__q__<kind> → navigateTo หน้าที่รายการอยู่ → ยิง erp:open-doc
@@ -83701,6 +83945,8 @@ function VATByPaymentReport({ state }){
         bank: p.bankName || (p.method==='cash' ? 'เงินสด' : p.method==='petty_cash' ? 'เงินสดย่อย' : p.method||'-'),   // 🆕 ACCT-V2: PV เงินสดย่อย
         bankAcc: p.bankNumber || '',
         payPortion: portion < 0.99 ? `(${Math.round(portion*100)}%)` : '',
+        transfer: Number(m.amount) || 0,   // 🆕 AMOUNT-INCL-VAT B6: ยอดโอนต่อสมาชิก (ข้อมูลประกอบ)
+        bankSide: !p.method || p.method === 'transfer' || p.method === 'cheque',
       };
     })).filter(Boolean);
   }, [state.payments, state.invoices, state.suppliers, dr.startDate, dr.endDate]);
@@ -83712,19 +83958,21 @@ function VATByPaymentReport({ state }){
     vatAmt: acc.vatAmt + r.vatAmt,
     vatableTotal: acc.vatableTotal + r.vatableTotal,
     wht: acc.wht + r.wht,
-  }), { total:0, vatableBase:0, vatAmt:0, vatableTotal:0, wht:0 });
+    trBank: acc.trBank + (r.bankSide ? r.transfer : 0),
+    trCash: acc.trCash + (r.bankSide ? 0 : r.transfer),
+  }), { total:0, vatableBase:0, vatAmt:0, vatableTotal:0, wht:0, trBank:0, trCash:0 });
 
   const exportRows = () => {
     // 🆕 ACCT-V2 (ม.82/5): คอลัมน์ 'VAT ไม่เคลม (ต้องห้าม)' = ส่วนที่ PV นี้โอนไป 5900 (ไม่รวมในคอลัมน์ VAT)
-    const csv = [['#','วันที่จ่าย','บัญชีที่ใช้โอน','เลขบัญชี','INV','Supplier','เลขผู้เสียภาษี','สนญ./สาขาที่','ยอดรวม','ฐาน VAT','VAT','รวม VATable','WHT','VAT ไม่เคลม (ต้องห้าม)']];
+    const csv = [['#','วันที่จ่าย','บัญชีที่ใช้โอน','เลขบัญชี','INV','Supplier','เลขผู้เสียภาษี','สนญ./สาขาที่','ยอดรวม','ฐาน VAT','VAT','รวม VATable','WHT','VAT ไม่เคลม (ต้องห้าม)','ยอดโอน']];
     rows.forEach((r, idx) => {
       csv.push([idx+1, r.p.date, r.bank, r.bankAcc||'', r.inv.invNumber, r.supName, _xlText(r.taxId), _xlText(r.br5 || ''),
         r.total.toFixed(2), r.vatableBase.toFixed(2), r.vatAmt.toFixed(2), r.vatableTotal.toFixed(2), r.wht.toFixed(2),
-        (r.ndVat||0) > 0 ? r.ndVat.toFixed(2) : '']);
+        (r.ndVat||0) > 0 ? r.ndVat.toFixed(2) : '', r.transfer.toFixed(2)]);
     });
     csv.push(['','','','','','','','รวม', totals.total.toFixed(2), totals.vatableBase.toFixed(2),
       totals.vatAmt.toFixed(2), totals.vatableTotal.toFixed(2), totals.wht.toFixed(2),
-      rows.reduce((s,r) => s + (r.ndVat||0), 0).toFixed(2)]);
+      rows.reduce((s,r) => s + (r.ndVat||0), 0).toFixed(2), (totals.trBank + totals.trCash).toFixed(2)]);
     exportCSV(`vat-by-payment-${getToday()}.csv`, csv);
   };
 
@@ -83733,7 +83981,8 @@ function VATByPaymentReport({ state }){
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วงวันจ่าย:' })
     ),
     h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-3 mb-3 text-sm text-indigo-800' },
-      '💰 รายงานตามวันที่จ่ายเงิน (cash-basis) — ใช้เทียบยอดกับ bank statement · ',
+      '💰 รายงานตามวันที่จ่ายเงิน (cash-basis) · ', h('b', { 'data-testid':'vatpay-stmt-hint' }, 'เทียบ bank statement ใช้หน้า ✅ จ่ายแล้ว (แยกตามบัญชี)'),
+      ' · รายงานนี้เรียงตามวันที่ขอจ่ายและแตก PV รวมเป็นรายบิล · ',
       h('b', null, 'การจ่ายบางส่วน'), ' จะคำนวณ VAT ตามสัดส่วนของยอดจ่าย · เฉพาะ payment ที่อนุมัติแล้ว · ',
       h('b', { className:'text-red-700' }, '⛔ ไม่เคลม'), ' = PV เงินสดย่อยแบบค่าใช้จ่ายต้องห้าม VAT โอนไป 5900 แล้ว ไม่รวมในคอลัมน์ VAT (ม.82/5)'
     ),
@@ -83755,15 +84004,16 @@ function VATByPaymentReport({ state }){
             h('th', { className:'px-2 py-2 text-left text-xs' }, 'Supplier'),
             h('th', { className:'px-2 py-2 text-left text-xs' }, 'เลขผู้เสียภาษี'),
             h('th', { className:'px-2 py-2 text-left text-xs', title:'สถานประกอบการของผู้ขาย (สำนักงานใหญ่ 00000 / สาขาที่)' }, 'สนญ./สาขาที่'),
-            h('th', { className:'px-2 py-2 text-right text-xs' }, 'ยอดรวม'),
+            h('th', { className:'px-2 py-2 text-right text-xs' }, 'ยอดรวม VAT'),
             h('th', { className:'px-2 py-2 text-right text-xs' }, 'ฐาน VAT'),
             h('th', { className:'px-2 py-2 text-right text-xs' }, 'VAT'),
             h('th', { className:'px-2 py-2 text-right text-xs' }, 'รวม VATable'),
-            h('th', { className:'px-2 py-2 text-right text-xs' }, 'WHT')
+            h('th', { className:'px-2 py-2 text-right text-xs' }, 'WHT'),
+            h('th', { className:'px-2 py-2 text-right text-xs', title:'ยอดโอนของบิลนี้ใน PV (ข้อมูลประกอบ)' }, 'ยอดโอน')
           )),
         h('tbody', { className:'divide-y' },
           rows.length === 0
-            ? h('tr', null, h('td', { colSpan:12, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
+            ? h('tr', null, h('td', { colSpan:13, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
             : pg.shown.map((r, idx) => h('tr', { key:r.p.id, className:'hover:bg-gray-50' },
                 h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, pg.from + idx),
                 h('td', { className:'px-2 py-1.5 text-xs' }, fmtDate(r.p.date)),
@@ -83785,14 +84035,17 @@ function VATByPaymentReport({ state }){
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs' },
                   r.vatableTotal > 0 ? fmtCur(r.vatableTotal) : '-'),
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs text-red-600' },
-                  r.wht > 0 ? fmtCur(r.wht) : '-'))).concat([
+                  r.wht > 0 ? fmtCur(r.wht) : '-'),
+                h('td', { className:'px-2 py-1.5 text-right font-mono text-xs' }, fmtCur(r.transfer)))).concat([
               h('tr', { key:'tot', className:'bg-gray-100 font-bold border-t-2' },
                 h('td', { colSpan:7, className:'px-2 py-2 text-right text-xs' }, 'รวม:'),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-blue-700' }, fmtCur(totals.total)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableBase)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-green-700' }, fmtCur(totals.vatAmt)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableTotal)),
-                h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)))
+                h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)),
+                h('td', { className:'px-2 py-2 text-right font-mono text-xs', 'data-testid':'vatpay-transfer-total' },
+                  h('div', null, '🏦 ', fmtCur(totals.trBank)), h('div', { className:'text-[10px] text-gray-600' }, '💵 เงินสดย่อย/เงินสด ', fmtCur(totals.trCash))))
             ])
         )),
       h(Pager, { pg, label:'รายการจ่าย' }))
@@ -83876,12 +84129,20 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
     netPayable: acc.netPayable + r.netPayable,
     paidAmount: acc.paidAmount + r.paidAmount,
     balance: acc.balance + r.balance,
-  }), { amount:0, vat:0, wht:0, offDisc:0, netPayable:0, paidAmount:0, balance:0 });
+    // 🆕 AMOUNT-INCL-VAT B3.6: ห้ามใช้ r.amount + r.vat (ฐานแถวอาจหัก 🎟️)
+    // 🆕 UAT M2: Σ รวม VAT ไม่นับใบมัดจำ DP (ใบจริงรวมมัดจำไว้แล้ว) → แยกไว้ที่ dpGross เหมือนหน้า PI ทั้งหมด
+    gross: r.i.type === 'deposit_pi' ? acc.gross : Number((acc.gross + _AE.invGrossInclVat(r.i).gross).toFixed(2)),
+    dpGross: r.i.type === 'deposit_pi' ? Number((acc.dpGross + _AE.invGrossInclVat(r.i).gross).toFixed(2)) : acc.dpGross,
+    dpCount: acc.dpCount + (r.i.type === 'deposit_pi' ? 1 : 0),
+    // 🆕 UAT S1: ยอดโอน = invAmtView().transfer (ตรงกับหน้า PI/กล่อง PI · นับใบ DP เพราะเป็นเงินออกจริง · หัก 🎟️ แล้ว)
+    transfer: Number((acc.transfer + _AE.invAmtView(r.i).transfer).toFixed(2)),
+  }), { amount:0, vat:0, wht:0, offDisc:0, netPayable:0, paidAmount:0, balance:0, gross:0, dpGross:0, dpCount:0, transfer:0 });
 
   const doExport = () => {
     const out = [['#','วันที่ INV','เลข INV (ระบบ)','เลข INV Sup','📄 Tax INV','วันที่ Tax INV','Supplier','TaxID','ประเภท','คำอธิบาย',
       'ยอดก่อน VAT','VAT','WHT','ยอดสุทธิ','จ่ายแล้ว','ค้างจ่าย','สถานะ','วันที่จ่าย','วิธี','Bank Ref','WH Cert',
-      'ส่วนลดนอกใบกำกับ']];   // UAT S4: คอลัมน์ใหม่ไว้ท้ายสุด — template Excel เดิมไม่เลื่อน
+      'ส่วนลดนอกใบกำกับ',   // 🎟️ UAT S4: คอลัมน์ใหม่ไว้ท้าย — template Excel เดิมไม่เลื่อน
+      'ยอดรวม VAT']];   // 🆕 AMOUNT-INCL-VAT B3.6: ต่อท้ายหลัง 'ส่วนลดนอกใบกำกับ' (คอลัมน์เดิมค่าเดิม)
     rows.forEach((r, idx) => {
       out.push([idx+1,
         r.i.invDate || '',
@@ -83896,12 +84157,13 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
         r.netPayable.toFixed(2), r.paidAmount.toFixed(2), r.balance.toFixed(2),
         r.paymentStatus, r.payDates, r.payMethods, r.bankRefs, r.whtCertNumbers,
         r.offDisc.toFixed(2),
+        _AE.invGrossInclVat(r.i).gross.toFixed(2),
       ]);
     });
     out.push(['','','','','','','','','','รวม',
       totals.amount.toFixed(2), totals.vat.toFixed(2), totals.wht.toFixed(2),
       totals.netPayable.toFixed(2), totals.paidAmount.toFixed(2), totals.balance.toFixed(2),
-      '','','','','', totals.offDisc.toFixed(2)]);
+      '','','','','', totals.offDisc.toFixed(2), totals.gross.toFixed(2)]);
     exportCSV(`expense-by-invoice-${dr.startDate}_${dr.endDate}.csv`, out);
   };
 
@@ -83946,7 +84208,8 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
     // KPI cards
     h('div', { className:'grid grid-cols-2 md:grid-cols-5 gap-2 mb-3' },
       h(KPICard, { label:'จำนวน INV', value:rows.length, color:'blue', icon:'📋' }),
-      h(KPICard, { label:'ยอดสุทธิรวม', value:fmtCur(totals.netPayable), color:'gray', icon:'💰' }),
+      h(KPICard, { label:'ยอดรวม VAT', value:fmtCur(totals.gross), color:'gray', icon:'💰',   // 🆕 AMOUNT-INCL-VAT B3.6 · UAT M2/S1
+        sub:`ยอดโอน ${fmtCur(totals.transfer)}` + (totals.dpCount ? ` · มัดจำ (DP) ${fmtCur(totals.dpGross)} แยก` : '') }),
       h(KPICard, { label:'จ่ายแล้ว', value:fmtCur(totals.paidAmount), color:'green', icon:'✅' }),
       h(KPICard, { label:'ค้างจ่าย', value:fmtCur(totals.balance),
         color: totals.balance > 0 ? 'red' : 'gray', icon:'⏳' }),
@@ -83977,9 +84240,10 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
                   h('th', { className:'px-2 py-2 text-left' }, 'รายการ'),
                   h('th', { className:'px-2 py-2 text-right' }, 'ก่อน VAT'),
                   h('th', { className:'px-2 py-2 text-right' }, 'VAT'),
+                  h('th', { className:'px-2 py-2 text-right' }, 'รวม VAT'),   // 🆕 AMOUNT-INCL-VAT B3.6
                   h('th', { className:'px-2 py-2 text-right' }, 'WHT'),
                   h('th', { className:'px-2 py-2 text-right', title:'คูปอง/คะแนนสะสมที่ไม่ได้พิมพ์บนใบกำกับ — VAT ไม่ลด' }, 'ส่วนลดนอกใบกำกับ'),
-                  h('th', { className:'px-2 py-2 text-right' }, 'สุทธิ'),
+                  h('th', { className:'px-2 py-2 text-right', title:'ยอดโอน = รวม VAT − หัก ณ ที่จ่าย/CN/มัดจำ/ส่วนลดนอกใบกำกับ' }, 'ยอดโอน'),
                   h('th', { className:'px-2 py-2 text-right' }, 'จ่ายแล้ว'),
                   h('th', { className:'px-2 py-2 text-right' }, 'ค้าง'),
                   h('th', { className:'px-2 py-2 text-center' }, 'สถานะ'),
@@ -84012,9 +84276,10 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
                             r.i.description && h('div', { className:'text-[10px] text-gray-500' }, r.i.description.substring(0,40)))),
                     h('td', { className:'px-2 py-1.5 text-right font-mono' }, fmtCur(r.amount)),
                     h('td', { className:'px-2 py-1.5 text-right font-mono text-blue-700' }, r.vat ? fmtCur(r.vat) : '-'),
+                    h('td', { className:'px-2 py-1.5 text-right font-mono', 'data-testid':'exp-gross' }, fmtCur(_AE.invGrossInclVat(r.i).gross)),
                     h('td', { className:'px-2 py-1.5 text-right font-mono text-pink-700' }, r.wht ? fmtCur(r.wht) : '-'),
                     h('td', { className:'px-2 py-1.5 text-right font-mono text-emerald-700', 'data-testid':'expinv-offdisc' }, r.offDisc ? '−' + fmtCur(r.offDisc) : '-'),
-                    h('td', { className:'px-2 py-1.5 text-right font-mono font-bold' }, fmtCur(r.netPayable)),
+                    h('td', { className:'px-2 py-1.5 text-right font-mono font-bold', 'data-testid':'exp-transfer' }, fmtCur(_AE.invAmtView(r.i).transfer)),   // 🆕 UAT S1 (หัก 🎟️ แล้ว)
                     h('td', { className:'px-2 py-1.5 text-right font-mono text-green-700' }, r.paidAmount ? fmtCur(r.paidAmount) : '-'),
                     h('td', { className: cls('px-2 py-1.5 text-right font-mono',
                       r.balance > 0.01 ? 'text-red-700 font-bold' : 'text-gray-400') },
@@ -84028,9 +84293,11 @@ function ExpenseByInvoiceReport({ state, dispatch, user }){
                   h('td', { colSpan:7, className:'px-2 py-2 text-right' }, 'รวม:'),
                   h('td', { className:'px-2 py-2 text-right font-mono' }, fmtCur(totals.amount)),
                   h('td', { className:'px-2 py-2 text-right font-mono text-blue-700' }, fmtCur(totals.vat)),
+                  h('td', { className:'px-2 py-2 text-right font-mono', 'data-testid':'exp-gross-total' }, fmtCur(totals.gross),
+                    totals.dpCount > 0 && h('div', { className:'text-[10px] text-amber-700 font-normal', 'data-testid':'exp-gross-dp' }, 'ไม่รวมมัดจำ (DP) ', fmtCur(totals.dpGross))),
                   h('td', { className:'px-2 py-2 text-right font-mono text-pink-700' }, fmtCur(totals.wht)),
                   h('td', { className:'px-2 py-2 text-right font-mono text-emerald-700', 'data-testid':'expinv-offdisc-total' }, totals.offDisc ? '−' + fmtCur(totals.offDisc) : '-'),
-                  h('td', { className:'px-2 py-2 text-right font-mono' }, fmtCur(totals.netPayable)),
+                  h('td', { className:'px-2 py-2 text-right font-mono', 'data-testid':'exp-transfer-total' }, fmtCur(totals.transfer)),
                   h('td', { className:'px-2 py-2 text-right font-mono text-green-700' }, fmtCur(totals.paidAmount)),
                   h('td', { className:'px-2 py-2 text-right font-mono text-red-700' }, fmtCur(totals.balance)),
                   h('td', { colSpan:3 }),
@@ -84054,10 +84321,19 @@ function ExpenseByCategory({ state }){
 
   // สินค้า (PO-based) vs ค่าใช้จ่าย (direct)
   const byCat = {};
-  const add = (key, label, count, amount, vat, net) => {
-    if(!byCat[key]) byCat[key] = { label, count:0, amount:0, vat:0, net:0 };
+  // 🆕 AMOUNT-INCL-VAT B3.6: gross = ยอดรวม VAT ของใบ × share (ไม่ขึ้นกับฐานแถว)
+  // tr = ยอดโอน (invAmtView().transfer × share) ให้ตรงกับรายงานตาม INV · net คงไว้ใช้เรียง/%/CSV 'สุทธิ'
+  const add = (key, label, count, amount, vat, net, gross, tr) => {
+    if(!byCat[key]) byCat[key] = { label, count:0, amount:0, vat:0, net:0, gross:0, tr:0 };
+    byCat[key].tr = Number((byCat[key].tr + (tr || 0)).toFixed(2));
     byCat[key].count += count; byCat[key].amount += amount; byCat[key].vat += vat; byCat[key].net += net;
+    byCat[key].gross = Number((byCat[key].gross + (gross || 0)).toFixed(2));
   };
+  // 🆕 UAT M2: ใบมัดจำ DP ไม่นับใน Σ รวม VAT (ใบจริงรวมมัดจำไว้แล้ว) → แยกไว้ที่ dpGross
+  const _dpInvs = invs.filter(i => i.type === 'deposit_pi');
+  const dpGross = _AE.sumAmt(_dpInvs, i => _AE.invGrossInclVat(i).gross);
+  const _gi = (i) => i.type === 'deposit_pi' ? 0 : _AE.invGrossInclVat(i).gross;
+  const _ti = (i) => _AE.invAmtView(i).transfer;
   const labelOf = (key, fallback) => fallback || cats.find(c=>c.id===key)?.label || expItems.find(x=>x.id===key)?.name || 'ไม่ระบุ';
   // 🎟️ OFF-INV-DISC §B11: ฐาน = ค่าใช้จ่ายตามจ่ายจริง (หักส่วนลดนอกใบกำกับ) · VAT คงตามใบกำกับ
   //   ส่วนลดของแต่ละกลุ่ม = Σ alloc ของบรรทัดในกลุ่ม (expLineId → รายการทะเบียน → กลุ่ม) · หาไม่ได้ → ตามสัดส่วน amount
@@ -84077,7 +84353,7 @@ function ExpenseByCategory({ state }){
   };
   for(const i of invs){
     const _od = global.ERP.offInvDiscAmt(i);
-    if(i.source !== 'direct_expense'){ add('__po__', '🛍️ ซื้อสินค้า/วัตถุดิบ (PO)', 1, (i.amount||0) - _od, i.vat||0, i.netPayable||0); continue; }
+    if(i.source !== 'direct_expense'){ add('__po__', '🛍️ ซื้อสินค้า/วัตถุดิบ (PO)', 1, (i.amount||0) - _od, i.vat||0, i.netPayable||0, _gi(i), _ti(i)); continue; }
     // 🆕 ACCT-V2: PI ค่าใช้จ่ายจากทะเบียน (บรรทัดครอบคลุม >1 กลุ่ม) → กระจายฐานตาม expenseTypes[] · VAT/สุทธิ prorate ตามสัดส่วนฐาน
     const types = Array.isArray(i.expenseTypes) ? i.expenseTypes.filter(t => t && (Number(t.amount)||0) > 0) : [];
     const tsum = types.reduce((a,t) => a + (Number(t.amount)||0), 0);
@@ -84085,21 +84361,21 @@ function ExpenseByCategory({ state }){
       const tDisc = offDiscByType(i, types);
       types.forEach((t, idx) => {
         const share = (Number(t.amount)||0) / tsum;
-        add(t.id || 'uncategorized', labelOf(t.id, t.label), idx === 0 ? 1 : 0, (Number(t.amount)||0) - tDisc[idx], (i.vat||0) * share, (i.netPayable||0) * share);
+        add(t.id || 'uncategorized', labelOf(t.id, t.label), idx === 0 ? 1 : 0, (Number(t.amount)||0) - tDisc[idx], (i.vat||0) * share, (i.netPayable||0) * share, _gi(i) * share, _ti(i) * share);
       });
       continue;
     }
     const key = i.expenseType || 'uncategorized';
-    add(key, labelOf(key, i.expenseLabel), 1, (i.amount||0) - _od, i.vat||0, i.netPayable||0);
+    add(key, labelOf(key, i.expenseLabel), 1, (i.amount||0) - _od, i.vat||0, i.netPayable||0, _gi(i), _ti(i));
   }
   const rows = Object.values(byCat).sort((a,b) => b.net - a.net);
   const total = rows.reduce((s,r) => s + r.net, 0);
 
   const exportRows = () => {
-    const csv = [['ประเภท','# ใบ','ฐาน','VAT','สุทธิ','% ของทั้งหมด']];
+    const csv = [['ประเภท','# ใบ','ฐาน','VAT','สุทธิ','% ของทั้งหมด','ยอดรวม VAT']];   // 🆕 AMOUNT-INCL-VAT: ต่อท้าย
     for(const r of rows){
       csv.push([r.label, r.count, r.amount.toFixed(2), r.vat.toFixed(2), r.net.toFixed(2),
-        ((r.net/total*100)||0).toFixed(1)+'%']);
+        ((r.net/total*100)||0).toFixed(1)+'%', r.gross.toFixed(2)]);
     }
     exportCSV(`expense-by-category-${getToday()}.csv`, csv);
   };
@@ -84127,13 +84403,14 @@ function ExpenseByCategory({ state }){
             h('th', { className:'px-3 py-2 text-right text-xs' }, '# ใบ'),
             h('th', { className:'px-3 py-2 text-right text-xs' }, 'ฐาน'),
             h('th', { className:'px-3 py-2 text-right text-xs' }, 'VAT'),
-            h('th', { className:'px-3 py-2 text-right text-xs' }, 'สุทธิ'),
+            h('th', { className:'px-3 py-2 text-right text-xs' }, 'รวม VAT'),   // 🆕 AMOUNT-INCL-VAT B3.6
+            h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดโอน = รวม VAT − หัก ณ ที่จ่าย/CN/มัดจำ/ส่วนลดนอกใบกำกับ' }, 'ยอดโอน'),
             h('th', { className:'px-3 py-2 text-right text-xs' }, '%'),
           )
         ),
         h('tbody', { className:'divide-y' },
           rows.length === 0
-            ? h('tr', null, h('td', { colSpan:6, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
+            ? h('tr', null, h('td', { colSpan:7, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
             : rows.map((r,idx) => {
                 const pct = total > 0 ? (r.net/total*100) : 0;
                 return h('tr', { key:idx, className:'hover:bg-gray-50' },
@@ -84141,11 +84418,20 @@ function ExpenseByCategory({ state }){
                   h('td', { className:'px-3 py-1.5 text-right text-xs' }, r.count),
                   h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' }, fmtCur(r.amount)),
                   h('td', { className:'px-3 py-1.5 text-right font-mono text-xs text-blue-700' }, fmtCur(r.vat)),
-                  h('td', { className:'px-3 py-1.5 text-right font-mono text-xs font-bold text-red-700' }, fmtCur(r.net)),
+                  h('td', { className:'px-3 py-1.5 text-right font-mono text-xs', 'data-testid':'cat-gross' }, fmtCur(r.gross)),
+                  h('td', { className:'px-3 py-1.5 text-right font-mono text-xs font-bold text-red-700', 'data-testid':'cat-transfer' }, fmtCur(r.tr)),
                   h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' }, pct.toFixed(1)+'%'),
                 );
               })
-        )
+        ),
+        rows.length > 0 && h('tfoot', { className:'bg-gray-50 border-t-2 font-bold' }, h('tr', { 'data-testid':'cat-total' },   // 🆕 AMOUNT-INCL-VAT B3.6
+          h('td', { colSpan:2, className:'px-3 py-1.5 text-right text-xs' }, 'รวม'),
+          h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' }, fmtCur(rows.reduce((a, r) => a + r.amount, 0))),
+          h('td', { className:'px-3 py-1.5 text-right font-mono text-xs text-blue-700' }, fmtCur(rows.reduce((a, r) => a + r.vat, 0))),
+          h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' }, fmtCur(_AE.sumAmt(rows, r => r.gross)),
+            _dpInvs.length > 0 && h('div', { className:'text-[10px] text-amber-700 font-normal', 'data-testid':'cat-gross-dp' }, 'ไม่รวมมัดจำ (DP) ', fmtCur(dpGross))),
+          h('td', { className:'px-3 py-1.5 text-right font-mono text-xs text-red-700', 'data-testid':'cat-transfer-total' }, fmtCur(_AE.sumAmt(rows, r => r.tr))),
+          h('td', null, '')))
       )
     )
   );
@@ -84193,7 +84479,7 @@ function ACDashboard({ state, user, setTab }){
   const go = (k) => setTab && setTab(k);
   return h('div', { className:'space-y-4' },
     h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3' },
-      h(KPICard, { label:'เจ้าหนี้ (AP) ค้าง', value:fmtCur(totalAP), color:'red', icon:'💸',
+      h(KPICard, { label:'เจ้าหนี้ (AP) ค้าง', value:fmtCur(totalAP), color:'red', icon:'💸', sub:'ยอดที่ต้องโอน',   // 🆕 AMOUNT-INCL-VAT B4.7
         onClick:()=>go('invAll') }),
       h(KPICard, { label:'ลูกหนี้ (AR) ค้าง', value:fmtCur(totalAR), color:'amber', icon:'🧾' }),
       h(KPICard, { label:'เงินสด + ธนาคาร', value:fmtCur(totalCash), color:'green', icon:'🏦',
@@ -85751,7 +86037,7 @@ function APAgingReport({ state }){
                 h('th', { className:'px-3 py-2 text-right text-xs' }, '31-60'),
                 h('th', { className:'px-3 py-2 text-right text-xs' }, '61-90'),
                 h('th', { className:'px-3 py-2 text-right text-xs' }, '> 90'),
-                h('th', { className:'px-3 py-2 text-right text-xs font-bold' }, 'รวม'))),
+                h('th', { className:'px-3 py-2 text-right text-xs font-bold', title:'ยอดที่ต้องโอนจริง (รวม VAT แล้ว หลังหัก ณ ที่จ่าย/CN − จ่ายแล้ว)' }, 'รวมค้างโอน'))),   // 🆕 AMOUNT-INCL-VAT B4.7: ป้าย
             h('tbody', { className:'divide-y' },
               bySupplier.map(s => h('tr', { key:s.sup.id, className:'hover:bg-gray-50' },
                 h('td', { className:'px-3 py-2' }, s.sup.name, s.sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:s.sup, parties:state.suppliers }),
@@ -85839,7 +86125,7 @@ function CashForecastReport({ state }){
           h('tr', null,
             h('th', { className:'px-3 py-2 text-left text-xs' }, 'ช่วงเวลา'),
             h('th', { className:'px-3 py-2 text-center text-xs' }, 'PI ค้าง'),
-            h('th', { className:'px-3 py-2 text-right text-xs' }, 'ยอดจ่าย'),
+            h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดที่ต้องโอนจริง (รวม VAT แล้ว หลังหัก ณ ที่จ่าย/CN)' }, 'ค้างโอน'),   // 🆕 AMOUNT-INCL-VAT B4.7: ป้าย
             h('th', { className:'px-3 py-2 text-left text-xs' }, 'รายละเอียด'))),
         h('tbody', { className:'divide-y' },
           weeks.map((w,i) => h('tr', { key:i, className: w.amount > 0 ? 'hover:bg-gray-50' : 'opacity-50' },
@@ -86360,7 +86646,8 @@ function INVAllOverviewTab({ state, dispatch, user }){
             tagF !== 'all' && tagF !== '__none__' && !(state.payTags || []).some(t => t && t.id === tagF && t.active !== false) && h('option', { value:tagF }, tagF))),
         h('button', { type:'button', 'data-testid':'pi-csv', disabled: rows.length === 0, title:'ส่งออกรายการตามตัวกรองปัจจุบันเป็น CSV',
           onClick:()=>{
-            const out = [['วันที่','เลข PI','ใบแจ้งหนี้ supplier','Tax INV','PO','Supplier','สุทธิ','จ่ายแล้ว','คงเหลือ','สถานะ','แท็ก']];
+            const out = [['วันที่','เลข PI','ใบแจ้งหนี้ supplier','Tax INV','PO','Supplier','สุทธิ','จ่ายแล้ว','คงเหลือ','สถานะ','แท็ก',
+              'ยอดรวม VAT','ก่อน VAT','VAT','หัก ณ ที่จ่าย','ยอดโอน']];   // 🆕 AMOUNT-INCL-VAT B3.1: ต่อท้าย 5 คอลัมน์ (คอลัมน์เดิมค่าเดิม)
             const _csvSt = (i) => {   // UAT N1: ป้ายเดียวกับคอลัมน์สถานะบนจอ (ตัดอีโมจินำหน้า)
               const st = i.voided ? 'cancelled' : ((state.payments||[]).some(p => _payInvIds(p).includes(i.id) && p.approvalStatus === 'pending') ? 'pending_approval' : (i.paymentStatus || 'unpaid'));
               const l = (STATUS_LBL[st === 'paid' && i.migApClose ? 'mig_closed' : st] || [st])[0];
@@ -86377,7 +86664,8 @@ function INVAllOverviewTab({ state, dispatch, user }){
               const _poTxt = Array.from(_poIds).map(pid => ((state.pos || []).find(p => p.id === pid) || {}).poNumber).filter(Boolean).join(' / ') || i.poNumber || '';
               out.push([i.invDate || '', i.invNumber || '', i.supInvNumber || '', i.supTaxInvNumber || '', _poTxt,
                 (sup && global.ERP.partyNameWithBranch(sup, state.suppliers)) || i.supplierNameFreeform || '', (i.netPayable||0).toFixed(2), (i.paidAmount||0).toFixed(2),
-                ((i.netPayable||0) - (i.paidAmount||0)).toFixed(2), _csvSt(i), t ? t.name : '']);   // UAT N1: ชื่อ+สาขา · สถานะภาษาไทยตามจอ
+                ((i.netPayable||0) - (i.paidAmount||0)).toFixed(2), _csvSt(i), t ? t.name : '',
+                ...(() => { const v = _AE.invAmtView(i); return [v.gross.toFixed(2), v.exVat.toFixed(2), v.vat.toFixed(2), v.ded.wht.toFixed(2), v.transfer.toFixed(2)]; })()]);   // UAT N1: ชื่อ+สาขา · สถานะภาษาไทยตามจอ
             });
             exportCSV(`pi-list-${getToday()}.csv`, out);
           }, className:'px-3 py-1 rounded text-xs font-medium bg-white border hover:bg-gray-100 disabled:opacity-40' }, '⬇️ CSV'),
@@ -86430,13 +86718,20 @@ function INVAllOverviewTab({ state, dispatch, user }){
     })(),
 
     (() => {
-      const sumNet = rows.reduce((s,i) => s + (i.netPayable||0), 0);
-      const sumPaid = rows.reduce((s,i) => s + (i.paidAmount||0), 0);
-      const sumRemain = rows.reduce((s,i) => s + Math.max(0,(i.netPayable||0)-(i.paidAmount||0)), 0);
+      // ใบยกเลิกไม่นับในยอดรวม (ตัวกรอง 'ทั้งหมด' ยังแสดงใบยกเลิกในตาราง) · ตรงกับ footer หน้ารายการ PI
+      const live = rows.filter(i => !i.voided && i.paymentStatus !== 'voided');
+      // 🆕 AMOUNT-INCL-VAT B3.1: Σ ยอดรวม VAT ไม่นับใบมัดจำ DP (ใบจริงรวมยอดมัดจำไว้แล้ว) · DP แสดงแยก
+      const _dp = live.filter(i => i.type === 'deposit_pi');
+      const sumGross = _AE.sumAmt(live.filter(i => i.type !== 'deposit_pi'), i => _AE.invGrossInclVat(i).gross);
+      const sumDp = _AE.sumAmt(_dp, i => _AE.invGrossInclVat(i).gross);
+      const sumPaid = live.reduce((s,i) => s + (i.paidAmount||0), 0);
+      const sumRemain = live.reduce((s,i) => s + Math.max(0,(i.netPayable||0)-(i.paidAmount||0)), 0);
       const noTaxInv = rows.filter(i => !i.supTaxInvNumber).length;
       return h('div', { className:'text-sm text-gray-600 mb-2 flex flex-wrap gap-x-4 gap-y-1' },
         h('span', null, h('b', null, rows.length), ' ใบ'),
-        h('span', null, 'สุทธิ ', h('b', { className:'text-gray-800' }, fmtCur(sumNet))),
+        h('span', { 'data-testid':'pi-sum-gross' }, 'ยอดรวม VAT ', h('b', { className:'text-gray-800' }, fmtCur(sumGross))),
+        _dp.length > 0 && h('span', { 'data-testid':'pi-sum-dp', className:'text-amber-700' }, 'มัดจำ (DP) ', h('b', null, fmtCur(sumDp))),
+        h('span', { 'data-testid':'pi-sum-transfer', title:'ยอดโอนทั้งหมด = รวม VAT − หัก ณ ที่จ่าย/CN/มัดจำ (นับใบ DP)' }, 'ยอดโอน ', h('b', { className:'text-gray-800' }, fmtCur(_AE.sumAmt(live, i => _AE.invAmtView(i).transfer)))),
         h('span', null, '✅ จ่ายแล้ว ', h('b', { className:'text-green-700' }, fmtCur(sumPaid))),
         h('span', null, '🔴 ค้างจ่าย ', h('b', { className:'text-red-700' }, fmtCur(sumRemain))),
         noTaxInv > 0 && h('span', { className:'text-orange-600' },
@@ -86457,7 +86752,7 @@ function INVAllOverviewTab({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'GR'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'ใบลดหนี้ (CN)'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'Supplier'),
-                h('th', { className:'px-3 py-2 text-right text-xs' }, 'สุทธิ'),
+                h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดรวม VAT ตามใบกำกับ · บรรทัดเล็ก = ยอดโอนหลังหัก ณ ที่จ่าย/CN' }, 'ยอดรวม VAT'),   // 🆕 AMOUNT-INCL-VAT B3.1
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'คงเหลือ'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
               )),
@@ -86565,7 +86860,8 @@ function INVAllOverviewTab({ state, dispatch, user }){
                       }));
                   })()),
                   h('td', { className:'px-3 py-2 text-sm' }, sup?.name || i.supplierNameFreeform || '-', sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
-                  h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(i.netPayable||0)),
+                  h('td', { className:'px-3 py-2 text-right font-medium' }, (() => { const v = _AE.invAmtView(i);   // 🆕 AMOUNT-INCL-VAT B3.1
+                    return h(AmtCell, { main:v.gross, sub:_invSub(v), tip:_amtTip(v), testid:'pi-amt' }); })()),
                   h('td', { className: cls('px-3 py-2 text-right',
                     remain > 0.01 ? 'text-red-600 font-bold' : 'text-gray-400') }, fmtCur(remain)),
                   h('td', { className:'px-3 py-2 text-center' },
@@ -86618,6 +86914,7 @@ function RecurringINVTab({ state, dispatch, user }){
   const { WHT_CATEGORIES, genWHNumber } = global.ERP;
   const [edit, setEdit] = useState(null);   // 'new' | template | null
   const templates = state.recurringINVs || [];
+  const _recurActive = templates.filter(t => t.active !== false);   // 🆕 UAT S2
   const today = getToday();
   const thisMonth = today.slice(0,7);
 
@@ -86702,7 +86999,7 @@ function RecurringINVTab({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'Supplier'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'สาขา'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'ประเภท'),
-                h('th', { className:'px-3 py-2 text-right text-xs' }, 'ยอด'),
+                h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดรวม VAT ต่อเดือน · บรรทัดเล็ก = ก่อน VAT / ยอดโอนหลังหัก ณ ที่จ่าย' }, 'ยอดรวม VAT'),   // 🆕 AMOUNT-INCL-VAT B3.3
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'VAT %'),
                 h('th', { className:'px-3 py-2 text-right text-xs' }, 'WHT'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'วันที่สร้าง'),
@@ -86732,7 +87029,11 @@ function RecurringINVTab({ state, dispatch, user }){
                     // 🆕 ACCT-V2: รายการจากทะเบียนที่ผูกไว้ (GL ตามบัญชีของรายการ)
                     t.expenseItemId && (() => { const it = (state.expenseItems||[]).find(x => x.id === t.expenseItemId);
                       return h('div', { className:'text-[10px] text-indigo-700', title: it ? `บัญชี ${it.accountCode||'5300'}` : 'รายการถูกลบจากทะเบียน' }, '🧾 ', it ? `${it.code||''} ${it.name}` : '(ไม่พบรายการ)'); })()),
-                  h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(t.amount||0)),
+                  h('td', { className:'px-3 py-2 text-right font-medium' }, (() => { const v = _recurAmt(t);   // 🆕 AMOUNT-INCL-VAT B3.3
+                    return h('div', { className:'text-right', 'data-testid':'recur-amt' },
+                      h('div', { 'data-testid':'amt-main' }, fmtCur(v.gross)),
+                      Math.abs(v.gross - v.exVat) > 0.005 && h('div', { className:'text-[10px] text-gray-400 font-normal' }, 'ก่อน VAT ', fmtCur(v.exVat)),
+                      v.wht > 0.005 && h('div', { className:'text-[10px] text-blue-700 font-normal', 'data-testid':'amt-sub' }, 'โอน ', fmtCur(v.transfer))); })()),
                   h('td', { className:'px-3 py-2 text-right text-xs' }, t.vatRate||0, '%'),
                   h('td', { className:'px-3 py-2 text-right text-xs text-red-600' },
                     wht > 0 ? fmtCur(wht) : '-'),
@@ -86750,7 +87051,16 @@ function RecurringINVTab({ state, dispatch, user }){
                         onClick:()=>{ if(confirm(`ลบ template "${t.name}"?`))
                           dispatch({ type:'DELETE_RECURRING', data:t.id }); }}, '🗑️'))));
               })
-            ))),
+            ),
+            templates.length > 0 && h('tfoot', { className:'bg-gray-50 border-t-2' },   // 🆕 AMOUNT-INCL-VAT B3.3: บรรทัดรวมต่อเดือน
+              h('tr', { 'data-testid':'recur-total' },
+                // 🆕 UAT S2: นับเฉพาะ template ที่เปิดใช้ (ปิดใช้ไม่ออกบิลทุกเดือน)
+                h('td', { colSpan:4, className:'px-3 py-2 text-right text-xs text-gray-600' }, `รวมต่อเดือน ${_recurActive.length} รายการ`,
+                  _recurActive.length < templates.length ? ` (ไม่นับปิดใช้ ${templates.length - _recurActive.length})` : ''),
+                h('td', { className:'px-3 py-2 text-right' },
+                  h('div', { className:'font-bold' }, fmtCur(_AE.sumAmt(_recurActive, t => _recurAmt(t).gross))),
+                  h('div', { className:'text-[10px] text-blue-700' }, 'โอน ', fmtCur(_AE.sumAmt(_recurActive, t => _recurAmt(t).transfer)))),
+                h('td', { colSpan:5 }, ''))))),
     edit && h(RecurringEditModal, {
       key: edit === 'new' ? 'new' : edit.id,
       template: edit === 'new' ? null : edit,
@@ -87030,6 +87340,13 @@ function INVQueueTab({ state, dispatch, user }){
       grTaxInvNo(g), g.deliveryNoteNo]);   // 🆕 DOC-GR: เลขใบกำกับ/ใบส่งของที่คลังบันทึกตอนรับ
   }), [pendingGRs, q, state.suppliers]);
 
+  // 🆕 AMOUNT-INCL-VAT B3.2: มูลค่า GR รวม VAT รายบรรทัด (7%/0%, ราคารวม/แยก VAT) — คิดครั้งเดียวต่อ GR
+  const grGross = useMemo(() => {
+    const m = new Map();
+    for(const g of pendingGRs){ const po = (state.pos || []).find(p => p.id === g.poId); m.set(g.id, _AE.grGrossInclVat(g, po)); }
+    return m;
+  }, [pendingGRs, state.pos]);
+  const grG = (g) => (grGross.get(g.id) || _AE.grGrossInclVat(g, (state.pos || []).find(p => p.id === g.poId)));
   // Group by supplier
   const bySupplier = useMemo(() => {
     const m = {};
@@ -87039,10 +87356,10 @@ function INVQueueTab({ state, dispatch, user }){
         grs: [], total: 0,
       };
       m[g.supplierId].grs.push(g);
-      m[g.supplierId].total += g.totalValue||0;
+      m[g.supplierId].total = Number((m[g.supplierId].total + grG(g).gross).toFixed(2));   // 🆕 AMOUNT-INCL-VAT: รวม VAT
     }
     return Object.values(m).sort((a,b) => b.total - a.total);
-  }, [filteredGRs, state.suppliers]);
+  }, [filteredGRs, state.suppliers, grGross]);
 
   // Pending sup inv (INVs ที่ยังไม่มีเลขจาก supplier)
   const pendingSupInv = (state.invoices||[]).filter(i =>
@@ -87065,8 +87382,9 @@ function INVQueueTab({ state, dispatch, user }){
     h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3 mb-4' },
       h(KPICard, { label:'GR รอตั้งหนี้', value:pendingGRs.length,
         sub:`${bySupplier.length} suppliers`, color:'orange', icon:'⏳' }),
-      h(KPICard, { label:'มูลค่า GR รอ',
-        value:fmtCur(pendingGRs.reduce((s,g)=>s+(g.totalValue||0),0)),
+      h(KPICard, { label:'มูลค่า GR รอ (รวม VAT)',   // 🆕 AMOUNT-INCL-VAT B3.2
+        value:fmtCur(_AE.sumAmt(pendingGRs, g => grG(g).gross)),
+        sub:`ก่อน VAT ${fmtCur(_AE.sumAmt(pendingGRs, g => grG(g).exVat))}`,
         color:'blue', icon:'💰' }),
       h(KPICard, { label:'INV รอเลข supplier',
         value:pendingSupInv.length,
@@ -87187,7 +87505,9 @@ function INVQueueTab({ state, dispatch, user }){
         pendingSupInv.slice(0,8).map(i =>
           h('button', { key:i.id, onClick:()=>setUpdateSupInv(i),
             className:'text-xs px-2 py-1 bg-white border border-yellow-300 rounded hover:bg-yellow-100' },
-            i.invNumber, ' · ', fmtCur(i.netPayable||0), h(VatAdjPill, { inv:i }))
+            i.invNumber, ' · ', (() => { const v = _AE.invAmtView(i);   // 🆕 AMOUNT-INCL-VAT B3.2: ยอดรวม VAT (+ โอน เมื่อต่าง)
+              return h('span', { title:_amtTip(v) + (v.differs ? ' · ' + _invSub(v) : '') }, fmtCur(v.gross), v.differs ? h('span', { className:'text-[10px] text-blue-700 ml-1' }, `(โอน ${fmtCur(v.transfer)})`) : null); })(),
+            h(VatAdjPill, { inv:i }))
         )
       )
     ),
@@ -87230,7 +87550,7 @@ function INVQueueTab({ state, dispatch, user }){
                     h('th', { className:'px-3 py-2 text-left',
                       title:'เครดิต (วัน) ตามทะเบียน supplier · ครบกำหนด = วันรับของ + เครดิต · โหมดจ่ายตามที่จัดซื้อเลือกใน PO' },
                       '📅 เครดิต / ครบกำหนด'),
-                    h('th', { className:'px-3 py-2 text-right' }, 'มูลค่า'),
+                    h('th', { className:'px-3 py-2 text-right', title:'มูลค่า GR รวม VAT (คิด VAT รายบรรทัดตามอัตราของบรรทัด) · บรรทัดเล็ก = ก่อน VAT' }, 'มูลค่า (รวม VAT)'),
                     h('th', { className:'px-3 py-2 text-center' }, 'จัดการ'),
                   )
                 ),
@@ -87298,7 +87618,8 @@ function INVQueueTab({ state, dispatch, user }){
                           title:'จัดซื้อเลือก PO แบบเครดิต แต่ทะเบียน supplier ยังไม่ได้ตั้งเครดิต (วัน) — ตรวจกับเอกสาร/ตั้งค่า supplier ก่อนตั้งหนี้',
                           className:'text-[10px] text-orange-700 bg-orange-100 rounded px-1 mt-0.5 inline-block' },
                           '⚠️ PO เครดิต แต่ supplier ยังไม่ตั้งวัน')),
-                      h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(g.totalValue||0)),
+                      h('td', { className:'px-3 py-2 text-right font-medium' }, (() => { const v = grG(g);   // 🆕 AMOUNT-INCL-VAT B3.2
+                        return h(AmtCell, { main:v.gross, subCls:'text-gray-400', sub: Math.abs(v.gross - v.exVat) > 0.005 ? 'ก่อน VAT ' + fmtCur(v.exVat) : '', tip:`ก่อน VAT ${fmtCur(v.exVat)} · VAT ${fmtCur(v.vat)}`, testid:'grq-amt' }); })()),
                       h('td', { className:'px-3 py-2 text-center' },
                         h('div', { className:'flex gap-1 justify-center flex-wrap' },
                           GRDetailModal && h(Button, { variant:'secondary', size:'sm', onClick:()=>setDetail(g) }, 'ดู'),
@@ -87523,16 +87844,19 @@ function PayApprovalTab({ state, dispatch, user }){
 
   // สรุปทั้งคิว (ตาม pendingF ไม่ใช่หน้าที่แสดง): ตามวันนัด + ตามบัญชีที่ขอโอน
   const queueSummary = useMemo(() => {
-    const byDate = dateGroups.map(g => ({ date:g.date, key:g.key, count:g.count, total:g.total }));
+    // 🆕 AMOUNT-INCL-VAT B4.4: gross = ยอดรวม VAT ของคำขอ (ค่า total = ยอดโอน คงเดิม)
+    const gOf = (p) => _AE.payAmtView ? _AE.payAmtView(state, p).gross : (Number(p.amount) || 0);
+    const byDate = dateGroups.map(g => ({ date:g.date, key:g.key, count:g.count, total:g.total, gross: _AE.sumAmt ? _AE.sumAmt(g.pays || [], gOf) : g.total }));
     const bm = {};
     for(const p of pendingF){
       const k = p.bankId || p.requestedBankId || '_none';
-      if(!bm[k]) bm[k] = { key:k, label: bankLabelOf(p), count:0, total:0 };
-      bm[k].count++; bm[k].total += Number(p.amount)||0;
+      if(!bm[k]) bm[k] = { key:k, label: bankLabelOf(p), count:0, total:0, gross:0 };
+      bm[k].count++; bm[k].total += Number(p.amount)||0; bm[k].gross = Number((bm[k].gross + gOf(p)).toFixed(2));
     }
     const byBank = Object.values(bm).sort((a,b) => (a.key === '_none') - (b.key === '_none') || b.total - a.total);
-    return { byDate, byBank, count: pendingF.length, total: pendingF.reduce((s,p) => s + (Number(p.amount)||0), 0) };
-  }, [dateGroups, pendingF, state.bankAccounts]);
+    return { byDate, byBank, count: pendingF.length, total: pendingF.reduce((s,p) => s + (Number(p.amount)||0), 0),
+      gross: _AE.sumAmt ? _AE.sumAmt(pendingF, gOf) : 0 };
+  }, [dateGroups, pendingF, state.bankAccounts, state.invoices]);
 
   const reject = (pay) => {
     const reason = prompt(`ปฏิเสธคำขอจ่าย ${fmtCur(pay.amount)}?\n\nเหตุผล:`);
@@ -87734,7 +88058,7 @@ function PayApprovalTab({ state, dispatch, user }){
                   h('th', { className:'px-3 py-2 text-left text-xs' }, 'PV'),
                   h('th', { className:'px-3 py-2 text-left text-xs' }, 'PI'),
                   h('th', { className:'px-3 py-2 text-left text-xs' }, 'Supplier'),
-                  h('th', { className:'px-3 py-2 text-right text-xs' }, 'จำนวน'),
+                  h('th', { className:'px-3 py-2 text-right text-xs' }, 'ยอดโอน'),
                   h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
                   h('th', { className:'px-3 py-2 text-left text-xs' }, 'อนุมัติโดย'),
                   h('th', { className:'px-3 py-2 text-center text-xs' }, 'พิมพ์')
@@ -87753,7 +88077,10 @@ function PayApprovalTab({ state, dispatch, user }){
                         h('span', { className:'inline-block text-[10px] font-sans bg-indigo-100 text-indigo-800 rounded px-1 mr-1' }, `PV รวม ${_payInvIds(p).length} ใบ`),
                         _payPiLabel(state, p)) : (inv?.invNumber||'-')),
                     h('td', { className:'px-3 py-2 text-sm' }, sup?.name||'-', sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
-                    h('td', { className:'px-3 py-2 text-right font-medium' }, fmtCur(p.amount||0)),
+                    h('td', { className:'px-3 py-2 text-right font-medium' }, (() => {   // 🆕 AMOUNT-INCL-VAT B4.4
+                      const v = _AE.payAmtView ? _AE.payAmtView(state, p) : null;
+                      return h(AmtCell, { main:p.amount || 0, mainCls:'', subCls:'text-gray-500', sub: v && v.differs ? _paySub(v, 0) : '' });
+                    })()),
                     h('td', { className:'px-3 py-2 text-center' },
                       h('span', { className: cls('text-xs px-2 py-0.5 rounded',
                         status === 'approved' ? 'bg-green-100 text-green-700'
@@ -87847,7 +88174,7 @@ function PayApprovalTab({ state, dispatch, user }){
                       h('th', { className:'px-3 py-2 text-left text-xs' }, 'PI'),
                       h('th', { className:'px-3 py-2 text-left text-xs' }, 'ใบกำกับ/ใบแจ้งหนี้ Sup'),
                       h('th', { className:'px-3 py-2 text-left text-xs' }, 'บัญชีที่ขอโอน'),
-                      h('th', { className:'px-3 py-2 text-right text-xs' }, 'จำนวน'),
+                      h('th', { className:'px-3 py-2 text-right text-xs' }, 'ยอดโอน'),
                       h('th', { className:'px-3 py-2 text-left text-xs' }, 'ขอโดย'),
                       h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'))),
                   h('tbody', { className:'divide-y' },
@@ -87888,7 +88215,10 @@ function PayApprovalTab({ state, dispatch, user }){
                           h('div', { className: (p.bankId || p.requestedBankId) ? 'text-gray-800' : 'text-gray-400 italic' }, bankLabelOf(p)),
                           h('div', { className:'text-[10px] text-gray-500' }, PAY_METHODS.find(m=>m.v===p.method)?.label || p.method || 'โอนธนาคาร'),
                           waitGm && h('span', { className:'inline-block mt-0.5 text-[10px] bg-amber-100 text-amber-800 border border-amber-300 rounded px-1', title:'ยอด ≥100,000 ส่งเข้าคำขออนุมัติ (GM) แล้ว — จ่ายจริงเมื่ออนุมัติครบ' }, '⏳ รอ GM')),
-                        h('td', { className:'px-3 py-2 text-right font-bold text-red-700 whitespace-nowrap' }, fmtCur(p.amount)),
+                        h('td', { className:'px-3 py-2 text-right font-bold text-red-700 whitespace-nowrap' }, (() => {   // 🆕 AMOUNT-INCL-VAT B4.4
+                          const v = _AE.payAmtView ? _AE.payAmtView(state, p) : null;
+                          return h(AmtCell, { main:p.amount, mainCls:'', subCls:'text-gray-500', testid:'appr-amt', sub: v && v.differs ? _paySub(v, 0) : '' });
+                        })()),
                         h('td', { className:'px-3 py-2 text-xs text-gray-500 break-all' }, userName(p.by),
                           h('div', { className:'text-[10px] text-gray-400 whitespace-nowrap' }, 'ขอ ', fmtDate(p.date))),
                         h('td', { className:'px-3 py-2 text-center' },
@@ -87926,14 +88256,17 @@ function PayApprovalTab({ state, dispatch, user }){
                             h('td', { className:'px-3 py-1 font-mono break-all' },
                               md ? h('span', null, h('span', { className:'text-[10px] text-gray-500 font-sans' }, md.kind, ' '), md.no) : h('span', { className:'text-gray-400' }, '-')),
                             h('td', { className:'px-3 py-1 text-[10px] text-gray-400 break-all' }, mi ? `ค้าง ${fmtCur(Number(((mi.netPayable||0) - (mi.paidAmount||0)).toFixed(2)))}` : ''),
-                            h('td', { className:'px-3 py-1 text-right font-mono text-gray-800 whitespace-nowrap' }, fmtCur(m.amount)),
+                            h('td', { className:'px-3 py-1 text-right font-mono text-gray-800 whitespace-nowrap' }, fmtCur(m.amount),
+                              (() => { const vm = _AE.payAmtView && _AE.payAmtView(state, p).members.find(x => x.inv && mi && x.inv.id === mi.id);   // 🆕 AMOUNT-INCL-VAT: รวม VAT ต่อใบ
+                                return vm && Math.abs(vm.gross - vm.transfer) > 0.005 ? h('div', { className:'text-[10px] text-gray-500 font-sans' }, 'รวม VAT ', fmtCur(vm.gross)) : null; })()),
                             h('td', { colSpan:2, className:'px-3 py-1' }, ''));
                         }));
                     })),
                   h('tfoot', null,
                     h('tr', { className:'bg-gray-50 font-bold' },
                       h('td', { colSpan:5, className:'px-3 py-2 text-right text-xs' }, `รวมวันที่ ${g.key === '_none' ? 'ไม่ระบุ' : fmtDate(g.date)} (${g.count} บิล)`),
-                      h('td', { className:'px-3 py-2 text-right text-red-700' }, fmtCur(g.total)),
+                      h('td', { className:'px-3 py-2 text-right text-red-700' }, fmtCur(g.total),
+                        _grossNote(g.total, _AE.sumAmt && _AE.payAmtView ? _AE.sumAmt(g.pays || [], x => _AE.payAmtView(state, x).gross) : null)),
                       h('td', { colSpan:2 }, ''))))));
           }),
           // ---------- สรุปทั้งคิว (ตาม pendingF) ----------
@@ -87945,11 +88278,11 @@ function PayApprovalTab({ state, dispatch, user }){
                   queueSummary.byDate.map(d => h('tr', { key:d.key },
                     h('td', { className:'px-3 py-1.5 text-xs' }, d.key === '_none' ? 'ไม่ระบุวันนัด' : fmtDateFull(d.date)),
                     h('td', { className:'px-3 py-1.5 text-xs text-center text-gray-500' }, `${d.count} บิล`),
-                    h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' }, fmtCur(d.total))))),
+                    h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' }, fmtCur(d.total), _grossNote(d.total, d.gross))))),
                 h('tfoot', null, h('tr', { className:'bg-gray-50 font-bold' },
                   h('td', { className:'px-3 py-1.5 text-xs' }, 'รวมทั้งคิว'),
                   h('td', { className:'px-3 py-1.5 text-xs text-center' }, `${queueSummary.count} บิล`),
-                  h('td', { className:'px-3 py-1.5 text-right font-mono text-xs text-red-700' }, fmtCur(queueSummary.total)))))),
+                  h('td', { className:'px-3 py-1.5 text-right font-mono text-xs text-red-700' }, fmtCur(queueSummary.total), _grossNote(queueSummary.total, queueSummary.gross)))))),
             h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
               h('div', { className:'px-3 py-2 bg-gray-50 border-b text-xs font-bold text-gray-700' }, '🏦 รวมตามบัญชีที่ขอโอน'),
               h('table', { className:'w-full text-sm' },
@@ -87957,11 +88290,11 @@ function PayApprovalTab({ state, dispatch, user }){
                   queueSummary.byBank.map(b => h('tr', { key:b.key },
                     h('td', { className: cls('px-3 py-1.5 text-xs', b.key === '_none' && 'text-gray-400 italic') }, b.label),
                     h('td', { className:'px-3 py-1.5 text-xs text-center text-gray-500' }, `${b.count} บิล`),
-                    h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' }, fmtCur(b.total))))),
+                    h('td', { className:'px-3 py-1.5 text-right font-mono text-xs' }, fmtCur(b.total), _grossNote(b.total, b.gross))))),
                 h('tfoot', null, h('tr', { className:'bg-gray-50 font-bold' },
                   h('td', { className:'px-3 py-1.5 text-xs' }, 'รวมทั้งคิว'),
                   h('td', { className:'px-3 py-1.5 text-xs text-center' }, `${queueSummary.count} บิล`),
-                  h('td', { className:'px-3 py-1.5 text-right font-mono text-xs text-red-700' }, fmtCur(queueSummary.total))))))),
+                  h('td', { className:'px-3 py-1.5 text-right font-mono text-xs text-red-700' }, fmtCur(queueSummary.total), _grossNote(queueSummary.total, queueSummary.gross))))))),
           h(Pager, { pg: pgPending, label:'วันนัดจ่าย' })
         )),
     approveTarget && h(ApprovePaymentModal, {
@@ -88543,7 +88876,7 @@ function PaymentCenter({ state, dispatch, user }){
 
     h('div', { className:'grid grid-cols-2 md:grid-cols-5 gap-3 mb-4' },
       h(KPICard, { label:'INV รอจ่าย', value:invsToPay.length,
-        sub:`รวม ${fmtCur(invsToPay.reduce((s,i)=>s+(i.netPayable-(i.paidAmount||0)),0))}`,
+        sub:`ยอดโอนรวม ${fmtCur(invsToPay.reduce((s,i)=>s+(i.netPayable-(i.paidAmount||0)),0))}`,   // 🆕 AMOUNT-INCL-VAT B4.2: ป้ายยอดโอน (ค่าเดิม)
         color:'red', icon:'💸' }),
       h(KPICard, { label:'เลยกำหนด',
         value:invsToPay.filter(i => i.dueDate < today).length,
@@ -88598,7 +88931,8 @@ function PaymentCenter({ state, dispatch, user }){
           className:`w-full min-h-[44px] text-left font-bold text-amber-900 text-sm flex items-center gap-2 flex-wrap ${reqBoxShown ? 'mb-2' : ''}` },
         h('span', { className:'inline-block w-4 text-center' }, reqBoxShown ? '▾' : '▸'),
         h('span', null, `⏳ INV ที่ส่งขออนุมัติจ่ายอยู่ — ${pendingRequests.length} คำขอ${pendingInvCount !== pendingRequests.length ? ` (${pendingInvCount} ใบ)` : ''}`),
-        h('span', { className:'font-normal text-xs text-amber-800' }, `รวมขอจ่าย ${fmtCur(pendingReqTotal)}`),
+        h('span', { className:'font-normal text-xs text-amber-800', title:'ยอดโอน (เงินที่จะออกจากบัญชีจริง)' }, `รวมขอจ่าย ${fmtCur(pendingReqTotal)}`,   // 🆕 AMOUNT-INCL-VAT B4.2: ป้าย + รวม VAT
+          _grossNote(pendingReqTotal, _AE.sumAmt && _AE.payAmtView ? _AE.sumAmt(pendingRequests, x => _AE.payAmtView(state, x).gross) : null)),
         reqOldest > 0 && h('span', { 'data-testid':'pay-req-oldest', className: cls('font-normal text-xs px-1.5 rounded', reqOldest > REQ_OLD_DAYS ? 'bg-red-100 text-red-700 font-semibold' : 'text-amber-800') },
           `เก่าสุด ${reqOldest} วัน`),
         reqMatchIds.size > 0 && h('span', { 'data-testid':'pay-req-found', className:'font-normal text-xs bg-yellow-200 text-yellow-900 px-1.5 rounded' },
@@ -88622,7 +88956,8 @@ function PaymentCenter({ state, dispatch, user }){
                     h('span', { className:'font-mono text-xs text-red-700' }, piNos.slice(0, 3).join(', '), members.length > 3 ? ` +${members.length - 3}` : ''))
                 : h('span', { className:'font-mono text-xs text-red-700' }, inv?.invNumber || p.invId),
               ' · ', sup?.name || inv?.supplierNameFreeform || '-',
-              h('span', { className:'ml-2 text-gray-600' }, 'ขอจ่าย ', h('b', null, fmtCur(p.amount||0))),
+              h('span', { className:'ml-2 text-gray-600' }, 'ขอจ่าย ', h('b', null, fmtCur(p.amount||0)),
+                _grossNote(p.amount || 0, _AE.payAmtView ? _AE.payAmtView(state, p).gross : null)),   // 🆕 AMOUNT-INCL-VAT B4.2
               h('span', { className:'ml-2 text-[11px] text-gray-500' }, 'โดย ', p.by||'-'),
               p.tagId && h('span', { className:'ml-2' }, h(PayTagChip, { state, p })),   // 🆕 PAY-TAGS T4
               reqDateOf(p) && h('span', { className: cls('ml-2 text-[11px]', age > REQ_OLD_DAYS ? 'text-red-700 font-semibold' : 'text-gray-500') },
@@ -89091,7 +89426,7 @@ function SupplierMemoTab({ state, dispatch, user }){
                 h('th', { className:'px-3 py-2 text-left text-xs', title:'วันที่บนเอกสาร supplier (เดือนภาษี) · วันที่ลงบัญชีแสดงเป็นบรรทัดย่อยเมื่อต่างกัน' }, 'วันที่เอกสาร (ลงบัญชี)'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'Supplier'),
                 h('th', { className:'px-3 py-2 text-left text-xs' }, 'อ้างอิง'),
-                h('th', { className:'px-3 py-2 text-right text-xs' }, 'ยอด'),
+                h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดรวม VAT ตามใบ (ก่อน VAT + VAT) · บรรทัดเล็ก = ก่อน VAT / คงเหลือใช้ได้' }, 'ยอดรวม VAT'),   // 🆕 AMOUNT-INCL-VAT B3.4
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'สถานะ'),
                 h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'))),
             h('tbody', { className:'divide-y' },
@@ -89156,7 +89491,10 @@ function SupplierMemoTab({ state, dispatch, user }){
                           readOnly:h('span', { className:'text-[10px] text-amber-700' }, '⏳ INV ยังไม่มี Tax INV') }))
                       : h('div', { className:'text-[10px] text-amber-700' }, '⏳ INV ยังไม่มี Tax INV')),
                     !refPo && !refInv && m.noRefInvReason && h('div', { className:'text-[10px] text-gray-500', title:m.noRefInvReason }, '— ไม่ผูก INV')),
-                  h('td', { className:'px-3 py-2 text-right font-mono' }, fmtCur(m.netAmount),
+                  h('td', { className:'px-3 py-2 text-right font-mono' }, (() => { const v = _AE.memoAmtView(m);   // 🆕 AMOUNT-INCL-VAT B3.4
+                      return h('div', { 'data-testid':'memo-amt' }, h('div', { 'data-testid':'amt-main' }, fmtCur(v.gross)),
+                        Math.abs(v.gross - v.exVat) > 0.005 && h('div', { className:'text-[10px] text-gray-400 font-sans' }, 'ก่อน VAT ', fmtCur(v.exVat)),
+                        v.partial && !v.cancelled && h('div', { className:'text-[10px] text-blue-700 font-sans', 'data-testid':'amt-sub' }, 'คงเหลือใช้ได้ ', fmtCur(v.remaining))); })(),
                     m.status === 'refund_pending' && (Number(m.refundAmount)||0) > 0 && h('div', { className:'text-[10px] text-amber-700' },
                       'รับแล้ว ', fmtCur(m.refundAmount), ' · ค้าง ', fmtCur(m.refundOutstanding != null ? m.refundOutstanding : (Number(m.netAmount)||0) - (Number(m.refundAmount)||0)))),
                   h('td', { className:'px-3 py-2 text-center' },
@@ -89264,7 +89602,13 @@ function SupplierMemoTab({ state, dispatch, user }){
                       '💬 ', (m.reasonNote||'').slice(0,20)),
                     m.awaitDocNote && h('div', { className:'text-[10px] text-amber-700 mt-1', title: m.awaitDocNote },
                       '🔔 ', (m.awaitDocNote||'').slice(0,20))));
-              }))),
+              })),
+            memos.length > 0 && h('tfoot', { className:'bg-gray-50 border-t-2' },   // 🆕 AMOUNT-INCL-VAT B3.4: CN ลบ / DN บวก · ไม่นับใบยกเลิก
+              h('tr', { 'data-testid':'memo-total' },
+                h('td', { colSpan:5, className:'px-3 py-2 text-right text-xs text-gray-600' }, 'รวมยอดรวม VAT (CN ลบ / DN บวก · ไม่นับยกเลิก)'),
+                h('td', { className:'px-3 py-2 text-right font-mono font-bold' },
+                  fmtCur(_AE.sumAmt(memos.filter(m => m.status !== 'cancelled'), m => { const v = _AE.memoAmtView(m); return v.sign * v.gross; }))),
+                h('td', { colSpan:2 }, '')))),
           h(Pager, { pg, label:'Memo' })),
 
     showCreate && CDMModal && h(CDMModal, { state, dispatch, user, onClose:()=>setShowCreate(false) }),
@@ -90497,7 +90841,10 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
                   nonDirect && h('div', { className:'text-[10px] text-red-700 font-sans' }, 'ต้องห้ามใช้กับ PI ที่มี PO ไม่ได้')),
                 h('td', { className:'px-2 py-1 text-xs' }, sup?.name || i.supplierNameFreeform || '-', sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
                 h('td', { className:'px-2 py-1 text-xs' }, fmtDate(i.dueDate)),
-                h('td', { className:'px-2 py-1 text-right text-xs' }, fmtCur(remain)),
+                h('td', { className:'px-2 py-1 text-right text-xs' }, (() => {   // 🆕 AMOUNT-INCL-VAT B4.3: คงเหลือ (ยอดโอน) + รวม VAT/จ่ายแล้ว
+                  const v = _AE.invAmtView ? _AE.invAmtView(i) : null;
+                  return h(AmtCell, { main:remain, mainCls:'', subCls:'text-gray-500', sub:_paySub(v, v ? v.paidCash : 0) });
+                })()),
                 h('td', { className:'px-2 py-1 text-right' },
                   h('input', { type:'number', step:'0.01', min:0, max:remain, value:amounts[i.id]||0,
                     // 🆕 กันจ่ายเกินยอดค้าง — clamp ที่ช่องกรอก (ตรวจซ้ำอีกทีตอนส่งและตอนอนุมัติ)
@@ -90605,7 +90952,7 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
           h('th', { className:'px-3 py-2 text-left text-xs', title:'เลขใบกำกับภาษีของ supplier · ยังไม่ได้คีย์ = แสดงเลขใบแจ้งหนี้ (ถ้ามี)' }, 'เลขใบกำกับ'),
           h('th', { className:'px-3 py-2 text-left text-xs' }, 'Supplier'),
           h('th', { className:'px-3 py-2 text-left text-xs' }, 'Source'),
-          h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดคงเหลือที่ต้องจ่าย = สุทธิ − จ่ายแล้ว' }, 'ยอดจ่าย'),
+          h('th', { className:'px-3 py-2 text-right text-xs', title:'ยอดโอน = ยอดคงเหลือที่ต้องโอน (รวม VAT แล้ว − หัก ณ ที่จ่าย/CN − จ่ายแล้ว) · บรรทัดเล็ก = ยอดรวม VAT ตามใบ' }, 'ยอดโอน'),
           h('th', { className:'px-3 py-2 text-center text-xs' }, 'จัดการ'),
         )
       ),
@@ -90674,7 +91021,10 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
                   '📥 คีย์ใบกำกับ/ปรับ VAT ให้ตรงก่อนจ่าย')),
             h('td', { className:'px-3 py-2 text-sm' }, sup?.name || i.supplierNameFreeform, sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
             h('td', { className:'px-3 py-2 text-xs' }, sourceBadge),
-            h('td', { className:'px-3 py-2 text-right font-bold text-red-700' }, fmtCur(remain)),
+            h('td', { className:'px-3 py-2 text-right' }, (() => {   // 🆕 AMOUNT-INCL-VAT B4.1: ยอดโอน + บรรทัด 2 รวม VAT/หัก/จ่ายแล้ว
+              const _v = _AE.invAmtView ? _AE.invAmtView(i) : null;
+              return h(AmtCell, { main:remain, mainCls:'font-bold text-red-700', sub:_paySub(_v, _v ? _v.paidCash : 0), tip:_amtTip(_v), testid:'payq-amt' });
+            })()),
             h('td', { className:'px-3 py-2 text-center' },
               h('div', { className:'flex gap-1 justify-center flex-wrap' },
                 h(Button, { variant:'secondary', size:'sm', onClick:()=>setDetail(i) }, 'ดู'),
@@ -90704,10 +91054,32 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
             )
           );
         })
-      )
+      ),
+      _payqFoot(invs, state)
     ),
     h(Pager, { pg, label:'INV รอจ่าย' })
   );
+}
+// 🆕 AMOUNT-INCL-VAT B4.1: บรรทัดรวมคิวรอจ่าย (แถวที่กรองทุกหน้า) + ปุ่ม CSV ใหม่
+function _payqView(i){ const v = _AE.invAmtView(i); return { v, remain: Number(((Number(i.netPayable) || 0) - (Number(i.paidAmount) || 0)).toFixed(2)) }; }   // remain = สูตรเดียวกับเซลล์ในตาราง
+function _payqFoot(invs, state){
+  if(!_AE.invAmtView || !invs || !invs.length) return null;
+  const rows = invs.map(_payqView);
+  const gross = _AE.sumAmt(rows, r => r.v.gross), remain = _AE.sumAmt(rows, r => r.remain);
+  return h('tfoot', { className:'bg-gray-50 border-t-2' },
+    h('tr', { 'data-testid':'payq-total' },
+      h('td', { colSpan:7, className:'px-3 py-2 text-right text-xs text-gray-600' }, `รวม ${invs.length} ใบ`),
+      h('td', { className:'px-3 py-2 text-right' },
+        h('div', { className:'text-xs text-gray-500', 'data-testid':'payq-total-gross' }, 'รวม VAT ทั้งใบ ', fmtCur(gross)),
+        h('div', { className:'font-bold text-red-700', 'data-testid':'payq-total-remain' }, 'ยอดโอนคงเหลือ ', fmtCur(remain))),
+      h('td', { className:'px-3 py-2 text-center' },
+        h('button', { 'data-testid':'payq-csv', onClick:() => _payqCsv(invs, state), className:'text-xs px-2 py-1 border rounded bg-white hover:bg-gray-50' }, '📥 CSV'))));
+}
+function _payqCsv(invs, st){
+  const supName = (i) => ((st.suppliers || []).find(s => s.id === i.supplierId) || {}).name || i.supplierNameFreeform || '';
+  const rows = invs.map(i => { const { v, remain } = _payqView(i); const d = v.ded;
+    return [i.dueDate || '', i.invNumber || '', supName(i), v.gross, d.wht, Number((d.credit + d.rtv + d.deposit + d.offInv + d.adj).toFixed(2)), v.paidCash, remain]; });
+  exportCSV(`รอจ่าย_${getToday()}.csv`, [['วันนัด','PI','Supplier','ยอดรวม VAT','หัก ณ ที่จ่าย','CN/เครดิต/คืนของ/มัดจำ/คูปอง','จ่ายแล้ว','ยอดโอนคงเหลือ'], ...rows]);
 }
 
 // 🆕 FIX(risk): แนบสลิปย้อนหลังได้ — เดิม bulk-approve จ่ายโดยไม่มีสลิป และไม่มีที่ให้แนบทีหลัง
@@ -91164,6 +91536,11 @@ function PaidPaymentsTab({ state, dispatch, user }){
   // 🆕 PAID-ECOUNT (E3): แยกยอด จ่ายในระบบนี้ (ใช้กระทบยอดธนาคาร) / จ่ายใน Ecount (ประวัติ)
   const totalEcount = rows.filter(r => r.kind === 'ecount').reduce((s,r) => s + r.amount, 0);
   const totalHere = Number((total - totalEcount).toFixed(2));
+  // 🆕 AMOUNT-INCL-VAT B4.5: ยอดโอนแยกตามแหล่งเงิน (pure helper · แสดงอย่างเดียว)
+  const srcSplit = useMemo(() => _AE.paidSrcSplit ? _AE.paidSrcSplit(state, rows, { from:dr.startDate, to:dr.endDate }) : [],
+    [rows, state.invoices, state.pettyTxns, state.bankAccounts, dr.startDate, dr.endDate]);
+  const _srcFiltered = !!(q && String(q).trim()) || tagF !== 'all' || view !== 'all' || unprintedOnly;   // 🆕 UAT S3: ตัวกรองนอกเหนือช่วงวันที่
+  const rowAmt = (r, sub) => _AE.paidRowAmtView ? _AE.paidRowAmtView(state, r, sub ? { sub:true } : null) : null;
   const ecountInRows = rows.filter(r => r.kind === 'ecount').reduce((s, r) => s + (r.ecGroup ? r.subs.length : 1), 0);   // 🆕 PV-VOUCHER V2: นับเป็นบิล (บรรทัดรวม = n ใบ)
   // 🆕 PV-VOUCHER V2: บรรทัดรวม Ecount ที่กด ▸ ขยาย · คำค้นตรงกับบิลสมาชิก → ขยายให้อัตโนมัติ
   const [ecOpen, setEcOpen] = useState({});
@@ -91341,19 +91718,22 @@ function PaidPaymentsTab({ state, dispatch, user }){
   const pmCsv = (r) => { if(!pvPrintable(r)) return ''; const i = pvPrintInfo(r); return i ? i.count + ' ครั้ง · ล่าสุด ' + _pmDT(i.lastAt) : 'ยังไม่พิมพ์'; };   // PRINT-MARK K3
   const lineNdAmt = (r) => (r && r.ecGroup) ? (r.subs || []).reduce((a, x) => a + (Number(x.inv && x.inv.nonDeductibleAmount) || 0), 0) : (Number(r && r.inv && r.inv.nonDeductibleAmount) || 0);
   const exportRows = () => {
-    const csv = [['วันที่จ่ายจริง','PV','PI','Supplier','แหล่งเงิน','บัญชี/ประเภท','ต้องห้าม','จำนวน','โดย','สถานะ','ตรวจเงินสดย่อย','แท็ก','ขอจ่ายโดย','พิมพ์ใบสำคัญจ่ายแล้ว']];   // PRINT-MARK K3: ต่อท้าย (ครั้ง/วันที่ล่าสุด)   // 🆕 PAID-BY: 'โดย' = ผู้อนุมัติ/ผู้จ่ายเหมือนเดิม · 'ขอจ่ายโดย' = ผู้ส่งขออนุมัติ (ต่อท้าย ไม่เลื่อนคอลัมน์เดิม)   // 🆕 PAY-TAGS T4: คอลัมน์ท้าย 'แท็ก' (ส่งออกตามตัวกรอง rows)
+    const csv = [['วันที่จ่ายจริง','PV','PI','Supplier','แหล่งเงิน','บัญชี/ประเภท','ต้องห้าม','จำนวน','โดย','สถานะ','ตรวจเงินสดย่อย','แท็ก','ขอจ่ายโดย','พิมพ์ใบสำคัญจ่ายแล้ว',
+      'ยอดรวม VAT','หัก ณ ที่จ่าย','CN/เครดิต/คืนของ/มัดจำ/คูปอง','ยอดโอน']];   // PRINT-MARK K3: ต่อท้าย (ครั้ง/วันที่ล่าสุด)   // 🆕 PAID-BY: 'โดย' = ผู้อนุมัติ/ผู้จ่ายเหมือนเดิม · 'ขอจ่ายโดย' = ผู้ส่งขออนุมัติ (ต่อท้าย ไม่เลื่อนคอลัมน์เดิม)   // 🆕 PAY-TAGS T4: คอลัมน์ท้าย 'แท็ก' (ส่งออกตามตัวกรอง rows)   // 🆕 AMOUNT-INCL-VAT: 4 คอลัมน์ต่อท้าย (คอลัมน์เดิมค่าเดิม · แถว Ecount 'จำนวน' ยังเป็นยอดก่อนหัก ณ ที่จ่าย)
+    const amtCols = (r) => { const v = rowAmt(r); if(!v) return ['', '', '', '']; const d = v.ded;
+      return [v.gross.toFixed(2), (d.wht || 0).toFixed(2), Number((d.total - (d.wht || 0)).toFixed(2)).toFixed(2), v.transfer.toFixed(2)]; };
     for(const r of rows){
       // 🆕 PAID-ECOUNT (E6): แถว Ecount → PV = เลขใบจ่าย Ecount · แหล่งเงิน "จ่ายใน Ecount" · สถานะ "จ่ายใน Ecount"
       if(r.kind === 'ecount'){
         csv.push([r.noPayDate ? '' : r.payDate, (r.ep && r.ep.voucher) || '', r.ecGroup ? r.subs.map(x => x.inv.invNumber).join(' | ') : (r.inv?.invNumber||''), r.sup?.name || r.inv?.supplierNameFreeform || '',
           'จ่ายใน Ecount', r.src.sub + (r.src.wht ? ` · หัก ณ ที่จ่าย ${r.src.wht.toFixed(2)}` : ''), lineDisallowed(r) ? 'ต้องห้าม' : '',
-          r.amount.toFixed(2), 'Ecount', 'จ่ายใน Ecount' + (r.noPayDate ? ' (ไม่มีวันจ่าย)' : ''), '', '', '', pmCsv(r)]);
+          r.amount.toFixed(2), 'Ecount', 'จ่ายใน Ecount' + (r.noPayDate ? ' (ไม่มีวันจ่าย)' : ''), '', '', '', pmCsv(r), ...amtCols(r)]);
         continue;
       }
       csv.push([r.payDate, r.p?.pvNumber||'', r.group ? (r.members||[]).map(m => (m.inv && m.inv.invNumber) || m.invoiceId).join(' | ') : (r.inv?.invNumber||''), r.sup?.name || r.inv?.supplierNameFreeform || '', r.src.text, r.src.sub,   // 🆕 PV-GROUP: PV รวม → ทุก PI คั่น |
         isDisallowed(r.inv) ? 'ต้องห้าม' : '', r.amount.toFixed(2), r.byName, r.reversed ? 'reversed' : 'จ่ายแล้ว',
         r.p && r.p.method === 'petty_cash' ? (r.p.pettyReviewedAt ? (r.p.pettyReviewFlag ? 'ติดปัญหา' : 'ตรวจแล้ว') + ' ' + userName(r.p.pettyReviewedBy) : 'ยังไม่ตรวจ') : '',
-        _payTagLabel(state, r.p), r.kind === 'pv' ? (r.reqName || '') : '', pmCsv(r)]);
+        _payTagLabel(state, r.p), r.kind === 'pv' ? (r.reqName || '') : '', pmCsv(r), ...amtCols(r)]);
     }
     exportCSV(`paid-payments-${today}.csv`, csv);
   };
@@ -91571,7 +91951,24 @@ function PaidPaymentsTab({ state, dispatch, user }){
       // 🆕 PAID-ECOUNT (E3): แยกยอด — กระทบยอดธนาคารใช้ "จ่ายในระบบนี้" เท่านั้น
       ecountInRows > 0 && h('span', { className:'ml-2 text-xs', 'data-testid':'paid-split' },
         '· จ่ายในระบบนี้ ', h('b', { className:'text-green-700', title:'ใช้ยอดนี้กระทบยอดธนาคาร/เงินสดย่อย' }, fmtCur(totalHere)),
-        ` · จ่ายใน Ecount (ประวัติ ${ecountInRows} ใบ) `, h('b', { className:'text-sky-700' }, fmtCur(totalEcount)))),
+        ` · จ่ายใน Ecount (ประวัติ ${ecountInRows} ใบ) `, h('b', { className:'text-sky-700' }, fmtCur(totalEcount)),
+        // 🆕 AMOUNT-INCL-VAT UAT N3: แถว Ecount โชว์ยอดหลังหัก ณ ที่จ่าย แต่แถบนี้คงยอดก่อนหัก (ตามสัญญา) → บอกให้ชัด
+        h('span', { className:'text-gray-500', 'data-testid':'paid-split-ecount-note',
+          title:'ยอดรวมจ่ายใน Ecount นับยอดก่อนหัก ณ ที่จ่าย (คงไว้ตามเดิม) — ยอดในแถว Ecount เป็นยอดหลังหัก ณ ที่จ่าย จึงอาจไม่เท่ากับผลรวมคอลัมน์' },
+          ' (ก่อนหัก ณ ที่จ่าย)'))),
+    // 🆕 AMOUNT-INCL-VAT B4.5: ชิปแยกยอดโอนตามแหล่งเงิน (บัญชีธนาคารทีละบัญชี / 💵 เงินสดย่อย / เงินสด / Ecount / ไม่มีวันจ่าย) — ใช้เทียบ bank statement
+    srcSplit.length > 0 && h('div', { className:'mb-3 flex flex-wrap gap-2 text-xs', 'data-testid':'paid-src-split' },
+      h('span', { className:'text-gray-500 self-center' }, 'ยอดโอนแยกตามแหล่งเงิน:'),
+      srcSplit.map(c => h('div', { key:c.key, 'data-src':c.key, className: cls('px-2 py-1 rounded border',
+          c.key === 'bank:_none' ? 'bg-orange-50 border-orange-300 text-orange-800' : c.key.startsWith('bank:') ? 'bg-green-50 border-green-200 text-green-900'
+          : (c.key.startsWith('ecount:') || c.key === 'nodate') ? 'bg-sky-50 border-sky-200 text-sky-900' : 'bg-gray-50 border-gray-200 text-gray-700') },
+        h('div', null, c.label, ' · ', h('b', { 'data-testid':'paid-src-transfer' }, fmtCur(c.transfer)), ` · ${c.count} รายการ`),
+        Math.abs(c.gross - c.transfer) > 0.005 && h('div', { className:'text-[10px] text-gray-500' }, 'รวม VAT ', fmtCur(c.gross)),
+        // 🆕 UAT S3: ยอดเติมเงินสดย่อยคิดตามช่วงวันที่อย่างเดียว → มีตัวกรองอื่น (ค้นหา/แท็ก/มุมมอง/ยังไม่พิมพ์) ให้บอกชัด และไม่บวกรวมถอน (จะไม่ตรงกับแถวที่เห็น)
+        c.topup && h('div', { className:'text-[10px] text-amber-800', 'data-testid':'paid-src-topup' },
+          _srcFiltered
+            ? `+ เติมเงินสดย่อย ${c.topup.n} รายการ ${fmtCur(c.topup.total)} (ทั้งช่วงวันที่ ไม่ตามตัวกรอง)`
+            : `+ เติมเงินสดย่อย ${c.topup.n} รายการ ${fmtCur(c.topup.total)} · รวมถอนจากบัญชีนี้ ${fmtCur(Number((c.transfer + c.topup.total).toFixed(2)))}`)))),
 
     // bulk bar ตรวจเงินสดย่อย
     view === 'petty' && canReview && rows.length > 0 && h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex items-center gap-2 flex-wrap' },
@@ -91663,7 +92060,7 @@ function PaidPaymentsTab({ state, dispatch, user }){
                       h('th', { className:'px-2 py-2 text-left text-xs' }, 'Supplier'),
                       h('th', { className:'px-2 py-2 text-left text-xs' }, 'แหล่งเงิน'),
                       h('th', { className:'px-2 py-2 text-center text-xs' }, '⛔'),
-                      h('th', { className:'px-2 py-2 text-right text-xs' }, 'จำนวน'),
+                      h('th', { className:'px-2 py-2 text-right text-xs', title:'ยอดโอน = เงินที่ออกจากบัญชีจริง (รวม VAT แล้ว หลังหัก ณ ที่จ่าย/CN) · ใช้เทียบ bank statement · บรรทัดเล็ก = ยอดรวม VAT ตามใบ' }, 'ยอดโอน'),
                       h('th', { className:'px-2 py-2 text-left text-xs' }, 'ผู้ขอ / ผู้อนุมัติ / ผู้จ่าย'),   // 🆕 PAID-BY (UAT N3: + ผู้จ่าย = แถวเงินสดย่อย): เดิม 'อนุมัติ/จ่ายโดย' (โชว์แค่ผู้อนุมัติ)
                       h('th', { className:'px-2 py-2 text-center text-xs' }, '🖨️'),
                       // 🆕 PAID-LAYOUT UAT S2: ช่อง ⋯ ติดขอบขวา (sticky) — จอ 1280 ที่ตารางเลื่อนข้าง ปุ่มแนบ/Tax INV/ยกเลิก ยังเห็นเสมอ
@@ -91730,7 +92127,12 @@ function PaidPaymentsTab({ state, dispatch, user }){
                           p && (Number(p.nonDeductibleVat)||0) > 0 && h('div', { className:'text-[10px] text-red-700 mt-0.5 no-underline',
                             title:'ภาษีซื้อของ PV นี้โอนเป็นค่าใช้จ่ายต้องห้าม (5900) และตัดออกจากรายงานภาษีซื้อ/ภ.พ.30 แล้ว (ม.82/5)' }, 'VAT ไม่เคลม ', h('span', { className:'whitespace-nowrap' }, fmtCur(p.nonDeductibleVat)))),
                         h('td', { className: cls('px-2 py-2 text-right font-medium', r.amount < 0 ? 'text-red-700' : (r.kind === 'ecount' ? 'text-sky-700' : 'text-green-700')),
-                            title: r.amount < 0 ? 'ยอดติดลบ = ใบลดหนี้/รับคืนเงินใน Ecount' : undefined }, fmtCur(r.amount)),
+                            title: r.amount < 0 ? 'ยอดติดลบ = ใบลดหนี้/รับคืนเงินใน Ecount' : undefined }, (() => {   // 🆕 AMOUNT-INCL-VAT B4.5: ยอดโอน + บรรทัด 2 รวม VAT/หัก
+                              const v = rowAmt(r);
+                              if(!v) return fmtCur(r.amount);
+                              return h(AmtCell, { main:v.transfer, mainCls:'', subCls:'text-gray-500', testid:'paid-amt',
+                                sub: v.differs ? ['รวม VAT ' + fmtCur(v.gross), _dedText(v.ded)].filter(Boolean).join(' · ') : '' });
+                            })()),
                         // 🆕 PAID-BY: PV ในระบบ → "ขอ: ผู้ขอจ่าย" + "อนุมัติ: ผู้อนุมัติ" (เงินสดย่อย = "จ่าย: ผู้จ่าย") · แถว Ecount/เดิม = r.byName แบบเดิม
                         h('td', { className:'px-2 py-2 text-xs text-gray-600 xl:min-w-[130px]', 'data-testid':'paid-by-cell' },
                           r.kind === 'pv'
