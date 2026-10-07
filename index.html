@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="18f9476cdfe5";window.__ERP_BUILT_AT__="2026-10-07T11:43:28";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="875fc672e036";window.__ERP_BUILT_AT__="2026-10-07T12:09:10";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -3516,6 +3516,49 @@ function getAllowedBranches(user, state){
   if(scope.allBranches) return branches;
   if(scope.hqOnly) return branches.filter(b => b.branchType === 'hq');
   return branches.filter(b => b.id === user.branch);
+}
+
+// 🆕 RECV-ONBEHALF R1 (เจ้าของ 2026-10-07): "รับของแทนสาขา" ตั้งรายคนที่ user.receiveForBranches ([branch id] หรือ ['*'] = ทุกสาขา)
+//   ช่องนี้แค่ขยายสาขาที่รับ PO ได้ — ไม่ให้สิทธิ์รับของเพิ่ม (ยังต้องมี purchase.gr.create)
+function receiveForBranchIds(user, state){
+  const v = (user && Array.isArray(user.receiveForBranches)) ? user.receiveForBranches : [];
+  if(!v.length) return [];
+  const all = ((state && state.branches) || []).filter(Boolean).map(b => b.id);
+  return v.includes('*') ? all : all.filter(id => v.includes(id));
+}
+// สาขาที่ "รับแทน" จริง = receiveForBranches ที่ไม่ใช่สาขาตัวเอง (superuser เห็นทุกสาขาอยู่แล้ว → ว่าง)
+function receiveOnBehalfBranchIds(user, state){
+  if(!user || isSuperUser(user)) return [];
+  const own = getAllowedBranches(user, state).map(b => b.id);
+  return receiveForBranchIds(user, state).filter(id => !own.includes(id));
+}
+// รับของเข้าสาขานี้ได้ไหม (สาขาตัวเอง / รับแทน / superuser) · ใช้ทั้งหน้าจอและ reducer
+function canReceiveForBranch(state, user, bid){
+  if(!user) return false;
+  if(isSuperUser(user)) return true;
+  return getAllowedBranches(user, state).some(b => b.id === bid) || receiveForBranchIds(user, state).includes(bid);
+}
+// 🆕 RECV-ONBEHALF UAT S3: ป้ายส้ม "📦 รับแทน" บนแถว GR (คิวตั้งหนี้ / ตัวเลือก GR / คิวจ่าย) — บัญชีรู้ว่าใบนี้คีย์ที่ HQ ไม่มีคนสาขานับของ
+function grOnBehalfTag(gr, state){
+  if(!gr || !gr.receivedOnBehalf) return null;
+  const bn = ((((state && state.branches) || []).find(b => b && b.id === gr.branch)) || {}).name || gr.branch || '';
+  const ob = gr.receivedOnBehalf;
+  return h('span', { className:'inline-block ml-1 text-[10px] font-semibold text-orange-800 bg-orange-100 border border-orange-300 rounded px-1 whitespace-nowrap align-middle',
+    'data-testid':'gr-onbehalf-tag', title:`รับแทนสาขา ${bn} โดย ${ob.byName || ob.by || '-'} — ไม่มีคนสาขานับของตอนรับ` }, '📦 รับแทน');
+}
+// ใบตั้งหนี้ที่มี GR รับแทนอย่างน้อย 1 ใบ → คืน GR ใบแรก (ใช้กับ grOnBehalfTag)
+function invOnBehalfGR(inv, state){
+  if(!inv) return null;
+  const ids = (Array.isArray(inv.grIds) && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+  for(const id of ids){ const g = ((state && state.grs) || []).find(x => x && x.id === id); if(g && g.receivedOnBehalf) return g; }
+  return null;
+}
+// ป้ายรายการผู้ใช้ / audit: "ทุกสาขา" หรือชื่อสาขา
+function receiveForLabel(v, state){
+  const arr = Array.isArray(v) ? v : [];
+  if(!arr.length) return '–';
+  if(arr.includes('*')) return 'ทุกสาขา';
+  return arr.map(id => (((state && state.branches) || []).find(b => b && b.id === id) || {}).name || id).join(', ');
 }
 
 // 🆕 รหัสคู่ค้าอัตโนมัติ: AP-0001 (เจ้าหนี้/supplier) · AR-0001 (ลูกหนี้/customer)
@@ -10047,7 +10090,7 @@ Object.assign(global.ERP, {
   canActOnLocation, getLineBomItemIds, locActDenyReason, isIntraTO, userHandlesIncomingTO, getLocStockFIFO,
   toLinePieces, slicePieces, isInTransitTO, getInTransit, getInTransitSummary, getInTransitValue, getNegStockValue,
   // Permissions
-  isSuperUser, getBranch, isHQ, getHQBranchId, canAccessModule, canSeeBranch, getAllowedBranches,
+  isSuperUser, getBranch, isHQ, getHQBranchId, canAccessModule, canSeeBranch, getAllowedBranches, receiveForBranchIds, receiveOnBehalfBranchIds, canReceiveForBranch, receiveForLabel, grOnBehalfTag, invOnBehalfGR,
   getUserPerms, hasPerm, hasAnyPermIn, expandPaths, pathsToFlatMap,
   // Production lines + sub-locations
   getBranchLines, findLine, getBranchLocations, findLocation,
@@ -12911,7 +12954,7 @@ Object.assign(global.ERP, {
       }
       if(me && me.id){
         var cu = (cloud.state.users || []).find(function(u){ return u && u.id === me.id; });
-        var _sig = function(u){ return _stable({ a: u.active !== false, r: u.role || null, p: u.permissions || null, b: u.branch || null, ab: u.accessBranches || null, st: u.assignedStations || null, sl: u.stationsByLine || null }); };
+        var _sig = function(u){ return _stable({ a: u.active !== false, r: u.role || null, p: u.permissions || null, b: u.branch || null, ab: u.accessBranches || null, st: u.assignedStations || null, sl: u.stationsByLine || null, rf: (Array.isArray(u.receiveForBranches) && u.receiveForBranches.length) ? u.receiveForBranches : null }); };   // 🆕 RECV-ONBEHALF UAT S1: แอดมินเอาสาขารับแทนออกระหว่างรอส่ง → ทาง user-changed (ไม่ replay ไปชนด่าน)
         var mine = ((ref && ref.users) || []).find(function(u){ return u && u.id === me.id; }) || me;
         if(!cu || cu.active === false || _sig(cu) !== _sig(mine)) return { ok:false, reason:'user-changed' };
       }
@@ -15406,6 +15449,33 @@ function _capGuard(s, me, oldU, data){
   if(cap1 != null && cap1 > 100000 && cap1 > (cap0 == null ? 100000 : cap0) && !top) return _no('ตั้งเพดาน ✋ PO เกิน 100,000 ได้เฉพาะ GM/เจ้าของ — แอดมินตั้งได้ไม่เกิน 100,000');
   return { changed, note: _capNote(cap0, cap1) };
 }
+// 🆕 RECV-ONBEHALF R3: สาขาของใบรับของต้องเป็นสาขาตัวเอง / รับแทน (receiveForBranches) / superuser — ตรวจจากแถวผู้ใช้สด
+//   ไม่มีผู้ใช้ (ระบบ/นำเข้า) หรือไม่มีสาขา = ไม่ตรวจ (ทางเดิมไม่พัง) · คืนข้อความปฏิเสธ หรือ null = ผ่าน
+function _recvBranchDeny(s, bid){
+  const me = s.currentUser, E = global.ERP;
+  if(!me || !bid || typeof E.canReceiveForBranch !== 'function') return null;
+  const meL = _userByRef(s, me.username) || _userByRef(s, me.id) || me;
+  if(E.canReceiveForBranch(s, meL, bid)) return null;
+  const bn = ((s.branches || []).find(b => b && b.id === bid) || {}).name || bid;
+  return '⛔ รับของเข้าสาขา ' + bn + ' ไม่ได้ — ไม่ใช่สาขาของคุณ และไม่ได้ตั้ง "📦 รับของแทนสาขา" ไว้ (ให้ผู้ดูแลตั้งที่ ตั้งค่า → ผู้ใช้)';
+}
+// 🆕 RECV-ONBEHALF R1: ตรวจค่า receiveForBranches (ใช้ร่วม ADD_USER / UPDATE_USER) · คืน null = ไม่ผ่าน (alert แล้ว) · { changed, note }
+function _rfbGuard(s, me, oldU, data){
+  const E = global.ERP, _no = (m) => { try { alert(m); } catch(_e){} return null; };
+  const _norm = (v) => Array.isArray(v) ? (v.includes('*') ? ['*'] : [...new Set(v)].sort()) : [];
+  const v0 = _norm(oldU && oldU.receiveForBranches), raw = data && data.receiveForBranches;
+  if(raw != null && !Array.isArray(raw)) return _no('📦 รับของแทนสาขา: รูปแบบไม่ถูกต้อง');
+  const v1 = raw === undefined ? v0 : _norm(raw);   // ไม่ส่งช่องนี้มา (ฟอร์ม/ทางอื่นรุ่นเก่า) = คงค่าเดิม
+  const bad = v1.filter(id => id !== '*' && !v0.includes(id) && !(s.branches || []).some(b => b && b.id === id));   // verify 1: ตรวจเฉพาะที่เพิ่มใหม่ (สาขาที่ถูกลบไปแล้วค้างในแถวเดิม ไม่ทำให้แก้ผู้ใช้ไม่ได้)
+  if(bad.length) return _no('📦 รับของแทนสาขา: ไม่พบสาขา ' + bad.join(', '));
+  const changed = JSON.stringify(v0) !== JSON.stringify(v1);
+  if(!changed || !me) return { changed, note: changed ? '📦 รับแทนสาขา: ' + E.receiveForLabel(v0, s) + ' → ' + E.receiveForLabel(v1, s) : '' };
+  const meL = _userByRef(s, me.username) || _userByRef(s, me.id) || me, top = E.selfCapSelfEditOk(meL);
+  if(!top && !(E.hasPerm && E.hasPerm(meL, 'settings', 'users', 'edit'))) return _no('ไม่มีสิทธิ์แก้ผู้ใช้ — ตั้ง "📦 รับของแทนสาขา" ไม่ได้');
+  if(oldU && oldU.id === meL.id && !top) return _no('ตั้ง "📦 รับของแทนสาขา" ของตัวเองไม่ได้ — ให้ผู้ดูแลอีกคนทำให้');
+  if(oldU && _userRank(meL) < _userRank(oldU)) return _no('สิทธิ์ไม่พอ: บัญชีนี้อยู่ลำดับชั้นสูงกว่าคุณ');
+  return { changed, note: '📦 รับแทนสาขา: ' + E.receiveForLabel(v0, s) + ' → ' + E.receiveForLabel(v1, s) };
+}
 function _capNote(c0, c1){
   const _cf = (n) => n == null ? '100,000 (ค่าเริ่ม)' : Number(n).toLocaleString('en-US', { maximumFractionDigits:2 });
   return '✋ เพดาน PO ' + _cf(c0) + ' → ' + _cf(c1);
@@ -17818,8 +17888,11 @@ function reducer(s, a){
       // 🆕 SELF-CAP verify 1: ด่านเพดาน ✋ PO เดียวกับ UPDATE_USER (ค่าเดิม = ว่าง/100,000) + audit เมื่อผู้ใช้ใหม่มีเพดาน
       const _cg = _capGuard(s, me, null, a.data);
       if(!_cg) return s;
-      const _al = _cg.changed ? [...(s.auditLog || []), { id:'al_' + Date.now().toString(36), ts:Date.now(), type:'user_role_change',
-        by: (me && me.username) || 'system', entityId: a.data.id, entityRef: a.data.username || a.data.name, note: _cg.note }] : null;
+      const _rg = _rfbGuard(s, me, null, a.data);   // 🆕 RECV-ONBEHALF R1
+      if(!_rg) return s;
+      const _notes = [_cg.changed && _cg.note, _rg.changed && _rg.note].filter(Boolean);
+      const _al = _notes.length ? [...(s.auditLog || []), { id:'al_' + Date.now().toString(36), ts:Date.now(), type:'user_role_change',
+        by: (me && me.username) || 'system', entityId: a.data.id, entityRef: a.data.username || a.data.name, note: _notes.join(' · ') }] : null;
       return { ...s, users:[...(s.users||[]), a.data], ...(_al ? { auditLog:_al } : {}) };
     }
     case 'UPDATE_USER': {
@@ -17843,9 +17916,12 @@ function reducer(s, a){
       const _cg = _capGuard(s, me, oldU || null, a.data);
       if(!_cg) return s;
       const _capChanged = !!oldU && _cg.changed;
+      const _rg = _rfbGuard(s, me, oldU || null, a.data);   // 🆕 RECV-ONBEHALF R1: ค่า/สิทธิ์/แก้ของตัวเอง
+      if(!_rg) return s;
       const sensitive = ['role','position','superAdmin','active','permissions','assignedLineIds','assignedStations','branch'];
       const changes = [];
       if(_capChanged) changes.push(_cg.note);
+      if(oldU && _rg.changed) changes.push(_rg.note);
       if(oldU){
         for(const k of sensitive){
           const oldV = oldU[k], newV = a.data[k];
@@ -17882,7 +17958,9 @@ function reducer(s, a){
       }
       // 🆕 ถ้าแก้ user ที่กำลังล็อกอินอยู่ → อัปเดต currentUser ด้วย
       //    ไม่งั้นสิทธิ์ที่เพิ่งให้ (เช่น สถานีที่ทำได้) ไม่มีผลจนกว่าจะ logout/login ใหม่
-      const _curU = (s.currentUser && s.currentUser.id === a.data.id) ? a.data : s.currentUser;
+      // RECV-ONBEHALF: ทางที่ไม่ส่ง receiveForBranches มา (แก้รหัส/โปรไฟล์) → คงค่าเดิม ไม่ล้างทิ้ง
+      const _rfbKeep = (u) => (oldU && a.data.receiveForBranches === undefined && oldU.receiveForBranches !== undefined) ? { ...u, receiveForBranches: oldU.receiveForBranches } : u;
+      const _curU = (s.currentUser && s.currentUser.id === a.data.id) ? _rfbKeep(a.data) : s.currentUser;
       // 🆕 ถ้าแก้สาขา/สิทธิ์สาขาของตัวเอง แล้วสาขาที่เปิดค้างอยู่หลุด scope → ย้ายไปสาขาแรกที่เข้าถึงได้
       //    ไม่งั้น switcher โชว์ค่าที่ไม่มีใน option + ยังเห็นข้อมูลสาขาที่ไม่มีสิทธิ์แล้ว
       let _curBranch = s.currentBranch;
@@ -17893,7 +17971,7 @@ function reducer(s, a){
           if(_allowed.length && !_allowed.some(b => b.id === _curBranch)) _curBranch = _allowed[0].id;
         } catch(_ab){}
       }
-      return { ...s, users:(s.users||[]).map(u => u.id===a.data.id ? a.data : u),
+      return { ...s, users:(s.users||[]).map(u => u.id===a.data.id ? _rfbKeep(a.data) : u),
         currentUser:_curU, currentBranch:_curBranch, auditLog };
     }
 
@@ -19385,7 +19463,13 @@ function reducer(s, a){
         seq: { ...s.seq, je: mcSeqJe },
         auditLog };
     }
-    case 'ADD_GR':       return { ...s, grs:[...s.grs, a.data], seq:{ ...s.seq, gr:s.seq.gr+1 } };
+    case 'ADD_GR': {     // RECV-ONBEHALF R3: ด่านสาขาเดียวกับ RECEIVE_PO (ทางนี้ไม่มีใครเรียกแล้ว แต่กันคอนโซล)
+      //   verify 1: ไม่ส่งสาขามา → ตรวจกับปลายทางของ PO จริงแทน · ส่งสาขามาไม่ตรงปลายทาง PO = ไม่รับ (ทางนี้ไม่แตะสต๊อก)
+      const _agD = (((s.pos||[]).find(p => p && a.data && p.id === a.data.poId)) || {}).destinationBranch || null;
+      if(s.currentUser && _agD && a.data && a.data.branch && a.data.branch !== _agD){ try { alert('⛔ บันทึกใบรับไม่สำเร็จ — PO นี้ส่งตรงสาขาอื่น'); } catch(_e){} return s; }
+      for(const _b of [...new Set([a.data && a.data.branch, _agD].filter(Boolean))]){ const _rd = _recvBranchDeny(s, _b); if(_rd){ try { alert(_rd); } catch(_e){} return s; } }
+      return { ...s, grs:[...s.grs, a.data], seq:{ ...s.seq, gr:s.seq.gr+1 } };
+    }
     case 'UPDATE_GR': {
       // 🆕 DEPOSIT-VAT UAT (กันชั้นสุดท้าย): ผูก GR กับใบตั้งหนี้ที่ "ไม่มีอยู่จริง" (ADD_INV ก่อนหน้าถูกปฏิเสธ) → ปฏิเสธ · ไม่งั้น GR หายจากคิวรอตั้งหนี้เงียบ ๆ
       const _og = (s.grs||[]).find(g => g.id === (a.data && a.data.id));
@@ -22233,6 +22317,26 @@ function reducer(s, a){
       const { gr, updatedPO, stockUpdates, movements, fifoLayers } = a.data;
       // 🆕 Y2: period-lock — กันรับของย้อนวันเข้างวดปิด (split-brain กับ GL)
       { const locked = _checkDateLock(s, gr?.grDate, 'รับของ (GR)'); if(locked) return locked; }
+      // 🆕 RECV-ONBEHALF R3: สาขาของ GR ต้องเป็นสาขาตัวเอง / รับแทน (receiveForBranches) / superuser — ตรวจจากแถวผู้ใช้สด
+      //   verify 1: สาขาใบรับ = gr.branch หรือ (ไม่ส่งมา) ปลายทางของ PO จริง · ตรวจทุกสาขาที่แตะ (ใบ/PO/แถวสต๊อก/ล็อต/movement) — กันคำขอแต่งตัด gr.branch ทิ้งเพื่อข้ามด่าน
+      const _livePO = (s.pos||[]).find(p => p && updatedPO && p.id === updatedPO.id) || null;
+      const _poD = (_livePO || updatedPO || {}).destinationBranch || null;
+      const _bid = (gr && gr.branch) || _poD || null;
+      const _rows = [...(stockUpdates||[]), ...(fifoLayers||[]), ...(movements||[])].filter(Boolean);
+      if(s.currentUser){
+        const _all = [...new Set([_bid, _poD, ..._rows.map(x => x.branch)].filter(Boolean))];
+        for(const _b of _all){ const _rd = _recvBranchDeny(s, _b); if(_rd){ try { alert(_rd); } catch(_e){} return s; } }
+      }
+      // 🆕 RECV-ONBEHALF UAT S2: ของต้องเข้าสาขาเดียวกับใบรับ · PO ส่งตรงสาขา → ใบรับต้องเป็นสาขานั้น (กันคำขอแต่งที่ผ่านด่านด้วย gr.branch แต่ย้ายของเข้าสาขาอื่น)
+      //   verify 1: รวม movement ด้วย · แถวไม่มีสาขา = ไม่ตรง (หน้าจอใส่สาขาเสมอ) · มีผู้ใช้แต่หาสาขาใบรับไม่ได้ทั้งที่มีแถวของ = ไม่รับ
+      if((gr && gr.branch) || s.currentUser){
+        const _off = _rows.find(x => x.branch !== _bid);
+        const _noB = !_bid && _rows.length > 0;
+        if(_noB || (_bid && _off) || (_poD && _poD !== _bid)){
+          try { alert('⛔ รับของไม่สำเร็จ — ' + (_noB ? 'ใบรับไม่ระบุสาขา' : 'สาขาของสินค้า/ล็อตไม่ตรงกับสาขาของใบรับ') + (_poD && _poD !== _bid ? ' (PO นี้ส่งตรงสาขาอื่น)' : '') + ' · ปิดหน้าต่างแล้วเปิดรับใหม่'); } catch(_e){}
+          return s;
+        }
+      }
       // 🆕 UAT (จัดซื้อ): ของจากผู้ขายห้ามเข้าคลังไลน์ตรง (สัญญาข้อ ข: ไลน์ได้ของผ่าน TR→TO→GR เท่านั้น)
       {
         const _isLineLoc = (bid, lid) => { if(!lid) return false; const b = (s.branches||[]).find(x => x && x.id === bid);
@@ -22251,12 +22355,31 @@ function reducer(s, a){
       //   ไม่งั้น NEG ค้างตลอดแม้รับของแล้ว (ล็อตติดลบโชว์ไม่หาย · checklist wh_issue_neg_layers ปิดไม่ได้)
       //   nettedQty เก็บไว้บน layer ใหม่ → VOID_GR ใช้กันยกเลิก GR ที่ของถูกใช้ล้างติดลบไปแล้ว
       const _layers = _netIncomingLayers(s.fifoLayers, fifoLayers);
+      // 🆕 RECV-ONBEHALF UAT S2: ประทับ "รับแทน" + audit gr_onbehalf ใน reducer (จากแถวผู้ใช้สด) — ไม่พึ่งค่าที่หน้าจอส่งมา
+      //   ใบรับเข้าสาขาที่ไม่ใช่สาขาตัวเอง (ไม่ใช่ superuser) = รับแทน · id audit ตายตัว al_grob_<gr.id> · เวลา = createdAt ของใบ (deterministic)
+      let _gr = gr, _al = s.auditLog;
+      { const me = s.currentUser, E = global.ERP;
+        const meL = me ? (_userByRef(s, me.username) || _userByRef(s, me.id) || me) : null;
+        if(gr && !gr.branch && _bid) _gr = { ...gr, branch: _bid };   // verify 1: ไม่ส่งสาขามา = ใช้ปลายทาง PO
+        if(meL && gr && _bid && typeof E.getAllowedBranches === 'function' && !(E.isSuperUser && E.isSuperUser(meL))
+          && !E.getAllowedBranches(meL, s).some(b => b && b.id === _bid)){
+          const _at = (gr.receivedOnBehalf && gr.receivedOnBehalf.at) || gr.createdAt || null;
+          _gr = { ..._gr, receivedOnBehalf: { by: meL.username, byName: meL.name || '', at: _at, userBranch: meL.branch || null } };
+          const _bn = ((s.branches||[]).find(b => b && b.id === _bid) || {}).name || _bid;
+          const _alId = 'al_grob_' + gr.id;
+          if(!(_al||[]).some(x => x && x.id === _alId)) _al = [...(_al||[]), { id:_alId, ts:_at, type:'gr_onbehalf', by:meL.username, byName:meL.name || meL.username,
+            entityId:gr.id, entityRef:gr.grNumber, refType:'gr', refId:gr.id, refLabel:gr.grNumber,
+            note:`📦 รับแทนสาขา ${_bn} · PO ${(updatedPO && updatedPO.poNumber) || gr.poNumber || ''} · ผู้รับ ${meL.name || meL.username}` }];
+        } else if(meL && gr && gr.receivedOnBehalf){ _gr = { ..._gr }; delete _gr.receivedOnBehalf; }   // สาขาตัวเอง = ไม่ใช่รับแทน (ไม่เชื่อค่าจากหน้าจอ)
+      }
       return {
         ...s,
         items,
-        grs: [...s.grs, gr],
+        auditLog: _al,
+        grs: [...s.grs, _gr],
         seq: { ...s.seq, gr: s.seq.gr+1 },
-        pos: s.pos.map(p => p.id === updatedPO.id ? _docTagKeep(s, p, updatedPO, null) : p),   // UAT M1 (DOC-TAGS): แท็กคงจาก PO จริง
+        pos: s.pos.map(p => p.id === updatedPO.id ? { ..._docTagKeep(s, p, updatedPO, null),   // UAT M1 (DOC-TAGS): แท็กคงจาก PO จริง
+          destinationBranch: p.destinationBranch, supplierId: p.supplierId } : p),   // verify 1: ปลายทาง/ผู้ขายคงจาก PO จริง (รับของแก้ไม่ได้)
         fifoLayers: _layers,
         movements: [...s.movements, ...(movements||[])],
       };
@@ -26455,7 +26578,7 @@ const ACTION_READS = Object.freeze({
   UPDATE_PO_SOFT: ['auditLog','pos'],
   UPDATE_PO_PAYMODE: ['approvalRequests','auditLog','deposits','grs','invoices','payments','pos'],   // 🆕 PO-PAYMODE: poPaymodeDeny (PI/จ่าย/มัดจำ UAT S3/GR/คำขอค้าง) + _approvalGate
   UPDATE_PO_FULL: ['approvalRequests','auditLog','pos'],   // B18: approvalReqId → _approvalGate อ่านคำขอ (users/settings/approvalRules = หมวดคุม)
-  RECEIVE_PO: ['fifoLayers','grs','items','movements','pos'],
+  RECEIVE_PO: ['auditLog','fifoLayers','grs','items','movements','pos'],   // 🆕 RECV-ONBEHALF UAT S2: + auditLog (กันซ้ำ al_grob_<gr.id> ก่อนต่อท้าย)
   ADD_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],   // VAT-DEFER verify: + approvalRequests (_taxInvDenyReason → vatApPendingLive)   // DEPOSIT-VAT UAT: + grs (ชุดแยกใบเก่า splitInvoiceIds)   // DEPOSIT-VAT review: ใบกำกับที่มากับใบใหม่ → ด่านซ้ำ (findDupTaxInv)
   ADD_COMBINED_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],   // VAT-DEFER verify: + approvalRequests
   UPDATE_INV: ['auditLog','invoices'],
@@ -26516,7 +26639,7 @@ const ACTION_READS = Object.freeze({
   ADD_STOCK_COUNT_SESSION: ['stockCounts'],
   // UAT คลื่น 3: แถวเพิ่ม (ไล่จาก reducer + T-READS)
   ADD_POS_IMPORT: ['items','movements','posImports'],
-  ADD_GR: ['grs'],
+  ADD_GR: ['grs','pos'],   // verify 1 (RECV-ONBEHALF): ตรวจสาขากับปลายทาง PO จริง
   UPDATE_GR: ['grs','invoices'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก invoiceId ที่ไม่มีอยู่จริง
   UPDATE_RTV: ['invoices','returns'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก linkedINV ที่ไม่มีอยู่จริง
   ADD_RTV: ['assets','boms','fifoLayers','grs','invoices','items','movements','returns','suppliers'],   // 💎 FA-S2: assets+grs (กันคืนเครื่องที่ลงทะเบียนแล้ว) · boms: deductFromStore NEG @negUnitCost (prod-live รอบ 2)
@@ -26586,7 +26709,7 @@ const APPEND_ONLY_READS = Object.freeze({
   UPDATE_PO_SOFT: ['auditLog'],
   UPDATE_PO_PAYMODE: ['auditLog'],   // 🆕 PO-PAYMODE: ต่อท้าย po_paymode_change อย่างเดียว (id ตายตัว al_pomode_<reqId>)
   UPDATE_PO_FULL: ['auditLog'],   // ต่อท้าย po_edit_full อย่างเดียว
-  RECEIVE_PO: ['grs', 'movements'],
+  RECEIVE_PO: ['grs', 'movements', 'auditLog'],   // 🆕 RECV-ONBEHALF UAT S2: ต่อท้าย gr_onbehalf (id ตายตัว al_grob_<gr.id>) — อ่านแค่กันซ้ำด้วย id
   ADD_INV: ['auditLog'],
   ADD_SALES_INV: ['auditLog'],   // 🆕 DOC-NUMBER verify 1: ต่อท้าย si_filed_period อย่างเดียว (id ตายตัว al_sifp_<id>)
   ADD_COMBINED_INV: ['auditLog'],
@@ -27323,12 +27446,14 @@ const NAV_COUNTS = {
   // mod-stock.js incomingPOs/incomingTOs (PO approved/partial หรือยังมีของค้างรับ + TO shipping/partial มาสาขาที่เห็นได้)
   'stock.incoming': (state, user) => {
     const ok = allowedIds(user, state); const sup = isSuper(user);
+    // 🆕 RECV-ONBEHALF R2: นับ PO ส่งตรงสาขาที่ "รับแทน" ด้วย (ตรงกับรายการใน mod-stock)
+    const okPO = ok.concat((global.ERP && global.ERP.receiveOnBehalfBranchIds) ? global.ERP.receiveOnBehalfBranchIds(user, state) : []);
     const pos = (state.pos || []).filter(p => {
       const okStatus = p.status === 'approved' || p.status === 'partial';
       const hasRemaining = (p.lines || []).some(l => (Number(l.qty) || 0) - (Number(l.receivedQty) || 0) > 0.001);
       const notDead = !['draft', 'pending', 'cancelled'].includes(p.status);
       if(!(okStatus || (notDead && hasRemaining))) return false;
-      return sup || ok.includes(p.destinationBranch);
+      return sup || okPO.includes(p.destinationBranch);
     }).length;
     const _h = (global.ERP && global.ERP.userHandlesIncomingTO) || (() => true);   // 🆕 ใบภายในสาขา = เฉพาะคนดูแลคลังปลายทาง (เหมือนการ์ดใน mod-stock)
     const tos = (state.transferOrders || []).filter(t => (t.status === 'shipping' || t.status === 'partial') && (sup || ok.includes(t.toBranch)) && _h(state, user, t)).length;
@@ -31888,8 +32013,10 @@ function StockModule({ state, dispatch }){
   const [tab, setTab] = usePersistedTab('stock', 'dashboard');
 
   // Incoming counts
+  // 🆕 RECV-ONBEHALF R2: สาขาที่ "รับแทน" ได้ (ตั้งรายคนที่ ตั้งค่า → ผู้ใช้) — PO ส่งตรงสาขาเหล่านี้ขึ้นแยกส่วน
+  const obBranchIds = global.ERP.receiveOnBehalfBranchIds ? global.ERP.receiveOnBehalfBranchIds(user, state) : [];
   const incomingPOs = useMemo(() => {
-    const ok = allowedBranches.map(b => b.id);
+    const ok = [...allowedBranches.map(b => b.id), ...obBranchIds];
     return (state.pos||[]).filter(p => {
       // 🆕 BUG-PO1: ใช้ remaining-qty fallback กัน status stuck — ถ้ามี line ยังเหลือ qty ก็ขึ้นรับได้
       //   เกณฑ์ปกติ: approved/partial · เกณฑ์ fallback: status ไม่ใช่ draft/pending/cancelled + มี remaining
@@ -31899,7 +32026,7 @@ function StockModule({ state, dispatch }){
       if(!(okStatus || (notDead && hasRemaining))) return false;
       return isSuperUser(user) || ok.includes(p.destinationBranch);
     });
-  }, [state.pos, user, allowedBranches]);
+  }, [state.pos, user, allowedBranches, obBranchIds.join(',')]);
 
   // 🆕 PRODUCTION-LIVE คลื่น 1 (B3.15): TO ภายในสาขา (TR→TO / ใบส่งมอบ) ขึ้นเฉพาะคนที่ดูแลคลังปลายทาง — คนไลน์เห็นของเข้าไลน์ตัวเอง · คลังเห็นของเข้าคลังกลาง/FG
   const incomingTOs = useMemo(() => {
@@ -32031,7 +32158,7 @@ function StockModule({ state, dispatch }){
     h(KeepAliveTabs, { active:tab, panes:{
       dashboard:    ()=>h(StockDashboard, { state, user, setTab }),
       overview:     ()=>h(OverviewTab,  { state, user }),
-      incoming:     ()=>h(IncomingTab,  { state, dispatch, user, pos:incomingPOs, tos:incomingTOs }),
+      incoming:     ()=>h(IncomingTab,  { state, dispatch, user, pos:incomingPOs, tos:incomingTOs, obBranchIds }),
       schedule:     ()=>h(StockIncomingScheduleTab, { state, user }),
       list:         ()=>h(StockListTab, { state, user }),
       byLocation:   ()=>h(StockByLocationTab, { state, user }),
@@ -32145,9 +32272,10 @@ function StockIncomingScheduleTab({ state, user }){
   };
 
   const rows = useMemo(() => {
+    const _obIds = global.ERP.receiveOnBehalfBranchIds ? global.ERP.receiveOnBehalfBranchIds(user, state) : [];   // 🆕 RECV-ONBEHALF R2
     const pos = (state.pos||[]).filter(p =>
       ['approved','partial'].includes(p.status) &&
-      (isSuperUser(user) || branchIds.includes(p.destinationBranch)));
+      (isSuperUser(user) || branchIds.includes(p.destinationBranch) || _obIds.includes(p.destinationBranch)));
     const q = search.trim().toLowerCase();
     const byDate = {};
     for(const po of pos){
@@ -32294,9 +32422,10 @@ function StockDashboard({ state, user, setTab }){
     .filter(m => m.date >= sevenDaysAgo && (isSuperUser(user) || branchIds.includes(m.branch)));
   const moveIn  = recentMovs.filter(m => (m.qty||0) > 0).length;
   const moveOut = recentMovs.filter(m => (m.qty||0) < 0).length;
+  const _obIds = global.ERP.receiveOnBehalfBranchIds ? global.ERP.receiveOnBehalfBranchIds(user, state) : [];   // 🆕 RECV-ONBEHALF R2: นับ PO รับแทนด้วย
   const incomingPOs = (state.pos||[]).filter(p =>
     ['approved','partial'].includes(p.status) &&
-    (isSuperUser(user) || branchIds.includes(p.destinationBranch))).length;
+    (isSuperUser(user) || branchIds.includes(p.destinationBranch) || _obIds.includes(p.destinationBranch))).length;
   const incomingTOs = (state.transferOrders||[]).filter(t =>
     ['shipping','partial'].includes(t.status) &&
     (isSuperUser(user) || branchIds.includes(t.toBranch))).length;
@@ -32816,7 +32945,7 @@ function TabBtn({ active, onClick, label, count, countHint }){
 // ================================================================
 // INCOMING TAB (รับเข้าจาก PO + TO)
 // ================================================================
-function IncomingTab({ state, dispatch, user, pos, tos }){
+function IncomingTab({ state, dispatch, user, pos, tos, obBranchIds = [] }){
   const [receivingPO, setReceivingPO] = useState(null);
   const [receivingTO, setReceivingTO] = useState(null);
   const [search, setSearch] = useState('');
@@ -32879,8 +33008,83 @@ function IncomingTab({ state, dispatch, user, pos, tos }){
   const dateChips = [{ key:'all', label:'ทั้งหมด', count: countFor('all') }, { key:'overdue', label:'เลยกำหนด', count: countFor('overdue'), urgent:true }, { key:'today', label:'วันนี้', count: countFor('today') },
     { key:'tomorrow', label:'พรุ่งนี้', count: countFor('tomorrow') }, { key:'7d', label:'7 วัน', count: countFor('7d') }, { key:'custom', label:'กำหนดเอง' }];
 
-  const pgPO = usePaged(filteredPOs, 50);
+  // 🆕 RECV-ONBEHALF R2: แยก PO สาขาตัวเอง / PO ส่งตรงสาขาที่รับแทน (ตัวกรองวัน/คำค้นใช้ร่วมกัน)
+  const _isOb = (p) => obBranchIds.includes(p.destinationBranch);
+  const ownPOs = filteredPOs.filter(p => !_isOb(p)), obPOs = filteredPOs.filter(_isOb);
+  const pgPO = usePaged(ownPOs, 50);
+  const pgOB = usePaged(obPOs, 50);
   const pgTO = usePaged(filteredTOs, 50);
+
+  // 🆕 RECV-ONBEHALF R2: การ์ด PO ใช้ร่วม ส่วนสาขาตัวเอง + ส่วน "รับแทน" (ob = true → ป้ายสาขาปลายทางชัด ๆ)
+  const _poCard = (po, ob) => {
+    const sup = state.suppliers.find(s => s.id === po.supplierId);
+    const dest = getBranch(state, po.destinationBranch);
+    // 🆕 เลยกำหนด/ครบกำหนด ดูจากรายการที่ยังค้างรับ (งวดที่รับครบแล้วไม่นับ) — ชุดเดียวกับชิปกรองวันที่ + wh_po_overdue ในงานค้าง
+    const etas = poEtas(po).filter(Boolean).sort();
+    const nextEta = etas[0] || po.dueDate;
+    const overdue = etas.length ? etas.some(d => d < today) : (po.dueDate < today);
+    const remaining = (po.lines||[]).reduce((s,l) => s + Math.max(0,(l.qty||0)-(l.receivedQty||0)), 0);
+    // group pending lines by expectedDeliveryDate (วันส่งต่อรายการ)
+    const pendingByDate = {};
+    for(const l of (po.lines||[])){
+      const left = (l.qty||0) - (l.receivedQty||0);
+      if(left <= 0) continue;
+      const d = l.expectedDeliveryDate || po.dueDate || '-';
+      if(!pendingByDate[d]) pendingByDate[d] = [];
+      pendingByDate[d].push({ ...l, remaining:left });
+    }
+    const dueGroups = Object.entries(pendingByDate).sort(([a],[b]) => a.localeCompare(b));
+    return h('div', { key:po.id, 'data-po-card': po.poNumber, ...(ob ? { 'data-onbehalf':'1' } : {}),
+      className: cls('bg-white rounded-lg shadow p-4 border-l-4',
+        overdue ? 'border-red-500' : ob ? 'border-orange-500' : 'border-blue-500') },
+      h('div', { className:'flex items-start justify-between mb-2' },
+        h('div', null,
+          h('div', { className:'font-mono text-sm text-blue-700 font-semibold' },
+            overdue && '⚠️ ', po.poNumber),
+          h('div', { className:'text-xs text-gray-500' },
+            `ครบกำหนด: ${nextEta ? fmtDate(nextEta) : '-'}`, overdue && ' (เลยกำหนด)')
+        ),
+        h('span', { className: cls('text-xs px-2 py-0.5 rounded font-medium',
+          po.status==='partial' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800')
+        }, po.status==='partial' ? 'รับบางส่วน' : 'รอรับ')
+      ),
+      h('div', { className:'text-sm mb-1' },
+        h('span', { className:'text-gray-500' }, '🏭 '), h('b', null, sup?.name), _supChip(sup, state)),   // 🆕 PARTY-BRANCH (UAT): การ์ดรอรับ — แยก PO ซีพีหลายสาขา
+      h('div', { className:'text-sm mb-2' },
+        h('span', { className:'text-gray-500' }, '📍 ส่งที่: '),
+        ob ? h('span', { className:'inline-block bg-orange-100 text-orange-800 border border-orange-300 rounded px-1.5 font-semibold', 'data-testid':'onbehalf-dest' },
+            `📦 รับแทน ${dest ? dest.name : po.destinationBranch}`)
+          : (dest ? `${dest.branchType==='hq'?'🏢':'🏪'} ${dest.name}` : '-')),
+      h('div', { className:'text-xs text-gray-600 mb-2' },
+        `${(po.lines||[]).length} รายการ · ค้างรับ ${fmtNum(remaining)} หน่วย${showValue ? ' · มูลค่า ' + fmtCur(po.total||0) : ''}`
+      ),
+      // Schedule summary — แสดงวันส่งแยกรายการ
+      dueGroups.length > 1 && h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 mb-2 text-[11px]' },
+        h('div', { className:'font-semibold text-amber-900 mb-1' }, '📅 ตารางส่งแยกรายการ'),
+        dueGroups.slice(0,5).map(([d, items]) => {
+          const odue = d < today;
+          return h('div', { key:d, className: cls('flex justify-between',
+            odue ? 'text-red-700 font-semibold' : 'text-amber-800') },
+            h('span', null, d === '-' ? '(ไม่ระบุ)' : fmtDate(d), odue && ' ⚠️'),
+            h('span', { className:'font-mono' },
+              items.map(i => {
+                const it = state.items.find(x => x.id === i.itemId);
+                return `${it?.name||''} ${fmtNum(i.remaining)}${i.unit||''}`;
+              }).join(', '))
+          );
+        }),
+        dueGroups.length > 5 && h('div', { className:'text-gray-500' }, `… อีก ${dueGroups.length-5} วัน`)
+      ),
+      canReceivePO && h(Button, { variant:'success', onClick:()=>{
+          // 🆕 UAT: หน้าต่างรับของ PO นี้ย่ออยู่แล้ว → เด้งขึ้นมาแทนเปิดใหม่ (docKey เดียวกับใน ReceiveFromPOModal)
+          if(global.ERP.restoreMinimized && global.ERP.restoreMinimized('gr:po:'+po.id)) return;
+          setReceivingPO(po); } },
+        ob ? '📥 รับของแทนสาขา' : '📥 รับของ'),
+      // 🆕 UAT S4: เห็นใบรับแทน (ตั้ง receiveForBranches แล้ว) แต่ไม่มีสิทธิ์รับของ → บอกเหตุผลแทนปุ่มที่หายไป
+      (ob && !canReceivePO) && h('div', { className:'text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1', 'data-testid':'onbehalf-nogr' },
+        '🔒 ไม่มีสิทธิ์รับของ (purchase.gr.create) — แจ้งผู้ดูแล'),
+    );
+  };
 
   if(pos.length === 0 && tos.length === 0 && pendingReplRTVs.length === 0){
     return h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
@@ -32949,77 +33153,22 @@ function IncomingTab({ state, dispatch, user, pos, tos }){
       onClose:()=>setViewRTV(null) }),
 
     // PO section
-    filteredPOs.length > 0 && h('div', null,
+    ownPOs.length > 0 && h('div', null,
       h('div', { className:'flex items-center justify-between mb-2' },
-        h('h3', { className:'font-bold text-gray-800' }, `🛍️ จากจัดซื้อ (PO) — ${filteredPOs.length} ใบ`),
+        h('h3', { className:'font-bold text-gray-800' }, `🛍️ จากจัดซื้อ (PO) — ${ownPOs.length} ใบ`),
       ),
       h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
-        pgPO.shown.map(po => {
-          const sup = state.suppliers.find(s => s.id === po.supplierId);
-          const dest = getBranch(state, po.destinationBranch);
-          // 🆕 เลยกำหนด/ครบกำหนด ดูจากรายการที่ยังค้างรับ (งวดที่รับครบแล้วไม่นับ) — ชุดเดียวกับชิปกรองวันที่ + wh_po_overdue ในงานค้าง
-          const etas = poEtas(po).filter(Boolean).sort();
-          const nextEta = etas[0] || po.dueDate;
-          const overdue = etas.length ? etas.some(d => d < today) : (po.dueDate < today);
-          const remaining = (po.lines||[]).reduce((s,l) => s + Math.max(0,(l.qty||0)-(l.receivedQty||0)), 0);
-          // group pending lines by expectedDeliveryDate (วันส่งต่อรายการ)
-          const pendingByDate = {};
-          for(const l of (po.lines||[])){
-            const left = (l.qty||0) - (l.receivedQty||0);
-            if(left <= 0) continue;
-            const d = l.expectedDeliveryDate || po.dueDate || '-';
-            if(!pendingByDate[d]) pendingByDate[d] = [];
-            pendingByDate[d].push({ ...l, remaining:left });
-          }
-          const dueGroups = Object.entries(pendingByDate).sort(([a],[b]) => a.localeCompare(b));
-          return h('div', { key:po.id,
-            className: cls('bg-white rounded-lg shadow p-4 border-l-4',
-              overdue ? 'border-red-500' : 'border-blue-500') },
-            h('div', { className:'flex items-start justify-between mb-2' },
-              h('div', null,
-                h('div', { className:'font-mono text-sm text-blue-700 font-semibold' },
-                  overdue && '⚠️ ', po.poNumber),
-                h('div', { className:'text-xs text-gray-500' },
-                  `ครบกำหนด: ${nextEta ? fmtDate(nextEta) : '-'}`, overdue && ' (เลยกำหนด)')
-              ),
-              h('span', { className: cls('text-xs px-2 py-0.5 rounded font-medium',
-                po.status==='partial' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800')
-              }, po.status==='partial' ? 'รับบางส่วน' : 'รอรับ')
-            ),
-            h('div', { className:'text-sm mb-1' },
-              h('span', { className:'text-gray-500' }, '🏭 '), h('b', null, sup?.name), _supChip(sup, state)),   // 🆕 PARTY-BRANCH (UAT): การ์ดรอรับ — แยก PO ซีพีหลายสาขา
-            h('div', { className:'text-sm mb-2' },
-              h('span', { className:'text-gray-500' }, '📍 ส่งที่: '),
-              dest ? `${dest.branchType==='hq'?'🏢':'🏪'} ${dest.name}` : '-'),
-            h('div', { className:'text-xs text-gray-600 mb-2' },
-              `${(po.lines||[]).length} รายการ · ค้างรับ ${fmtNum(remaining)} หน่วย${showValue ? ' · มูลค่า ' + fmtCur(po.total||0) : ''}`
-            ),
-            // Schedule summary — แสดงวันส่งแยกรายการ
-            dueGroups.length > 1 && h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 mb-2 text-[11px]' },
-              h('div', { className:'font-semibold text-amber-900 mb-1' }, '📅 ตารางส่งแยกรายการ'),
-              dueGroups.slice(0,5).map(([d, items]) => {
-                const odue = d < today;
-                return h('div', { key:d, className: cls('flex justify-between',
-                  odue ? 'text-red-700 font-semibold' : 'text-amber-800') },
-                  h('span', null, d === '-' ? '(ไม่ระบุ)' : fmtDate(d), odue && ' ⚠️'),
-                  h('span', { className:'font-mono' },
-                    items.map(i => {
-                      const it = state.items.find(x => x.id === i.itemId);
-                      return `${it?.name||''} ${fmtNum(i.remaining)}${i.unit||''}`;
-                    }).join(', '))
-                );
-              }),
-              dueGroups.length > 5 && h('div', { className:'text-gray-500' }, `… อีก ${dueGroups.length-5} วัน`)
-            ),
-            canReceivePO && h(Button, { variant:'success', onClick:()=>{
-                // 🆕 UAT: หน้าต่างรับของ PO นี้ย่ออยู่แล้ว → เด้งขึ้นมาแทนเปิดใหม่ (docKey เดียวกับใน ReceiveFromPOModal)
-                if(global.ERP.restoreMinimized && global.ERP.restoreMinimized('gr:po:'+po.id)) return;
-                setReceivingPO(po); } },
-              '📥 รับของ'),
-          );
-        })
+        pgPO.shown.map(po => _poCard(po, false))
       ),
       h(Pager, { pg:pgPO, label:'ใบสั่งซื้อ (PO)' })
+    ),
+
+    // 🆕 RECV-ONBEHALF R2: PO ส่งตรงสาขา — รับแทน (ของเข้าสต๊อกสาขาปลายทางของ PO)
+    obPOs.length > 0 && h('div', { 'data-testid':'onbehalf-section', className:'bg-orange-50 border-2 border-orange-200 rounded-lg p-3' },
+      h('h3', { className:'font-bold text-orange-900' }, `📦 PO ส่งตรงสาขา — รับแทน — ${obPOs.length} ใบ`),
+      h('div', { className:'text-xs text-orange-800 mb-2' }, 'PO ส่งตรงสาขาที่คุณได้รับมอบให้รับแทน — ตกลงกับสาขาก่อนว่าใครเป็นคนกดรับ (กันรับซ้ำ) · ของจะเข้าสต๊อกของสาขาปลายทางตาม PO (ไม่ใช่สาขาคุณ)'),
+      h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' }, pgOB.shown.map(po => _poCard(po, true))),
+      h(Pager, { pg:pgOB, label:'ใบสั่งซื้อรับแทน' })
     ),
 
     // TO section
@@ -33081,6 +33230,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
   // 🆕 BILL-DISC UAT S2: มูลค่า/ส่วนลดที่ต่อรองกับผู้ขาย เห็นเฉพาะผู้มีสิทธิ์เห็นต้นทุน (เหมือนหน้ารับโอน ReceiveFromTOModal)
   const showValue = global.ERP.canSeeStockValue(user, state);
   const destBranchObj = getBranch(state, po.destinationBranch || state.currentBranch);
+  // 🆕 RECV-ONBEHALF R2: ปลายทาง PO ไม่ใช่สาขาตัวเอง แต่อยู่ใน "รับของแทนสาขา" → รับแทน (ของเข้าสต๊อกสาขาปลายทาง)
+  const onBehalf = !!(po.destinationBranch && global.ERP.receiveOnBehalfBranchIds && global.ERP.receiveOnBehalfBranchIds(user, state).includes(po.destinationBranch));
   // 🆕 UAT (จัดซื้อ): รับของจากผู้ขายเข้าได้เฉพาะคลัง raw ที่ไม่ผูกไลน์ (ของไลน์ต้องผ่าน TR→TO→GR)
   const destLocs = (destBranchObj?.locations||[]).filter(l => global.ERP.isSupplierRecvLoc ? global.ERP.isSupplierRecvLoc(l) : (l.type === 'raw' && !l.lineId));
   const [rcvLines, setRcvLines] = useState(() =>
@@ -33096,8 +33247,9 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         expiryDate: '',
         // 🏷️ LOT-LABEL: แนะนำ = จำนวน "ลัง/ถุง" ที่รับ (1 ดวงต่อ 1 ลัง) · ผู้ใช้แก้เองได้
         // 💎 UAT S2: แนะนำตามปกติทุกบรรทัด (💎 ต่ำกว่าเกณฑ์ = ของเข้าสต๊อก ต้องมีสติ๊กเกอร์) · ถึงเกณฑ์ = ซ่อนช่อง + ไม่พิมพ์ (_capUi/_isCap)
-        labelQty: suggestLabelQty(_it, _rem, l.unit),
-        _labelTouched: false,   // แก้เองแล้ว = หยุดวิ่งตามช่อง "รับตอนนี้"
+        // 🆕 RECV-ONBEHALF UAT M2: รับแทน = ของอยู่ที่สาขา → ค่าเริ่มต้น 0 ดวง (ไม่พิมพ์ที่เครื่อง HQ) · แก้เองได้
+        labelQty: onBehalf ? 0 : suggestLabelQty(_it, _rem, l.unit),
+        _labelTouched: onBehalf,   // แก้เองแล้ว = หยุดวิ่งตามช่อง "รับตอนนี้"
       };
     })
   );
@@ -33451,6 +33603,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
       photos,                // 📷 รูปถ่ายจาก mobile/desktop
       hasOverReceive,
       receivedBy: user.username, receivedByName: user.name,
+      // 🆕 RECV-ONBEHALF R2: รับแทนสาขา — ใครรับ/เมื่อไร/สาขาของคนรับ (ของเข้าสาขาปลายทาง = branch)
+      ...(onBehalf ? { receivedOnBehalf: { by: user.username, byName: user.name || '', at: Date.now(), userBranch: user.branch || null } } : {}),
       createdAt: Date.now(),
     };
 
@@ -33541,7 +33695,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     //   และใช้ resolvedLots (LOT จริงที่เข้า FIFO layer) ไม่ใช่ค่าที่ผู้ใช้พิมพ์อย่างเดียว
     //   เปิดหน้าต่างพิมพ์ก่อน alert — กัน popup blocker กินสิทธิ์ตอนค้าง dialog
     const _supName = (state.suppliers||[]).find(sp => sp.id === poLive.supplierId)?.name || '';
-    const _labelFrom = _supName ? `ผู้ส่ง: ${_supName}` : '';
+    // 🆕 RECV-ONBEHALF UAT M2: ฉลากของรับแทน ขึ้นชื่อสาขาปลายทางนำหน้า (สัญญา R2) — กันไลน์ HQ หยิบไปใช้ · อยู่ใน fromText เพื่อให้ขึ้นทั้งหน้าพิมพ์และเครื่องพิมพ์ฉลาก
+    const _labelFrom = (onBehalf ? `ของสาขา ${destBranchObj?.name || branch}` + (_supName ? ' · ' : '') : '') + (_supName ? `ผู้ส่ง: ${_supName}` : '');
     const labelJobs = receiving.map((l, idx) => {
       const n = Math.max(0, Math.min(99, Math.floor(Number(l.labelQty)||0)));
       if(n <= 0 || _isCap(l)) return null;   // 💎 FA-S2: ทรัพย์สินไม่มีล็อต ไม่พิมพ์สติกเกอร์
@@ -33554,11 +33709,14 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         dateText: fmtDate(grDate),
         expText: l.expiryDate ? fmtDate(l.expiryDate) : '',
         grNumber,
-        fromText: _labelFrom,                        // 🏷️ บริษัทที่ส่งของมา
+        fromText: _labelFrom,                        // 🏷️ บริษัทที่ส่งของมา (+ "ของสาขา X" เมื่อรับแทน)
+        ...(onBehalf ? { branchText: `ของสาขา ${destBranchObj?.name || branch}` } : {}),
         unitText: lotUnitText(item, l.unit),         // 🏷️ "1 ลัง = 24 ชิ้น"
       };
     }).filter(Boolean);
     const labelCount = labelJobs.reduce((s2, j) => s2 + j.count, 0);
+    // 🆕 RECV-ONBEHALF R2: audit gr_onbehalf (รับแทนสาขา) — แยกจากก้อนรับของ (audit-only ไม่ชนกับงานอื่น)
+    //   🆕 UAT S2: ย้ายไปประทับใน reducer RECEIVE_PO แล้ว (al_grob_<gr.id>) — ไม่ส่ง ADD_AUDIT_LOG แยก
     // 🆕 บอกตามจริง — printLotLabels คืน false ถ้าเปิดหน้าต่างไม่ได้ (popup ถูกบล็อก)
     //    หรือผู้ใช้กดยกเลิกตอนถามยืนยันจำนวนมาก · เดิมขึ้นว่า "เปิดหน้าพิมพ์แล้ว" ทุกกรณี
     const _printed = (labelJobs.length > 0 && _numOk) ? (printLotLabels(labelJobs, state) !== false) : null;
@@ -33590,6 +33748,12 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     h('div', { className:'space-y-4' },
       // 🖨️ สถานะเครื่องพิมพ์ฉลาก — ต่อ Bluetooth/USB ก่อนกดรับ → สติ๊กเกอร์ยิงเข้าเครื่องตรง (ไม่ผ่านหน้าจอพิมพ์)
       h(PrinterStatusRow, { state }),
+      onBehalf && h('div', { className:'bg-orange-50 border-2 border-orange-400 rounded p-3 text-sm text-orange-900', 'data-testid':'gr-onbehalf-banner' },
+        h('div', { className:'font-bold' }, `📦 รับแทนสาขา ${destBranchObj?.name || po.destinationBranch} — ของเข้าสต๊อกสาขา ${destBranchObj?.name || po.destinationBranch}`),
+        h('div', { className:'text-xs' }, 'ไม่ใช่สาขาของคุณ · ล็อต/FIFO/ตำแหน่งเก็บเป็นของสาขาปลายทาง · ใบรับของบันทึกว่าคุณรับแทน'),
+        // 🆕 UAT S5: ผู้รับแทนไม่เห็นของจริง — จำนวน/วันหมดอายุเป็นฐานตั้งหนี้ (เตือนอย่างเดียว ยังไม่บังคับ)
+        h('div', { className:'text-xs mt-1 font-semibold', 'data-testid':'gr-onbehalf-verify' }, '⚠️ คุณไม่ได้เห็นของจริง — ยืนยันจำนวน/วันหมดอายุกับสาขา + ขอรูปใบส่งของที่สาขาเซ็นก่อนกดรับ'),
+        h('div', { className:'text-xs mt-1', 'data-testid':'gr-onbehalf-labelnote' }, '🏷️ ของอยู่ที่สาขา — สติ๊กเกอร์ตั้งไว้ 0 ดวง · พิมพ์ฉลากเมื่อจะส่งไปติดที่สาขา (แก้จำนวนได้ · ฉลากขึ้น "ของสาขา …")')),
       h('div', { className:'bg-green-50 border border-green-200 rounded p-3 text-sm text-green-800' },
         '✨ รับได้บางส่วน · ระบบจะเพิ่ม stock ที่ ',
         h('b', null, `${destBranchObj?.branchType==='hq'?'🏢':'🏪'} ${destBranchObj?.name}`),
@@ -36101,8 +36265,16 @@ function EcountHistToggle({ show, setShow, hidden, testid }){
 // ================================================================
 // GR HISTORY TAB (ย้อนหลัง — read only จากฝั่งคลัง)
 // ================================================================
+// 🆕 RECV-ONBEHALF UAT M1: สาขาที่เห็นใบรับของ/คืนของ = สาขาตัวเอง + สาขาที่ "รับแทน" (ไม่งั้นผู้รับแทนพิมพ์ฉลากซ้ำ/ยกเลิก/คืนของ/แก้วันที่ไม่ได้)
+function _grScopeBranches(user, state){
+  const own = getAllowedBranches(user, state);
+  const ob = global.ERP.receiveOnBehalfBranchIds ? global.ERP.receiveOnBehalfBranchIds(user, state) : [];
+  if(!ob.length) return own;
+  return own.concat((state.branches||[]).filter(b => b && ob.includes(b.id) && !own.some(o => o.id === b.id)));
+}
+
 function GRHistoryTab({ state, user, dispatch }){
-  const allowedBranches = getAllowedBranches(user, state);
+  const allowedBranches = _grScopeBranches(user, state);
   const branchIds = allowedBranches.map(b => b.id);
   const [branchFilter, setBranchFilter] = useState(isSuperUser(user) || allowedBranches.length > 1 ? '__all__' : state.currentBranch);
   const [search, setSearch] = useState('');
@@ -36516,6 +36688,12 @@ function GRViewModal({ gr: grIn, state, dispatch, user, onClose }){
           h('div', { className:'font-bold' },
             branch ? `${branch.branchType==='hq'?'🏢':'🏪'} ${branch.name}` : gr.branch),
           h('div', { className:'text-xs text-gray-600 mt-1' }, `รับโดย: ${gr.receivedByName || gr.receivedBy}`),
+          gr.receivedOnBehalf && h('div', { className:'text-xs text-orange-700 font-semibold mt-0.5', 'data-testid':'gr-view-onbehalf' }, (() => {
+            // 🆕 UAT N5: บอกชื่อผู้รับแทน + สาขาของผู้รับ (เก็บไว้ใน receivedOnBehalf ตอนรับ)
+            const ob = gr.receivedOnBehalf, ub = ob.userBranch ? getBranch(state, ob.userBranch) : null;
+            const who = ob.byName || ob.by || gr.receivedByName || gr.receivedBy || '-';
+            return `📦 รับแทนโดย ${who}` + (ob.userBranch ? ` (${(ub && ub.name) || ob.userBranch})` : '') + ' — ไม่ใช่พนักงานสาขานี้';
+          })()),
         )
       ),
 
@@ -36914,7 +37092,7 @@ function RTVTab({ state, dispatch, user }){
   const [showNew, setShowNew] = useState(false);
   const [detail, setDetail] = useState(null);
   const [activeOnly, setActiveOnly] = useState(true);  // 🆕 U11: default แสดงเฉพาะที่ยังไม่จบ
-  const allowedBranches = getAllowedBranches(user, state);
+  const allowedBranches = _grScopeBranches(user, state);   // 🆕 RECV-ONBEHALF UAT M1
   const branchIds = allowedBranches.map(b => b.id);
   const dr = useDateRange(7);
 
@@ -37054,7 +37232,7 @@ function RTVTab({ state, dispatch, user }){
 }
 
 function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
-  const allowedBranches = getAllowedBranches(user, state);
+  const allowedBranches = _grScopeBranches(user, state);   // 🆕 RECV-ONBEHALF UAT M1
   const branchIds = allowedBranches.map(b => b.id);
 
   // Available GRs (purchase type, received in allowed branches)
@@ -37493,7 +37671,10 @@ function grFromText(gr, state){
     return (b && b.name) ? `โอนจาก: ${b.name}` : '';
   }
   const sup = (state.suppliers || []).find(x => x.id === gr.supplierId);
-  return (sup && sup.name) ? `ผู้ส่ง: ${sup.name}` : '';
+  const _sup = (sup && sup.name) ? `ผู้ส่ง: ${sup.name}` : '';
+  // 🆕 RECV-ONBEHALF UAT M2: พิมพ์ซ้ำใบรับแทน → ขึ้น "ของสาขา X" นำหน้าเหมือนตอนรับ
+  if(gr.receivedOnBehalf){ const b = getBranch(state, gr.branch); return `ของสาขา ${(b && b.name) || gr.branch}` + (_sup ? ' · ' + _sup : ''); }
+  return _sup;
 }
 
 function printLotLabels(labels, stateArg){
@@ -69541,7 +69722,7 @@ function GRList({ state, dispatch, user }){
               pg.shown.map(g => {
                 const sup = state.suppliers.find(s => s.id === g.supplierId);
                 return h('tr', { key:g.id, className:'hover:bg-gray-50' },
-                  h('td', { className:'px-3 py-2 font-mono text-xs text-green-700 font-semibold' }, g.grNumber),
+                  h('td', { className:'px-3 py-2 font-mono text-xs text-green-700 font-semibold' }, g.grNumber, global.ERP.grOnBehalfTag && global.ERP.grOnBehalfTag(g, state)),
                   h('td', { className:'px-3 py-2 text-xs' }, fmtDate(g.grDate)),
                   h('td', { className:'px-3 py-2 font-mono text-xs text-blue-700' }, g.poNumber||'-'),
                   h('td', { className:'px-3 py-2 text-sm' }, sup?.name || '-', sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
@@ -72091,7 +72272,7 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
               selectedGRs.includes(g.id) && 'bg-blue-50') },
               h('input', { type:'checkbox', checked:selectedGRs.includes(g.id),
                 onChange:()=>toggleGR(g) }),
-              h('span', { className:'font-mono text-green-700' }, g.grNumber),
+              h('span', { className:'font-mono text-green-700' }, g.grNumber, global.ERP.grOnBehalfTag && global.ERP.grOnBehalfTag(g, state)),
               h('span', { className:'text-gray-500' }, fmtDate(g.grDate)),
               h('span', { className:'flex-1 font-mono text-blue-700' }, g.poNumber||'-'),
               poSt && !poSt.complete && h('span', { className:'text-[10px] text-orange-700 bg-orange-100 px-1 rounded' },
@@ -72661,7 +72842,7 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
                         h('input', { type:'checkbox', checked:selectedGRs.includes(g.id), readOnly:true,
                           className:'w-4 h-4' })
                       ),
-                      h('td', { className:'px-2 py-1.5 font-mono text-xs text-green-700 font-semibold' }, g.grNumber),
+                      h('td', { className:'px-2 py-1.5 font-mono text-xs text-green-700 font-semibold' }, g.grNumber, global.ERP.grOnBehalfTag && global.ERP.grOnBehalfTag(g, state)),
                       h('td', { className:'px-2 py-1.5 text-xs' }, fmtDate(g.grDate)),
                       h('td', { className:'px-2 py-1.5 font-mono text-xs text-blue-700' }, g.poNumber||'-'),
                       h('td', { className:'px-2 py-1.5 text-center text-xs' }, (g.lines||[]).length),
@@ -76638,7 +76819,7 @@ function printGR(gr, state){
   </div>
   ${gr.note ? `<div style="margin-top:4mm;font-size:9pt"><b>หมายเหตุ:</b> ${gr.note}</div>` : ''}
   <div class="footer">
-    <div class="sig">${sigImg(gr.receivedBy||gr.createdBy)}<div style="border-top:1px dotted #888;margin-top:2px;padding-top:1mm">ผู้รับของ<br/><b>${gr.receivedByName||gr.receivedBy||gr.createdBy||''}</b></div></div>
+    <div class="sig">${sigImg(gr.receivedBy||gr.createdBy)}<div style="border-top:1px dotted #888;margin-top:2px;padding-top:1mm">ผู้รับของ<br/><b>${gr.receivedByName||gr.receivedBy||gr.createdBy||''}</b>${gr.receivedOnBehalf ? `<br/><span style="font-size:9px">📦 รับแทนสาขา ${branch?.name||''}</span>` : ''}</div></div>
     <div class="sig"><div style="border-top:1px dotted #888;margin-top:42px;padding-top:1mm">ผู้ตรวจ</div></div>
     <div class="sig"><div style="border-top:1px dotted #888;margin-top:42px;padding-top:1mm">ผู้ส่ง (Driver/Supplier)</div></div>
   </div>
@@ -79797,9 +79978,10 @@ function IncomingScheduleTab({ state, user }){
   const setSingleDay = (ymd) => { setFromDate(ymd); setToDate(ymd); };
 
   const rows = useMemo(() => {
+    const _obIds = global.ERP.receiveOnBehalfBranchIds ? global.ERP.receiveOnBehalfBranchIds(user, state) : [];   // 🆕 RECV-ONBEHALF R2: PO ส่งตรงสาขาที่รับแทน
     const pos = (state.pos||[]).filter(p =>
       ['approved','partial'].includes(p.status) &&
-      (isSuperUser(user) || branchIds.includes(p.destinationBranch))
+      (isSuperUser(user) || branchIds.includes(p.destinationBranch) || _obIds.includes(p.destinationBranch))
     );
     const byDate = {};
     for(const po of pos){
@@ -89775,7 +89957,7 @@ function INVQueueTab({ state, dispatch, user }){
                           : grDocNone
                             ? h('span', { className:'text-gray-500 font-sans', title:'คลังระบุว่าของมาโดยไม่มีเอกสาร — ตรวจกับ supplier ก่อนตั้งหนี้' }, '📭 ไม่มีเอกสาร')
                             : h('span', { className:'text-gray-400 font-sans' }, '—')),
-                      h('td', { className:'px-3 py-2 font-mono text-xs text-green-700 font-semibold break-all' }, g.grNumber),
+                      h('td', { className:'px-3 py-2 font-mono text-xs text-green-700 font-semibold break-all' }, g.grNumber, global.ERP.grOnBehalfTag && global.ERP.grOnBehalfTag(g, state)),   // 🆕 RECV-ONBEHALF UAT S3
                       h('td', { className:'px-3 py-2 font-mono text-xs text-blue-700 break-all' },
                         g.poNumber||'-',
                         poNotFull && h('div', {
@@ -93302,7 +93484,8 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
               dueMismatch && h('div', { className:'text-[10px] text-yellow-700 whitespace-nowrap' },
                 `≠ เครดิต ${_supCredit} วัน (${fmtDate(_expDue)})`)),
             h('td', { className:'px-3 py-2' },
-              h('div', { className:'font-mono text-xs text-red-700 font-semibold' }, i.invNumber),
+              h('div', { className:'font-mono text-xs text-red-700 font-semibold' }, i.invNumber,
+                global.ERP.invOnBehalfGR && global.ERP.grOnBehalfTag(global.ERP.invOnBehalfGR(i, state), state)),   // 🆕 RECV-ONBEHALF UAT S3
               i.rtvHoldPayment && h('div', { className:'text-[10px] text-rose-700 font-semibold',
                 title:'ไปที่ บัญชี → 🔄 ศูนย์จัดการคืนของ เพื่อปิดเคสก่อน' },
                 '🔒 พักจ่าย — ของคืนยังไม่ปิดเคส'),
@@ -99171,7 +99354,11 @@ function UsersSettings({ state, dispatch }){
                   return ks.length ? h('div', { className:'mt-0.5' }, h('span', { className:'text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 font-medium',
                     'data-self-approve':u.username, title:'อนุมัติเอกสารที่ตัวเองสร้าง/ส่งได้: ' + ks.map(k => NM[k]).join(', ') }, '✋ อนุมัติเองได้'),
                     ks.includes('po') && h('span', { className:'ml-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200', 'data-self-cap-badge':u.username },   // 🆕 SELF-CAP C1
-                      '✋ PO < ' + Number(global.ERP.selfApprovePoCapOf(u)).toLocaleString('en-US', { maximumFractionDigits:2 }))) : null; })()
+                      '✋ PO < ' + Number(global.ERP.selfApprovePoCapOf(u)).toLocaleString('en-US', { maximumFractionDigits:2 }))) : null; })(),
+                // 🆕 RECV-ONBEHALF R1: ป้าย 📦 รับแทนสาขา
+                (() => { const v = Array.isArray(u.receiveForBranches) ? u.receiveForBranches : []; if(!v.length) return null;
+                  return h('div', { className:'mt-0.5' }, h('span', { className:'text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-800 font-medium', 'data-rfb-badge':u.username,
+                    title:'รับของแทน: ' + global.ERP.receiveForLabel(v, state) }, v.includes('*') ? '📦 รับแทนทุกสาขา' : `📦 รับแทน ${v.length} สาขา`)); })()
               ),
               h('td', { className:'px-3 py-2 text-center' },
                 u.active!==false ? h('span', { className:'text-xs text-green-700 font-medium' }, '✓ ใช้งาน')
@@ -99231,7 +99418,15 @@ function UserEditModal({ user, state, dispatch, onClose }){
   const [permMap, setPermMap] = useState(() => getUserPerms(user || { role:'branch' }));
   const [selfPoCap, setSelfPoCap] = useState(user && user.selfApprovePoCap != null ? String(user.selfApprovePoCap) : '');   // 🆕 SELF-CAP C1
   const _me0 = state.currentUser, capLocked = !!(isEdit && _me0 && user && _me0.id === user.id && !global.ERP.selfCapSelfEditOk(_me0));
-  const capHiLocked = !global.ERP.selfCapSelfEditOk(_me0);   // UAT M1: เพดาน > 100,000 = GM/เจ้าของตั้งเท่านั้น (reducer ตรวจซ้ำ)
+  const capHiLocked = !global.ERP.selfCapSelfEditOk(_me0);
+  // 🆕 RECV-ONBEHALF R1: 📦 รับของแทนสาขา ([ids] / ['*']) · แก้ของตัวเองไม่ได้ (ยกเว้น GM/เจ้าของ) · ต้องมีสิทธิ์แก้ผู้ใช้ · reducer ตรวจซ้ำ
+  const [rfb, setRfb] = useState(() => Array.isArray(user && user.receiveForBranches) ? user.receiveForBranches : []);
+  const rfbLocked = !!((isEdit && _me0 && user && _me0.id === user.id && !global.ERP.selfCapSelfEditOk(_me0))
+    || !(global.ERP.selfCapSelfEditOk(_me0) || hasPerm(_me0, 'settings', 'users', 'edit')));
+  const rfbAll = rfb.includes('*');
+  // 🆕 UAT S4: ตั้งรับแทนแล้วแต่คนนี้ไม่มีสิทธิ์รับของ (purchase.gr.create) → เตือนในฟอร์ม (ตามสิทธิ์ที่กำลังแก้ในฟอร์ม)
+  const rfbNoGr = rfb.length > 0 && !hasPerm({ ...(user || {}), role, permissions: useCustomPerms ? permMap : null }, 'purchase', 'gr', 'create');
+  const toggleRfb = (bid) => setRfb(rfb.includes(bid) ? rfb.filter(x => x !== bid) : [...rfb.filter(x => x !== '*'), bid]);   // UAT M1: เพดาน > 100,000 = GM/เจ้าของตั้งเท่านั้น (reducer ตรวจซ้ำ)
   // Production fields (Phase 2A)
   const [assignedLineIds, setAssignedLineIds] = useState(
     user?.assignedLineIds || (user?.assignedLineId ? [user.assignedLineId] : [])
@@ -99313,6 +99508,9 @@ function UserEditModal({ user, state, dispatch, onClose }){
       canSeeStockValue: canSeeStockValueOverride === 'on' ? true :
                         canSeeStockValueOverride === 'off' ? false : null,
     };
+    // 🆕 RECV-ONBEHALF R1: ล็อก = คงค่าเดิม (ไม่ส่งค่าใหม่) · ว่าง = ลบฟิลด์ (รับแทนไม่ได้)
+    if(!rfbLocked){ const _v = rfbAll ? ['*'] : rfb.filter(id => (state.branches||[]).some(b => b.id === id));
+      if(_v.length) data.receiveForBranches = _v; else if(isEdit && user && user.receiveForBranches) data.receiveForBranches = []; else delete data.receiveForBranches; }
     // 🆕 SELF-CAP C1: เพดาน ✋ PO · ว่าง = ลบฟิลด์ (100,000) · ล็อก (แก้ของตัวเอง) = คงค่าเดิม · reducer ตรวจซ้ำ
     const _capS = String(selfPoCap == null ? '' : selfPoCap).trim();
     // UAT S2: ไม่ติ๊ก ✋ PO = ล้างเพดาน (ไม่ค้างแบบซ่อน แล้วกลับมาเงียบ ๆ ตอนติ๊กใหม่) → audit "a → 100,000 (ค่าเริ่ม)"
@@ -99431,6 +99629,25 @@ function UserEditModal({ user, state, dispatch, onClose }){
               h('span', null, `${b.branchType==='hq'?'🏢':'🏪'} ${b.name}`)
             )))
         )
+      ),
+
+      // 🆕 RECV-ONBEHALF R1: 📦 รับของแทนสาขา — PO ส่งตรงสาขาเหล่านี้ขึ้นในหน้ารับของของคนนี้ (ของเข้าสต๊อกสาขาปลายทาง)
+      h(Field, { label:'📦 รับของแทนสาขา (PO ส่งตรงสาขา)',
+        hint:'เลือกสาขาที่คนนี้กดรับของแทนได้ — ใช้กับสาขาที่ไม่ได้รับของในระบบ · ต้องมีสิทธิ์รับของอยู่แล้ว (ช่องนี้ไม่ให้สิทธิ์เพิ่ม) · เว้นว่าง = รับแทนไม่ได้' },
+        h('div', { className:'border-2 rounded p-2 bg-white', 'data-testid':'rfb-editor' },
+          rfbLocked && h('div', { className:'text-[11px] text-amber-700 mb-1', 'data-testid':'rfb-locked' },
+            '🔒 แก้ของตัวเองไม่ได้ / ไม่มีสิทธิ์แก้ผู้ใช้ — ให้ผู้ดูแลอีกคนตั้งให้'),
+          rfbNoGr && h('div', { className:'text-[11px] text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-0.5 mb-1', 'data-testid':'rfb-nogr' },
+            '⚠️ คนนี้ยังไม่มีสิทธิ์รับของ (purchase.gr.create) — จะเห็นรายการรับแทนแต่กดรับไม่ได้ · ให้เพิ่มสิทธิ์รับของในส่วนสิทธิ์ของผู้ใช้นี้'),
+          h('label', { className:'flex items-center gap-1 text-xs py-0.5 font-medium cursor-pointer' },
+            h('input', { type:'checkbox', checked:rfbAll, disabled:rfbLocked, 'data-testid':'rfb-all',
+              onChange:()=>setRfb(rfbAll ? [] : ['*']) }),
+            h('span', null, '🌐 ทุกสาขา')),
+          h('div', { className:'grid grid-cols-2 gap-x-3 max-h-32 overflow-y-auto' },
+            state.branches.map(b => h('label', { key:b.id, className:'flex items-center gap-1 text-xs py-0.5 cursor-pointer hover:bg-gray-50' },
+              h('input', { type:'checkbox', checked:rfbAll || rfb.includes(b.id), disabled:rfbLocked || rfbAll, 'data-rfb':b.id,
+                onChange:()=>toggleRfb(b.id) }),
+              h('span', null, `${b.branchType==='hq'?'🏢':'🏪'} ${b.name}`)))))
       ),
 
       h('div', { className:'grid grid-cols-2 gap-3' },
@@ -109569,7 +109786,7 @@ global.ERP.registerModule('executive', { main: ExecutiveModule });
 //     alias:    '<group>.<key>' | (ctx)=>'<group>.<key>'|null,   // optional — ข้อเท็จจริงเดียวกับ check นั้น: ซ่อนตัวเองเมื่อผู้ใช้เห็นกลุ่มนั้นอยู่แล้ว (กัน gm นับซ้ำ) · ฟังก์ชันคืน null = ไม่ alias ในบริบทนั้น
 //     run:      (ctx)=> number | array | { count, detail:[string…] }   // detail ≤ 6 รายการ (เลขที่เอกสาร/ชื่อ)
 //   }
-//   ctx: { state, user, today, now (ms), role, isSuper, branches, branchIds, inScope(bid), branchName(bid),
+//   ctx: { state, user, today, now (ms), role, isSuper, branches, branchIds, inScope(bid), recvScope(bid) (= inScope + สาขารับแทน), branchName(bid),
 //          can(module), perm(mod,tab,action), items (Map), item(id), itemName(id), sup (Map), supName(id),
 //          cus (Map), cusName(id), daysBetween(a,b), daysAgo(dateStr), daysUntil(dateStr),
 //          memo(key, fn), H (helper จาก global.ERP),
@@ -109626,6 +109843,9 @@ function buildCtx(state, user, opts){
     state, user, today, now, role: user.role, isSuper, H, prodLive,
     branches, branchIds,
     inScope: (bid) => isSuper || branchSet.has(bid),
+    // 🆕 RECV-ONBEHALF verify 2: ขอบเขตรับของ PO = สาขาตัวเอง + สาขาที่ "รับแทน" (user.receiveForBranches) — เหมือน mod-home recvScope / แท็บ 📥 รับเข้า
+    recvScope: (() => { let ob = []; try { ob = (H && H.receiveOnBehalfBranchIds) ? (H.receiveOnBehalfBranchIds(user, state) || []) : []; } catch(_e){}
+      const obSet = new Set(ob); return (bid) => isSuper || branchSet.has(bid) || obSet.has(bid); })(),
     branchName: (bid) => (bmap.get(bid) || {}).name || bid || '-',
     can: (m) => { try { return canAccessModule(user, m); } catch(_e){ return false; } },
     perm: (mod, tab, action) => { try { return hasPerm(user, mod, tab, action); } catch(_e){ return false; } },
@@ -109835,7 +110055,7 @@ function ChecklistModule({ state }){
 }
 
 // ลงทะเบียนโมดูลก่อน fragment — fragment ด้านล่างเรียก global.ERP.MODULES.checklist.registerGroup(...)
-global.ERP.registerModule('checklist', { main: ChecklistModule, collectPendingWork, registerGroup, GROUPS, SEV_META });
+global.ERP.registerModule('checklist', { main: ChecklistModule, collectPendingWork, registerGroup, GROUPS, SEV_META, _buildCtx: buildCtx });
 
 })(window);
 
@@ -110141,7 +110361,7 @@ C.registerGroup({
       nav: NAV_INCOMING,
       hint: 'โทรยืนยัน supplier ว่าส่งวันนี้แน่ · ดูรายการที่ จัดซื้อ → แท็บ "🚚 รอเข้า" (กลุ่มวันนี้) · ถ้าเลื่อน เปิด PO กด "✏️ note/due" แก้วันส่ง แล้วแจ้งคลัง',
       run: (ctx) => { const today = ctx.today;
-                      const l = pos(ctx).filter(p => ACTIVE_PO.includes(p.status) && !isLegacyPO(p) && ctx.inScope(p.destinationBranch || p.branch)
+                      const l = pos(ctx).filter(p => ACTIVE_PO.includes(p.status) && !isLegacyPO(p) && ctx.recvScope(p.destinationBranch || p.branch)
                         && (p.lines||[]).some(x => x && !isShortMarked(x) && remain(x) > 0 && (x.expectedDeliveryDate || p.dueDate) === today));
                       return { count:l.length, detail:l.map(p => poRef(ctx, p)) }; } },
 
@@ -110318,12 +110538,12 @@ function poLineSlots(po, l){
   }
   return [{ eta: l.expectedDeliveryDate || po.dueDate || '', remain: (Number(l.qty)||0) - (Number(l.receivedQty)||0) }];
 }
-// PO ที่ยังรับได้ ปลายทางในขอบเขต — เกณฑ์เดียวกับแท็บ 📥 รับเข้า ที่ปุ่ม "ไปทำ" พาไป (ตัวเลขจะได้ตรงกัน)
+// PO ที่ยังรับได้ ปลายทางในขอบเขต (รวมสาขาที่รับแทน) — เกณฑ์เดียวกับแท็บ 📥 รับเข้า ที่ปุ่ม "ไปทำ" พาไป (ตัวเลขจะได้ตรงกัน)
 // ref: src/mod-stock.js:39-49 (incomingPOs: approved/partial หรือ fallback status ไม่ใช่ draft/pending/cancelled + มี line เหลือ) · src/mod-purchase.js:106-124 (isPOOverdue)
 //      PO migrate (~1,057 ใบ approved, receivedQty 0, ไม่มี dueDate, มี branch ไม่มี destinationBranch — migration/assemble_import.py:36-48) → ข้ามด้วย isMigrated
 function activePOs(ctx){
   return ctx.memo('wh_activePOs', () => (ctx.state.pos||[]).filter(p => {
-    if(isMigrated(p) || !ctx.inScope(p.destinationBranch)) return false;
+    if(isMigrated(p) || !ctx.recvScope(p.destinationBranch)) return false;   // RECV-ONBEHALF: นับ PO รับแทนด้วย (ตรงกับแท็บรับเข้า/badge)
     const okStatus = (p.status === 'approved' || p.status === 'partial');
     const notDead = !['draft','pending','cancelled'].includes(p.status);
     const hasRemaining = (p.lines||[]).some(l => isItemLine(l) && (Number(l.qty)||0) - (Number(l.receivedQty)||0) > 0.001);
@@ -115141,6 +115361,9 @@ function buildHomeCtx(state, user){
     // เทียบ "เดือนนี้ถึงวันนี้" กับ "เดือนก่อนช่วงเดียวกัน (1–วันที่เดียวกัน)" — เทียบทั้งเดือนก่อนจะ ▼ แดงตลอดต้นเดือน (UAT)
     dom: today.slice(8, 10), inPrevPeriod: (d) => d.slice(0, 7) === prevMonthOf(ym) && d.slice(8, 10) <= today.slice(8, 10),
     inScope: (bid) => isSuper || branchSet.has(bid),                                   // = mod-checklist buildCtx.inScope
+    // 🆕 RECV-ONBEHALF R2: ขอบเขตรับของ PO = สาขาตัวเอง + สาขาที่ "รับแทน" (user.receiveForBranches)
+    recvScope: (() => { let ob = []; try { ob = global.ERP.receiveOnBehalfBranchIds ? global.ERP.receiveOnBehalfBranchIds(user, state) : []; } catch(_e){}
+      const obSet = new Set(ob); return (bid) => isSuper || branchSet.has(bid) || obSet.has(bid); })(),
     can: (m) => { try { return !!canAccessModule(user, m); } catch(_e){ return false; } },
     perm: (mod, tab, action) => { try { return !!hasPerm(user, mod, tab, action); } catch(_e){ return false; } },
     item: (id) => items.get(id), itemName: (id) => (items.get(id) || {}).name || id || '-',
@@ -115176,7 +115399,7 @@ function incomingPOs(ctx){
     const hasRemaining = arr(p.lines).some(l => num(l.qty) - num(l.receivedQty) > 0.001);
     const notDead = !['draft','pending','cancelled'].includes(p.status);
     if(!(okStatus || (notDead && hasRemaining))) return false;
-    return ctx.inScope(p.destinationBranch);
+    return ctx.recvScope(p.destinationBranch);   // RECV-ONBEHALF R2
   }));
 }
 // ref: src/mod-stock.js:59-65 incomingTOs · src/mod-checklist.js:952-960 wh_to_incoming — TO shipping/partial ที่ปลายทางในขอบเขต
@@ -115524,7 +115747,7 @@ const HOME_KPIS = {
     if(!(ctx.can('purchase') || ctx.can('stock')) || !arr(state.pos).length) return null;
     const poIds = new Set(); let lines = 0;
     for(const po of arr(state.pos)){
-      if(!['approved','partial'].includes(po.status) || !ctx.inScope(po.destinationBranch)) continue;
+      if(!['approved','partial'].includes(po.status) || !ctx.recvScope(po.destinationBranch)) continue;   // RECV-ONBEHALF R2
       for(const l of arr(po.lines)){
         if(num(l.qty) - num(l.receivedQty) <= 0) continue;
         const eta = lineETA(po, l);
