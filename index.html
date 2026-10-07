@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="9909ba9a4b08";window.__ERP_BUILT_AT__="2026-10-07T15:57:50";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="7a49f463b31e";window.__ERP_BUILT_AT__="2026-10-07T17:11:26";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -6812,6 +6812,27 @@ function migInvBackDeny(state, inv){
     return 'ใบนี้มีคำขอจ่าย/PV ในระบบนี้ — ยกเลิกคำขอจ่ายก่อน';
   return '';
 }
+// 🆕 MIG_LATE_INV UAT MF1: ใบยกมาเพิ่มภายหลัง (migLate) ยกเลิกได้ก่อนจ่าย (สัญญา M2) — คีย์ผิด (ยอด/ผู้ขาย/เลข RE) ไม่ต้องค้างเป็นเจ้าหนี้ถาวร
+//   ต่างจากใบนำเข้า ③ แบบค่าใช้จ่าย (direct_expense ห้ามย้อน): ใบนี้ไม่มี GR/JE ให้กลับ → ยกเลิก = ใบหายจากเจ้าหนี้เท่านั้น
+//   '' = ยกเลิกได้ · ห้าม: จ่ายแล้ว/บางส่วน (ในระบบนี้หรือ Ecount) · มีคำขอจ่าย/PV · ปิดยอดค้าง
+// 🆕 MIG_LATE_INV verify 1: ใบยกมาเพิ่มภายหลัง "ของจริง" = มาจาก ADD_MIG_LATE_INV เท่านั้น (migLate อยู่ใน _INV_PROTECTED แล้ว)
+//   ต้องครบ: migLate + expenseType ecount_history + ไม่มี GR + มี auditLog al_miglate_<id> — กันตั้ง migLate ให้ใบ ③/ใบมี GR แล้วข้ามด่านยกเลิก
+function migLateGenuine(state, inv){
+  return !!(inv && inv.migLate && inv.expenseType === 'ecount_history' && !inv.grId
+    && ((state && state.auditLog) || []).some(x => x && x.id === 'al_miglate_' + inv.id));
+}
+function migLateVoidDeny(state, inv){
+  if(!inv || !inv.migLate) return 'ไม่ใช่ใบยกมาเพิ่มภายหลัง';
+  if(!migLateGenuine(state, inv)) return 'ใบนี้ไม่ได้เพิ่มจาก ➕ ใบยกมาจาก Ecount — ใช้ด่านยกเลิกของใบนำเข้าปกติ';
+  if(inv.voided) return 'ใบนี้ยกเลิกไปแล้ว';
+  if(inv.migApClose) return 'ใบนี้ ✂️ ปิดยอดค้างไว้ — ↩️ ยกเลิกการปิดยอดก่อน (ผจก.บัญชี/GM)';
+  if((Number(inv.paidAmount) || 0) > 0.005 || inv.ecountPay || ['paid', 'partial'].includes(inv.paymentStatus))
+    return 'ใบยกมานี้จ่ายแล้ว/จ่ายบางส่วน (ในระบบนี้หรือ Ecount) — ยกเลิกไม่ได้ · ยอดผิดให้ทำใบลด/เพิ่มหนี้ (CN/DN) ผ่าน ผจก.บัญชี';
+  const ids = p => !p ? [] : (p.invId ? [p.invId] : (p.invoiceIds || (p.invoiceId ? [p.invoiceId] : [])));
+  if(((state && state.payments) || []).some(p => p && !p.reversed && ['pending', 'approved'].includes(p.approvalStatus) && ids(p).includes(inv.id)))
+    return 'ใบนี้มีคำขอจ่าย/PV ในระบบนี้ — ยกเลิกคำขอจ่ายก่อน';
+  return '';
+}
 // 🆕 INV_PAYSUM: เลขใบจ่าย Ecount ของใบนำเข้า — ecountPay.voucher ก่อน · ไม่มี → ดึงจากโน้ต paidBy (เช่น "… PV25092600005")
 //   ใช้ร่วม: แท็บ ✅ รายการที่จ่ายแล้ว (mod-accounting) + กล่อง 💰 สรุปการจ่าย ใน INVDetailModal (mod-purchase)
 function invEcountVoucher(inv){
@@ -10480,7 +10501,7 @@ Object.assign(global.ERP, {
   findDupSupInv, consumeSupplierCredit,
   // Helpers
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines,
-  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, _buildInvDrLinesRaw, offInvDiscAmt, offInvDiscWeights, offInvDiscAlloc, offInvDiscCheck, applyOffInvDiscDr, grMigApHeld, grMigOpening, invVatExactOk, migInvBackDeny, migEcountPaidOrig, invEcountVoucher, invPayParts, invPaySplit, invMigClosed, setPayCenterPrefill, takePayCenterPrefill, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
+  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, _buildInvDrLinesRaw, offInvDiscAmt, offInvDiscWeights, offInvDiscAlloc, offInvDiscCheck, applyOffInvDiscDr, grMigApHeld, grMigOpening, invVatExactOk, migInvBackDeny, migLateVoidDeny, migLateGenuine, migEcountPaidOrig, invEcountVoucher, invPayParts, invPaySplit, invMigClosed, setPayCenterPrefill, takePayCenterPrefill, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
   readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, unitUsage, unitUsageAdvice, getBaseUnit, findItemUnit, toBaseQty, rtvReturnBaseQty, rtvLineBaseQty, rtvReplaceBaseQty, unitsForPurpose,
@@ -15447,7 +15468,8 @@ const _INV_PROTECTED = Object.freeze(['depositApplications','depositUsed','depos
   'vatClaimHere','vatClaimHereLog',
   'ecountPayLog','ecountPayReversed',   // 🆕 MIG_AP_NORMAL N5: แก้ได้เฉพาะ MIG_AP_UNPAY/_MARKPAID
   'migApClose','migApCloseLog',   // 🆕 MIG_AP_CLOSE: แก้ได้เฉพาะ MIG_AP_CLOSE/_UNDO
-  'supTaxInvMore','supTaxInvBase','supTaxInvVat']);   // 🆕 MULTI-TAXINV: แก้ได้เฉพาะ SET/ADD/CLEAR_TAX_INV (กันสำเนาเก่าทับใบกำกับใบที่ 2+)
+  'supTaxInvMore','supTaxInvBase','supTaxInvVat',
+  'migLate']);   // 🆕 MIG_LATE_INV verify 1: ตั้งได้เฉพาะ ADD_MIG_LATE_INV (กัน PATCH_INV ตั้งธงให้ใบ ③ แล้วยกเลิกข้ามด่าน)   // 🆕 MULTI-TAXINV: แก้ได้เฉพาะ SET/ADD/CLEAR_TAX_INV (กันสำเนาเก่าทับใบกำกับใบที่ 2+)
   //   // 🆕 MIG_VAT_HERE V2: ธงย้ายมาเคลมในระบบนี้ — แก้ได้เฉพาะ MIG_VAT_HERE/_UNDO (ไฟล์นำเข้าใบใหม่ตั้งมาได้)   // 🆕 VAT-CLAIM verify (B3.1): เลื่อนเคลม/ประวัติเคลม/หมดสิทธิ์ — แก้ได้เฉพาะ action ของมัน (V5+)
 // PATCH_INV.add ที่สายจ่ายเงินใช้ (บวกเท่านั้น — ค่าลบ/ฟิลด์ควบคุมอื่นถูกตัดทิ้ง)
 const _INV_PROTECTED_ADD_OK = Object.freeze(['paidAmount','nonDeductibleVat','nonDeductibleVatBase']);
@@ -15832,7 +15854,10 @@ function _taxInvDenyReason(s, inv, op, d, u, opts){
       // 🆕 DEPOSIT-VAT UAT: ใบกำกับใบเดียวคลุมหลาย GR (นม/ไข่ วางบิลรายเดือน) — ชนใบของผู้ขายเดียวกันที่ผูก GR อื่นและยังไม่จ่าย → ชี้ทางที่ถูก
       const _multiGr = hits.some(x => { const c = (s.invoices||[]).find(i => i.id === x.id) || ((d && d.pending) || []).find(i => i && i.id === x.id);
         return !!c && !c.voided && c.supplierId === inv.supplierId && !!c.grId && c.grId !== inv.grId && !((Number(c.paidAmount)||0) > 0.005); });
-      return 'ใบกำกับ ' + num + ' ของผู้ขายรายนี้ถูกใช้แล้ว — ' + hits.map(x => (x.invNumber || x.id) + ' (' + (_why[x.why] || x.why) + (x.createdBy ? ' · คีย์โดย ' + x.createdBy : '') + ')').join(', ')
+      // 🆕 MIG_LATE verify 3b F3: ใบยกมาจาก Ecount (เพิ่มภายหลัง) — หน้าจอตั้งหนี้ไม่ถามด่านใบยกมาก่อนแล้ว (รายงานที่นี่ที่เดียว) → ป้าย + ทางออกที่ถูก (ไม่ใช่ "ใส่ทีหลัง")
+      const _ml = x => { const c = (s.invoices||[]).find(i => i.id === x.id); return !!(c && c.migLate); }, _anyMl = hits.some(_ml);
+      return 'ใบกำกับ ' + num + ' ของผู้ขายรายนี้ถูกใช้แล้ว — ' + hits.map(x => (x.invNumber || x.id) + ' (' + (_why[x.why] || x.why) + (_ml(x) ? ' · 🧾 ยกมาจาก Ecount (เพิ่มภายหลัง)' : (x.createdBy ? ' · คีย์โดย ' + x.createdBy : '')) + ')').join(', ')
+        + (_anyMl ? '\n→ 🧾 ใบยกมาจาก Ecount = หนี้ของของล็อตนี้อยู่แล้ว ไม่ต้องตั้งหนี้ซ้ำ (ถ้าใบยกมาคีย์ผิด ให้บัญชียกเลิกใบยกมาที่ 💰 รอจ่าย → 🗑️ ก่อน)' : '')
         + (_multiGr ? '\n→ ใบกำกับใบเดียวครอบหลาย GR → ใช้ปุ่ม 🔗 INV รวมหลาย GR → ใบเดียว (ถ้าตั้งใบแรกไปแล้วและยังไม่จ่าย: ยกเลิก PI เดิม แล้วตั้งรวมใหม่)' : '')
         + (hits.some(x => x.yearRollover) ? '\n→ ใบเดิมห่างกันเกินรอบปี — ผู้ขายอาจรันเลขใหม่ทุกปี: ให้ใส่เลขตามที่พิมพ์บนใบเต็ม ๆ (รวมปี/คำนำหน้า เช่น 2026/0012) ถ้าบนใบมี' : '')
         + '\n→ ถ้าเป็นบิลคนละใบจริง: กด ⏰ ใส่ทีหลัง (หรือเว้นช่องเลขใบกำกับว่าง · Batch: ลบเลขใบกำกับในแถวนั้น) แล้วแจ้ง ผจก.บัญชี พร้อมรูปใบกำกับทั้งสองใบ — ใบที่ตั้งแบบนี้ถูกระงับจ่าย จนผู้อนุมัติอีกคนตรวจ';
@@ -16360,6 +16385,279 @@ function _migApCloseCheck(s, d, u, undo){
 }
 global.ERP.migApCloseDeny = function(state, type, data, user){
   try { const d = data || {}; return _migApCloseCheck(state || {}, d, user || _actorOf(state, d.by), type === 'MIG_AP_CLOSE_UNDO').deny || ''; } catch(e){ return 'ตรวจไม่สำเร็จ: ' + (e && e.message); } };
+// 🆕 MIG_LATE_INV M1/M2/M2': ใบเจ้าหนี้ยกมาจาก Ecount ที่ตกหล่น (คีย์ใน Ecount ย้อนหลังหลังเวลาดึงข้อมูล 1 ต.ค.)
+//   สิทธิ์ = แถวผู้ใช้สด (ผจก.บัญชี/GM/เจ้าของ) · ด่าน: เลข Ecount ซ้ำ · ผู้ขาย+เลขใบแจ้งหนี้/ใบกำกับซ้ำ · วันที่หลัง 30 ก.ย. 69 · ยอด
+const MIG_LATE_LAST_DATE = '2026-09-30';
+const MIG_LATE_FIRST_DATE = '2026-03-01';   // 🆕 verify 1: invDate แรกสุดของใบนำเข้า ③
+function _migLateNo(x){ return String(x == null ? '' : x).trim().toUpperCase(); }
+function _migLateUser(s, u){ return u && u.username ? ((s.users || []).find(x => x && x.username === u.username) || null) : null; }
+function _migLateCanAdd(live){ const E = global.ERP; return !!live && live.active !== false && (E.taxInvOverrideApprover(live) || E.isTopAuthority(live)); }
+// 🆕 MIG-LATE GR/PO guard (2026-10-07): ช่วงตัดระบบพนักงานคีย์ของเข้าทั้ง Ecount และ ERP (RE261001013 = GR-691001-3 · RE261001015 = GR-690930-1)
+//   → ใบยกมาที่เป็นของที่รับในระบบใหม่แล้ว = เจ้าหนี้ซ้ำ (ตั้งหนี้จาก GR อีกรอบ)
+// 🆕 verify GR-dup F1: ผู้ขาย "รายเดียวกัน" = id เดียวกัน หรือ เลขผู้เสียภาษี 13 หลัก + สาขา 5 หลักตรงกัน (กติกาเดียวกับ core _supTax/taxInvKey)
+//   ทะเบียนจริงมีคู่ taxId+สาขาซ้ำ 20 กลุ่ม (บีบ๊อกซ์ sup_SP2609019 / "ไม่ใช้ BEEBOX" sup_SP2609009 active ทั้งคู่) → คีย์ใบยกมาไว้คนละ id ก็ต้องเจอ GR/PO/ใบเดิม
+function _migLateTaxOf(sup){
+  const tax = String((sup && sup.taxId) || '').replace(/\D/g, '');
+  if(tax.length !== 13) return '';
+  const br = String((sup && sup.branchCode) || '').replace(/\D/g, '');
+  return tax + '|' + (br || '0').padStart(5, '0').slice(-5);
+}
+function _migLateSupIds(s, sup){
+  const ids = new Set(sup && sup.id ? [sup.id] : []), k = _migLateTaxOf(sup);
+  if(k) (s.suppliers || []).forEach(x => { if(x && x.id && _migLateTaxOf(x) === k) ids.add(x.id); });
+  return ids;
+}
+function _migLateSupNote(s, sup, otherId){   // เจอใต้ผู้ขายอีก id (เลขผู้เสียภาษี+สาขาเดียวกัน) → บอกชื่อให้ตามไปดูถูกที่
+  if(!otherId || !sup || otherId === sup.id) return '';
+  const o = (s.suppliers || []).find(x => x && x.id === otherId);
+  return ' [อยู่ที่ผู้ขาย "' + ((o && (o.name || o.code)) || otherId) + '" — เลขผู้เสียภาษี+สาขาเดียวกัน]';
+}
+// 🆕 verify GR-dup F3: เลขเอกสารเทียบด้วย normTaxInvNo ของ core (NFKC · เลขไทย · ตัด / . # _ : ช่องว่าง ขีด · ศูนย์นำหน้า · เล่ม|เลขที่ คงไว้: 12-345 ≠ 123-45)
+//   s = strict (กติกาเดียวกับด่านใบกำกับซ้ำ) ตรง = ใบเดียวกัน · l = loose (ตัดตัวคั่นระหว่างตัวเลขด้วย) ตรงแค่ l = อาจเป็นใบเดียวกัน → SOFT ให้ GM ตรวจ
+const _MIG_LATE_PH = ['NA', 'NONE', 'NULL', 'NIL', 'ไม่มี'];
+function _migLateDocKey(x){
+  let t = String(x == null ? '' : x);
+  try { t = t.normalize('NFKC'); } catch(_e){}
+  t = t.replace(/[‐-―−]/g, '-');   // ขีดยูนิโค้ด → '-'
+  const N = global.ERP.normTaxInvNo || (v => String(v).trim().toUpperCase().replace(/[\s\-_/.#:]/g, ''));
+  const st = String(N(t) || ''), lo = String(N(t.replace(/[\s\-_/.#:]+/g, '')) || '');
+  if(lo.length < 3 || /^0+$/.test(lo) || _MIG_LATE_PH.includes(lo)) return null;   // ว่าง/สั้น/placeholder → ไม่เทียบ
+  // 🆕 verify 3 F1: d = ตัวเลขล้วน (ตัดตัวอักษร/ตัวคั่น/ศูนย์นำหน้า) — 2609300018 ขาดคำนำหน้าของ IV2609300018 = อาจเป็นใบเดียวกัน (ไม่ใช่ "คนละใบชัด")
+  return { s: st, l: lo, d: lo.replace(/\D/g, '').replace(/^0+(?=\d)/, '') };
+}
+const _MIG_LATE_DOC_FIELDS = ['supTaxInvNumber', 'deliveryNoteNo', 'supInvNumber', 'supInvNoSeen'];
+// 🆕 verify GR-dup F7: เลขระดับใบกำกับ/ใบแจ้งหนี้ (ไม่นับเลขใบส่งของ — ใบส่งของกับใบกำกับของล็อตเดียวกันเลขต่างกันได้) — ใช้หาเลขที่ตรง/คล้าย
+const _MIG_LATE_TAX_FIELDS = ['supTaxInvNumber', 'supInvNumber'];
+// 🆕 verify 3 F1: เลขใบกำกับภาษีที่ "รู้แน่" = supTaxInvNumber (+ supTaxInvMore) เท่านั้น — supInvNumber อาจเป็นเลขใบแจ้งหนี้ (ใบแจ้งหนี้กับใบกำกับของบิลเดียวกันเลขต่างกันได้)
+const _MIG_LATE_TAXINV_FIELDS = ['supTaxInvNumber'];
+const _MIG_LATE_DIGITS_MIN = 4;   // ตัวเลขล้วนตรงกันนับเป็น "คล้าย" เมื่อยาว ≥ 4 หลัก (กันเลขสั้น ๆ ชนกันมั่ว)
+function _migLateKeysOf(o, fields){
+  const out = (fields || _MIG_LATE_DOC_FIELDS).map(f => _migLateDocKey(o && o[f]));
+  (Array.isArray(o && o.supTaxInvMore) ? o.supTaxInvMore : []).forEach(e => { if(e && !e.removedAt) out.push(_migLateDocKey(e.number)); });
+  return out.filter(Boolean);
+}
+//   strict = normTaxInvNo ตรง · loose = ต่างแค่ตัวคั่น หรือ (verify 3 F1) ตัวเลขล้วนตรงกัน ≥ 4 หลัก (ขาด/เกินคำนำหน้า IV · ตัวอักษรต่าง)
+function _migLateRel(bk, keys){
+  if(!bk) return '';
+  if(keys.some(k => k.s === bk.s)) return 'strict';
+  return keys.some(k => k.l === bk.l || (bk.d.length >= _MIG_LATE_DIGITS_MIN && k.d === bk.d)) ? 'loose' : '';
+}
+// คนละใบแน่ → ไม่ต้องเตือนด้วยยอด/วันที่ (เบทาโกร 645 เลขใบกำกับ 5481063835 ≠ GR เลขใบกำกับ 5481063900)
+//   🆕 verify 3 F1: ข้ามได้เฉพาะเมื่อ "ทั้งสองฝั่ง" เป็นเลขใบกำกับภาษีที่รู้แน่ — ฝั่งบิล billTax ((ก) ยื่นใน Ecount + วันที่ใบกำกับ) · อีกฝั่ง taxKeys (supTaxInvNumber)
+//   และตัวเลขล้วนต่างจากทุกเลขของอีกฝั่ง · ไม่งั้น (เลขใบแจ้งหนี้ / (ข) ยังไม่มีใบกำกับ / ไม่มี VAT / ขาดคำนำหน้า) = ยังเตือน SOFT
+function _migLateDiffDoc(bk, billTax, taxKeys, allKeys){ return !!bk && !!billTax && taxKeys.length > 0 && allKeys.every(k => k.d !== bk.d); }
+const _MIG_LATE_LOOSE_NOTE = ' (ตัวเลขชุดเดียวกัน — ต่างกันแค่ตัวคั่น/ตัวอักษรนำหน้า)';
+const _migLateNear = (amts, amount, total) => amts.some(v => Math.abs(v - amount) <= 1 || Math.abs(v - total) <= 1);
+const _migLatePoDead = po => !po || po.voided === true || po.status === 'cancelled' || po.status === 'rejected';
+function _migLateDays(a, b){   // วัน (YYYY-MM-DD) a − b · deterministic (UTC)
+  const p = x => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(x || '')); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN; };
+  return Math.round((p(a) - p(b)) / 86400000);
+}
+// เลข/ยอดของ GR ที่ใช้เทียบ: เลขบน GR + เลขบนใบตั้งหนี้ของ GR · ยอด = มูลค่ารับ (ราคา PO) · ยอดใบตั้งหนี้ · ยอด PO ถ้า PO นี้รับครั้งเดียว
+function _migLateGrInfo(s, g, poById, grsByPo){
+  const po = g.poId ? poById[g.poId] || null : null;
+  const inv = g.invoiceId ? (s.invoices || []).find(i => i && i.id === g.invoiceId && !i.voided) || null : null;
+  const ik = inv ? _migLateKeysOf(inv, _MIG_LATE_TAX_FIELDS) : [];
+  const amts = [Number(g.totalValue) || 0, inv ? Number(inv.total) || 0 : 0, inv ? Number(inv.amount) || 0 : 0,
+    po && (grsByPo[po.id] || []).length === 1 ? Number(po.total) || 0 : 0].filter(v => v > 0.005);
+  return { po, inv, all: _migLateKeysOf(g).concat(ik), amts,
+    tax: _migLateKeysOf(g, _MIG_LATE_TAXINV_FIELDS).concat(inv ? _migLateKeysOf(inv, _MIG_LATE_TAXINV_FIELDS) : []) };   // 🆕 verify 3 F1: ไม่นับเลขใบแจ้งหนี้ของใบตั้งหนี้
+}
+// ใบเดิม (invoices ไม่ยกเลิก) ของผู้ขายรายเดียวกัน
+//   HARD: เลขใบแจ้งหนี้/ใบกำกับตรงแบบ normTaxInvNo (findDupSupInv เทียบแค่ตรงตัวอักษร — IV-2609300018 ≠ IV2609300018)
+//   SOFT: เลขคล้าย (ต่างแค่ตัวคั่น) · วันที่เดียวกัน + ยอดรวมห่าง ≤ 1 บาท (ยกเว้นเลขระดับใบกำกับทั้งสองฝั่งต่างกัน)
+function _migLateInvHits(s, sup, sids, d, bk, docNo, date, total, live, billTax){
+  const mine = live.filter(i => i.id !== d.id && sids.has(i.supplierId)), soft = [];
+  for(const i of mine){
+    if(_migLateRel(bk, _migLateKeysOf(i, _MIG_LATE_TAX_FIELDS)) === 'strict')
+      return { hard: 'ผู้ขายนี้มีเลขใบแจ้งหนี้/ใบกำกับ ' + docNo + ' ในระบบแล้ว (' + (i.invNumber || i.id) + (i.supInvNumber && i.supInvNumber !== docNo ? ' · เลข ' + i.supInvNumber : '') + ')' + _migLateSupNote(s, sup, i.supplierId) };
+  }
+  for(const i of mine){
+    const ks = _migLateKeysOf(i, _MIG_LATE_TAX_FIELDS), sn = _migLateSupNote(s, sup, i.supplierId), ref = i.invNumber || i.id;
+    const itot = Number(i.total) || _r2mp((Number(i.amount) || 0) + (Number(i.vat) || 0));
+    if(_migLateRel(bk, ks) === 'loose') soft.push({ id: i.id, ref, text: 'เลขเอกสาร ' + docNo + ' คล้ายเลขของใบ ' + ref + _MIG_LATE_LOOSE_NOTE + ' — อาจเป็นใบเดียวกัน' + sn });
+    else if(String(i.invDate || '').slice(0, 10) === date && Math.abs(itot - total) <= 1 && !_migLateDiffDoc(bk, billTax, _migLateKeysOf(i, _MIG_LATE_TAXINV_FIELDS), ks))
+      soft.push({ id: i.id, ref, text: 'ผู้ขายนี้มีใบวันที่ ' + date + ' ยอดใกล้เคียง ' + total.toFixed(2) + ' แล้ว (' + ref + ') — อาจคีย์ซ้ำ' + sn });
+  }
+  return { soft };
+}
+// ใบรับของ/PO ระบบใหม่ ของผู้ขายรายเดียวกัน
+//   HARD (GM ก็ข้ามไม่ได้): เลข strict ตรงกับ GR ปกติ (ไม่ใช่ GR ชดเชย) หรือ PO และยอดใกล้ ≤ 1 บาท (หรือฝั่งนั้นไม่มียอดให้เทียบ) = บิลเดียวกันแน่
+//   SOFT (GM/เจ้าของ ยืนยันรายตัว): F6 เลขตรงแต่ยอดต่าง (ใบกำกับเดียวหลายเที่ยวส่ง "รับต่อจากใบเดิม") · GR ชดเชยเลขตรง · เลขคล้าย
+//         · F4 ไม่มีเลขสัมพันธ์: GR ยอดใกล้ + วันรับ invDate−3…+7 · PO ยอดรวมใกล้ + วันสั่ง/วันรับอยู่ในช่วง · F7 ยกเว้นเลขระดับใบกำกับต่างกันชัด
+//   GR/PO ประวัติ Ecount ไม่นับ (ไม่มีเลขเอกสาร · หนี้อยู่ที่ใบนำเข้า ตรวจที่ _migLateInvHits แล้ว)
+function _migLateGrPoHits(s, sup, sids, bk, docNo, amount, total, date, billTax){
+  const poById = {}, grsByPo = {}, soft = [], softPo = new Set();
+  (s.pos || []).forEach(p => { if(p && p.id) poById[p.id] = p; });
+  (s.grs || []).forEach(g => { if(g && !g.voided && g.poId) (grsByPo[g.poId] = grsByPo[g.poId] || []).push(g); });
+  const inWin = x => { const n = _migLateDays(x, date); return n >= -3 && n <= 7; };
+  for(const g of (s.grs || [])){
+    if(!g || g.voided || _grIsMigrated(g)) continue;
+    const gs = g.supplierId || (g.poId && poById[g.poId] && poById[g.poId].supplierId) || '';
+    if(!sids.has(gs)) continue;
+    const x = _migLateGrInfo(s, g, poById, grsByPo), rel = _migLateRel(bk, x.all), near = _migLateNear(x.amts, amount, total);
+    const where = (g.isReplacement ? 'ใบรับของชดเชย ' : 'ใบรับของ ') + (g.grNumber || g.id) + (x.po ? ' (' + (x.po.poNumber || x.po.id) + ')' : '')
+      + ' วันที่ ' + String(g.grDate || '').slice(0, 10) + _migLateSupNote(s, sup, gs);
+    if(rel === 'strict' && !g.isReplacement && (near || !x.amts.length))
+      return { hard: 'เลขเอกสาร ' + docNo + ' ตรงกับ' + where + ' ในระบบใหม่ ยอดตรงกัน — รับของในระบบแล้ว ห้ามเพิ่มซ้ำ ('
+        + (x.inv ? 'ตั้งหนี้แล้วที่ ' + (x.inv.invNumber || x.inv.id) : 'ตั้งหนี้จากใบรับของนั้นแทน') + ')' };
+    const val = x.amts.length ? ' ยอด ' + x.amts[0].toFixed(2) : '';
+    let t = '';
+    if(rel === 'strict') t = 'เลขเอกสาร ' + docNo + ' ตรงกับ' + where + val + (g.isReplacement ? ' (ของชดเชยคืนของ)' : ' แต่ยอดต่างจากบิล ' + total.toFixed(2) + ' (ใบกำกับเดียวหลายเที่ยวส่ง?)');
+    else if(rel === 'loose') t = 'เลขเอกสาร ' + docNo + ' คล้ายเลขของ' + where + val + _MIG_LATE_LOOSE_NOTE;
+    else if(near && inWin(g.grDate) && !_migLateDiffDoc(bk, billTax, x.tax, x.all)) t = 'อาจซ้ำกับ' + where + val + ' ในระบบใหม่';
+    if(t){ soft.push({ id: g.id, ref: g.grNumber || g.id, text: t }); if(g.poId) softPo.add(g.poId); }
+  }
+  for(const po of (s.pos || [])){
+    if(_migLatePoDead(po) || _grIsMigrated(po) || !sids.has(po.supplierId)) continue;
+    const gs = grsByPo[po.id] || [], rel = _migLateRel(bk, _migLateKeysOf(po)), near = Math.abs((Number(po.total) || 0) - total) <= 1;   // ยอด PO รวม VAT → เทียบยอดรวมบิล
+    const sn = _migLateSupNote(s, sup, po.supplierId), pn = po.poNumber || po.id;
+    if(rel === 'strict' && near) return { hard: 'เลขเอกสาร ' + docNo + ' ตรงกับใบสั่งซื้อ ' + pn + sn + ' ในระบบใหม่ ยอดตรงกัน — มีใบสั่งซื้อในระบบแล้ว ห้ามเพิ่มซ้ำ (รับของ/ตั้งหนี้จาก PO นั้นแทน)' };
+    if(softPo.has(po.id)) continue;   // GR ของ PO นี้อยู่ในรายการแล้ว
+    const st = gs.length ? 'รับของ ' + gs.map(g => (g.grNumber || g.id) + ' ' + String(g.grDate || '').slice(0, 10)).join(', ') : 'ยังไม่รับของ · สั่ง ' + String(po.poDate || '').slice(0, 10);
+    const pv = (Number(po.total) || 0).toFixed(2);
+    let t = '';
+    if(rel) t = 'เลขเอกสาร ' + docNo + (rel === 'strict' ? ' ตรงกับใบสั่งซื้อ ' : ' คล้ายเลขของใบสั่งซื้อ ') + pn + ' (' + st + ') ยอด ' + pv + sn;
+    else if(near && (inWin(po.poDate) || gs.some(g => inWin(g.grDate)))
+      && !(gs.length && gs.every(g => { const x = _migLateGrInfo(s, g, poById, grsByPo); return _migLateDiffDoc(bk, billTax, x.tax, x.all); })))
+      t = 'อาจซ้ำกับ ' + pn + ' (' + st + ') ในระบบใหม่ ยอดใกล้เคียง ' + pv + sn;
+    if(t) soft.push({ id: po.id, ref: pn, text: t });
+  }
+  return { soft };
+}
+function _migLateCheck(s, d, u, ctx){
+  const E = global.ERP;
+  let soft = null;   // 🆕 verify GR-dup F2: รายการที่อาจซ้ำ (ผ่านด่าน HARD แล้ว) — ฟอร์มใช้แสดงช่องยืนยันรายตัว
+  const R = x => ({ deny: x, soft });
+  if(!d || !d.id || typeof d.id !== 'string') return R('ไม่มีรหัสใบ (id) ใน payload');
+  if((s.invoices || []).some(i => i && i.id === d.id)) return { deny:'ใบนี้เพิ่มไปแล้ว', dup:true };
+  if(!_migLateCanAdd(_migLateUser(s, u))) return R('เพิ่มใบยกมาจาก Ecount ได้เฉพาะ ผจก.บัญชี/GM/เจ้าของ');
+  const no = _migLateNo(d.ecountNo);
+  if(!no) return R('ใส่เลขบิล Ecount (เช่น RE260930032)');
+  if(!/^RE\d{9}$/.test(no)) return R('เลขบิล Ecount ต้องเป็น RE + 9 หลัก (เช่น RE260930032)');   // 🆕 verify 1: ใบ ③ ทั้ง 3,502 ใบเป็นรูปนี้
+  const date = String(d.invDate || '').slice(0, 10);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return R('ใส่วันที่บิล');
+  if(date > MIG_LATE_LAST_DATE) return R('ใบหลังตัดระบบ (หลัง 30 ก.ย. 2569) ให้ตั้งหนี้ตามปกติ');
+  // 🆕 verify 1: ใบก่อน มี.ค. 69 อยู่นอกช่วงข้อมูลนำเข้า ③ (ตรวจซ้ำกับใบนำเข้าไม่ได้) → เฉพาะ GM/เจ้าของ
+  const top = E.isTopAuthority(_migLateUser(s, u));
+  if(date < MIG_LATE_FIRST_DATE && !top) return R('ใบก่อน มี.ค. 69 อยู่นอกช่วงข้อมูลนำเข้า — ให้ GM/เจ้าของตรวจและเพิ่มเอง');
+  const sup = (s.suppliers || []).find(x => x && x.id === d.supplierId);
+  if(!sup) return R('เลือกผู้ขายจากคู่ค้าในระบบ');
+  // 🆕 UAT SF4: สาขามากับ payload (ฟอร์มค่าเริ่ม = สำนักงานใหญ่) — ไม่ใช้สาขาที่ผู้ใช้กำลังดู (currentBranch) → replay ทุกเครื่องได้สาขาเดิม
+  const _hq = (s.branches || []).find(b => b && b.branchType === 'hq');
+  const br = String(d.branch || '').trim() || String(sup.branch || '') || (_hq ? _hq.id : '');
+  if(String(d.branch || '').trim() && !(s.branches || []).some(b => b && b.id === br)) return R('ไม่พบสาขา ' + String(d.branch).trim() + ' ในระบบ — เลือกสาขาใหม่');
+  const live = (s.invoices || []).filter(i => i && !i.voided);
+  const dupEc = live.find(i => _migLateNo(i.invNumber) === no || _migLateNo(i.extRef) === no);
+  if(dupEc) return R('เลขบิล Ecount ' + no + ' มีในระบบแล้ว (' + (dupEc.invNumber || dupEc.id) + ')');
+  // ยอด (ตรวจก่อนด่านเลขเอกสาร — HARD ของใบรับของต้องเทียบยอด · verify GR-dup F6)
+  const n = x => Number(x), amount = _r2mp(d.amount), vat = _r2mp(d.vat), wht = _r2mp(d.wht), paid = _r2mp(d.paidAmount);
+  if(![d.amount, d.vat || 0, d.wht || 0, d.paidAmount || 0].every(x => isFinite(n(x)))) return R('ยอดเงินไม่ถูกต้อง');
+  if(!(amount > 0.005)) return R('ยอดก่อน VAT ต้องมากกว่า 0');
+  if(vat < 0 || wht < 0 || paid < 0) return R('ยอดติดลบไม่ได้');
+  if(vat > _r2mp(amount * 0.07) + 1) return R('VAT เกิน 7% ของยอดก่อน VAT — ตรวจยอดอีกครั้ง');
+  const total = _r2mp(amount + vat), net = _r2mp(total - wht);
+  const sids = _migLateSupIds(s, sup);   // 🆕 verify GR-dup F1
+  const docNo = String(d.supDocNo || '').trim(), bk = _migLateDocKey(docNo);
+  if(docNo){
+    for(const sid of sids){
+      const dd = E.findDupSupInv(s, sid, docNo, d.id);
+      if(dd.length) return R('ผู้ขายนี้มีเลขใบแจ้งหนี้/ใบกำกับ ' + docNo + ' ในระบบแล้ว (' + (dd[0].invNumber || dd[0].id) + ')' + _migLateSupNote(s, sup, sid));
+    }
+  }
+  // 🆕 verify 3 F1: เลขของบิลเป็นเลขใบกำกับภาษีที่รู้แน่เฉพาะ (ก) ยื่นใน Ecount + วันที่ใบกำกับ (เก็บเป็น supTaxInvNumber) — (ข)/ไม่มี VAT = อาจเป็นเลขใบแจ้งหนี้
+  const billTax = !!bk && vat > 0.005 && d.vatPlace === 'ecount' && /^\d{4}-\d{2}-\d{2}$/.test(String(d.supDocDate || '').slice(0, 10));
+  const ih = _migLateInvHits(s, sup, sids, d, bk, docNo, date, total, live, billTax);
+  if(ih.hard) return R(ih.hard);
+  const gh = _migLateGrPoHits(s, sup, sids, bk, docNo, amount, total, date, billTax);
+  if(gh.hard) return R(gh.hard);
+  // 🆕 verify GR-dup F2: SOFT ทุกรายการแสดงพร้อมกัน · ยืนยัน = GM/เจ้าของ ส่ง dupAckIds ที่ครอบทุก id ที่เจอตอนนี้
+  //   (id ที่โผล่มาภายหลัง เช่น PO ใหม่ตอน rebase = ยังไม่ได้ยืนยัน → ปฏิเสธ) · dupAck:true แบบเดิมไม่นับแล้ว
+  soft = ih.soft.concat(gh.soft);
+  if(soft.length){
+    const ack = Array.isArray(d.dupAckIds) ? d.dupAckIds.map(String) : [];
+    if(!(top && soft.every(e => ack.includes(e.id)))){
+      const hint = ctx === 'file'   // 🆕 verify GR-dup B1: พรีวิว 📂 ไม่มีช่องยืนยัน → บอกให้เพิ่มทีละใบด้วยฟอร์ม
+        ? (top ? ' · ถ้าเป็นคนละรายการจริง เพิ่มใบนี้ทีละใบด้วยฟอร์ม ➕ แล้วยืนยันไม่ซ้ำในฟอร์ม' : ' · ถ้าเป็นคนละรายการจริง ให้ GM/เจ้าของเพิ่มใบนี้ทีละใบด้วยฟอร์ม ➕')
+        : (top ? ' · ถ้าเป็นคนละรายการจริง ติ๊ก "ยืนยันไม่ซ้ำ"' : ' · ถ้าเป็นคนละรายการจริง ให้ GM/เจ้าของยืนยัน');
+      return { deny: soft.map(e => e.text).join(' · และ ') + ' — ตรวจก่อน' + hint, soft, softDeny: true };
+    }
+  }
+  // 🆕 UAT SF3: ใบยกมายังไม่รองรับหัก ณ ที่จ่าย (ไม่มี whtLines/ประเภทเงินได้ → ไม่เข้ารายงาน ภ.ง.ด.3/53 · ไม่ออก 50 ทวิ) — ใบนำเข้า ③ ก็ไม่มี WHT
+  if(wht > 0.005) return R('ใบยกมาจาก Ecount ยังไม่รองรับหัก ณ ที่จ่าย — ใส่ 0 แล้วให้ ผจก.บัญชี ✏️ แก้ WHT ที่ใบหลังเพิ่ม (เลือกประเภทเงินได้/ภ.ง.ด.) หรือทำใบลด/เพิ่มหนี้ (CN/DN)');
+  if(paid > net + 0.005) return R('ยอดจ่ายแล้วใน Ecount มากกว่ายอดสุทธิ (' + net.toFixed(2) + ')');
+  if(paid > 0.005 && !String(d.ecountPayNo || '').trim()) return R('จ่ายบางส่วนใน Ecount แล้ว — ใส่เลขใบจ่าย Ecount');
+  let vatPlace = '';
+  if(vat > 0.005){
+    vatPlace = d.vatPlace === 'ecount' || d.vatPlace === 'here' ? d.vatPlace : (!docNo ? 'here' : '');
+    if(!vatPlace) return R('มีเลขใบกำกับ — เลือกว่า VAT ของใบนี้ยื่นใน Ecount หรือเคลมในระบบใหม่');
+    if(vatPlace === 'ecount' && !docNo) return R('VAT ยื่นใน Ecount ต้องมีเลขใบกำกับ — ยังไม่มีใบกำกับ ให้เลือก "เคลมในระบบใหม่"');
+    // 🆕 UAT N2: (ก) ช่องเดียวรับทั้งเลขใบแจ้งหนี้/ใบกำกับ → บังคับวันที่ใบกำกับ ยืนยันว่าเป็นเลขใบกำกับภาษีจริง (กันเลขใบแจ้งหนี้ไปเป็น supTaxInvNumber)
+    if(vatPlace === 'ecount' && !/^\d{4}-\d{2}-\d{2}$/.test(String(d.supDocDate || '').slice(0, 10))) return R('(ก) ยื่นใน Ecount ต้องใส่วันที่ใบกำกับภาษี — เลขที่กรอกต้องเป็นเลขใบกำกับภาษี (ไม่ใช่เลขใบแจ้งหนี้)');
+    if(vatPlace === 'ecount' && String(d.supDocDate || date).slice(0, 10) > MIG_LATE_LAST_DATE) return R('ใบกำกับลงวันที่หลัง ก.ย. 69 ยื่นใน Ecount ไม่ได้ — เลือก "เคลมในระบบใหม่"');
+    if(vatPlace === 'ecount'){
+      const dt = E.findDupTaxInv(s, { id: d.id, supplierId: sup.id, supTaxInvNumber: docNo, supTaxInvDate: String(d.supDocDate || date).slice(0, 10), vat, amount }, {});
+      if(dt.block.length) return R('เลขใบกำกับ ' + docNo + ' ซ้ำกับ ' + (dt.block[0].invNumber || dt.block[0].id));
+    }
+  }
+  if(String(d.reason || '').trim().length < 5) return R('ใส่เหตุผล (อย่างน้อย 5 ตัวอักษร) เช่น คีย์ใน Ecount ย้อนหลังหลังดึงข้อมูล 1 ต.ค.');
+  return { sup, no, date, docNo, amount, vat, wht, paid, total, net, vatPlace, br, soft: soft || [] };
+}
+// 🆕 UAT MF2: ฐานที่มี VAT ของใบยกมา = VAT/7% (ไม่เกินยอดก่อน VAT) — ใบผสมสินค้ายกเว้น VAT (เนื้อสด/ไข่) ไม่นับเป็นฐานภาษีซื้อทั้งใบ
+//   ส่วนต่าง ≤ 1 บาท = ปัดเศษ VAT รายบรรทัดของ Ecount → ถือว่ามี VAT ทั้งใบ
+function _migLateVatSplit(amount, vat){
+  amount = _r2mp(amount); vat = _r2mp(vat);
+  if(!(vat > 0.005)) return { vatable: 0, exempt: amount, mixed: false };
+  let vatable = Math.min(amount, _r2mp(vat / 0.07));
+  if(amount - vatable <= 1) vatable = amount;
+  const exempt = _r2mp(amount - vatable);
+  return { vatable, exempt, mixed: vatable > 0.005 && vatable < amount - 0.005 };
+}
+global.ERP.migLateVatSplit = _migLateVatSplit;
+global.ERP.MIG_LATE_LAST_DATE = MIG_LATE_LAST_DATE;
+global.ERP.migLateCanAdd = function(state, user){ try { return _migLateCanAdd(_migLateUser(state || {}, user)); } catch(_e){ return false; } };
+// ctx 'file' = พรีวิว 📂 (ไม่มีช่องยืนยันไม่ซ้ำ → คำแนะนำให้เพิ่มทีละใบด้วยฟอร์ม)
+global.ERP.migLateDeny = function(state, data, user, ctx){
+  try { const d = data || {}; return _migLateCheck(state || {}, d, user || _actorOf(state || {}, d.by), ctx).deny || ''; } catch(e){ return 'ตรวจไม่สำเร็จ: ' + (e && e.message); } };
+// 🆕 verify GR-dup F2/B5: ฟอร์มต้องรู้ว่าอะไรอาจซ้ำ (id/เลข) เพื่อแสดงช่องยืนยันรายตัว — เฉพาะตอนไม่มีด่าน HARD
+global.ERP.migLateInfo = function(state, data, user, ctx){
+  try { const d = data || {}, r = _migLateCheck(state || {}, d, user || _actorOf(state || {}, d.by), ctx);
+    return { deny: r.deny || '', soft: (r.soft || []).map(e => ({ id: e.id, ref: e.ref, text: e.text })), softDeny: !!r.softDeny };
+  } catch(e){ return { deny: 'ตรวจไม่สำเร็จ: ' + (e && e.message), soft: [], softDeny: false }; } };
+// 🆕 verify GR-dup F1: ผู้ขายรายเดียวกัน (id เดียวกัน / เลขผู้เสียภาษี+สาขาเดียวกัน) — พรีวิว 📂 ตรวจแถวซ้ำกันเองในไฟล์
+global.ERP.migLateSameSup = function(state, a, b){
+  if(!a || !b) return false;
+  if(a === b) return true;
+  try { const s = state || {}, sa = (s.suppliers || []).find(x => x && x.id === a); return !!sa && _migLateSupIds(s, sa).has(b); } catch(_e){ return false; } };
+// 🆕 verify GR-dup F5: ทางกลับ — ใบยกมาเพิ่มก่อน แล้วค่อยตั้งหนี้จากใบรับของ (GR→PI ทีละใบ / หลายใบ / รวมใบ) → เทียบกับใบยกมาเพิ่มภายหลัง (migLate) ของผู้ขายรายเดียวกัน
+//   q = { supplierId, taxInvNos:[เลขใบกำกับภาษีที่รู้แน่ — ช่องใบกำกับ/gr.supTaxInvNumber], taxDocNos:[เลขใบแจ้งหนี้ (ไม่รู้ว่าเป็นใบกำกับไหม)], otherDocNos:[เลขใบส่งของ],
+//         amount, total, date (วันรับของ) } → { hard:[{inv,text}], soft:[{inv,text}] }
+//   hard = เลข strict ตรง + ยอดใกล้ ≤ 1 บาท · soft = เลขตรงแต่ยอดต่าง / เลขคล้าย (รวมตัวเลขล้วนตรง) / ยอดใกล้ + วันรับของ − วันบิล อยู่ใน −3…+7
+//   🆕 verify 3 F1: ข้าม soft ยอด/วันที่ เฉพาะเมื่อทั้งสองฝั่งเป็นเลขใบกำกับภาษีที่รู้แน่ (q.taxInvNos · ใบยกมา supTaxInvNumber) และตัวเลขต่างกันทุกคู่
+//     — ใบยกมา (ข) ยังไม่มีใบกำกับ / มีแต่เลขใบแจ้งหนี้ (taxDocNos) = ยังเตือน
+//   UI เตือนแบบเดียวกับเลขใบกำกับซ้ำเดิม (confirm · บล็อกเมื่อตั้งค่า blockDupSupInv)
+global.ERP.migLateReverseHits = function(state, q){
+  const out = { hard: [], soft: [] };
+  try {
+    const s = state || {}, sup = (s.suppliers || []).find(x => x && x.id === (q && q.supplierId));
+    if(!sup) return out;
+    const sids = _migLateSupIds(s, sup), amount = _r2mp(q.amount), total = _r2mp(q.total != null ? q.total : q.amount);
+    const K = a => (a || []).map(_migLateDocKey).filter(Boolean);
+    const qt = K(q.taxInvNos), allk = qt.concat(K(q.taxDocNos), K(q.otherDocNos));
+    for(const i of (s.invoices || [])){
+      if(!i || i.voided || !i.migLate || !sids.has(i.supplierId)) continue;
+      const ks = _migLateKeysOf(i, _MIG_LATE_TAX_FIELDS), it = _migLateKeysOf(i, _MIG_LATE_TAXINV_FIELDS), rels = allk.map(k => _migLateRel(k, ks));
+      const near = _migLateNear([Number(i.total) || 0, Number(i.amount) || 0].filter(v => v > 0.005), amount, total), dd = _migLateDays(q.date, i.invDate);
+      const lbl = (i.invNumber || i.id) + ' (ยกมาจาก Ecount เพิ่มภายหลัง · ' + String(i.invDate || '').slice(0, 10) + ' · ยอด ' + (Number(i.total) || 0).toFixed(2)
+        + (i.supInvNumber ? ' · เลข ' + i.supInvNumber : '') + ')' + _migLateSupNote(s, sup, i.supplierId);
+      const diff = qt.length > 0 && it.length > 0 && allk.every(k => ks.every(k2 => k2.d !== k.d));
+      if(rels.includes('strict') && near) out.hard.push({ inv: i, text: 'เลขเอกสารและยอดตรงกับ ' + lbl });
+      else if(rels.includes('strict')) out.soft.push({ inv: i, text: 'เลขเอกสารตรงกับ ' + lbl + ' แต่ยอดต่างกัน' });
+      else if(rels.includes('loose')) out.soft.push({ inv: i, text: 'เลขเอกสารคล้ายกับ ' + lbl + _MIG_LATE_LOOSE_NOTE });
+      else if(near && dd >= -3 && dd <= 7 && !diff) out.soft.push({ inv: i, text: 'ยอดใกล้เคียง/วันที่ใกล้กับ ' + lbl });
+    }
+  } catch(_e){}
+  return out; };
 function _vatClaimDenyReason(s, type, d, u){
   if(type === 'MARK_VAT_EXPIRED') return _vatExpireCheck(s, d || {}, u).deny || null;
   if(type === 'MIG_VAT_HERE') return _migVatHereCheck(s, d || {}, u, false).deny || null;   // 🆕 MIG_VAT_HERE V2
@@ -16828,6 +17126,7 @@ const _ADD_DUP = {
   ADD_STAFF_ADVANCE:    _dupById('staffAdvances', d => d.id),
   ADD_PETTY_TXN:        _dupById('pettyTxns', d => d.id),
   ADD_INV:              _dupById('invoices', d => d.id),
+  ADD_MIG_LATE_INV:     _dupById('invoices', d => d.id),   // 🆕 MIG_LATE_INV: id ใบมากับ payload
   ADD_PAY:              _dupById('payments', d => d.id),
   // UAT M1: สองเครื่องสร้างชื่อเดียวกัน (id ต่างกัน) ก่อนซิงก์ → เล่นซ้ำบนก้อนที่มีชื่อนั้นแล้ว = ซ้ำ (ข้าม) ไม่ใช่ "ถูกปฏิเสธ" (ไม่เทงานทั้งรอบลงงานค้าง)
   ADD_PAY_TAG:          (s, d) => _dupById('payTags', x => x.tag && x.tag.id)(s, d) || !!_payTagByName(s, d && d.tag && d.tag.name),
@@ -20955,7 +21254,10 @@ function reducer(s, a){
       // 🆕 MIG_AP_NORMAL N1 (แทน UAT MF2 เดิมที่ห้ามทุกใบ): ใบนำเข้า Ecount ที่ "ยังไม่จ่าย" ย้อนไปตั้งหนี้ได้เหมือนใบปกติ (ด่านเดิมทุกด่านด้านล่าง)
       //   ใบนำเข้าที่จ่ายแล้ว/จ่ายบางส่วน (ใน Ecount) หรือมี PV/คำขอจ่ายในระบบนี้ = เหมือนใบจ่ายแล้ว → ยกเลิกไม่ได้
       const _migV = _invIsMigrated(inv);
-      if(_migV && global.ERP.migInvBackDeny(s, inv)){
+      // 🆕 MIG_LATE_INV UAT MF1: ใบยกมาเพิ่มภายหลัง — ด่านของมันเอง (ยังไม่จ่าย/ไม่มีคำขอจ่าย = ยกเลิกได้) แทนด่านใบนำเข้า ③
+      const _migLateOk = _migV && global.ERP.migLateGenuine(s, inv);   // 🆕 verify 1: ธง migLate อย่างเดียวไม่พอ (ต้องมาจาก ADD_MIG_LATE_INV)
+      if(_migLateOk){ const _dl = global.ERP.migLateVoidDeny(s, inv); if(_dl){ alert('⛔ ' + _dl); return s; } }
+      else if(_migV && global.ERP.migInvBackDeny(s, inv)){
         const _dn = global.ERP.migInvBackDeny(s, inv);   // 🆕 UAT MF2: ใบค่าใช้จ่ายนำเข้า → ข้อความของมันเอง (ไม่ใช่ "จ่ายแล้ว")
         alert(/ค่าใช้จ่าย|ผูกผู้ขาย|ยื่นใน Ecount แล้ว/.test(_dn) ? '⛔ ' + _dn : _MIG_INV_VOID_MSG + '\n(' + _dn + ')'); return s; }
       // 💎 FA-S5 (B4.10 บางส่วน): บิลนี้ลงทะเบียนเป็นส่วนเพิ่มของเครื่องแล้ว → ยกเลิกส่วนเพิ่มก่อน (ลงค่าเสื่อมแล้ว = ใช้ CN + JE)
@@ -21106,7 +21408,9 @@ function reducer(s, a){
       }
       // 🆕 MIG_AP_NORMAL N1: ใบนำเข้าไม่มี JE ตั้งหนี้ (ยอดอยู่ในยอดยกมาก้อนเดียว Dr 3900 / Cr 2100) → ย้อนแล้วกลับยอดเจ้าหนี้ยกมา Dr 2100 / Cr 3900 ยอดค้าง
       //   id ตายตัวต่อใบ (ยกเลิกได้ครั้งเดียว) · ใบตั้งหนี้ใหม่จาก GR นำเข้าจะ Cr 2100 กลับเข้ามาเอง (N3)
-      if(_migV){
+      // 🆕 MIG_LATE_INV UAT MF1: ใบยกมาเพิ่มภายหลังไม่ได้อยู่ในยอดยกมาก้อนเดียว (ไม่มี JE ตอนเพิ่ม) → ไม่ลง je_migvoid_
+      //   (ถ้าบัญชีลง JE ปรับยอดยกมาของใบนี้ไว้เอง ให้กลับรายการ JE นั้นเอง — บอกในข้อความยกเลิก)
+      if(_migV && !_migLateOk){
         const _coa = s.chartOfAccounts || [];
         const _ap = _coa.find(x => x.code === '2100'), _obe = _coa.find(x => x.code === '3900');
         // 🆕 MIG_AP_NORMAL UAT MF1: ยอดค้างเดิมตอนยกมา = ยอดค้างปัจจุบัน + ผล 2100 สุทธิของ JE ปรับ (ADJUST_INV_WHT/VAT · source 'inv') ที่เพิ่งกลับรายการข้างบน
@@ -21707,6 +22011,47 @@ function reducer(s, a){
         by: who, entityId: inv.id, entityRef: no,
         note: (mark ? 'บันทึกว่าจ่ายแล้วก่อนตัดระบบ (ไม่มี PV) · JE Dr 2100 / Cr 3900 ' : 'ยกเลิกการจ่าย (Ecount) → ค้างจ่าย · JE Dr 3900 / Cr 2100 ') + amt.toFixed(2) + ' · ' + reason };
       return { ...s, invoices, journalEntries: [...(s.journalEntries || []), je], auditLog: [...(s.auditLog || []), al] };
+    }
+
+    // 🆕 MIG_LATE_INV M2/M2': เพิ่มใบเจ้าหนี้ยกมาจาก Ecount ที่ตกหล่น — รูปแบบเดียวกับใบนำเข้า ③ (ไม่มี GR/PO · ไม่มี JE · ไม่แตะสต๊อก)
+    //   id/at/by มากับ payload (replay ได้ผลเดิม) · VAT: 'ecount' = ยื่นใน Ecount (invVatInEcount) · 'here' = เคลมในระบบใหม่ (vatClaimHere)
+    case 'ADD_MIG_LATE_INV': {
+      const d = a.data || {}, u = _actorOf(s, d.by);
+      const ck = _migLateCheck(s, d, u);
+      if(ck.dup) return s;
+      if(ck.deny){ alert('⛔ ' + ck.deny); return s; }
+      const now = Number(d.at) || Date.now(), who = (u && u.username) || d.by || '', reason = String(d.reason || '').trim();
+      const { sup, no, date, docNo, amount, vat, wht, paid, total, net, vatPlace, br } = ck;
+      const docDate = String(d.supDocDate || '').slice(0, 10) || (docNo ? date : '');
+      const items = String(d.itemsText || '').trim();   // UAT SF4: br มาจาก _migLateCheck (payload → ผู้ขาย → สำนักงานใหญ่)
+      const _ackRefs = (ck.soft || []).map(e => e.ref);   // 🆕 verify GR-dup F2/B3: ชื่อสิ่งที่ยืนยันจริง (ไม่เดาว่าเป็นใบเดิม)
+      const st = paid > 0.005 ? (paid >= net - 0.005 ? 'paid' : 'partial') : 'unpaid';
+      const vs = _migLateVatSplit(amount, vat), desc = items || ('ยกมาจาก Ecount ' + no);   // 🆕 UAT MF2
+      const _el = (k, base, vr, va, sfx) => ({ id: 'expl_' + d.id + '_' + k, type: 'expense', expenseItemId: null, expenseItemCode: '', itemId: null, description: desc + (sfx || ''),
+        qty: 1, unit: '', unitPrice: base, discount: 0, vatRate: vr, lineTotal: base, vatAmount: va, wht: null, accountCode: '5300', branch: br, deductStock: false });
+      const inv = { id: d.id, invNumber: no, invDate: date, createdDate: date, dueDate: String(d.dueDate || '').slice(0, 10) || date,
+        ...(d.dueDate ? { dueDateSource:'mig-late' } : { needsDueDate: true, dueDateSource:'ecount-none' }),
+        supInvNumber: docNo, supInvDate: docNo ? docDate : '', needSupInv: !docNo,
+        supplierId: sup.id, supplierNameEcount: String(d.supplierNameEcount || sup.name || ''), branch: br,
+        amount, vatRate: vat > 0.005 ? 7 : 0, vat, vatOverridden: false, vatableBase: vs.vatable, exemptBase: vs.exempt, hasMixedVat: vs.mixed,
+        whtLines: [], whtForm: '53', whtAmount: wht, whtRate: wht > 0.005 ? _r2mp(wht * 100 / amount) : 0, whtCertificates: [], whtNumber: '',
+        netPayable: net, total, paidAmount: paid, paymentStatus: st,
+        ...(paid > 0.005 ? { paidDate: String(d.ecountPayDate || '').slice(0, 10), paidBy: 'Ecount ' + String(d.ecountPayNo || '').trim(),
+          // 🆕 UAT SF2: รูปแบบเดียวกับใบนำเข้า ③ (voucher/partial — แท็บจ่ายแล้ว/CSV/พิมพ์ใบจ่าย Ecount อ่าน) · no = ชื่อเดิม
+          ecountPay: { voucher: String(d.ecountPayNo || '').trim(), no: String(d.ecountPayNo || '').trim(), date: String(d.ecountPayDate || '').slice(0, 10), amount: paid, partial: st === 'partial' } } : { paidBy: '' }),
+        source: 'direct_expense', poId: null, grId: null, expenseItemId: null, expenseItemCode: '', accountCode: '5300',
+        expenseType: 'ecount_history', expenseLabel: 'ยกมาจาก Ecount (เพิ่มภายหลัง)', description: desc,
+        // ใบผสม → 2 บรรทัด (มี VAT / ยกเว้น VAT) ให้ฐานรายบรรทัดตรงกับ vatableBase/exemptBase
+        expenseLines: vs.mixed ? [_el(0, vs.vatable, 7, vat, ' (มี VAT)'), _el(1, vs.exempt, 0, 0, ' (ยกเว้น VAT)')] : [_el(0, amount, vat > 0.005 ? 7 : 0, vat)],
+        importBatch: MIG_IMPORT_BATCH, _migrated: true, historyOnly: true, createdBy: 'migration', createdAt: now, extRef: no,
+        note: '📥 ยกมาจาก Ecount (เพิ่มภายหลัง) ' + no, migLate: { by: who, at: now, reason, vatPlace: vatPlace || 'none', ...(_ackRefs.length ? { dupAck: true, dupAckRefs: _ackRefs } : {}) },   // 🆕 verify GR-dup F2: ยืนยันรายตัว (ใบเดิม/GR/PO ที่เจอจริง)
+        ...(d.supInvImage && d.supInvImage.dataUrl ? { supInvImage: d.supInvImage } : {}) };
+      if(vatPlace === 'here') inv.vatClaimHere = { by: who, at: now, reason: 'ยกมาเพิ่มภายหลัง — ยังไม่มีใบกำกับ เคลมในระบบใหม่ · ' + reason, migLate: true };
+      else if(vatPlace === 'ecount') Object.assign(inv, { supTaxInvNumber: docNo, supTaxInvDate: docDate, supTaxInvReceivedBy: who, supTaxInvReceivedAt: now });
+      const al = { id: 'al_miglate_' + d.id, ts: now, type: 'mig_late_inv', action: 'mig_late_inv', by: who, entityId: d.id, entityRef: no,
+        note: 'เพิ่มใบยกมาจาก Ecount (ตกหล่น) ' + no + ' · ' + (sup.name || sup.id) + ' · ' + date + ' · ยอด ' + total.toFixed(2) + (wht > 0.005 ? ' หัก ณ ที่จ่าย ' + wht.toFixed(2) : '')
+          + (paid > 0.005 ? ' · จ่ายใน Ecount ' + paid.toFixed(2) : '') + (vat > 0.005 ? ' · VAT ' + vat.toFixed(2) + (vatPlace === 'here' ? ' เคลมในระบบใหม่' : ' ยื่นใน Ecount') : '') + (_ackRefs.length ? ' · ⚠️ GM/เจ้าของยืนยันไม่ซ้ำกับ ' + _ackRefs.join(', ') : '') + ' · ' + reason };
+      return { ...s, invoices: [...(s.invoices || []), inv], auditLog: [...(s.auditLog || []), al] };
     }
 
     // 🆕 MIG_AP_CLOSE C1/C2: ✂️ ปิดยอดค้าง (ไม่ต้องจ่าย) ใบนำเข้า Ecount / ↩️ ยกเลิกการปิดยอด
@@ -26722,6 +27067,7 @@ const ACTION_MERGE = Object.freeze({
   ADD_GR: { kind:'add' },
   ADD_HANDOVER_TO: { kind:'add' },   // 🆕 PRODUCTION-LIVE (B11) ใบส่งมอบไลน์→คลัง FG · id จาก payload · เลข TO ออกใน reducer
   ADD_INV: { kind:'add' },
+  ADD_MIG_LATE_INV: { kind:'add' },   // 🆕 MIG_LATE_INV M2 ใบเจ้าหนี้ยกมาจาก Ecount ที่ตกหล่น
   ADD_ITEM: { kind:'add' },
   ADD_ITEM_GROUP: { kind:'add' },
   ADD_ITEM_TAG: { kind:'delta' },
@@ -26997,6 +27343,7 @@ const ACTION_READS = Object.freeze({
   UPDATE_PO_FULL: ['approvalRequests','auditLog','pos'],   // B18: approvalReqId → _approvalGate อ่านคำขอ (users/settings/approvalRules = หมวดคุม)
   RECEIVE_PO: ['auditLog','fifoLayers','grs','items','movements','pos'],   // 🆕 RECV-ONBEHALF UAT S2: + auditLog (กันซ้ำ al_grob_<gr.id> ก่อนต่อท้าย)
   ADD_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],   // VAT-DEFER verify: + approvalRequests (_taxInvDenyReason → vatApPendingLive)   // DEPOSIT-VAT UAT: + grs (ชุดแยกใบเก่า splitInvoiceIds)   // DEPOSIT-VAT review: ใบกำกับที่มากับใบใหม่ → ด่านซ้ำ (findDupTaxInv)
+  ADD_MIG_LATE_INV: ['auditLog','filedTaxInvKeys','grs','invoices','pos','suppliers'],   // 🆕 MIG_LATE_INV: ด่านเลข Ecount/ผู้ขาย+เลขใบ (findDupSupInv/findDupTaxInv) · users/settings = หมวดคุม
   ADD_COMBINED_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],   // VAT-DEFER verify: + approvalRequests
   UPDATE_INV: ['auditLog','invoices'],
   PATCH_INV: ['invoices'],
@@ -27128,6 +27475,7 @@ const APPEND_ONLY_READS = Object.freeze({
   UPDATE_PO_FULL: ['auditLog'],   // ต่อท้าย po_edit_full อย่างเดียว
   RECEIVE_PO: ['grs', 'movements', 'auditLog'],   // 🆕 RECV-ONBEHALF UAT S2: ต่อท้าย gr_onbehalf (id ตายตัว al_grob_<gr.id>) — อ่านแค่กันซ้ำด้วย id
   ADD_INV: ['auditLog'],
+  ADD_MIG_LATE_INV: ['auditLog'],   // 🆕 MIG_LATE_INV: ต่อท้าย mig_late_inv (id ตายตัว al_miglate_<id>)
   ADD_SALES_INV: ['auditLog'],   // 🆕 DOC-NUMBER verify 1: ต่อท้าย si_filed_period อย่างเดียว (id ตายตัว al_sifp_<id>)
   ADD_COMBINED_INV: ['auditLog'],
   UPDATE_INV: ['auditLog'],
@@ -29611,6 +29959,7 @@ function ApprovalDocRef({ req, state, dispatch, user, onLeave, prefix, className
     diffOpen && h(ApprovalEditDiffModal, { req, state, onClose:() => setDiffOpen(false) }));
 }
 
+global.ERP.ApprovalRequestCard = ApprovalRequestCard;   // 🆕 MIG_LATE_INV verify 2: ให้ test render การ์ดได้ตรง
 function ApprovalRequestCard({ req, state, dispatch, user, mode, onLeave }){
   const { Button: Btn, fmtDate, fmtCur, getCurrentStep, canApproveStep, APPROVAL_ACTIONS, POSITION_OPTIONS } = global.ERP;
   const curStep = getCurrentStep(req);
@@ -29699,7 +30048,10 @@ function ApprovalRequestCard({ req, state, dispatch, user, mode, onLeave }){
   return h('div', { className:'bg-white border rounded-lg p-3' },
     h('div', { className:'flex items-start justify-between mb-2' },
       h('div', null,
-        h('div', { className:'font-semibold' }, req.label),
+        h('div', { className:'font-semibold' }, req.label,
+          // 🆕 MIG_LATE_INV verify 2: คำขอยกเลิกใบยกมาเพิ่มภายหลัง → ป้าย 🧾 (ใบยังอยู่ = ใช้ข้อมูลจริง · ไม่อยู่แล้ว = ป้ายเปล่า)
+          req.action === 'delete_inv' && (req.payload || {}).migLate && global.ERP.MigLatePill
+            && h(global.ERP.MigLatePill, { inv: (state.invoices || []).find(i => i && i.id === (req.payload || {}).invId && i.migLate) || { migLate:{} } })),
         h(ApprovalDocRef, { req, state, dispatch, user, onLeave, className:'text-xs text-gray-500 font-mono' }),   // 🆕 APPROVAL-DOCLINK: เลขเอกสารกดเปิดดู + 🔍 ดูสิ่งที่ขอแก้
         req.amount > 0 && !_hideAmt && h('div', { className:'text-xs text-red-700 font-bold' }, 'ยอด: ' + fmtCur(req.amount))
       ),
@@ -70766,6 +71118,48 @@ function GRDetailModal({ gr:grProp, state, dispatch, user, onClose }){
   );
 }
 
+// 🆕 MIG-LATE verify GR-dup F5: ทางกลับของด่านใบยกมา — ใบยกมาจาก Ecount (เพิ่มภายหลัง) ถูกเพิ่มก่อน แล้วค่อยตั้งหนี้จากใบรับของล็อตเดียวกัน
+//   rows = [{ label, supplierId, taxInvNos, taxDocNos, otherDocNos, amount, total, date }] → true = ไปต่อ · false = หยุด
+//     taxInvNos = เลขใบกำกับภาษีที่รู้แน่ (ช่องใบกำกับ / gr.supTaxInvNumber) · taxDocNos = เลขใบแจ้งหนี้ supplier · otherDocNos = ใบส่งของ (🆕 verify 3 F1)
+//   เตือนแบบเดียวกับเลขใบกำกับซ้ำเดิม: confirm · ตั้งค่า "ห้ามเลขซ้ำ" (blockDupSupInv) + เลขเอกสารและยอดตรงกัน = บล็อก
+//   🆕 verify 3 F2: ใบยกมา 1 ใบ = 1 บรรทัด ระดับที่ร้ายแรงที่สุดจากทุกแถว (hard ชนะ soft) — เดิม soft ของแถวแรก (GR ทีละใบในรวม GR) บัง hard ของแถวใบรวม
+//   🆕 verify 3 F3: opts.skipIds = ใบที่ด่านเลขใบกำกับซ้ำเดิม (findDupSupInv) จะรายงานต่ออยู่แล้ว → ไม่ถามซ้ำที่นี่ (ถาม/บล็อกครั้งเดียวต่อใบ · คงความเข้มของ "ห้ามเลขซ้ำ")
+function _migLateRevOk(state, rows, opts){
+  const f = global.ERP.migLateReverseHits; if(!f) return true;
+  const skip = new Set(((opts && opts.skipIds) || []).filter(Boolean)), by = new Map();
+  (rows || []).forEach(r => { if(!r || !r.supplierId) return; const x = f(state, r);
+    const put = (o, sev) => { const id = o && o.inv && o.inv.id; if(!id || skip.has(id)) return; const cur = by.get(id);
+      if(!cur || sev > cur.sev) by.set(id, { sev, line: '• ' + (r.label ? r.label + ': ' : '') + o.text }); };
+    x.hard.forEach(o => put(o, 2)); x.soft.forEach(o => put(o, 1)); });
+  const all = Array.from(by.values()), hard = all.filter(e => e.sev === 2).map(e => e.line), soft = all.filter(e => e.sev === 1).map(e => e.line);
+  if(!hard.length && !soft.length) return true;
+  const body = hard.concat(soft).join('\n');
+  if(hard.length && state.settings?.blockDupSupInv === true){
+    alert('🚫 ใบรับนี้ตรงกับใบยกมาจาก Ecount (เพิ่มภายหลัง) ที่ตั้งหนี้ไว้แล้ว:\n' + body
+      + '\n\nระบบตั้งค่า "ห้ามเลขซ้ำ" ไว้ — ถ้าเป็นบิลเดียวกัน ใบยกมานั้นคือหนี้ของของล็อตนี้แล้ว ไม่ต้องตั้งหนี้ซ้ำ · ถ้าใบยกมาคีย์ผิด ให้บัญชียกเลิกใบยกมา (💰 รอจ่าย → 🗑️) ก่อน');
+    return false;
+  }
+  return confirm('⚠️ อาจตั้งหนี้ซ้ำกับใบยกมาจาก Ecount (เพิ่มภายหลัง):\n' + body
+    + '\n\nถ้าเป็นบิลเดียวกัน: ใบยกมานั้นคือหนี้ของของล็อตนี้แล้ว — กด "ยกเลิก" (ถ้าใบยกมาคีย์ผิด ให้บัญชียกเลิกใบยกมาที่ 💰 รอจ่าย → 🗑️ ก่อน)'
+    + '\nยืนยันว่าเป็นคนละบิล และตั้งหนี้จากใบรับนี้?');
+}
+global.ERP.migLateRevOk = _migLateRevOk;
+// 🆕 verify 3b F3: ใบเดิมที่ "ด่านใบกำกับภาษีซ้ำ" ตอนสร้างจะบล็อกแน่ (_invCreateBlocked → invCreateDeny → _taxInvDenyReason → findDupTaxInv().block · fail-closed ไม่มีทางข้าม)
+//   drafts = [{ supplierId, supTaxInvNumber, supTaxInvDate, vat }] = ค่าที่จะลงใบตั้งหนี้จริง (ติ๊กใส่ทีหลัง = เลขว่าง → ไม่มีด่านนี้ · เลขไปเป็น dupTaxInvAttempt)
+//   → Set ของ id: ด่านใบยกมา (skipIds) + ด่านเลขใบแจ้งหนี้ซ้ำ (findDupSupInv) ไม่ถามใบเหล่านี้ก่อน — ถาม confirm แล้วโดน ⛔ ทีหลัง = คำตอบไม่มีผล + รายงานใบเดียว 2 รอบ
+//   ไม่ส่ง supInvNumber → ไม่นับข้อ (ค) เลขใบแจ้งหนี้ซ้ำของบิลไม่มี VAT (ด่าน findDupSupInv ของหน้าจอรายงานเองอยู่แล้ว)
+function _taxDupBlockIds(state, drafts){
+  const f = global.ERP.findDupTaxInv, out = new Set(); if(!f) return out;
+  (drafts || []).forEach((d, i) => { const no = String((d && d.supTaxInvNumber) || '').trim(); if(!no) return;
+    try { (f(state, { ...d, id: '__taxdup_draft_' + i, supTaxInvNumber: no }, {}).block || []).forEach(x => { if(x && x.id) out.add(x.id); }); } catch(_e){} });
+  return out;
+}
+global.ERP.taxDupBlockIds = _taxDupBlockIds;
+// 🆕 verify 3 F3: ด่านเลขใบกำกับซ้ำเดิมเจอใบยกมาจาก Ecount → บอกในบรรทัด + ทางออก (ใบยกมาคือหนี้ของล็อตนี้แล้ว · ไม่ใช่ "แก้เลขใบกำกับ")
+const _migLateDupTag = d => d && d.migLate ? ' 🧾 ยกมาจาก Ecount (เพิ่มภายหลัง)' : '';
+const _migLateDupHint = ds => (ds || []).some(d => d && d.migLate)
+  ? '\n🧾 ใบยกมาจาก Ecount = หนี้ของของล็อตนี้อยู่แล้ว ไม่ต้องตั้งหนี้ซ้ำ (ถ้าใบยกมาคีย์ผิด ให้บัญชียกเลิกใบยกมาที่ 💰 รอจ่าย → 🗑️ ก่อน)' : '';
+
 // ================================================================
 // CREATE INV FROM GR
 // ================================================================
@@ -71196,16 +71590,24 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
           + ` · ${vatAdjustReason.trim()}` } });
     };
 
+    // 🆕 MIG-LATE verify GR-dup F5: ใบยกมาจาก Ecount (เพิ่มภายหลัง) ของล็อตเดียวกัน → เตือนก่อนตั้งหนี้ซ้ำ
+    //   🆕 verify 3 F3: ใบที่ด่านเลขใบกำกับซ้ำเดิมเจอ (ตรงตัวอักษร) ให้ด่านนั้นรายงานที่เดียว (ไม่ถามซ้ำ 2 รอบ)
+    //   🆕 verify 3b F3: ใบที่ด่านใบกำกับภาษีซ้ำ (_invCreateBlocked ข้างล่าง) จะบล็อกแน่ → ไม่ถามทั้งด่านใบยกมาและด่านเลขใบแจ้งหนี้ซ้ำ (ให้ ⛔ รายงานที่เดียว)
+    //     ค่าเดียวกับ invData: supplierId = gr.supplierId · เลขใบกำกับ = ช่องใบกำกับ (ใส่ทีหลัง = ว่าง) · VAT ใบ (แยกตาม WHT ใช้เลข/ผู้ขายเดียวกันทุกใบ)
+    const _taxBlk = _taxDupBlockIds(state, [{ supplierId: gr.supplierId, supTaxInvNumber: taxInvLater ? '' : taxInvNumber, supTaxInvDate: taxInvDate, vat }]);
+    const _exactDups = global.ERP.findDupSupInv(state, gr.supplierId, finalSupInv, null);
+    if(!_migLateRevOk(state, [{ supplierId: gr.supplierId || po?.supplierId, taxInvNos: [taxInvLater ? '' : taxInvNumber, gr.supTaxInvNumber], taxDocNos: [finalSupInv],
+      otherDocNos: [gr.deliveryNoteNo, gr.supInvNoSeen], amount, total: amount + vat, date: gr.grDate }], { skipIds: _exactDups.map(d => d.id).concat(Array.from(_taxBlk)) })) return;
     // 🆕 DUP: เช็คเลขใบกำกับ supplier ซ้ำ — กันเปิด PI/จ่ายซ้ำ
     {
-      const dups = global.ERP.findDupSupInv(state, gr.supplierId, finalSupInv, null);
+      const dups = _exactDups.filter(d => !_taxBlk.has(d.id));   // 🆕 verify 3b F3: ใบที่ด่านใบกำกับภาษีซ้ำบล็อกแน่ → ⛔ รายงานที่เดียว
       if(dups.length > 0){
         const hardBlock = state.settings?.blockDupSupInv === true;
-        const list = dups.map(d => `• ${d.invNumber} (${fmtCur(d.netPayable||0)})`).join('\n');
+        const list = dups.map(d => `• ${d.invNumber} (${fmtCur(d.netPayable||0)})${_migLateDupTag(d)}`).join('\n');
         if(hardBlock){
-          return alert(`🚫 เลขใบกำกับ "${finalSupInv}" เคยใช้กับ supplier นี้แล้ว:\n${list}\n\nระบบตั้งค่า "ห้ามเลขซ้ำ" ไว้ — แก้เลขใบกำกับก่อน`);
+          return alert(`🚫 เลขใบกำกับ "${finalSupInv}" เคยใช้กับ supplier นี้แล้ว:\n${list}\n\nระบบตั้งค่า "ห้ามเลขซ้ำ" ไว้ — แก้เลขใบกำกับก่อน${_migLateDupHint(dups)}`);
         }
-        if(!confirm(`⚠️ เลขใบกำกับ "${finalSupInv}" เคยใช้กับ supplier นี้แล้ว:\n${list}\n\nอาจเป็นการเปิดบิลซ้ำ/จ่ายซ้ำ — ยืนยันสร้าง PI นี้?`)) return;
+        if(!confirm(`⚠️ เลขใบกำกับ "${finalSupInv}" เคยใช้กับ supplier นี้แล้ว:\n${list}\n\nอาจเป็นการเปิดบิลซ้ำ/จ่ายซ้ำ — ยืนยันสร้าง PI นี้?${_migLateDupHint(dups)}`)) return;
       }
     }
 
@@ -73000,23 +73402,34 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
           + '\n→ ถ้าเป็นคนละใบจริง แก้เลขใบกำกับของแต่ละแถวให้ตรงกับกระดาษ\n\nยังไม่ได้บันทึกอะไร');
       }
     }
+    // 🆕 MIG-LATE verify GR-dup F5: ใบยกมาจาก Ecount (เพิ่มภายหลัง) ของล็อตเดียวกัน → เตือนก่อนตั้งหนี้ซ้ำ (รายแถว)
+    //   🆕 verify 3 F3: ใบที่ด่านเลขใบกำกับซ้ำเดิม (รายแถว) เจออยู่แล้ว ไม่ถามซ้ำในด่านใบยกมา
+    //   🆕 verify 3b F3: + ใบที่ด่านใบกำกับภาษีซ้ำ (_invCreateBlocked ทั้งชุด) จะบล็อกแน่ — แถวที่จะสร้างจริง (ยอด > 0) · ค่าเดียวกับ invData รายแถว
+    const _taxBlk = _taxDupBlockIds(state, selected.filter(gr => (Number(rowData[gr.id]?.amount) || 0) > 0).map(gr => { const row = rowData[gr.id] || {};
+      return { supplierId, supTaxInvNumber: row.taxInvNumber, supTaxInvDate: row.taxInvDate || row.invDate, vat: Number(row.vat) || 0 }; }));
+    const _exactByGr = {};
+    for(const gr of selected){ const num = (rowData[gr.id]?.supInvNumber||'').trim(); _exactByGr[gr.id] = num ? global.ERP.findDupSupInv(state, supplierId, num, null).filter(d => !_taxBlk.has(d.id)) : []; }
+    if(!_migLateRevOk(state, selected.map(gr => { const row = rowData[gr.id] || {};
+      return { label: gr.grNumber || gr.id, supplierId, taxInvNos: [row.taxInvNumber, gr.supTaxInvNumber], taxDocNos: [row.supInvNumber], otherDocNos: [gr.deliveryNoteNo, gr.supInvNoSeen],
+        amount: Number(row.amount) || 0, total: (Number(row.amount) || 0) + (Number(row.vat) || 0), date: gr.grDate }; }),
+      { skipIds: [].concat(...Object.values(_exactByGr)).map(d => d.id).concat(Array.from(_taxBlk)) })) return;
     // 🆕 DUP: เช็คเลขใบกำกับซ้ำ — ทั้งกับของเดิม + ซ้ำกันเองในรอบนี้
     {
-      const dupMsgs = [];
+      const dupMsgs = [], dupInvs = [];
       const seenInBatch = {};
       for(const gr of selected){
         const row = rowData[gr.id];
         const num = (row?.supInvNumber||'').trim();
         if(!num) continue;
         const key = num.toLowerCase();
-        const dups = global.ERP.findDupSupInv(state, supplierId, num, null);
-        if(dups.length > 0) dupMsgs.push(`• "${num}" ซ้ำกับ ${dups.map(d=>d.invNumber).join(', ')}`);
+        const dups = _exactByGr[gr.id] || [];
+        if(dups.length > 0){ dupMsgs.push(`• "${num}" ซ้ำกับ ${dups.map(d=>d.invNumber + _migLateDupTag(d)).join(', ')}`); dupInvs.push(...dups); }
         if(seenInBatch[key]) dupMsgs.push(`• "${num}" ใส่ซ้ำในรอบนี้ 2 แถว`);
         seenInBatch[key] = true;
       }
       if(dupMsgs.length > 0){
         const hardBlock = state.settings?.blockDupSupInv === true;
-        const body = dupMsgs.join('\n');
+        const body = dupMsgs.join('\n') + _migLateDupHint(dupInvs);
         if(hardBlock) return alert(`🚫 เลขใบกำกับซ้ำ:\n${body}\n\nระบบห้ามเลขซ้ำ — แก้ก่อน`);
         if(!confirm(`⚠️ เลขใบกำกับซ้ำ:\n${body}\n\nอาจเปิด/จ่ายซ้ำ — ยืนยัน?`)) return;
       }
@@ -73550,14 +73963,27 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
     }
     // 🆕 supInvNumber + taxInvNumber ตอนนี้ optional (มี toggle "ใส่ทีหลัง")
     if(!supInvLater && !supInvNumber.trim() && !confirm('ไม่ใส่เลขใบแจ้งหนี้ supplier — ยืนยัน?')) return;
+    // 🆕 MIG-LATE verify GR-dup F5: ใบยกมาจาก Ecount (เพิ่มภายหลัง) ของล็อตเดียวกัน → เตือนก่อนตั้งหนี้ซ้ำ (รายใบรับ + ทั้งใบรวม)
+    //   🆕 verify 3 F3: ใบที่ด่านเลขใบกำกับซ้ำเดิมเจออยู่แล้ว ไม่ถามซ้ำ · F1: เลขใบกำกับ (taxInvNos) แยกจากเลขใบแจ้งหนี้ (taxDocNos)
+    //   🆕 verify 3b F3: ใบที่ด่านใบกำกับภาษีซ้ำ (_invCreateBlocked ข้างล่าง) จะบล็อกแน่ → ไม่ถามทั้งด่านใบยกมาและด่านเลขใบแจ้งหนี้ซ้ำ (ค่าเดียวกับ inv)
+    const _taxBlk = _taxDupBlockIds(state, [{ supplierId, supTaxInvNumber: taxInvLater ? '' : taxInvNumber, supTaxInvDate: taxInvDate, vat: Number(vat) || 0 }]);
+    const _exactDups = (!supInvLater && supInvNumber.trim()) ? global.ERP.findDupSupInv(state, supplierId, supInvNumber.trim(), null).filter(d => !_taxBlk.has(d.id)) : [];
+    {
+      const _inv = [supInvLater ? '' : supInvNumber], _tax = [taxInvLater ? '' : taxInvNumber];
+      const _d0 = selected.map(g => String(g.grDate || '')).filter(Boolean).sort()[0] || invDate;
+      if(!_migLateRevOk(state, selected.map(g => ({ label: g.grNumber || g.id, supplierId, taxInvNos: [g.supTaxInvNumber].concat(_tax), taxDocNos: _inv, otherDocNos: [g.deliveryNoteNo, g.supInvNoSeen],
+          amount: Number(g.totalValue) || 0, total: Number(g.totalValue) || 0, date: g.grDate }))
+        .concat([{ label: 'ใบรวม', supplierId, taxInvNos: _tax, taxDocNos: _inv, otherDocNos: [], amount: totalAmount, total: totalAmount + (Number(vat) || 0), date: _d0 }]),
+        { skipIds: _exactDups.map(d => d.id).concat(Array.from(_taxBlk)) })) return;
+    }
     // 🆕 DUP: เช็คเลขใบกำกับซ้ำต่อ supplier
     if(!supInvLater && supInvNumber.trim()){
-      const dups = global.ERP.findDupSupInv(state, supplierId, supInvNumber.trim(), null);
+      const dups = _exactDups;
       if(dups.length > 0){
         const hardBlock = state.settings?.blockDupSupInv === true;
-        const list = dups.map(d => `• ${d.invNumber} (${fmtCur(d.netPayable||0)})`).join('\n');
-        if(hardBlock) return alert(`🚫 เลขใบกำกับ "${supInvNumber.trim()}" เคยใช้กับ supplier นี้แล้ว:\n${list}\n\nระบบห้ามเลขซ้ำ — แก้ก่อน`);
-        if(!confirm(`⚠️ เลขใบกำกับ "${supInvNumber.trim()}" เคยใช้กับ supplier นี้แล้ว:\n${list}\n\nอาจเปิด/จ่ายซ้ำ — ยืนยัน?`)) return;
+        const list = dups.map(d => `• ${d.invNumber} (${fmtCur(d.netPayable||0)})${_migLateDupTag(d)}`).join('\n');
+        if(hardBlock) return alert(`🚫 เลขใบกำกับ "${supInvNumber.trim()}" เคยใช้กับ supplier นี้แล้ว:\n${list}\n\nระบบห้ามเลขซ้ำ — แก้ก่อน${_migLateDupHint(dups)}`);
+        if(!confirm(`⚠️ เลขใบกำกับ "${supInvNumber.trim()}" เคยใช้กับ supplier นี้แล้ว:\n${list}\n\nอาจเปิด/จ่ายซ้ำ — ยืนยัน?${_migLateDupHint(dups)}`)) return;
       }
     }
 
@@ -89950,6 +90376,200 @@ function BalanceSheet({ state }){
 // ================================================================
 // ALL INV OVERVIEW — รวม INV ทุกใบ: วันที่ / เลข INV / PO / GR / สถานะ
 // ================================================================
+// 🆕 MIG_LATE_INV M2: ป้ายใบยกมาจาก Ecount ที่เพิ่มด้วยมือภายหลัง (PI ทั้งหมด · รอจ่าย · คำขออนุมัติจ่าย)
+function MigLatePill({ inv }){
+  if(!inv || !inv.migLate) return null;
+  const m = inv.migLate;
+  return h('span', { 'data-testid':'mig-late-pill', className:'ml-1 text-[10px] bg-teal-100 text-teal-800 border border-teal-300 rounded px-1 font-sans font-normal whitespace-nowrap',
+    title:'ใบเจ้าหนี้ยกมาจาก Ecount ที่เพิ่มด้วยมือภายหลัง โดย ' + (m.by || '-') + (m.reason ? ' · ' + m.reason : '') }, '🧾 ยกมาเพิ่มภายหลัง');
+}
+global.ERP.MigLatePill = MigLatePill;
+// 🆕 MIG_LATE_INV M1/M2': ฟอร์ม ➕ เพิ่มใบยกมาจาก Ecount (ตกหล่น) — ผจก.บัญชี/GM/เจ้าของ · dispatch ADD_MIG_LATE_INV
+const _mlR2 = x => Math.round((Number(x) || 0) * 100) / 100;
+function _mlPayload(f, user, at){
+  return { id:'inv_eclate_' + String(f.ecountNo || '').trim().replace(/[^A-Za-z0-9]/g, '').toLowerCase() + '_' + Number(at).toString(36),
+    ecountNo:String(f.ecountNo || '').trim(), invDate:f.invDate, supplierId:f.supplierId, supDocNo:String(f.supDocNo || '').trim(), supDocDate:f.supDocDate || '',
+    amount:_mlR2(f.amount), vat:_mlR2(f.vat), wht:_mlR2(f.wht), paidAmount:_mlR2(f.paidAmount), ecountPayNo:String(f.ecountPayNo || '').trim(), ecountPayDate:f.ecountPayDate || '',
+    vatPlace:f.vatPlace || '', itemsText:String(f.itemsText || '').trim(), reason:String(f.reason || '').trim(), dueDate:f.dueDate || '', branch:String(f.branch || '').trim(),   // UAT SF4
+    ...(f.supInvImage ? { supInvImage:f.supInvImage } : {}), by:(user && user.username) || '', at,
+    // 🆕 verify GR-dup F2: GM/เจ้าของ ยืนยันไม่ซ้ำ "รายตัว" = id ของใบเดิม/GR/PO ที่เห็นตอนติ๊ก (reducer ตรวจว่าครอบทุกตัวที่เจอตอนบันทึก)
+    ...(Array.isArray(f.dupAckIds) && f.dupAckIds.length ? { dupAckIds:f.dupAckIds.slice() } : {}) };
+}
+// 🆕 MIG_LATE_INV UAT SF1: ใบยกมาไม่ลง JE (สัญญา M2) → บอกบัญชีให้ลง JE ปรับยอดยกมาเอง พร้อมยอดที่คำนวณแล้ว (ลงอัตโนมัติไหม = รอเจ้าของตัดสิน)
+function _mlJeNote(f){
+  const vat = _mlR2(f.vat), net = _mlR2(_mlR2(f.amount) + vat - _mlR2(f.wht)), open = _mlR2(net - _mlR2(f.paidAmount));
+  const here = vat > 0.005 && (f.vatPlace === 'here' || (!f.vatPlace && !String(f.supDocNo || '').trim()));
+  if(!(open > 0.005) && !here) return '';
+  return 'ใบยกมาไม่ลง JE — ถ้ายอดยกมา 2100 ยังไม่รวมใบนี้ ให้ลง JE ปรับยอดยกมา'
+    + (open > 0.005 ? ' Dr 3900 / Cr 2100 ยอด ' + fmtCur(open) : '') + (here ? ' + Dr 1150 / Cr 3900 VAT ' + fmtCur(vat) + ' (เคลมในระบบใหม่)' : '');
+}
+// 🆕 UAT MF2: แสดงฐาน VAT ที่ระบบคิด (VAT/7%) — ใบผสมสินค้ายกเว้น VAT
+function _mlVatSplitText(f){
+  const vat = _mlR2(f.vat), amt = _mlR2(f.amount);
+  if(!(vat > 0.005) || !(amt > 0.005) || !global.ERP.migLateVatSplit) return '';
+  const v = global.ERP.migLateVatSplit(amt, vat);
+  return v.mixed ? 'ใบผสม: ฐานมี VAT ' + fmtCur(v.vatable) + ' · ยกเว้น VAT ' + fmtCur(v.exempt) + ' (คิดจาก VAT ÷ 7%)' : 'ฐานมี VAT ทั้งใบ ' + fmtCur(v.vatable);
+}
+// 🆕 UAT SF4: สาขาค่าเริ่มของใบยกมา = สำนักงานใหญ่ (ไม่ใช่สาขาที่กำลังดู)
+function _mlHqId(state){ const b = (state.branches || []).find(x => x && x.branchType === 'hq') || (state.branches || [])[0]; return (b && b.id) || ''; }
+// ไฟล์: branch = id สาขา / รหัสสาขา 5 หลัก / ชื่อ · ว่าง = สำนักงานใหญ่ · ไม่พบ = ส่งค่าเดิม (ด่าน reducer ปฏิเสธ "ไม่พบสาขา")
+function _mlBranchOf(state, v){ const t = String(v == null ? '' : v).trim(); if(!t) return _mlHqId(state);
+  const b = (state.branches || []).find(x => x && (x.id === t || String(x.name || '').trim() === t || (/^\d{1,5}$/.test(t) && String(x.branchCode || '') === t.padStart(5, '0'))));
+  return b ? b.id : t; }
+function MigLateVatPicker({ f, set, testid }){
+  if(!(_mlR2(f.vat) > 0.005)) return h('div', { className:'text-xs text-gray-500' }, 'ใบไม่มี VAT — ไม่ต้องเลือกที่เคลม');
+  const hasNo = !!String(f.supDocNo || '').trim(), vp = f.vatPlace || (hasNo ? '' : 'here');   // M2': ไม่มีเลขใบกำกับ = (ข) · มีเลข = เลือกเอง
+  return h('div', { className:'space-y-1' },
+    h('div', { className:'text-xs font-semibold' }, 'VAT ของใบนี้', hasNo && !vp && h('span', { className:'text-red-600 ml-1' }, '(มีเลขใบกำกับ — เลือกเอง)')),
+    [['ecount', '(ก) มีเลขใบกำกับภาษีแล้ว (ไม่ใช่ใบแจ้งหนี้) — ใบกำกับเดือน ≤ ก.ย. บัญชียื่นใน ภ.พ.30 ก.ย. จาก Ecount · ต้องใส่วันที่ใบกำกับ'], ['here', '(ข) ยังไม่มีใบกำกับ → เคลมในระบบใหม่ (เข้า ⏳ รอใบกำกับ)']].map(([v, l]) =>
+      h('label', { key:v, className:'flex items-start gap-1 text-xs' },
+        h('input', { type:'radio', name:testid, 'data-testid':testid + '-' + v, checked:vp === v, onChange:()=>set({ vatPlace:v }) }), l)),
+    vp === 'here' && h('div', { 'data-testid':'mig-late-here-warn', className:'text-xs bg-amber-50 border border-amber-300 text-amber-800 rounded p-1' },
+      '⚠️ อย่าใส่ใบนี้ใน ภ.พ.30 ก.ย. ของ Ecount — เคลมในระบบใหม่เมื่อได้ใบกำกับ'));
+}
+const _ML_ACK_KEYS = ['supplierId', 'invDate', 'amount', 'vat', 'supDocNo'];   // 🆕 verify GR-dup F2: ช่องที่เปลี่ยนผลด่านซ้ำ → ล้างการยืนยัน
+function MigLateInvModal({ state, dispatch, user, onClose }){
+  const [f, setF] = useState({ ecountNo:'', invDate:'2026-09-30', supplierId:'', supDocNo:'', supDocDate:'', amount:'', vat:'', wht:'', paidAmount:'', ecountPayNo:'', ecountPayDate:'',
+    vatPlace:'', itemsText:'', reason:'คีย์ใน Ecount ย้อนหลังหลังดึงข้อมูล 1 ต.ค.', dueDate:'', supInvImage:null, branch:_mlHqId(state) });
+  const [supQ, setSupQ] = useState('');
+  const [touched, setTouched] = useState(false);   // UAT N3: ยังไม่แก้อะไร → เหตุผลที่กดไม่ได้เป็นคำแนะนำสีเทา (ไม่ใช่ ⛔ แดง)
+  // 🆕 verify GR-dup F2: แก้ผู้ขาย/วันที่/ยอด/VAT/เลขเอกสาร → ล้างการยืนยันไม่ซ้ำ (ยืนยันกับข้อมูลชุดเดิม ไม่ใช่ชุดใหม่)
+  const set = (p) => { setTouched(true); setF(o => ({ ...o, ...p, ...(_ML_ACK_KEYS.some(k => k in p) ? { dupAckIds:[] } : {}) })); };
+  const total = _mlR2(_mlR2(f.amount) + _mlR2(f.vat)), net = _mlR2(total - _mlR2(f.wht)), open = _mlR2(net - _mlR2(f.paidAmount));
+  const sups = (state.suppliers || []).filter(x => x && x.active !== false && (!supQ || [x.name, x.code, x.taxId].some(v => String(v || '').toLowerCase().includes(supQ.toLowerCase()))))
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'th')).slice(0, 200);
+  const info = global.ERP.migLateInfo(state, _mlPayload(f, user, 1), user), deny = info.deny;
+  // ช่องยืนยันไม่ซ้ำ: เฉพาะ GM/เจ้าของ · มีรายการอาจซ้ำ (ไม่ใช่ HARD) · ยังติดด่านนี้อยู่ หรือยืนยันครบแล้ว (ให้เอาติ๊กออกได้)
+  const softIds = info.soft.map(e => e.id), acked = softIds.length > 0 && softIds.every(id => (f.dupAckIds || []).includes(id));
+  const showAck = global.ERP.isTopAuthority(user) && softIds.length > 0 && (info.softDeny || acked);
+  const inp = (k, ph, type) => h('input', { type: type || 'text', value:f[k], placeholder:ph || '', 'data-testid':'ml-' + k, onChange:e=>set({ [k]:e.target.value }),
+    className:'w-full px-2 py-1 border rounded text-sm' });
+  const L = (t, el) => h('label', { className:'block text-xs text-gray-600' }, t, el);
+  const onImg = async (e) => { const file = e.target.files && e.target.files[0]; if(!file) return;
+    try { const r = await global.ERP.resizeImageToBase64(file, 1600, 0.75); set({ supInvImage:{ dataUrl:r.dataUrl, sizeKB:r.sizeKB, w:r.w, h:r.h, name:file.name } }); }
+    catch(err){ alert('Upload error: ' + err.message); } finally { e.target.value = ''; } };
+  const save = () => { if(deny) return; const _n = _mlJeNote(f); dispatch({ type:'ADD_MIG_LATE_INV', data:_mlPayload(f, user, Date.now()) }); onClose();
+    alert('✅ เพิ่มใบยกมา ' + String(f.ecountNo || '').trim() + ' แล้ว' + (_n ? '\n\n📌 ' + _n : '')); };
+  return h(Modal, { isOpen:true, title:'➕ เพิ่มใบยกมาจาก Ecount (ตกหล่น)', onClose, size:'lg' },
+    h('div', { className:'space-y-2', 'data-testid':'mig-late-form' },
+      h('div', { className:'text-xs bg-blue-50 border border-blue-200 rounded p-2' }, 'ใบเจ้าหนี้ที่คีย์ใน Ecount ย้อนหลังหลังดึงข้อมูล 1 ต.ค. — ได้ใบแบบเดียวกับใบนำเข้า (ไม่มี JE · ไม่ตัดสต๊อก · จ่ายผ่านคิวรอจ่ายตามปกติ) · วันที่บิลต้องไม่เกิน 30 ก.ย. 2569'),
+      h('div', { className:'grid grid-cols-2 gap-2' },
+        L('เลขบิล Ecount (RE…)', inp('ecountNo', 'RE260930032')), L('วันที่บิล', inp('invDate', '', 'date')),
+        L('ค้นผู้ขาย', h('input', { value:supQ, onChange:e=>setSupQ(e.target.value), placeholder:'ชื่อ/รหัส/เลขผู้เสียภาษี', 'data-testid':'ml-supq', className:'w-full px-2 py-1 border rounded text-sm' })),
+        L('ผู้ขาย', h('select', { value:f.supplierId, onChange:e=>set({ supplierId:e.target.value }), 'data-testid':'ml-supplierId', className:'w-full px-2 py-1 border rounded text-sm bg-white' },
+          h('option', { value:'' }, '— เลือกผู้ขาย —'), sups.map(x => h('option', { key:x.id, value:x.id }, (x.code ? x.code + ' · ' : '') + x.name + (x.branchCode ? ' (สาขา ' + x.branchCode + ')' : ''))))),
+        L('เลขใบแจ้งหนี้/ใบกำกับผู้ขาย (ถ้ามี)', inp('supDocNo')), L('วันที่ใบกำกับ (ถ้ามี)', inp('supDocDate', '', 'date')),
+        L('ยอดก่อน VAT', inp('amount', '0.00', 'number')), L('VAT', inp('vat', '0.00', 'number')),
+        h('div', { className:'text-xs text-gray-500 pt-1' }, 'หัก ณ ที่จ่าย: ใบยกมายังไม่รองรับ — เพิ่มใบแล้วให้ ผจก.บัญชี ✏️ แก้ WHT ที่ใบ (เลือกประเภทเงินได้/ภ.ง.ด.)'), h('div', { className:'text-sm pt-4' }, 'ยอดรวม ', h('b', { 'data-testid':'ml-total' }, fmtCur(total)), ' · สุทธิ ', fmtCur(net)),
+        L('จ่ายแล้วใน Ecount (ถ้ามี)', inp('paidAmount', '0.00', 'number')), L('เลขใบจ่าย Ecount', inp('ecountPayNo')),
+        L('วันที่จ่ายใน Ecount', inp('ecountPayDate', '', 'date')), h('div', { className:'text-sm pt-4' }, 'ค้างจ่าย ', h('b', { 'data-testid':'ml-open' }, fmtCur(open))),
+        L('วันนัดจ่าย (ว่าง = ตั้งภายหลัง)', inp('dueDate', '', 'date')),
+        L('สาขา (พิมพ์บนเอกสาร)', h('select', { value:f.branch, onChange:e=>set({ branch:e.target.value }), 'data-testid':'ml-branch', className:'w-full px-2 py-1 border rounded text-sm bg-white' },
+          (state.branches || []).filter(b => b && b.id).map(b => h('option', { key:b.id, value:b.id }, b.name || b.id))))),
+      _mlVatSplitText(f) && h('div', { 'data-testid':'ml-vat-split', className:'text-xs text-gray-700' }, '🧮 ' + _mlVatSplitText(f)),
+      h(MigLateVatPicker, { f, set, testid:'ml-vat' }),
+      _mlJeNote(f) && h('div', { 'data-testid':'ml-je-note', className:'text-xs bg-amber-50 border border-amber-300 text-amber-900 rounded p-1' }, '📌 ' + _mlJeNote(f)),
+      L('รายการสินค้า/หมายเหตุ (ข้อความ ไม่ตัดสต๊อก)', h('textarea', { value:f.itemsText, rows:2, 'data-testid':'ml-itemsText', onChange:e=>set({ itemsText:e.target.value }), className:'w-full px-2 py-1 border rounded text-sm' })),
+      L('เหตุผล (บังคับ)', inp('reason')),
+      // 🆕 verify 1: ผู้ขาย+วันที่+ยอดใกล้เคียงใบเดิม → GM/เจ้าของ ติ๊กยืนยันว่าเป็นคนละใบ (เหตุผลด้านบนบังคับ)
+      //   🆕 verify GR-dup F2/B2/B5: ยืนยันรายตัว (ใบเดิม/GR/PO ที่เจอทั้งหมด แสดงครบในเหตุผลด้านล่าง) · ด่าน HARD (เลขเอกสาร+ยอดตรง) = ไม่มีช่องติ๊ก
+      showAck && h('label', { className:'flex items-start gap-1 text-xs bg-amber-50 border border-amber-300 rounded p-1' },
+        h('input', { type:'checkbox', 'data-testid':'ml-dupAck', checked:acked, onChange:e=>set({ dupAckIds:e.target.checked ? softIds : [] }) }),
+        h('span', { 'data-testid':'ml-dupAck-text' }, 'ยืนยันไม่ซ้ำกับ ' + info.soft.map(e => e.ref).join(', ') + ' — ตรวจแล้วเป็นคนละรายการ · ระบุเหตุผลในช่องเหตุผล',
+          acked && info.soft.length && h('ul', { className:'list-disc ml-4 text-gray-700' }, info.soft.map(e => h('li', { key:e.id }, e.text))))),
+      h('div', { className:'text-xs' }, '📎 รูปบิล ', h('input', { type:'file', accept:'image/*', onChange:onImg }), f.supInvImage && h('span', { className:'text-green-700 ml-1' }, '✓ ' + f.supInvImage.name)),
+      deny && (touched ? h('div', { 'data-testid':'ml-deny', className:'text-xs text-red-700 bg-red-50 border border-red-200 rounded p-1' }, '⛔ ' + deny)
+        : h('div', { 'data-testid':'ml-deny', 'data-hint':'1', className:'text-xs text-gray-500' }, 'ℹ️ ' + deny)),
+      h('div', { className:'flex justify-end gap-2 pt-2' },
+        h('button', { onClick:onClose, className:'px-3 py-1.5 border rounded text-sm' }, 'ยกเลิก'),
+        h('button', { onClick:save, disabled:!!deny, 'data-testid':'ml-save', className:cls('px-3 py-1.5 rounded text-sm text-white', deny ? 'bg-gray-400' : 'bg-teal-600 hover:bg-teal-700') }, '✅ เพิ่มใบยกมา'))));
+}
+// 🆕 MIG_LATE_INV M3: 📂 เพิ่มจากไฟล์ ecount-late-bills.json (รูปแบบ: MIG_LATE_INV_CONTRACT ภาค B) — ตรวจ schema → พรีวิว → ติ๊ก → ADD_MIG_LATE_INV ทีละใบ
+const _mlBr5 = x => (String(x == null ? '' : x).replace(/\D/g, '') || '0').padStart(5, '0').slice(-5);
+function migLateParseFile(txt){
+  let j; try { j = JSON.parse(txt); } catch(e){ return { err:'ไฟล์ไม่ใช่ JSON: ' + e.message }; }
+  if(!j || j.kind !== 'ecount-late-bills' || !Array.isArray(j.bills)) return { err:'ไม่ใช่ไฟล์ ecount-late-bills (ต้องมี kind:"ecount-late-bills" และ bills:[…])' };
+  if(!j.bills.length) return { err:'ไฟล์ไม่มีบิล' };
+  const num = v => v === undefined || v === null || v === '' || isFinite(Number(v));
+  for(let k = 0; k < j.bills.length; k++){ const b = j.bills[k] || {};
+    if(!String(b.ecountNo || '').trim() || !/^\d{4}-\d{2}-\d{2}$/.test(String(b.invDate || ''))) return { err:'บิลที่ ' + (k + 1) + ': ต้องมี ecountNo และ invDate (YYYY-MM-DD)' };
+    if(!b.supplier || typeof b.supplier !== 'object') return { err:'บิลที่ ' + (k + 1) + ': ต้องมี supplier {taxId, branchCode, code, name}' };
+    if(!isFinite(Number(b.amount)) || !['vat','wht','paidAmount'].every(x => num(b[x]))) return { err:'บิลที่ ' + (k + 1) + ': ยอด amount/vat/wht/paidAmount ต้องเป็นตัวเลข' };
+    if(b.vatPlace && !['ecount','here'].includes(b.vatPlace)) return { err:'บิลที่ ' + (k + 1) + ': vatPlace ต้องเป็น "ecount" หรือ "here"' }; }
+  return { file:j };
+}
+function migLateMatchSup(state, ps){
+  const sups = (state.suppliers || []).filter(x => x && x.active !== false), tax = String((ps && ps.taxId) || '').replace(/\D/g, '');
+  if(tax.length === 13){
+    const byTax = sups.filter(x => String(x.taxId || '').replace(/\D/g, '') === tax);
+    const hit = byTax.filter(x => _mlBr5(x.branchCode) === _mlBr5(ps.branchCode));
+    if(hit.length === 1) return { id:hit[0].id, how:'เลขผู้เสียภาษี+สาขา' };
+    if(!hit.length && byTax.length === 1 && !String(ps.branchCode || '').trim()) return { id:byTax[0].id, how:'เลขผู้เสียภาษี' };
+  }
+  const code = String((ps && ps.code) || '').trim();
+  const byCode = code ? sups.filter(x => String(x.code || '').trim() === code) : [];
+  if(byCode.length === 1) return { id:byCode[0].id, how:'รหัส' };
+  return { id:'', how:'' };
+}
+global.ERP.migLateParseFile = migLateParseFile;
+global.ERP.migLateMatchSup = migLateMatchSup;
+function MigLateFileModal({ state, dispatch, user, onClose }){
+  const [err, setErr] = useState('');
+  const [rows, setRows] = useState(null);   // [{ f, how, pick }]
+  const onFile = (e) => { const file = e.target.files && e.target.files[0]; if(!file) return;
+    const rd = new FileReader();
+    rd.onload = () => { const r = migLateParseFile(String(rd.result || ''));
+      if(r.err){ setErr(r.err); setRows(null); return; }
+      setErr(''); setRows(r.file.bills.map(b => { const m = migLateMatchSup(state, b.supplier);
+        return { how:m.how, pick:false, f:{ ecountNo:String(b.ecountNo).trim(), invDate:b.invDate, supplierId:m.id, supDocNo:b.supDocNo || '', supDocDate:b.supDocDate || '',
+          amount:b.amount, vat:b.vat || 0, wht:b.wht || 0, paidAmount:b.paidAmount || 0, ecountPayNo:b.ecountPayNo || '', ecountPayDate:b.ecountPayDate || '',
+          vatPlace:b.vatPlace || '', itemsText:b.itemsText || '', reason:b.reason || 'คีย์ใน Ecount ย้อนหลังหลังดึงข้อมูล 1 ต.ค.', dueDate:b.dueDate || '', supName:(b.supplier && b.supplier.name) || '', branch:_mlBranchOf(state, b.branch) } }; })); };
+    rd.readAsText(file); e.target.value = ''; };
+  const upd = (k, p) => setRows(rs => rs.map((r, j) => j === k ? { ...r, ...p, f:{ ...r.f, ...(p.f || {}) } } : r));
+  const denyOf = (r) => global.ERP.migLateDeny(state, _mlPayload(r.f, user, 1), user, 'file');   // 🆕 verify GR-dup B1: คำแนะนำแบบพรีวิว (ไม่มีช่องยืนยัน)
+  // ซ้ำกันเองในไฟล์ (เลข Ecount เดียวกัน 2 แถว) — แถวหลังห้าม
+  //   🆕 verify 1: + ผู้ขาย+วันที่เดียวกัน+ยอดรวมห่าง ≤ 1 บาท (ใบไม่มีเลขคีย์ซ้ำคนละเลข RE) — แถวหลังห้าม (เพิ่มทีละใบด้วยฟอร์มถ้าคนละใบจริง)
+  const seen = {}, seenAmt = [], dupIn = (rows || []).map(r => { const k = String(r.f.ecountNo).toUpperCase(); const tot = _mlR2(_mlR2(r.f.amount) + _mlR2(r.f.vat));
+    const d = seen[k] ? 'เลข Ecount ซ้ำกับแถวก่อนหน้าในไฟล์'
+      : (r.f.supplierId && seenAmt.some(x => global.ERP.migLateSameSup(state, x.s, r.f.supplierId) && x.d === r.f.invDate && Math.abs(x.t - tot) <= 1))   // 🆕 verify GR-dup F1: ผู้ขายรายเดียวกัน (เลขผู้เสียภาษี+สาขา)
+        ? 'ผู้ขาย/วันที่/ยอดใกล้เคียงแถวก่อนหน้าในไฟล์ — อาจคีย์ซ้ำ · ถ้าเป็นคนละใบจริง เพิ่มใบนี้ทีละใบด้วยฟอร์ม ➕' : '';
+    seen[k] = true; seenAmt.push({ s:r.f.supplierId, d:r.f.invDate, t:tot }); return d; });
+  const ok = (rows || []).map((r, k) => !dupIn[k] && !denyOf(r));
+  const go = () => { const t0 = Date.now(); let n = 0; const notes = [];
+    rows.forEach((r, k) => { if(r.pick && ok[k]){ dispatch({ type:'ADD_MIG_LATE_INV', data:_mlPayload(r.f, user, t0 + n) }); n++;
+      const _n = _mlJeNote(r.f); if(_n) notes.push('• ' + r.f.ecountNo + ': ' + _n.replace(/^ใบยกมาไม่ลง JE — ถ้ายอดยกมา 2100 ยังไม่รวมใบนี้ ให้ลง JE ปรับยอดยกมา/, '')); } });
+    alert('✅ เพิ่มใบยกมา ' + n + ' ใบ' + (notes.length ? '\n\n📌 ใบยกมาไม่ลง JE — ถ้ายอดยกมา 2100 ยังไม่รวมใบเหล่านี้ ให้ลง JE ปรับยอดยกมา:\n' + notes.join('\n') : '')); onClose(); };
+  const sups = (state.suppliers || []).filter(x => x && x.active !== false).sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'th'));
+  return h(Modal, { isOpen:true, title:'📂 เพิ่มใบยกมาจาก Ecount จากไฟล์', onClose, size:'xl' },
+    h('div', { className:'space-y-2', 'data-testid':'mig-late-file' },
+      h('div', { className:'text-xs bg-blue-50 border border-blue-200 rounded p-2' }, 'เลือกไฟล์ ecount-late-bills.json ที่เตรียมไว้ → ตรวจทุกใบ → ติ๊กใบที่ถูกต้อง → ✅ เพิ่มใบที่เลือก (ผู้ขายจับคู่ด้วยเลขผู้เสียภาษี+สาขา หรือรหัส · ไม่พบ = เลือกเอง)'),
+      h('input', { type:'file', accept:'.json,application/json', onChange:onFile, 'data-testid':'ml-file' }),
+      err && h('div', { 'data-testid':'ml-file-err', className:'text-xs text-red-700 bg-red-50 border border-red-200 rounded p-1' }, '⛔ ' + err),
+      rows && h('div', { className:'overflow-x-auto' }, h('table', { className:'w-full text-xs' },
+        h('thead', null, h('tr', { className:'bg-gray-50 text-left' }, ['', 'เลข Ecount', 'วันที่ / สาขา', 'ผู้ขาย', 'ใบแจ้งหนี้/ใบกำกับ', 'ยอดรวม', 'VAT ของใบนี้', 'ผลตรวจ'].map((t, i) => h('th', { key:i, className:'px-2 py-1' }, t)))),
+        h('tbody', null, rows.map((r, k) => { const dn = dupIn[k] || denyOf(r);
+          return h('tr', { key:k, 'data-testid':'ml-row', className:cls('border-t align-top', dn ? 'bg-red-50' : '') },
+            h('td', { className:'px-2 py-1' }, h('input', { type:'checkbox', 'data-testid':'ml-pick', disabled:!!dn, checked:!dn && r.pick, onChange:e=>upd(k, { pick:e.target.checked }) })),
+            h('td', { className:'px-2 py-1 font-mono' }, r.f.ecountNo),
+            h('td', { className:'px-2 py-1' }, r.f.invDate, h('select', { value:r.f.branch, 'data-testid':'ml-row-branch', title:'สาขา (พิมพ์บนเอกสาร)', onChange:e=>upd(k, { f:{ branch:e.target.value } }),
+              className:'block border rounded max-w-[10rem] mt-1' }, (state.branches || []).some(b => b && b.id === r.f.branch) ? null : h('option', { value:r.f.branch }, '⚠️ ' + r.f.branch),
+              (state.branches || []).filter(b => b && b.id).map(b => h('option', { key:b.id, value:b.id }, b.name || b.id)))),
+            h('td', { className:'px-2 py-1' }, h('div', { className:'text-gray-500' }, r.f.supName),
+              h('select', { value:r.f.supplierId, 'data-testid':'ml-row-sup', onChange:e=>upd(k, { f:{ supplierId:e.target.value }, how:e.target.value ? 'เลือกเอง' : '' }),
+                className:cls('border rounded max-w-[14rem]', r.f.supplierId ? '' : 'border-red-500 bg-red-50') },
+                h('option', { value:'' }, '— ไม่พบ เลือกเอง —'), sups.map(x => h('option', { key:x.id, value:x.id }, (x.code ? x.code + ' · ' : '') + x.name + (x.branchCode ? ' (' + x.branchCode + ')' : '')))),
+              r.how && h('div', { className:'text-green-700' }, '✓ ' + r.how)),
+            h('td', { className:'px-2 py-1 font-mono' }, r.f.supDocNo || '—'),
+            h('td', { className:'px-2 py-1 text-right' }, fmtCur(_mlR2(_mlR2(r.f.amount) + _mlR2(r.f.vat)))),
+            h('td', { className:'px-2 py-1' }, h(MigLateVatPicker, { f:r.f, set:p=>upd(k, { f:p }), testid:'ml-row-vat-' + k }),
+              _mlVatSplitText(r.f) && h('div', { className:'text-gray-600 mt-1' }, '🧮 ' + _mlVatSplitText(r.f)),
+              _mlJeNote(r.f) && h('div', { 'data-testid':'ml-row-je-note', className:'text-amber-800 mt-1' }, '📌 ' + _mlJeNote(r.f))),
+            h('td', { className:'px-2 py-1', 'data-testid':'ml-row-deny' }, dn ? h('span', { className:'text-red-700' }, '⛔ ' + dn) : h('span', { className:'text-green-700' }, '✓ พร้อมเพิ่ม'))); })))),
+      h('div', { className:'flex justify-end gap-2 pt-2' },
+        h('button', { onClick:onClose, className:'px-3 py-1.5 border rounded text-sm' }, 'ปิด'),
+        rows && h('button', { onClick:go, 'data-testid':'ml-file-go', disabled:!rows.some((r, k) => r.pick && ok[k]),
+          className:'px-3 py-1.5 rounded text-sm text-white bg-teal-600 hover:bg-teal-700 disabled:bg-gray-400' }, '✅ เพิ่มใบที่เลือก (' + rows.filter((r, k) => r.pick && ok[k]).length + ')'))));
+}
 function INVAllOverviewTab({ state, dispatch, user }){
   const purchaseMod = global.ERP.MODULES.purchase;
   const INVDetailModal = purchaseMod?.INVDetailModal;
@@ -89965,6 +90585,8 @@ function INVAllOverviewTab({ state, dispatch, user }){
   const [detail, setDetail] = useState(null);
   const [previewImg, setPreviewImg] = useState(null);  // { src, title }
   const [taxInvEntry, setTaxInvEntry] = useState(null);  // 🆕 F2: INV ที่จะคีย์ Tax INV (paid/unpaid ก็ใส่ได้)
+  const [migLate, setMigLate] = useState('');   // 🆕 MIG_LATE_INV: 'form' | 'file' | ''
+  const canMigLate = global.ERP.migLateCanAdd(state, user);
   const [receiveCNDoc, setReceiveCNDoc] = useState(null);  // 🆕 CN-1: memo ที่จะกรอกเลข supplier
   const dr = useDateRange(60);
   const [focusId, setFocusId] = useFocusId();
@@ -90060,6 +90682,11 @@ function INVAllOverviewTab({ state, dispatch, user }){
             h('option', { value:'__none__' }, 'ไม่ระบุแท็ก'),
             (state.payTags || []).filter(t => t && t.active !== false).map(t => h('option', { key:t.id, value:t.id }, t.name)),
             tagF !== 'all' && tagF !== '__none__' && !(state.payTags || []).some(t => t && t.id === tagF && t.active !== false) && h('option', { value:tagF }, tagF))),
+        // 🆕 MIG_LATE_INV M1/M3: ใบเจ้าหนี้ยกมาจาก Ecount ที่ตกหล่น (ผจก.บัญชี/GM/เจ้าของ)
+        canMigLate && h('button', { type:'button', 'data-testid':'mig-late-add', onClick:()=>setMigLate('form'), title:'ใบที่คีย์ใน Ecount ย้อนหลังหลังดึงข้อมูล 1 ต.ค. (วันที่ ≤ 30 ก.ย. 69)',
+          className:'px-2 py-1 rounded text-xs border border-teal-400 text-teal-800 bg-teal-50 hover:bg-teal-100 whitespace-nowrap' }, '➕ เพิ่มใบยกมาจาก Ecount (ตกหล่น)'),
+        canMigLate && h('button', { type:'button', 'data-testid':'mig-late-file-btn', onClick:()=>setMigLate('file'),
+          className:'px-2 py-1 rounded text-xs border border-teal-400 text-teal-800 bg-teal-50 hover:bg-teal-100 whitespace-nowrap' }, '📂 เพิ่มจากไฟล์'),
         h('button', { type:'button', 'data-testid':'pi-csv', disabled: rows.length === 0, title:'ส่งออกรายการตามตัวกรองปัจจุบันเป็น CSV',
           onClick:()=>{
             const out = [['วันที่','เลข PI','ใบแจ้งหนี้ supplier','Tax INV','PO','Supplier','สุทธิ','จ่ายแล้ว','คงเหลือ','สถานะ','แท็ก',
@@ -90220,7 +90847,8 @@ function INVAllOverviewTab({ state, dispatch, user }){
                       title:`คืนของ/RTV: ${(i.rtvNotes||[]).map(n => `${n.rtvNumber} (${n.note||n.method})`).join(' · ')}`,
                       className:'ml-1 text-amber-700' }, '🔄'),
                     h(VatAdjPill, { inv:i }),   // 🆕 VAT ถูกปรับให้ตรงใบกำกับ
-                    i.source === 'direct_expense' && h('div', { className:'text-[10px] text-purple-600' }, '📝 ค่าใช้จ่าย'),
+                    h(MigLatePill, { inv:i }),   // 🆕 MIG_LATE_INV
+                    i.source === 'direct_expense' && !i.migLate && h('div', { className:'text-[10px] text-purple-600' }, '📝 ค่าใช้จ่าย'),
                     i.source === 'po_advance' && h('div', { className:'text-[10px] text-orange-600' }, '💰 ล่วงหน้า'),
                     i.source === 'po_combined' && h('div', { className:'text-[10px] text-indigo-600' }, '🔗 รวม GR'),
                     // 🆕 FD-7: Deposit PI badge
@@ -90301,6 +90929,8 @@ function INVAllOverviewTab({ state, dispatch, user }){
     grDetail && GRDetailModal && h(GRDetailModal, { key:grDetail.id, gr:grDetail, state, dispatch, user, onClose:()=>setGrDetail(null) }),
     previewImg && h(ImagePreviewModal, { ...previewImg, onClose:()=>setPreviewImg(null) }),
     // 🆕 F2: TaxInvEntryModal เข้าจากคอลัมน์ Tax INV ใน INV All
+    migLate === 'form' && h(MigLateInvModal, { state, dispatch, user, onClose:()=>setMigLate('') }),   // 🆕 MIG_LATE_INV M1
+    migLate === 'file' && h(MigLateFileModal, { state, dispatch, user, onClose:()=>setMigLate('') }),   // 🆕 MIG_LATE_INV M3
     taxInvEntry && h(TaxInvEntryModal, { key:taxInvEntry.id, inv:taxInvEntry, state, dispatch, user,
       onClose:()=>setTaxInvEntry(null) }),
     // 🆕 CN-1: กรอกเลข supplier CN จากคอลัมน์ CN
@@ -91656,9 +92286,10 @@ function PayApprovalTab({ state, dispatch, user }){
                                     className:'font-mono text-xs text-indigo-800 font-bold hover:underline',
                                     title: open ? 'ซ่อนรายการ PI' : 'แสดงรายการ PI ที่รวมในคำขอนี้' },
                                   open ? '▾ ' : '▸ ', `${members.length} ใบ`),
-                                h('div', { className:'text-[10px] text-gray-500 font-mono' }, _payPiNos(state, p).slice(0, 2).join(', '), members.length > 2 ? ' …' : ''))
+                                h('div', { className:'text-[10px] text-gray-500 font-mono' }, _payPiNos(state, p).slice(0, 2).join(', '), members.length > 2 ? ' …' : '',
+                                  h(MigLatePill, { inv: (members.find(m => m.inv && m.inv.migLate) || {}).inv })))   // 🆕 MIG_LATE_INV
                             : h('div', null,
-                                h('div', { className:'font-mono text-xs text-red-700' }, inv?.invNumber || '-', inv && h(VatAdjPill, { inv })),   // 🆕 VAT ปรับตามใบกำกับ
+                                h('div', { className:'font-mono text-xs text-red-700' }, inv?.invNumber || '-', inv && h(VatAdjPill, { inv }), h(MigLatePill, { inv })),   // 🆕 VAT ปรับตามใบกำกับ · MIG_LATE_INV
                                 inv?.dueDate && h('div', { className:'text-[10px] text-gray-500' }, 'ครบกำหนด ', fmtDate(inv.dueDate)))),
                         h('td', { className:'px-3 py-2 text-xs font-mono break-all' },
                           grp
@@ -91703,7 +92334,7 @@ function PayApprovalTab({ state, dispatch, user }){
                             h('td', { className:'px-3 py-1 text-right text-gray-400' }, '↳'),
                             h('td', { className:'px-3 py-1 break-all' },
                               mi
-                                ? h('span', { className:'font-mono text-red-700' }, mi.invNumber, h(VatAdjPill, { inv:mi }))
+                                ? h('span', { className:'font-mono text-red-700' }, mi.invNumber, h(VatAdjPill, { inv:mi }), h(MigLatePill, { inv:mi }))
                                 : h('span', { className:'font-mono text-gray-400', title:m.invoiceId }, '(ไม่พบ PI)'),
                               mi?.dueDate && h('span', { className:'ml-2 text-[10px] text-gray-500' }, 'ครบกำหนด ', fmtDate(mi.dueDate))),
                             h('td', { className:'px-3 py-1 font-mono break-all' },
@@ -94539,6 +95170,14 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
     if(_r !== 'done') return;
     alert(`✅ ${back ? `ย้อน ${i.invNumber} ไปตั้งหนี้` : `ยกเลิก INV ${i.invNumber}`} แล้ว\n• Reverse JE แล้ว\n• GR กลับเข้าคิว "🧾 เจ้าหนี้" — ตั้งใหม่ได้` + global.ERP.migChargeNote(i));
   };
+  // 🆕 MIG_LATE_INV UAT MF1: ยกเลิกใบยกมาเพิ่มภายหลัง (คีย์ผิด) — ยังไม่จ่าย · ไม่มี GR/JE ให้กลับ · ผ่านสายอนุมัติ delete_inv เหมือนยกเลิก INV
+  const voidMigLate = (i) => {
+    const reason = prompt(`🗑️ ยกเลิกใบยกมา ${i.invNumber} (คีย์ผิด)?\n\n• ใบนี้หายจากเจ้าหนี้/รอจ่าย (ไม่มี JE ให้กลับ — ใบยกมาไม่ลง JE)\n• ถ้าลง JE ปรับยอดยกมาของใบนี้ไว้แล้ว ให้กลับรายการ JE นั้นเอง\n• คีย์ใหม่ได้ที่ 📑 PI ทั้งหมด → ➕ เพิ่มใบยกมา\n\nเหตุผล:`, '');
+    if(reason === null) return;
+    if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
+    const _r = global.ERP.voidInvViaApproval(state, dispatch, user, i, reason.trim());
+    if(_r === 'done') alert(`✅ ยกเลิกใบยกมา ${i.invNumber} แล้ว`);
+  };
   if(invs.length === 0){
     return String(q||'').trim()
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
@@ -94613,7 +95252,8 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
                 `≠ เครดิต ${_supCredit} วัน (${fmtDate(_expDue)})`)),
             h('td', { className:'px-3 py-2' },
               h('div', { className:'font-mono text-xs text-red-700 font-semibold' }, i.invNumber,
-                global.ERP.invOnBehalfGR && global.ERP.grOnBehalfTag(global.ERP.invOnBehalfGR(i, state), state)),   // 🆕 RECV-ONBEHALF UAT S3
+                global.ERP.invOnBehalfGR && global.ERP.grOnBehalfTag(global.ERP.invOnBehalfGR(i, state), state),   // 🆕 RECV-ONBEHALF UAT S3
+                h(MigLatePill, { inv:i })),   // 🆕 MIG_LATE_INV
               i.rtvHoldPayment && h('div', { className:'text-[10px] text-rose-700 font-semibold',
                 title:'ไปที่ บัญชี → 🔄 ศูนย์จัดการคืนของ เพื่อปิดเคสก่อน' },
                 '🔒 พักจ่าย — ของคืนยังไม่ปิดเคส'),
@@ -94671,6 +95311,12 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
                   title:'ใบยกมาจาก Ecount ที่ยอดค้างไม่ต้องจ่าย (เช่น ผู้ขายแยกส่ง/แยกใบกำกับ) — ปิดยอดค้าง ใบออกจากหน้ารอจ่าย (JE Dr 2100 / Cr 3900)',
                   className:'text-xs px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded font-medium' },
                   '✂️ ปิดยอดค้าง (ไม่ต้องจ่าย)'),
+                // 🆕 MIG_LATE_INV UAT MF1: ใบยกมาเพิ่มภายหลังที่ยังไม่จ่าย → ยกเลิกได้ (คีย์ผิด)
+                (canVoid || (global.ERP.migLateCanAdd && global.ERP.migLateCanAdd(state, user))) && i.migLate && global.ERP.migLateVoidDeny && !global.ERP.migLateVoidDeny(state, i) && h('button', {
+                  onClick:()=>voidMigLate(i), 'data-testid':'pay-mig-late-void',
+                  title:'ใบยกมาเพิ่มภายหลังที่คีย์ผิด (ยอด/ผู้ขาย/เลข RE) — ยกเลิกแล้วคีย์ใหม่ได้ (ยังไม่จ่ายเท่านั้น)',
+                  className:'text-xs px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded font-medium' },
+                  '🗑️ ยกเลิกใบยกมา (คีย์ผิด)'),
                 canVoid && (Number(i.paidAmount)||0) > 0.005 && !(global.ERP.invIsMigrated && global.ERP.invIsMigrated(i)) && h('button', {   // จ่ายบางส่วนแล้ว = ยกเลิกทั้งใบ (กลับรายการจ่ายด้วย) · ใบ Ecount จ่ายแล้วยกเลิกไม่ได้
                   onClick:()=>voidINV(i),
                   title:'ยกเลิก INV ทั้งใบ (เผื่อคีย์ผิด/คืนของทั้งล็อต) — GR กลับเข้าคิวตั้งใหม่ได้',
@@ -95850,10 +96496,14 @@ function PaidPaymentsTab({ state, dispatch, user }){
 global.ERP.voidInvViaApproval = function(state, dispatch, user, inv, reason){
   const E = global.ERP;
   const _vAct = { type:'VOID_INV', data:{ invId:inv.id, reason, by:user.username } };
+  // 🆕 MIG_LATE_INV verify 2: ใบยกมาเพิ่มภายหลัง ไม่มี GR/JE → ยกเลิก = ลบหนี้ทิ้ง ไม่ใช่ "ย้อนไปตั้งหนี้" · ใส่ migLate ใน payload ให้การ์ดอนุมัติโชว์ป้าย
+  const _ml = !!inv.migLate, _paid = (Number(inv.paidAmount) || 0) > 0;
+  const _pre = _ml ? '🗑️ ยกเลิกใบยกมาเพิ่มภายหลัง (ไม่มี GR/JE — ถ้าลง JE ปรับยอดยกมาไว้ต้องกลับเอง)' : (_paid ? 'ยกเลิก INV' : '↩️ ย้อนไปตั้งหนี้');
   const sent = E.requestApprovalIfNeeded && E.requestApprovalIfNeeded({ direct:true, directAct:_vAct,
     action:'delete_inv', user, state, dispatch,
     context:{ entityType:'inv', entityId:inv.id, entityRef:inv.invNumber, scope:'accounting', amount: inv.netPayable||0,
-      wasPaid: (Number(inv.paidAmount) || 0) > 0, reason:`${(Number(inv.paidAmount) || 0) > 0 ? 'ยกเลิก INV' : '↩️ ย้อนไปตั้งหนี้'}: ${inv.invNumber} · ${reason}`, payload:{ invId: inv.id, reason } } });
+      wasPaid: _paid, migLate: _ml || undefined, reason:`${_pre}: ${inv.invNumber} · ${reason}`,
+      payload: _ml ? { invId: inv.id, reason, migLate:true } : { invId: inv.id, reason } } });
   if(sent) return 'sent';
   const _gmV = E.gmDirectLast && E.gmDirectLast();
   try { const _cs = { ...state, currentUser: state.currentUser || user };
