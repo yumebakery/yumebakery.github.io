@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="4fa95db2ebea";window.__ERP_BUILT_AT__="2026-10-08T17:13:58";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="500a01f028c3";window.__ERP_BUILT_AT__="2026-10-09T09:48:11";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -4673,6 +4673,7 @@ const FOCUS_SCOPES = {
   'purchase.rtv':       _FS('purchase', 'rtv', null, ['rtv_decide']),
   'purchase.lowstock':  _FS('purchase', 'lowstock', null, []),
   'purchase.incoming':  _FS('purchase', 'incoming', null, []),
+  'purchase.pricefix':  _FS('purchase', 'pricefix', null, ['pricefix']),   // 🆕 PRICE-FIX ขั้น 3: 💰 รอแก้ราคาตามใบกำกับ · id = <target>:<docId>
   'stock.incoming':     _FS('stock', 'incoming', null, ['to_receive']),
   'stock.lots':         _FS('stock', 'lots', null, []),
   'stock.list':         _FS('stock', 'list', null, []),
@@ -6998,6 +6999,225 @@ function invVatExactOk(inv, state){
 //   ใช้เฉพาะจุดภาษีซื้อ/ใบกำกับ — จุดอื่นของใบนำเข้า (ยกเลิก/ลบ/แก้ยอด/WHT/ผูกผู้ขาย) ยังใช้ _invIsMig ตามเดิม
 //   changelog 2026-10-01: ธง vatClaimHere มาจากไฟล์นำเข้า (เจ้าหนี้ค้างจ่ายยกมา · auto 'ap-open') หรือจาก action MIG_VAT_HERE (ผจก.บัญชี/GM)
 function invVatInEcount(i){ return _invIsMig(i) && !i.vatClaimHere; }
+// 🆕 PRICE-FIX ขั้น 2 (PRICE_VARIANCE_CONTRACT REFRESH R2.2–R2.6): แผนปรับราคาตามใบกำกับ — pure · ใช้ร่วม UI + reducer ADJUST_INV_PRICE
+//   opts = { mode:'post_pi'|'at_gr', invId (post_pi) | grIds (at_gr), lines:[{grId,lineIdx,newUnitPrice}] }
+//   คืน { lines, costPlan, dGoods, dVat, dNet, dInv, dVar, blocks[], inv, grIds, newAmount/newVat/newVatableBase/newExemptBase/newNet (post_pi),
+//         cumGoods, cumBase, needsApproval, isIncrease, warnLines } · blocks = เหตุผลภาษาไทย (สิทธิ์/อนุมัติ/expect/งวด/เหตุผล reducer ตรวจเอง)
+const PRICE_KEYIN_DEFAULTS = Object.freeze({ priceKeyInTolAbs:200, priceKeyInTolPct:2, priceKeyInVolatileTolAbs:500, priceKeyInVolatileTolPct:3, priceKeyInWarnPct:30, priceKeyInBlockPct:150 });
+function priceKeyInSetting(state, k){
+  const v = state && state.settings ? state.settings[k] : undefined;
+  return (v === undefined || v === null || v === '' || !isFinite(Number(v))) ? PRICE_KEYIN_DEFAULTS[k] : Number(v);
+}
+function _pvR2(v){ return Number((Number(v) || 0).toFixed(2)); }
+function _pvInvLive(S, id){ return !!id && ((S && S.invoices) || []).some(i => i && i.id === id && !i.voided && i.status !== 'voided' && i.paymentStatus !== 'voided'); }
+function planInvPriceAdjust(state, opts){
+  const o = opts || {}, S = state || {}, blocks = [];
+  const push = (m) => { if(m && !blocks.includes(m)) blocks.push(m); };
+  const mode = o.mode === 'at_gr' || o.mode === 'post_pi' ? o.mode : null;
+  const out = { mode, lines:[], costPlan:[], dGoods:0, dVat:0, dNet:0, dInv:0, dVar:0, blocks, inv:null, grIds:[], cumGoods:0, cumBase:0, needsApproval:false, isIncrease:false, warnLines:[] };
+  if(!mode){ push('โหมดปรับราคาไม่ถูกต้อง'); return out; }
+  let inv = null, grIds = [];
+  if(mode === 'post_pi'){
+    inv = (S.invoices || []).find(i => i && i.id === o.invId) || null;
+    if(!inv){ push('ไม่พบใบตั้งหนี้'); return out; }
+    if(inv.voided || inv.status === 'voided' || inv.paymentStatus === 'voided'){ push('ใบตั้งหนี้นี้ยกเลิกไปแล้ว'); return out; }
+    grIds = (inv.grIds && inv.grIds.length) ? inv.grIds.slice() : (inv.grId ? [inv.grId] : []);
+  } else grIds = Array.from(new Set((o.grIds || []).filter(Boolean)));
+  out.inv = inv; out.grIds = grIds;
+  if(!grIds.length){ push('ไม่มีใบรับของ (GR) ให้ปรับราคา'); return out; }
+  const grs = [];
+  for(const gid of grIds){
+    const g = (S.grs || []).find(x => x && x.id === gid);
+    if(!g){ push('ไม่พบใบรับของ ' + gid); continue; }
+    const gn = g.grNumber || gid;
+    if(g.voided || g.status === 'voided'){ push('ใบรับของ ' + gn + ' ถูกยกเลิกแล้ว'); continue; }
+    if(grMigOpening(g)) push('ใบรับของ ' + gn + ' เป็นยอดยกมา (ไม่มีล็อตสต๊อก) — ใช้ ↩️ ย้อนไปตั้งหนี้ หรือ JE ปรับปรุง');
+    if(mode === 'at_gr' && (_pvInvLive(S, g.invoiceId) || (g.splitInvoiceIds || []).some(x => _pvInvLive(S, x)))) push('ใบรับของ ' + gn + ' ตั้งหนี้แล้ว — ปรับราคาที่ใบตั้งหนี้แทน');
+    const po = (S.pos || []).find(p => p && p.id === g.poId);
+    if((g.priceMode || (po && po.priceMode) || 'exclusive') === 'inclusive') push('ใบรับของ ' + gn + ' เป็นราคารวม VAT — ปรับราคาทางนี้ไม่ได้ (↩️ ย้อนไปตั้งหนี้ แล้วตั้งใหม่)');
+    if(mode === 'at_gr' && (S.returns || []).some(r => r && r.grId === g.id && r.rtvStatus !== 'cancelled')) push('ใบรับของ ' + gn + ' มีการคืนของ (RTV) ผูกอยู่ — มูลค่าคืนใช้ราคาเดิม ใช้ CN/DN แทน');
+    // 🆕 PRICE-FIX verify 2: มุมมองที่มีผลจริง — ส่วนลด PI ของใบที่ยกเลิกแล้วไม่หักซ้ำ (ตรงกับ CreateINVModal)
+    grs.push(grEffective(g, S.invoices));
+  }
+  const rateOf = (g, l, idx) => {
+    if(inv && l.vatRateAdjustedFrom == null){ const ov = (inv.vatLineOverrides || []).find(x => x && (x.grId == null || x.grId === g.id) && x.lineIdx === idx); if(ov) return Number(ov.to) || 0; }
+    return l.vatRate !== undefined && l.vatRate !== null ? (Number(l.vatRate) || 0) : (inv ? (Number(inv.vatRate) || 0) : 7);
+  };
+  const want = Array.isArray(o.lines) ? o.lines : [], seen = new Set(), newLt = {};
+  if(!want.length) push('ไม่มีรายการที่เปลี่ยนราคา');
+  const blockPct = priceKeyInSetting(S, 'priceKeyInBlockPct'), warnPct = priceKeyInSetting(S, 'priceKeyInWarnPct');
+  for(const w of want){
+    const g = grs.find(x => x.id === (w && w.grId));
+    if(!g){ push('บรรทัดอ้างใบรับของที่ไม่อยู่ในชุดนี้'); continue; }
+    const idx = Number(w.lineIdx), l = Number.isInteger(idx) ? (g.lines || [])[idx] : null, gn = g.grNumber || g.id;
+    if(!l){ push('ไม่พบบรรทัดที่ ' + (idx + 1) + ' ใน ' + gn); continue; }
+    const key = g.id + ':' + idx;
+    if(seen.has(key)){ push('บรรทัดที่ ' + (idx + 1) + ' ของ ' + gn + ' ซ้ำ'); continue; }
+    seen.add(key);
+    const nu = Number(w.newUnitPrice), it = (S.items || []).find(x => x && x.id === l.itemId), nm = (it && it.name) || l.itemId || '';
+    if(!(isFinite(nu) && nu > 0)){ push('ราคาใหม่ของ ' + nm + ' ต้องมากกว่า 0'); continue; }
+    if(l.isFreebie){ push(nm + ' เป็นของแถม — ปรับราคาไม่ได้'); continue; }
+    if(grLineIsCapex(S, g, l)){ push(nm + ' เป็นรายการทรัพย์สิน (ไม่มีล็อตสต๊อก) — ใช้ ↩️ ย้อนไปตั้งหนี้ หรือ JE ปรับปรุง'); continue; }
+    const qty = Number(l.qty) || 0, baseQty = Number(l.baseQty) || qty, ou = Number(l.unitPrice) || 0, olt = Number(l.lineTotal) || 0;
+    const first = l.priceAdjustedFrom != null ? Number(l.priceAdjustedFrom) || 0 : ou;
+    if(first > 0 && Math.abs(nu - first) / first * 100 > blockPct + 1e-9){ push(nm + ': ราคาใหม่ต่างจากราคาเดิมเกิน ' + blockPct + '% — น่าจะคีย์ผิดหน่วย'); continue; }
+    if(first > 0 && Math.abs(nu - first) / first * 100 > warnPct + 1e-9) out.warnLines.push(key);
+    if(!(qty > 0) || !(baseQty > 0)){ push(nm + ': จำนวนรับเป็น 0 — ปรับราคาไม่ได้'); continue; }
+    const nlt = _pvR2(olt + (nu - ou) * qty);
+    if(nlt < -0.005){ push(nm + ': ยอดหลังส่วนลดติดลบ'); continue; }
+    const disc = (Number(l.discAmt) || 0) + (Number(l.piDiscAlloc) || 0);
+    const c1 = Math.max(0, nu * qty - disc) / baseQty;
+    // R2.4 ข้อ 1: ล็อตของบรรทัด — grLineIdx → (grLot||lot) → itemId ที่มีบรรทัดเดียวในใบ (รวมล็อตลูกจาก split · ข้าม NEG/ของแถม)
+    const pool = (S.fifoLayers || []).filter(f => f && f.grRef === g.grNumber && f.itemId === l.itemId && !f.isNegative && !f.isFreebie);
+    let L = pool.filter(f => f.grLineIdx === idx);
+    const sameItem = (g.lines || []).filter(x => x && x.itemId === l.itemId && !x.isFreebie);
+    if(!L.length && String(l.lot || '')){
+      const sameLot = sameItem.filter(x => String(x.lot || '') === String(l.lot));
+      if(sameLot.length === 1) L = pool.filter(f => f.grLineIdx == null && String(f.grLot || f.lot || '') === String(l.lot));
+    }
+    if(!L.length && sameItem.length === 1) L = pool.filter(f => f.grLineIdx == null);
+    if(!L.length){ push(nm + ' (' + gn + '): หาล็อตสต๊อกของบรรทัดนี้ไม่เจอ / ใบมีสินค้าซ้ำหลายบรรทัด แยกล็อตไม่ได้ — ใช้ CN/DN'); continue; }
+    if(L.some(f => f.allocatedCost)){ push(nm + ' (' + gn + '): ล็อตนี้เฉลี่ยต้นทุนกับของแถม — ปรับราคาทางนี้ไม่ได้ ใช้ CN/DN'); continue; }
+    const R = L.reduce((t, f) => t + (Number(f.remaining) || 0), 0);
+    if(L.some(f => (Number(f.remaining) || 0) < -0.0001) || R > baseQty + 0.001){ push(nm + ' (' + gn + '): จำนวนคงเหลือในล็อตไม่ตรงกับใบรับของ — ตรวจล็อตก่อน'); continue; }
+    let dInv = 0;
+    for(const f of L){
+      const rem = Number(f.remaining) || 0, c0 = Number(f.unitCost) || 0;
+      dInv += rem * (c1 - c0);
+      out.costPlan.push({ layerId:f.id, grId:g.id, lineIdx:idx, itemId:l.itemId, from:c0, to:c1, remaining:rem });
+    }
+    dInv = _pvR2(dInv);
+    const dAmt = _pvR2(nlt - olt), rate = rateOf(g, l, idx);
+    newLt[key] = nlt;
+    out.lines.push({ grId:g.id, grNumber:g.grNumber, lineIdx:idx, itemId:l.itemId, qty, baseQty, unit:l.unit, oldUnitPrice:ou, newUnitPrice:nu, firstUnitPrice:first,
+      oldLineTotal:olt, newLineTotal:nlt, dAmt, vatRate:rate, c1, remaining:R, used:Math.max(0, baseQty - R), dInv, dVar:_pvR2(dAmt - dInv) });
+  }
+  let vOld = 0, vNew = 0, sumLt = 0, cum = 0, cumBase = 0, dvb = 0, deb = 0, volatile = false;
+  for(const g of grs) (g.lines || []).forEach((l, idx) => {
+    if(!l) return;
+    const k = g.id + ':' + idx, olt = Number(l.lineTotal) || 0, nlt = (k in newLt) ? newLt[k] : olt, rate = rateOf(g, l, idx);
+    sumLt += olt; vOld += olt * rate / 100; vNew += nlt * rate / 100;
+    if(rate > 0) dvb += nlt - olt; else deb += nlt - olt;
+    const ou = Number(l.unitPrice) || 0, first = l.priceAdjustedFrom != null ? (Number(l.priceAdjustedFrom) || 0) : ou;
+    const flt = olt + (first - ou) * (Number(l.qty) || 0);   // ยอดบรรทัด ณ ราคาแรกสุด (เกณฑ์สะสม กันกดซ้ำทีละนิด)
+    cumBase += flt; cum += nlt - flt;
+    if(k in newLt){ const it = (S.items || []).find(x => x && x.id === l.itemId); if(it && it.priceVolatile) volatile = true; }
+  });
+  out.dGoods = _pvR2(out.lines.reduce((t, x) => t + x.dAmt, 0));
+  out.dVat = _pvR2(_pvR2(vNew) - _pvR2(vOld));
+  out.dNet = _pvR2(out.dGoods + out.dVat);
+  out.dInv = _pvR2(out.lines.reduce((t, x) => t + x.dInv, 0));
+  out.dVar = _pvR2(out.lines.reduce((t, x) => t + x.dVar, 0));
+  out.cumGoods = _pvR2(cum); out.cumBase = _pvR2(cumBase);
+  out.isIncrease = out.dNet > 0.005;
+  const tA = priceKeyInSetting(S, volatile ? 'priceKeyInVolatileTolAbs' : 'priceKeyInTolAbs'), tP = priceKeyInSetting(S, volatile ? 'priceKeyInVolatileTolPct' : 'priceKeyInTolPct');
+  out.needsApproval = Math.abs(out.cumGoods) > tA + 0.005 || (out.cumBase > 0 ? Math.abs(out.cumGoods) / out.cumBase * 100 > tP + 1e-9 : Math.abs(out.cumGoods) > 0.005);
+  if(out.lines.length && Math.abs(out.dGoods) < 0.005) push('ราคาเท่าเดิม — ไม่มีอะไรต้องปรับ');
+  if(inv){
+    if(invVatInEcount(inv)) push('PI นำเข้าจาก Ecount — ยื่น ภ.พ.30 ในระบบเดิมแล้ว ปรับราคาทางนี้ไม่ได้');
+    if(inv.source === 'po_gr' && (inv.expenseLines || []).length) push('PI นี้รวมค่าบริการกับสินค้า (PO ผสม) — ปรับราคาทางนี้ไม่ได้');
+    if(inv.type === 'deposit_pi' || (inv.depositApplications || []).length) push('ใบนี้หักมัดจำแล้ว — ปรับราคาทางนี้ไม่ได้ ใช้ใบเพิ่ม/ลดหนี้ (CN/DN)');
+    else if((Number(inv.paidAmount) || 0) > 0 || ['paid', 'partial', 'voided', 'cancelled'].includes(inv.paymentStatus)) push('ใบนี้จ่ายไปแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (CN/DN)');
+    if((S.payments || []).some(p => p && (p.invId === inv.id || (p.invoiceIds || []).includes(inv.id)) && p.approvalStatus === 'pending')) push('มีคำขอจ่ายค้างอยู่ — ยกเลิกคำขอจ่ายก่อน');
+    if((Number(inv.returnedAmount) || 0) > 0 || (S.returns || []).some(r => r && r.rtvStatus !== 'cancelled' && (r.linkedINV === inv.id || (r.grId && grIds.includes(r.grId)))))
+      push('ใบนี้มีการคืนของ (RTV) ผูกอยู่ — มูลค่าคืนใช้ราคาเดิม ใช้ CN/DN แทน');
+    if((Number(inv.whtAmount) || 0) > 0.005 || (inv.whtLines || []).length || (inv.whtCertificates || []).some(c => c && !c.voided))
+      push('ใบนี้มีหัก ณ ที่จ่าย — แก้ WHT เป็น 0 ด้วย "แก้ WHT" ก่อน หรือใช้ CN/DN');
+    // 🆕 verify 1: CN/DN ผูกใบนี้แล้ว (หักยอดค้าง/ภาษีซื้อไปแล้ว) → ปรับราคาซ้ำ = นับส่วนลดผู้ขาย 2 รอบ
+    if((Number(inv.creditApplied) || 0) > 0.005 || (inv.memoApplied || []).length || (S.supplierMemos || []).some(m => m && m.refInvId === inv.id && !['void', 'voided', 'cancelled'].includes(m.status)))
+      push('ใบนี้มีใบเพิ่ม/ลดหนี้ (CN/DN) ผูกอยู่แล้ว — ใช้ CN/DN ต่อ ห้ามปรับราคาซ้ำ');
+    if(_tiMore(inv).some(e => e && !e.removedAt && String(e.number || '').trim())) push('ใบนี้มีใบกำกับหลายใบ — ปรับราคาทางนี้ไม่ได้ ใช้ CN/DN');
+    if(inv.billDiscount && inv.billDiscount.source === 'pi') push('ใบนี้มีส่วนลดท้ายบิลจากใบกำกับ — ↩️ ย้อนไปตั้งหนี้แล้วตั้งใหม่');
+    if(Math.abs(_pvR2(sumLt) - _pvR2(inv.amount)) > 0.05) push('ยอดใบนี้ถูกแก้ด้วยมือ (ไม่เท่ารายการรับของ) — ใช้ ↩️ ย้อนไปตั้งหนี้ แล้วตั้งใหม่');
+    out.newAmount = _pvR2((Number(inv.amount) || 0) + out.dGoods);
+    out.newVat = _pvR2((Number(inv.vat) || 0) + out.dVat);
+    const _vb0 = inv.vatableBase != null ? Number(inv.vatableBase) || 0 : ((Number(inv.vatRate) || 0) > 0 ? Number(inv.amount) || 0 : 0);
+    out.newVatableBase = _pvR2(_vb0 + dvb);
+    out.newExemptBase = _pvR2((inv.exemptBase != null ? Number(inv.exemptBase) || 0 : (Number(inv.amount) || 0) - _vb0) + deb);
+    out.newNet = _pvR2((Number(inv.netPayable) || 0) + out.dNet);
+    if(inv.supTaxInvVat != null && Math.abs(out.newVat - (Number(inv.supTaxInvVat) || 0)) > TAXINV_VAT_TOL) push('VAT ใหม่ (' + out.newVat.toFixed(2) + ') ไม่ตรง VAT ตามใบกำกับที่คีย์ไว้ (' + (Number(inv.supTaxInvVat) || 0).toFixed(2) + ') — ใช้ CN/DN');
+    if(out.newNet < -0.005) push('ยอดค้างจ่ายไม่พอหักส่วนต่าง — ใช้ใบลดหนี้ (CN)');
+  }
+  return out;
+}
+// 🆕 PRICE-FIX ขั้น 3 (R2.1/R2.2/R2.8): คำขอแก้ราคา P3 — open = รอจัดซื้อคีย์ · submitted = รอบัญชียืนยัน (2 สถานะนี้ = "เปิดอยู่" กันขอจ่าย/ตั้งหนี้)
+const PRICE_FIX_LIVE = Object.freeze(['open', 'submitted']);
+function _pfDocLive(doc){ return !!doc && !doc.voided && doc.status !== 'voided' && doc.paymentStatus !== 'voided'; }
+function priceFixLive(doc){ const r = doc && doc.priceFixRequest; return !!(r && PRICE_FIX_LIVE.includes(r.status)) && _pfDocLive(doc); }
+// คำขอเปิดบนใบตั้งหนี้ invId (null = ไม่มี) — ใช้ใน ADD_PAY/UPDATE_PAY และ executor approve_payment
+function priceFixOpenForInv(state, invId){
+  const inv = ((state && state.invoices) || []).find(i => i && i.id === invId);
+  return inv && _pfSwOn(state) && priceFixLive(inv) ? inv.priceFixRequest : null;
+}
+// 🆕 PRICE-FIX UAT M1 (T12 rollback): ปิดสวิตช์ priceKeyInEnabled = คำขอที่ค้าง (open/submitted) ไม่กันตั้งหนี้/ขอจ่ายอีก (ตั้งหนี้/จ่ายทำงานเหมือนเดิม)
+//   คำขออนุมัติ adjust_inv_price ที่ค้าง ยังกันอยู่ (ผู้อนุมัติปฏิเสธ/ผู้ขอยกเลิกได้) — ราคาอาจเปลี่ยนหลังอนุมัติ
+function _pfSwOn(state){ return !!(state && state.settings && state.settings.priceKeyInEnabled === true); }
+// คำขออนุมัติ adjust_inv_price ค้างผูกใบตั้งหนี้ invId (S3: ห้ามจ่ายระหว่างรออนุมัติ — อนุมัติทีหลังจะล้มเพราะ "จ่ายไปแล้ว")
+function invPriceApprovalPending(state, invId){
+  return ((state && state.approvalRequests) || []).find(r => r && r.action === 'adjust_inv_price' && (r.status || 'pending') === 'pending'
+    && (r.entityId === invId || (r.payload && r.payload.invId === invId))) || null;
+}
+// GR นี้ห้ามตั้งหนี้ไหม: มีคำขอเปิด หรือมีคำขออนุมัติ adjust_inv_price ค้างผูก GR → คืนเหตุผล (null = ผ่าน)
+function grPriceFixHold(state, grId){
+  const g = ((state && state.grs) || []).find(x => x && x.id === grId); if(!g) return null;
+  const gn = g.grNumber || grId;
+  if(_pfSwOn(state) && priceFixLive(g)) return 'ใบรับของ ' + gn + (g.priceFixRequest.status === 'open' ? ' รอจัดซื้อแก้ราคา' : ' รอบัญชียืนยันราคา') + ' — ยืนยันหรือยกเลิกคำขอก่อนตั้งหนี้';
+  const ap = ((state && state.approvalRequests) || []).find(r => r && r.action === 'adjust_inv_price' && (r.status || 'pending') === 'pending'
+    && (r.entityId === grId || ((r.payload && r.payload.grIds) || []).includes(grId) || ((r.payload && r.payload.lines) || []).some(l => l && l.grId === grId)));
+  return ap ? 'ใบรับของ ' + gn + ' มีคำขออนุมัติปรับราคาค้างอยู่ — รอผลอนุมัติก่อนตั้งหนี้' : null;
+}
+// รายการคำขอทั้งระบบ (GR + INV) ตามสถานะ — แหล่งเดียวของแท็บจัดซื้อ/ป้ายบัญชี/งานค้าง (นับตรงกัน)
+function priceFixList(state, statuses){
+  const want = statuses || PRICE_FIX_LIVE, out = [];
+  const add = (target, doc) => { const r = doc.priceFixRequest;
+    if(r && want.includes(r.status) && _pfDocLive(doc)) out.push({ target, id:doc.id, doc, req:r, ref:(target === 'gr' ? doc.grNumber : doc.invNumber) || doc.id, supplierId:doc.supplierId || null }); };
+  ((state && state.grs) || []).forEach(g => g && add('gr', g));
+  ((state && state.invoices) || []).forEach(i => i && add('inv', i));
+  return out;
+}
+// 🆕 PRICE-FIX ขั้น 3 (R2.8 acct_inv_amount_vs_gr): ยอดสินค้าใบตั้งหนี้ − Σ lineTotal ของ GR (จับ amountOverride ใบเก่า) · null = ไม่เข้าข่ายตรวจ
+//   ข้าม: ยกเลิก · นำเข้า (_migrated) · ไม่ใช่ตั้งหนี้จาก GR · ปรับราคาแล้ว · ราคารวม VAT · PO ผสมบริการ · ส่วนลดท้ายบิล · คืนของ · GR แบ่งตั้งหนี้หลายใบ
+function invAmountVsGrDiff(state, inv){
+  if(!inv || inv.voided || inv.status === 'voided' || inv._migrated || inv.source !== 'po_gr' || inv.type === 'deposit_pi') return null;
+  if((inv.priceAdjustHistory || []).length || inv.priceMode === 'inclusive' || (inv.expenseLines || []).length || inv.billDiscount || (Number(inv.returnedAmount) || 0) > 0) return null;
+  const ids = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+  if(!ids.length) return null;
+  let sum = 0;
+  for(const id of ids){
+    const g = ((state && state.grs) || []).find(x => x && x.id === id);
+    if(!g || g._migrated || g.priceMode === 'inclusive' || (g.splitInvoiceIds || []).length) return null;
+    (g.lines || []).forEach(l => { if(l && !l.isFreebie) sum += Number(l.lineTotal) || 0; });
+  }
+  return _pvR2((Number(inv.amount) || 0) - sum);
+}
+// 🆕 PRICE-FIX ขั้น 4 (R2.7 ปิดทางเลี่ยง): ตั้งหนี้จาก GR ตอนเปิดสวิตช์ priceKeyInEnabled — พิมพ์ทับ "มูลค่าสินค้า" เกิน Σ GR > 1 ฿
+//   หรือ "ต้องจ่ายสุทธิ" ห่างจากสูตรเกิน ±1 ฿ = บล็อก (ราคาผิดต้องผ่าน ↩️ ส่งให้จัดซื้อแก้ราคา) · null = ผ่าน · สวิตช์ปิด = ระบบเดิม
+function invOverrideDeny(state, d, grIds){
+  const S = state || {};
+  if(!(S.settings && S.settings.priceKeyInEnabled === true)) return null;
+  if(!d || (d.source !== 'po_gr' && d.source !== 'po_combined') || d.type === 'deposit_pi' || d._migrated) return null;
+  const ids = (grIds && grIds.length) ? grIds : ((d.grIds && d.grIds.length) ? d.grIds : (d.grId ? [d.grId] : []));
+  if(!ids.length) return null;
+  // verify 3: ช่อง 🔧 ปรับยอด/ปัดเศษ ใช้ปัดเศษเท่านั้น (≤ ±1 ฿) — ไม่งั้นเพิ่มเจ้าหนี้เท่าไรก็ได้ลง 5390 โดยไม่ผ่านการแก้ราคา
+  if(Math.abs(Number(d.roundingAdjustment) || 0) > 1.005)
+    return 'ปรับยอด/ปัดเศษเกิน ±1 ฿ — ถ้าราคาไม่ตรงใบกำกับ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา';
+  const R = _pvR2, net = R((Number(d.amount) || 0) + (Number(d.vat) || 0) + (Number(d.roundingAdjustment) || 0) - (Number(d.whtAmount) || 0)
+    - (Number(d.creditUsed) || 0) - (Number(d.depositUsed) || 0) - (Number(d.offInvDiscount && d.offInvDiscount.amount) || 0));
+  if(d.netPayable != null && Math.abs(R(d.netPayable) - Math.max(0, net)) > 1.005)
+    return 'ยอดต้องจ่ายสุทธิ (' + R(d.netPayable).toFixed(2) + ') ต่างจากสูตร (' + net.toFixed(2) + ') เกิน 1 ฿ — ถ้าราคาไม่ตรงใบกำกับ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา';
+  let base = 0; const poIds = new Set();
+  for(const id of ids){
+    const g = (S.grs || []).find(x => x && x.id === id); if(!g) return null;
+    if(g.poId) poIds.add(g.poId);
+    (g.lines || []).forEach(l => { if(l) base += l.lineTotalBeforePiDisc != null ? Number(l.lineTotalBeforePiDisc) || 0 : Number(l.lineTotal) || 0; });
+  }
+  // รับขาดที่จัดซื้อเลือก "ตั้งหนี้เต็ม + รอ CN" → บิลเต็มยอด supplier (เพดานบน: จำนวนขาด × ราคา PO)
+  for(const pid of poIds){ const po = (S.pos || []).find(p => p && p.id === pid);
+    ((po && po.lines) || []).forEach(l => { if(l && l.shortStatus === 'decided_keep_inv_cn' && (Number(l.shortQty) || 0) > 0) base += (Number(l.shortQty) || 0) * (Number(l.unitPrice) || 0); }); }
+  if((Number(d.amount) || 0) > R(base) + 1.005)
+    return 'มูลค่าสินค้า (' + R(d.amount).toFixed(2) + ') เกินยอดรับของ (' + R(base).toFixed(2) + ') — ราคาไม่ตรงใบกำกับ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา';
+  return null;
+}
 // งวดเคลมแรกของใบที่ย้ายมา (งวด ก.ย. 2569 ยื่นนอกระบบใหม่ผ่าน Ecount/สำนักงานบัญชี)
 const MIG_VAT_HERE_FROM_YM = '2026-10';
 function invVatHereMoved(i){ return _invIsMig(i) && !!i.vatClaimHere; }
@@ -7958,6 +8178,24 @@ function collectOperationalAlerts(state, user){
     }
   }
 
+  // 1c. 💰 PRICE-FIX ขั้น 3: บัญชีขอให้จัดซื้อแก้ราคาตามใบกำกับ (open) → แจ้งจัดซื้อ · จัดซื้อส่งราคาแล้ว (submitted) → แจ้งบัญชี
+  // verify 3: สวิตช์ปิด (rollback) = ไม่แจ้งเตือน — จัดซื้อส่งราคาไม่ได้แล้ว · คำขอค้างให้บัญชีเก็บกวาดผ่านงานค้าง acct_price_fix_stale
+  const _pfSw = !!(state && state.settings && state.settings.priceKeyInEnabled === true);
+  if(_pfSw && can('purchase') && (su || hasPerm(user, 'purchase', 'po', 'edit'))){
+    const pf = priceFixList(state, ['open']);
+    if(pf.length > 0) alerts.push({ id:'nc_price_fix_open', type:'price_fix', icon:'💰', severity:'urgent', module:'purchase',
+      title:`บัญชีขอให้แก้ราคาตามใบกำกับ ${pf.length} ใบ`,
+      detail: pf.slice(0,6).map(x => `${x.ref} (รอบ ${x.req.round || 1}) — ${x.req.requestedBy || '-'}: ${x.req.reason || ''}`),
+      docs: pf.map(x => ({ kind:'pricefix', id:x.target + ':' + x.id, ref:x.ref })), count: pf.length, navTab:'purchase' });
+  }
+  if(_pfSw && can('accounting') && (su || hasPerm(user, 'accounting', 'invQueue', 'edit'))){
+    const pf = priceFixList(state, ['submitted']);
+    if(pf.length > 0) alerts.push({ id:'nc_price_fix_review', type:'price_fix', icon:'🔍', severity:'warn', module:'accounting',
+      title:`จัดซื้อแก้ราคาแล้ว รอบัญชียืนยัน ${pf.length} ใบ`,
+      detail: pf.slice(0,6).map(x => `${x.ref} — คีย์โดย ${(x.req.proposal && x.req.proposal.by) || '-'}`),
+      docs: pf.map(x => ({ kind:x.target === 'gr' ? 'gr_inv' : 'pi', id:x.id, ref:x.ref })), count: pf.length, navTab:'accounting' });
+  }
+
   // 2. ⏰ ใกล้หมดอายุ ≤7 วัน (stock)
   if(can('stock')){
     const urgent = (state.fifoLayers||[]).filter(l =>
@@ -8111,6 +8349,12 @@ function _decorateAlert(a, user){
     case 'nc_po_returned':
       todo = one ? `${d0.ref} ถูกส่งกลับให้แก้${d0.reason ? ` (${d0.reason})` : ''} — แก้แล้วกด «📤 ส่งขออนุมัติ»` : `${n} PO ถูกส่งกลับให้แก้ — เปิดทีละใบ แก้แล้วกด «📤 ส่งขออนุมัติ»`;
       nav = _alertNav(user, 'purchase.po', a, 'po'); btn = 'แก้ PO'; break;
+    case 'nc_price_fix_open':   // 🆕 PRICE-FIX ขั้น 3
+      todo = one ? `${d0.ref} บัญชีขอให้แก้ราคา — กด «💰 คีย์ราคา» ใส่ราคาตามใบกำกับ แล้ว «📤 ส่งกลับบัญชี»` : `${n} ใบรอจัดซื้อแก้ราคา — คีย์ราคาตามใบกำกับแล้ว «📤 ส่งกลับบัญชี»`;
+      nav = _alertNav(user, 'purchase.pricefix', a, 'pricefix'); btn = 'คีย์ราคา'; break;
+    case 'nc_price_fix_review':
+      todo = one ? `${d0.ref} จัดซื้อแก้ราคาแล้ว — ตรวจแล้วยืนยัน หรือส่งกลับ` : `${n} ใบจัดซื้อแก้ราคาแล้ว — ตรวจแล้วยืนยัน หรือส่งกลับ`;
+      nav = (a.docs || []).every(d => d.kind === 'pi') ? _alertNav(user, 'acct.invAll', a, 'pi') : _alertNav(user, 'acct.invQueue', a, 'gr_inv'); btn = 'ตรวจราคา'; break;
     case 'nc_expiry':
       todo = `${n} lot ใกล้/เลยหมดอายุ — ใช้หรือโอนก่อน ถ้าเสียแล้วให้ตัดของเสีย`;
       nav = _alertNav(user, 'stock.lots', a, null) || _alertNav(user, 'reports.expiry', a, null); btn = 'ดู lot'; break;
@@ -8295,7 +8539,10 @@ Object.assign(_ACT_LABEL, {
   DECIDE_SHORT_RECEIVE:'ตัดสินรับของไม่ครบ', UNDO_SHORT_DECISION:'ยกเลิกการตัดสินรับของไม่ครบ', MARK_GR_SHORT_PENDING:'ตั้งรอของขาดส่ง', MARK_GR_WAIT_EXTRA:'ตั้งรอของส่งเพิ่ม',
   DECIDE_REPLACEMENT_BILLING:'ตัดสินการเรียกเก็บของชดเชย', UPDATE_RTV:'แก้ใบคืนของ', CANCEL_RTV:'ยกเลิกใบคืนของ',
   ADD_INV:'ตั้งหนี้ (บันทึกใบแจ้งหนี้)', ADD_COMBINED_INV:'ตั้งหนี้รวมหลายใบรับของ', UPDATE_INV:'แก้ใบตั้งหนี้', VOID_INV:'ยกเลิกใบตั้งหนี้', PATCH_INV:'แก้ข้อมูลใบตั้งหนี้',
-  ADJUST_INV_VAT:'ปรับ VAT ตามใบกำกับ', ADJUST_INV_WHT:'ปรับหัก ณ ที่จ่ายในใบตั้งหนี้', ADJUST_INV_PARTY_BRANCH:'แก้สาขาผู้ขายในใบตั้งหนี้',
+  ADJUST_INV_VAT:'ปรับ VAT ตามใบกำกับ', ADJUST_INV_WHT:'ปรับหัก ณ ที่จ่ายในใบตั้งหนี้',
+  ADJUST_INV_PRICE:'ปรับราคาตามใบกำกับ (กระทบต้นทุน)', REQUEST_INV_PRICE_FIX:'ส่งให้จัดซื้อแก้ราคา', SUBMIT_INV_PRICE_FIX:'จัดซื้อส่งราคาที่แก้ให้บัญชี',   // 🆕 PRICE-FIX ขั้น 1
+  RETURN_INV_PRICE_FIX:'ส่งราคากลับให้จัดซื้อแก้', CANCEL_INV_PRICE_FIX:'ยกเลิกคำขอแก้ราคา',
+  ADJUST_INV_PARTY_BRANCH:'แก้สาขาผู้ขายในใบตั้งหนี้',
   SET_TAX_INV:'คีย์เลขใบกำกับภาษีซื้อ', ADD_TAX_INV_ENTRY:'เพิ่มใบกำกับภาษีซื้ออีกใบ', CLEAR_TAX_INV:'ลบเลขใบกำกับภาษีซื้อ', APPLY_CN_AUTO_ON_PI:'หักใบลดหนี้ในใบตั้งหนี้',
   ADD_DEPOSIT:'บันทึกมัดจำผู้ขาย', UPDATE_DEPOSIT:'แก้มัดจำผู้ขาย', CANCEL_DEPOSIT:'ยกเลิกมัดจำผู้ขาย',
   ADD_PO_REFUND:'บันทึกเงินคืนจาก PO', CONSUME_SUPPLIER_CREDIT:'ใช้เครดิตผู้ขาย', CANCEL_PAY_REQUEST:'ยกเลิกคำขอจ่าย', REVERSE_PAYMENT:'กลับรายการจ่ายเงิน',
@@ -8692,6 +8939,7 @@ const APPROVAL_ACTIONS = {
   vat_claim_in:     { label:'เคลมภาษีซื้อที่เลื่อนไว้ (เคลมคืน)', scopeDefault:'accounting' },
   // 🆕 APPROVAL ขั้น 1 (APPROVAL_IMPL_CONTRACT §B2)
   adjust_inv_wht:   { label:'แก้ WHT ใบตั้งหนี้',          scopeDefault:'accounting' },
+  adjust_inv_price: { label:'ปรับราคาตามใบกำกับ (กระทบต้นทุน)', scopeDefault:'accounting' },   // 🆕 PRICE-FIX ขั้น 1 (PRICE_VARIANCE_CONTRACT R2.6)
   approval_rule_change: { label:'แก้กฎอนุมัติแบบผ่อนลง (ต้อง GM/เจ้าของอนุมัติ)', scopeDefault:'any' },   // เจ้าของ 2026-09-29 §B15 ข้อ 6
   // 🆕 EXPENSE_PO ภาค P (P4): สัญญางานจ้าง/โครงการ — บัญชีคีย์ · GM/เจ้าของอนุมัติ (แบ่งหน้าที่)
   approve_contract: { label:'อนุมัติสัญญางานจ้าง',                 scopeDefault:'accounting' },
@@ -8730,6 +8978,10 @@ const APPROVAL_BUILTIN_RULES = Object.freeze([
   // 🆕 APPROVAL 1b-3: แก้ WHT ใบตั้งหนี้ · WHT ลด = ยอดที่ต้องโอนให้ผู้ขายเพิ่ม → 2 ขั้น
   { id:'r_adjust_inv_wht', action:'adjust_inv_wht', scope:'accounting', active:true, label:'แก้ WHT ใบตั้งหนี้', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },
   { id:'r_adjust_inv_wht_up', action:'adjust_inv_wht', scope:'accounting', active:true, label:'⚠️ แก้ WHT ลด (ยอดโอนเพิ่ม) — 2 ขั้น (ผจก.บัญชี + GM)', condition:{ amountGte:0.01, isIncrease:true },
+    steps:[ { order:1, anyOf:[ _AP_M('accounting') ] }, { order:2, anyOf:[ _AP_GM ] } ] },
+  // 🆕 PRICE-FIX ขั้น 1 (R2.6): ปรับราคาหลังรับของ · ราคาขึ้น (ยอดจ่ายเพิ่ม) = 2 ขั้น ผจก.บัญชี → GM · ฝ่ายจัดซื้อไม่อยู่ในขั้นอนุมัติ (เป็นคนคีย์ราคา)
+  { id:'r_adjust_inv_price', action:'adjust_inv_price', scope:'accounting', active:true, label:'ปรับราคาตามใบกำกับ (กระทบต้นทุน)', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },
+  { id:'r_adjust_inv_price_up', action:'adjust_inv_price', scope:'accounting', active:true, label:'⚠️ ปรับราคาขึ้น (ยอดจ่ายเพิ่ม) — 2 ขั้น (ผจก.บัญชี + GM)', condition:{ amountGte:0.01, isIncrease:true },
     steps:[ { order:1, anyOf:[ _AP_M('accounting') ] }, { order:2, anyOf:[ _AP_GM ] } ] },
   // 🆕 GR-DATE-FIX G1 (เจ้าของ 2026-10-06 · สต๊อก "ต้องมีอีกคน"): แก้วันที่รับของ — ผจก.คลัง/GM/เจ้าของ ที่ไม่ใช่ผู้ขอ
   // 🆕 EXPENSE_PO P4: สัญญางานจ้าง — GM/เจ้าของ อนุมัติ · ใบแก้สัญญาคิดระดับจากยอดหลังแก้ทั้งก้อน · คืนเงินประกัน = ผจก.บัญชีหรือ GM
@@ -8784,12 +9036,15 @@ function approvalAdminBlocked(req, step, user){
   if(!(user.position === 'admin' || user.role === 'admin') || user.position === 'gm' || user.role === 'gm') return false;
   return APPROVAL_NO_ADMIN_HI.actions.includes(req.action) && (Number(req.amount) || 0) >= APPROVAL_NO_ADMIN_HI.amountGte && (Number(step.order) || 0) >= APPROVAL_NO_ADMIN_HI.orderGte;
 }
+// 🆕 PRICE-FIX ขั้น 3 (R2.6): ผู้คีย์ราคา (payload.proposalBy) = ผู้ขอ → อนุมัติราคาที่ตัวเองคีย์ไม่ได้
+function approvalIsProposer(req, user){ return !!(req && user && req.payload && req.payload.proposalBy && req.payload.proposalBy === user.username); }
 function approvalCanDecide(req, step, user){
-  return !!(req && step && user) && user.active !== false && canApproveStep(step, user, req.entityScope) && approvalExtraPermOk(req.action, user) && !approvalAdminBlocked(req, step, user);
+  return !!(req && step && user) && user.active !== false && !approvalIsProposer(req, user) && canApproveStep(step, user, req.entityScope) && approvalExtraPermOk(req.action, user) && !approvalAdminBlocked(req, step, user);
 }
 // 🆕 verify F8: ผู้ใช้นี้ "กดขั้นปัจจุบันของคำขอได้จริง" ไหม — แถวสดใน state.users · ไม่ใช่ผู้ขอ · ยังไม่ได้กดขั้นก่อน · ใช้กับ 🔔/หน้าแรก/หน้างานค้าง (นับตรงกับปุ่มอนุมัติ)
 function approvalUserCanDecide(state, req, user){
   if(!req || !user || (req.status || 'pending') !== 'pending') return false;
+  if(approvalIsProposer(req, user)) return false;   // 🆕 PRICE-FIX ขั้น 3: ผู้คีย์ราคา = ผู้ขอ
   if(req.requestedBy === user.username && !selfApproveReqUser(state, req)) return false;   // SELF-APPROVE S2: ผู้ขอที่มีสิทธิ์ ✋ ตัดสินได้
   const cur = getCurrentStep({ ...req, status:'pending' });
   if(!cur || (req.steps || []).some(x => x && x.decidedBy && x.decidedBy === user.username)) return false;
@@ -8911,7 +9166,7 @@ function _saUserRow(state, ref){ return ref ? (((state && state.users) || []).fi
 // คำขอที่ไม่ปลดด้วยสิทธิ์นี้ (ต้อง GM/เจ้าของคนละคนกับผู้ขอ · ทาง 👑 GM-SELF เดิมยังใช้ได้) · UAT M1: + ปรับ VAT/WHT ใบตั้งหนี้
 //   S5: + คำขอสต๊อกทั้งหมด (ปรับ/ยกเลิกปรับ · ตัดของเสีย · ของหายระหว่างโอน · ยกเลิกเบิก/GR/TO) = ต้องมีอีกคนเสมอ
 const SELF_APPROVE_STOCK_ACTIONS = Object.freeze(['adjust_stock','reverse_adjust','scrap','transfer_loss','void_issue','void_gr','cancel_to','edit_gr_date']);   // GR-DATE-FIX: แก้วันที่รับของ = สต๊อก ต้องมีอีกคนเสมอ
-const SELF_APPROVE_NEVER = Object.freeze(['vat_unlock','vat_defer','vat_claim_in','approval_rule_change','adjust_inv_vat','adjust_inv_wht','approve_contract','contract_amend','release_retention'].concat(SELF_APPROVE_STOCK_ACTIONS));
+const SELF_APPROVE_NEVER = Object.freeze(['vat_unlock','vat_defer','vat_claim_in','approval_rule_change','adjust_inv_vat','adjust_inv_wht','adjust_inv_price','approve_contract','contract_amend','release_retention'].concat(SELF_APPROVE_STOCK_ACTIONS));
 function selfApproveKind(action){
   if(!action || SELF_APPROVE_NEVER.includes(action)) return null;
   for(const k of Object.keys(SELF_APPROVE_GROUPS)) if(SELF_APPROVE_GROUPS[k].includes(action)) return k;
@@ -9231,7 +9486,7 @@ function approvalRuleLoosening(state, before, after){
 const APPROVAL_FAIL_CLOSED = Object.freeze(['delete_je','approve_payment','adjust_stock','scrap','decide_rtv','post_je','reverse_adjust','dispose_asset','adjust_inv_vat','void_sup_memo','void_issue',
   'petty_topup','reimburse_advance','cancel_deposit','edit_inv','delete_inv','vat_defer','vat_claim_in',
   // 🆕 APPROVAL ขั้น 1 (§B2)
-  'edit_po_soft','edit_po_full','edit_po_post_gr','delete_po','delete_si','create_cn_memo','create_dn_memo','writeoff_wrong_transfer','adjust_inv_wht',
+  'edit_po_soft','edit_po_full','edit_po_post_gr','delete_po','delete_si','create_cn_memo','create_dn_memo','writeoff_wrong_transfer','adjust_inv_wht','adjust_inv_price',
   'cancel_po','reopen_po','transfer_loss','approval_rule_change',
   'edit_gr_date',   // 🆕 GR-DATE-FIX
   'approve_contract','contract_amend','release_retention',   // 🆕 EXPENSE_PO P4
@@ -9279,7 +9534,7 @@ function poPaymodeDeny(state, po, to, exceptReqId){
   return null;
 }
 function pendingInvChangeReq(state, invId, actions){
-  const acts = actions || ['adjust_inv_vat','edit_inv','adjust_inv_wht'];   // 🆕 APPROVAL 1b-3: คำขอแก้ WHT ค้าง = กันขอจ่ายทับ
+  const acts = actions || ['adjust_inv_vat','edit_inv','adjust_inv_wht','adjust_inv_price'];   // 🆕 APPROVAL 1b-3: คำขอแก้ WHT ค้าง = กันขอจ่ายทับ
   return ((state && state.approvalRequests) || []).find(r => r.status === 'pending' && acts.includes(r.action)
     && (r.entityId === invId || (r.payload && r.payload.invId === invId) || (r.payload && r.payload.updatedInv && r.payload.updatedInv.id === invId))) || null;
 }
@@ -11346,6 +11601,8 @@ Object.assign(global.ERP, {
   vatLockOf, vatPeriodLocked, depositKindOf, depositAvail, depositEligible, planDepositApplication, depositVatSplit, invDepositVatOffset, invDepositBaseOffset, invClaimableVatBase, invVatConflictOpen,
   normTaxInvNo, taxInvKey, taxInvKey2, findDupTaxInv, findTaxInvGrant, taxInvClaimWindow, TAX_INV_OVERRIDE_ANYOF, taxInvOverrideApprover,
   // 🆕 VAT-CLAIM (§B1)
+  planInvPriceAdjust, priceKeyInSetting, PRICE_KEYIN_DEFAULTS,   // 🆕 PRICE-FIX ขั้น 2
+  approvalIsProposer, PRICE_FIX_LIVE, priceFixLive, priceFixOpenForInv, invPriceApprovalPending, grPriceFixHold, priceFixList, invAmountVsGrDiff, invOverrideDeny,   // 🆕 PRICE-FIX ขั้น 3 (+ invOverrideDeny ขั้น 4)
   TAXINV_VAT_TOL, invTaxMultiOk, invTaxInvViews, invTaxInvViewOf, invTaxInvBlankView, invTaxUncoveredVat, invTaxPaperSum, invTaxInvProgress, invTaxInvLabel, invTaxInvNumbers, vatDocKey,   // 🆕 MULTI-TAXINV
   ymOf, ymAdd, ymDiff, ymEnd, vatDeferred, vatDeferUsed, VAT_DEFER_ONCE_MSG, vatClaimDateOf, vatClaimWindowEnd, vatPaperDateBase, vatPendingDeadlineYm, supMemoNettedInInv, pendingTaxInvIds,
   purchaseVatForPeriod, purchaseVatByPeriod, vatFilingLockOf, vatClaimIndex, siDateGuard, purchaseVatDocs, purchaseVatClaimState, vatExpireJeLive, jeCr1150, vatNaturalClaimYm, vatFirstOpenYm, vatLockedWithoutFiling,
@@ -15848,6 +16105,7 @@ const INIT_STATE = {
     { id:'5300', code:'5300', name:'ค่าใช้จ่ายทั่วไป', type:'expense', normal:'debit' },
     { id:'5320', code:'5320', name:'ค่าซ่อมแซมบำรุงรักษา', type:'expense', normal:'debit' },   // 🔧 EXPENSE_PO B2.4 (ระบบเดิมเพิ่มด้วยปุ่ม ➕ ในทะเบียนรายจ่าย · ไม่ migrate)
     { id:'5390', code:'5390', name:'ผลต่างราคาซื้อ (Price Variance)', type:'expense', normal:'debit' },
+    { id:'5391', code:'5391', name:'ผลต่างราคาซื้อ (ปรับหลังรับของ)', type:'cogs', normal:'debit' },   // 🆕 PRICE-FIX: ส่วนที่ใช้/ขายไปแล้วตอนแก้ราคาหลังรับ (cogs ไม่ใช่ expense) · ระบบเดิมสร้างแบบ lazy ด้วย _ensureCoa5391
     { id:'6200', code:'6200', name:'ค่าเช่า', type:'expense', normal:'debit' },
     { id:'5900', code:'5900', name:'ค่าใช้จ่ายต้องห้าม', type:'expense', normal:'debit' },   // 🆕 ACCT-V2: reclass จากจ่ายเงินสดย่อยแบบ "ต้องห้าม" (บวกกลับตอนคำนวณภาษี)
     // 🆕 B0 (council audit): บัญชีหลักที่ขาด — กัน VAT ขายไม่ลงบัญชี / WHT ทับ AP / งบดุลไม่มีทุน
@@ -16256,7 +16514,8 @@ const _INV_PROTECTED = Object.freeze(['depositApplications','depositUsed','depos
   'supTaxInvMore','supTaxInvBase','supTaxInvVat',   // 🆕 MULTI-TAXINV: แก้ได้เฉพาะ SET/ADD/CLEAR_TAX_INV (กันสำเนาเก่าทับใบกำกับใบที่ 2+)
   // 🆕 EXPENSE_PO P10.2: ลิงก์สัญญา/PO + เงินประกัน + เหตุผลด่าน — ตั้งตอน ADD_INV เท่านั้น (ยกเลิกแล้วตั้งใหม่)
   'contractId','contractInstIds','retention','acceptBypass','overSchedule','contractSkipReason','taxInvNotRequired','fromPO','poConfirmIds','overPO',
-  'migLate']);   // 🆕 MIG_LATE_INV verify 1: ตั้งได้เฉพาะ ADD_MIG_LATE_INV (กัน PATCH_INV ตั้งธงให้ใบ ③ แล้วยกเลิกข้ามด่าน)
+  'migLate',
+  'priceAdjustHistory','priceFixRequest']);   // 🆕 PRICE-FIX verify 2: แก้ได้เฉพาะ ADJUST_INV_PRICE + *_INV_PRICE_FIX (สำเนาเก่าทับ = ปลดด่าน VOID/ปลด hold จ่าย) · 🆕 MIG_LATE_INV verify 1: ตั้งได้เฉพาะ ADD_MIG_LATE_INV (กัน PATCH_INV ตั้งธงให้ใบ ③ แล้วยกเลิกข้ามด่าน)
   //   // 🆕 MIG_VAT_HERE V2: ธงย้ายมาเคลมในระบบนี้ — แก้ได้เฉพาะ MIG_VAT_HERE/_UNDO (ไฟล์นำเข้าใบใหม่ตั้งมาได้)   // 🆕 VAT-CLAIM verify (B3.1): เลื่อนเคลม/ประวัติเคลม/หมดสิทธิ์ — แก้ได้เฉพาะ action ของมัน (V5+)
 // PATCH_INV.add ที่สายจ่ายเงินใช้ (บวกเท่านั้น — ค่าลบ/ฟิลด์ควบคุมอื่นถูกตัดทิ้ง)
 const _INV_PROTECTED_ADD_OK = Object.freeze(['paidAmount','nonDeductibleVat','nonDeductibleVatBase']);
@@ -16415,6 +16674,8 @@ global.ERP.invUpdateDeny = function(state, old, nu){
     // 🆕 EXPENSE_PO verify 2a: ด่านเดียวกับ UPDATE_INV — ใบผูกสัญญา/PO ค่าบริการ/คืนประกัน แก้เงินไม่ได้
     //   (เพิ่ม WHT ย้อนหลัง/แก้ INV/executor edit_inv ต้องหยุดก่อนลง JE-VOID · JE ใหม่ · เครดิตผู้ขาย)
     { const _cm = _ctInvMoneyDeny(old, nu); if(_cm) return '⛔ ' + _cm; }
+    // 🆕 PRICE-FIX verify 1: ใบปรับราคาแล้ว (post_pi) — ทางแก้ INV กลับ JE ทุกตัวรวม inv_price_adjust แล้วลงใหม่ทั้งก้อนเข้า 1300 (5391 หาย · GL 1300 เกิน FIFO)
+    if((old.priceAdjustHistory || []).some(x => x && x.mode === 'post_pi')) return '⛔ ใบนี้ปรับราคาแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN)';
     return _invFiledFinReason(state, old, nu) || _invGlLockReason(state, old, nu);
   } catch(e){ return 'ตรวจการแก้ใบไม่สำเร็จ: ' + (e && e.message); }
 };
@@ -17613,6 +17874,17 @@ function _stockAssetLines(s, docLines, srcGr, total, isDebit, desc1300, descAsse
   return out;
 }
 
+// 🆕 PRICE-FIX ขั้น 3 (R1 แถว 11 · P5): บิลที่มีคำขอแก้ราคาเปิดอยู่ (open/submitted) ห้ามขอจ่าย/อนุมัติจ่าย — บัญชี ✖ ยกเลิกคำขอ = ปลดทันที
+function _blockIfPriceFix(s, invId){
+  const inv = (s.invoices || []).find(i => i && i.id === invId) || {};
+  // 🆕 PRICE-FIX UAT S3 (P5): บัญชีคีย์ราคาเอง (post_pi) แล้วรออนุมัติ adjust_inv_price — ห้ามจ่ายจนกว่าจะอนุมัติ/ปฏิเสธ (ไม่งั้นอนุมัติทีหลังล้ม "จ่ายไปแล้ว")
+  if(global.ERP.invPriceApprovalPending && global.ERP.invPriceApprovalPending(s, invId)){
+    alert('⛔ บิล ' + (inv.invNumber || invId) + ' มีคำขออนุมัติปรับราคาค้างอยู่ — รอผลอนุมัติ (หรือยกเลิกคำขอ) ก่อน แล้วค่อยขอจ่าย'); return s;
+  }
+  const r = global.ERP.priceFixOpenForInv(s, invId); if(!r) return null;
+  alert('⛔ บิล ' + (inv.invNumber || invId) + ' รอแก้ราคา (' + (r.status === 'open' ? 'รอจัดซื้อแก้' : 'รอบัญชียืนยัน') + ') — ยืนยันหรือยกเลิกคำขอก่อน แล้วค่อยขอจ่าย');
+  return s;
+}
 function _blockIfPendingRtv(s, invId){
   const pend = _pendingRtvForInv(s, invId);
   if(pend.length === 0) return null;
@@ -18230,6 +18502,8 @@ const _ADD_DUP = {
   MIG_VAT_HERE_UNDO:    (s, d) => { const inv = d && (s.invoices || []).find(i => i && i.id === d.invId);
                           return !!(inv && d.at != null && (inv.vatClaimHereLog || []).some(x => x && x.action === 'undo' && x.at === Number(d.at))); },
   // 🆕 MIG_AP_NORMAL N5: ยกเลิกจ่าย/บันทึกจ่ายแล้วครั้งเดียวกัน (at เดิม) ลง ecountPayLog แล้ว = ซ้ำ
+  // 🆕 PRICE-FIX ขั้น 1: แก้ล็อตครั้งเดียวกัน (id+at เดิม) ลง auditLog แล้ว = ซ้ำ (ไม่ต่อท้าย audit ซ้ำ)
+  UPDATE_FIFO_LAYER:    (s, d) => !!(d && d.id && d.at) && (s.auditLog || []).some(x => x && x.id === _fleAuditId(d.id, d.at)),
   MIG_AP_UNPAY:         (s, d) => { const inv = d && (s.invoices || []).find(i => i && i.id === d.invId);
                           return !!(inv && d.at != null && (inv.ecountPayLog || []).some(x => x && x.action === 'unpay' && x.at === Number(d.at))); },
   MIG_AP_MARKPAID:      (s, d) => { const inv = d && (s.invoices || []).find(i => i && i.id === d.invId);
@@ -18292,6 +18566,29 @@ function _isIntraDoc(t){ return !!t && t.fromBranch === t.toBranch && !!t.fromLo
 function _dayDocNo(prefix, date, arr, key, opts){ return fmtDayDocNo(prefix, date, arr, key, opts); }
 const _baseUnitOf = (it) => (((it && it.units) || []).find(u => u && u.isBase) || {}).name || (it && it.issueUnit) || '';
 // คนที่ทำรายการ = ผู้ใช้ที่ล็อกอิน (fold แนบให้) · ไม่มี session → หาจากชื่อใน payload
+// 🆕 PRICE-FIX ขั้น 1 (PRICE_VARIANCE_CONTRACT R1 แถว 2): ผังบัญชี 5391 แบบ lazy — ไม่ migrate · ระบบเดิมที่ไม่มี 5391 → ต่อท้ายครั้งแรกที่ ADJUST_INV_PRICE ใช้
+//   type 'cogs' (ส่วนที่ใช้/ขายไปแล้ว = ต้นทุนขาย ไม่ใช่ค่าใช้จ่าย) · มีอยู่แล้ว (code 5391) → คืน s เดิม (ไม่แตะชื่อ/ประเภทที่ผู้ใช้ตั้งเอง)
+function _fleAuditId(layerId, at){ return 'al_fle_' + layerId + '_' + String(at).replace(/[^0-9A-Za-z]/g, ''); }   // 🆕 PRICE-FIX: id audit แก้ล็อต (ตายตัวจาก payload → กันซ้ำตอนเล่นซ้ำ)
+const _COA_5391 = Object.freeze({ id:'5391', code:'5391', name:'ผลต่างราคาซื้อ (ปรับหลังรับของ)', type:'cogs', normal:'debit' });
+function _ensureCoa5391(s){
+  const coa = s.chartOfAccounts || [];
+  if(coa.some(c => c && c.code === '5391')) return s;
+  return { ...s, chartOfAccounts: [...coa, { ..._COA_5391 }] };
+}
+// 🆕 PRICE-FIX ขั้น 2 (R2.2): rev ราคา GR = จำนวนครั้งที่ปรับราคา · ADD_INV/ADD_COMBINED_INV ต้องส่ง grPriceRev:{grId:rev} ตรง state สด
+//   ไม่ส่ง = rev 0 (ผู้เรียกเก่า) → GR ที่ปรับราคาแล้วถูกบล็อก (fail-closed: เครื่องที่ถือราคาเก่าตั้งหนี้ทับไม่ได้)
+function _grPriceRevDeny(s, grIds, rev){
+  const m = rev || {};
+  for(const id of (grIds || [])){
+    const g = (s.grs || []).find(x => x && x.id === id); if(!g) continue;
+    const hold = global.ERP.grPriceFixHold(s, id); if(hold) return hold;   // 🆕 PRICE-FIX ขั้น 3: คำขอแก้ราคาเปิด / คำขออนุมัติปรับราคาค้าง
+    const cur = (g.priceAdjustHistory || []).length;
+    if(cur !== (Number(m[id]) || 0)) return 'ราคาใบรับของ ' + (g.grNumber || id) + ' ถูกปรับแล้ว (ครั้งที่ ' + cur + ') — ปิดแล้วเปิดหน้าตั้งหนี้ใหม่';
+  }
+  return null;
+}
+// Σ ส่วนต่างมูลค่าสินค้าที่ปรับแล้วของ GR (ใช้บวกยอดรับเข้าใน 3-way — at_gr ที่ถูกต้องไม่เตือน three_way_over หลอก)
+function _grPriceAdjSum(s, pred){ return (s.grs || []).filter(g => g && !g.voided && pred(g)).reduce((t, g) => t + (g.priceAdjustHistory || []).reduce((u, h) => u + (Number(h && h.dGoods) || 0), 0), 0); }
 function _actorOf(s, by){ return s.currentUser || (by ? (s.users || []).find(u => u && u.username === by) : null) || null; }
 // ==================== ⚖️ WEIGH-ORDER E2 (WEIGH_ORDER_CONTRACT §B2.5 · §G.4): จอง/ปล่อยงานชั่งตามใบสั่ง ====================
 // หาใบ/batch/สถานะขั้นของงาน (orderId, batchSeq|null, opId) — ด่านรูปใบ: batchSeq ว่าง ⇔ ใบไม่มี batch (ใบถูกแบ่งระหว่างนั้น = ไม่ตรง)
@@ -19692,7 +19989,8 @@ function reducer(s, a){
       }
       const _old = s.settings || {}, _new = { ..._old, ...(a.data || {}) };
       const _WATCH = ['gmSelfApprove', 'posBackflushPhantomOnly','productionLive','periodLockUntil','futureDateLimit','siRequirePrice','stockValueRoles','allowNegativeStock',
-        'weighOrderJobs', 'vatLockUntil', 'capitalizeThreshold'];   // 💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · B18 gmSelfApprove · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
+        'weighOrderJobs', 'vatLockUntil', 'capitalizeThreshold',
+        'priceKeyInEnabled', 'priceKeyInTolAbs', 'priceKeyInTolPct', 'priceKeyInBlockPct'];   // 🆕 PRICE-FIX UAT M2: สวิตช์/เกณฑ์ไม่ต้องอนุมัติ ลงประวัติ (กันขยับเกณฑ์ชั่วคราวแล้วคืนเงียบ) ·   💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · B18 gmSelfApprove · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
       const _chg = _WATCH.filter(k => a.data && Object.prototype.hasOwnProperty.call(a.data, k) && JSON.stringify(_old[k]) !== JSON.stringify(a.data[k]));
       if(!_chg.length) return { ...s, settings:_new };
       const _by = (s.currentUser && s.currentUser.username) || (a.data && a.data._by) || 'system', _now = Date.now();
@@ -19926,9 +20224,28 @@ function reducer(s, a){
       };
       return { ...s, items, fifoLayers:[...s.fifoLayers, layer], movements:[...s.movements, movement] };
     }
-    case 'UPDATE_FIFO_LAYER':
-      // a.data: { id, patch:{ expiryDate?, lot?, ... } }
-      return { ...s, fifoLayers: s.fifoLayers.map(l => l.id === a.data.id ? { ...l, ...a.data.patch } : l) };
+    case 'UPDATE_FIFO_LAYER': {
+      // a.data: { id, patch:{ lot?, expiryDate?, locId? }, at?, by? }
+      // 🆕 PRICE-FIX ขั้น 1: แก้ได้เฉพาะ lot/expiryDate/locId (ห้ามแก้ unitCost/qty/remaining/grRef ฯลฯ ผ่านทางนี้)
+      //   เปลี่ยน lot ครั้งแรก → เก็บชื่อล็อตตอนรับไว้ใน grLot (ใช้จับคู่ล็อตกับบรรทัดใบรับตอนปรับราคา) · ลง auditLog ทุกครั้ง
+      const d = a.data || {};
+      const patch = d.patch || {};
+      const _FL_EDIT_OK = ['lot', 'expiryDate', 'locId'];
+      const bad = Object.keys(patch).filter(k => !_FL_EDIT_OK.includes(k));
+      if(bad.length){ alert('แก้ชั้นต้นทุนได้เฉพาะ ล็อต / วันหมดอายุ / ที่เก็บ — ห้ามแก้ ' + bad.join(', ')); return s; }
+      const layer = (s.fifoLayers || []).find(l => l && l.id === d.id);
+      if(!layer){ alert('ไม่พบชั้นต้นทุน (ล็อต) นี้'); return s; }
+      const next = { ...layer, ...patch };
+      if('lot' in patch && (patch.lot || '') !== (layer.lot || '') && layer.grLot == null) next.grLot = layer.lot || '';
+      const at = d.at || new Date().toISOString();
+      const by = d.by || (s.currentUser && (s.currentUser.username || s.currentUser.id)) || '';
+      const before = {}, after = {};
+      for(const k of Object.keys(patch)){ before[k] = layer[k] == null ? null : layer[k]; after[k] = patch[k] == null ? null : patch[k]; }
+      const al = { id: _fleAuditId(layer.id, at), ts: Date.parse(at) || 0, at, type: 'fifo_layer_edit', by,
+        layerId: layer.id, itemId: layer.itemId, grRef: layer.grRef || '', before, after,
+        summary: 'แก้ล็อต ' + (layer.lot || layer.id) + (('lot' in patch && after.lot !== before.lot) ? ' → ' + (after.lot || '(ว่าง)') : '') };
+      return { ...s, fifoLayers: s.fifoLayers.map(l => l.id === layer.id ? next : l), auditLog: [...(s.auditLog || []), al] };
+    }
     case 'SPLIT_FIFO_LAYER': {
       // a.data: { id, splits:[{qty, expiryDate?, lot?}, ...] }
       // splits qty รวมต้องเท่า remaining ของ layer เดิม
@@ -19946,6 +20263,7 @@ function reducer(s, a){
         qty: Number(sp.qty)||0,
         remaining: Number(sp.qty)||0,
         lot: sp.lot || (layer.lot ? `${layer.lot}-${i+1}` : ''),
+        grLot: layer.grLot || layer.lot || '',   // 🆕 PRICE-FIX: ล็อตลูกยังจับคู่บรรทัดใบรับได้ (ชื่อล็อตตอนรับ)
         expiryDate: sp.expiryDate || layer.expiryDate || null,
         splitFrom: layer.id,
       }));
@@ -20858,6 +21176,8 @@ function reducer(s, a){
     case 'CLOSE_PO_SERVICE_LINE': return _svcClose(s, a.data || {});
 
     case 'UPDATE_PO_POST_GR': {
+      // 🆕 PRICE-FIX ขั้น 1: ปิดถาวร (PO_POSTGR_EDIT_ENABLED=false) — กันคำขอเก่าที่ค้าง pending มาลงตอนอนุมัติ · แก้ราคาหลังรับของใช้ "ส่งให้จัดซื้อแก้ราคา" แทน
+      if(s){ alert('ปิดการแก้ PO หลังรับของแล้ว — ถ้าราคาผิด ให้ฝ่ายบัญชีกด ↩️ ส่งให้จัดซื้อแก้ราคา จากหน้าเจ้าหนี้'); return s; }
       const { id, newLines, varianceAmount, varianceJe, reason, by } = a.data;
       const old = (s.pos||[]).find(p => p.id === id);
       if(!old){ alert('ไม่พบ PO'); return s; }
@@ -21934,7 +22254,16 @@ function reducer(s, a){
         const _missing = _newIds.filter(id => !_has(id));
         if(_missing.length){ try { console.warn('⛔ UPDATE_GR ' + (_og.grNumber||_og.id) + ': ใบตั้งหนี้ ' + _missing.join(', ') + ' ไม่มีในระบบ — ไม่ผูก'); } catch(_w){} return s; }
       }
-      return { ...s, grs:s.grs.map(g => g.id===a.data.id ? a.data : g) };
+      // 🆕 PRICE-FIX verify 2: ประวัติปรับราคา/คำขอแก้ราคาของ GR แก้ได้เฉพาะ ADJUST_INV_PRICE + *_INV_PRICE_FIX
+      //   สำเนาเก่า (ประวัติสั้นกว่า) = คงบรรทัด (ราคา/ต้นทุนที่ปรับแล้ว) จากใบใน state ด้วย
+      let _ng = a.data;
+      if(_og && _ng){
+        _ng = { ..._ng };
+        const _stale = (_og.priceAdjustHistory || []).length !== (_ng.priceAdjustHistory || []).length;
+        for(const k of ['priceAdjustHistory','priceFixRequest']){ if(k in _og) _ng[k] = _og[k]; else delete _ng[k]; }
+        if(_stale && Array.isArray(_og.lines)) _ng.lines = _og.lines;
+      }
+      return { ...s, grs:s.grs.map(g => g.id===a.data.id ? _ng : g) };
     }
     // 💎 บันทึกรายละเอียดทรัพย์สินหลังรับของ (S/N · วันเริ่มประกัน · ที่ตั้ง · ผู้รับผิดชอบ) — คลัง/จัดซื้อ ก่อนบัญชีลงทะเบียน
     case 'UPDATE_GR_ASSET_INFO': {
@@ -22206,6 +22535,9 @@ function reducer(s, a){
     case 'ADD_INV': {
       const locked = _checkDateLock(s, a.data.invDate, 'INV');
       if(locked) return locked;
+      { const _gIds = (a.data.grIds && a.data.grIds.length) ? a.data.grIds : (a.data.grId ? [a.data.grId] : []);   // 🆕 PRICE-FIX ขั้น 2: ราคา GR เปลี่ยนระหว่างเปิดหน้าตั้งหนี้
+        const _rv = _grPriceRevDeny(s, _gIds, a.data.grPriceRev); if(_rv){ alert('⛔ ตั้งหนี้ไม่ได้ — ' + _rv); return s; } }
+      { const _od = global.ERP.invOverrideDeny(s, a.data); if(_od){ alert('⛔ ตั้งหนี้ไม่ได้ — ' + _od); return s; } }   // 🆕 PRICE-FIX ขั้น 4: ปิดทางเลี่ยงพิมพ์ทับยอด (สวิตช์เปิดเท่านั้น)
       // 🆕 A2/F3 (council): 3-way match — เตือน+audit ถ้าตั้ง PI เกินยอดรับเข้า GR (po.lines[].receivedQty)
       //   ครอบทุก PI-creation path ในที่เดียว · ไม่บล็อก (per user: เตือน+ยืนยัน — confirm dialog ต่อ modal = follow-up)
       let _twExtra = {};
@@ -22214,7 +22546,8 @@ function reducer(s, a){
         if(a.data.poId && a.data.type !== 'deposit_pi'){
           const _po = (s.pos||[]).find(p => p.id === a.data.poId);
           if(_po && Array.isArray(_po.lines)){
-            const _recvVal = _po.lines.reduce((sum,pl) => sum + (Number(pl.receivedQty)||0) * (Number(pl.unitPrice)||0), 0);
+            const _recvVal = _po.lines.reduce((sum,pl) => sum + (Number(pl.receivedQty)||0) * (Number(pl.unitPrice)||0), 0)
+              + _grPriceAdjSum(s, g => g.poId === a.data.poId);   // 🆕 PRICE-FIX: + ส่วนต่างราคาที่ปรับแล้ว (po.lines.unitPrice ห้ามเขียนทับ)
             const _priorVal = (s.invoices||[]).filter(i => i.poId === a.data.poId && i.id !== a.data.id && !i.voided && i.status !== 'voided' && i.paymentStatus !== 'voided' && i.type !== 'deposit_pi')
               .reduce((sum,i) => sum + (Number(i.amount)||0), 0);
             const _thisVal = Number(a.data.amount) || 0;
@@ -22281,6 +22614,15 @@ function reducer(s, a){
       // 🆕 DEPOSIT-VAT verify: งวด GL ของ invDate เดิม/ใหม่ปิดแล้ว → ห้ามเปลี่ยนยอด/วันที่ (JE ใหม่ลงไม่ได้ = AP หายจาก GL)
       if(_oldInv){ const _gl = _invGlLockReason(s, _oldInv, a.data); if(_gl){ alert('⛔ ' + _gl); return s; } }
       if(_oldInv){ const _cm = _ctInvMoneyDeny(_oldInv, a.data); if(_cm){ alert('⛔ ' + _cm); return s; } }   // 🆕 EXPENSE_PO P10.2
+      // 🆕 PRICE-FIX verify 2: ใบปรับราคาแล้ว (post_pi) — reducer ปฏิเสธการเปลี่ยนเงิน (ด่านเดียวกับ invUpdateDeny · กันสำเนาเก่าย้อนยอด)
+      if(_oldInv && (_oldInv.priceAdjustHistory || []).some(x => x && x.mode === 'post_pi')
+        && ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId'].some(f => a.data[f] !== undefined && !_protSame(_oldInv[f], a.data[f]))){
+        alert('⛔ ใบนี้ปรับราคาแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN)'); return s; }
+      // 🆕 PRICE-FIX verify 3: สวิตช์เปิด — ใบตั้งหนี้จาก GR แก้ 🔧 ปรับยอด/ปัดเศษ ได้ไม่เกิน ±1 ฿ (ทางเดียวกับตอนตั้งหนี้)
+      if(_oldInv && s.settings && s.settings.priceKeyInEnabled === true && !_oldInv._migrated
+        && (_oldInv.source === 'po_gr' || _oldInv.source === 'po_combined') && a.data.roundingAdjustment !== undefined
+        && !_protSame(_oldInv.roundingAdjustment, a.data.roundingAdjustment) && Math.abs(Number(a.data.roundingAdjustment) || 0) > 1.005){
+        alert('⛔ ปรับยอด/ปัดเศษเกิน ±1 ฿ — ถ้าราคาไม่ตรงใบกำกับ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา'); return s; }
       // 🆕 WHT-MERGE: แก้ยอดหัก ณ ที่จ่าย ของใบที่รวมอยู่ใน 50 ทวิ ของ PV (เช่น 🧾 เพิ่ม WHT ย้อนหลัง) → ปฏิเสธ
       if(_oldInv && _invWhtMergedInto(_oldInv) && a.data.whtAmount !== undefined && !_protSame(_oldInv.whtAmount, a.data.whtAmount)){ alert(_whtMergedDenyMsg(_oldInv)); return s; }
       if(_oldInv){
@@ -22541,6 +22883,263 @@ function reducer(s, a){
         journalEntries:[...(s.journalEntries||[]), je], seq:{ ...(s.seq||{}), je: seqJe }, auditLog:[...(s.auditLog||[]), al] };
     }
 
+    // 🆕 PRICE-FIX ขั้น 2 (PRICE_VARIANCE_CONTRACT REFRESH R2.2–R2.5): ปรับราคาต่อหน่วยตามใบกำกับหลังรับของ — ตัวลงบัญชีตัวเดียว 2 โหมด
+    //   post_pi = ตั้งหนี้แล้ว (invId) → แก้ยอดใบ + JE 1300/5391/1150 ↔ 2100 · at_gr = ยังไม่ตั้งหนี้ (grIds) → แก้ GR + JE 5391 ↔ 1300 (ส่วนที่ใช้ไปแล้ว)
+    //   data: { mode, invId|grIds, lines:[{grId,lineIdx,newUnitPrice}], prevAmount, prevVat, expect:{dGoods,dVat,dNet}, reqId?, reason, by,
+    //           approvalReqId?, direct? (GM ทำเอง), supTaxInvNumber?, date?, at } · ทุก guard alert + return s (executor dry-run พึ่งข้อนี้)
+    //   จำนวน (P4) ไม่อยู่ใน payload เลย · ไม่แตะ movements/payments/supplierMemos/JE COGS เดิม/qty/remaining/lot/po.lines.unitPrice
+    case 'ADJUST_INV_PRICE': {
+      const d = a.data || {}, E = global.ERP;
+      if(!(s.settings && s.settings.priceKeyInEnabled === true)){ alert('⛔ ยังไม่เปิดใช้การปรับราคาตามใบกำกับ (ตั้งค่า → นโยบาย)'); return s; }
+      const P = E.planInvPriceAdjust(s, { mode:d.mode, invId:d.invId, grIds:d.grIds, lines:d.lines });
+      if(P.blocks.length){ alert('⛔ ปรับราคาไม่ได้ — ' + P.blocks.join('\n• ')); return s; }
+      const inv = P.inv, grs0 = P.grIds.map(id => (s.grs || []).find(g => g && g.id === id)).filter(Boolean);
+      const by = d.by || (s.currentUser && s.currentUser.username) || '';
+      const actor = _actorOf(s, by);
+      const gmDirect = d.direct === true && !!s.currentUser && s.currentUser.username === by && !!E.gmSelfUser(s, by);
+      if(!d.approvalReqId && !gmDirect && !(actor && (E.isSuperUser(actor) || E.hasPerm(actor, 'accounting', 'invQueue', 'edit')))){ alert('⛔ ไม่มีสิทธิ์ปรับราคาตามใบกำกับ (ต้องเป็นฝ่ายบัญชี — คิวตั้งหนี้ แก้ไข)'); return s; }
+      const reason = String(d.reason || '').trim();
+      if(!reason){ alert('ใส่เหตุผลที่ปรับราคา'); return s; }
+      if(P.warnLines.length && reason.length < 10){ alert('⛔ ราคาเปลี่ยนเกิน ' + E.priceKeyInSetting(s, 'priceKeyInWarnPct') + '% — ต้องใส่เหตุผลอย่างน้อย 10 ตัวอักษร'); return s; }
+      // คำขอ P3 (จัดซื้อคีย์ → บัญชียืนยัน) — target inv (post_pi) หรือ GR (at_gr)
+      const reqDoc = d.reqId ? (inv ? (inv.priceFixRequest && inv.priceFixRequest.id === d.reqId ? inv : null) : grs0.find(g => g.priceFixRequest && g.priceFixRequest.id === d.reqId)) : null;
+      const req = reqDoc ? reqDoc.priceFixRequest : null;
+      if(d.reqId && (!req || req.status !== 'submitted' || !req.proposal)){ alert('⛔ คำขอแก้ราคานี้ไม่อยู่ในสถานะรอบัญชียืนยัน (อาจถูกยืนยัน/ยกเลิกไปแล้ว)'); return s; }
+      const proposalBy = req && req.proposal ? (req.proposal.by || '') : '';
+      if(req && proposalBy && proposalBy === by && !gmDirect){ alert('⛔ ผู้คีย์ราคา (จัดซื้อ) ยืนยันราคาที่ตัวเองคีย์ไม่ได้ — ต้องให้ฝ่ายบัญชีอีกคนยืนยัน'); return s; }
+      if(inv && d.prevAmount != null && Math.abs((Number(inv.amount) || 0) - (Number(d.prevAmount) || 0)) > 0.01){ alert('⛔ ยอดใบนี้เปลี่ยนไปหลังเปิดหน้าจอ — เปิดใหม่แล้วลองอีกครั้ง'); return s; }
+      if(inv && d.prevVat != null && Math.abs((Number(inv.vat) || 0) - (Number(d.prevVat) || 0)) > 0.01){ alert('⛔ VAT ของใบนี้เปลี่ยนไปหลังเปิดหน้าจอ — เปิดใหม่แล้วลองอีกครั้ง'); return s; }
+      // expect เทียบเฉพาะฝั่ง AP (ΔInv/ΔVar คิดใหม่จาก remaining สด — ของถูกเบิก/ขายระหว่างรอ push ไม่ทำให้ล้ม)
+      if(d.expect && ['dGoods', 'dVat', 'dNet'].some(k => Math.abs((Number(d.expect[k]) || 0) - P[k]) > 0.05)){ alert('⛔ ยอดที่คำนวณได้ (สินค้า ' + P.dGoods.toFixed(2) + ' · VAT ' + P.dVat.toFixed(2) + ') ไม่ตรงกับที่ส่งมา — เปิดใหม่แล้วลองอีกครั้ง'); return s; }
+      // เลขใบกำกับ: post_pi = ใบกำกับเดิมถูกแต่ ERP คีย์ผิด · เลขต่าง = เอกสารใหม่จากผู้ขาย (ใบเพิ่ม/ลดหนี้) → DN/CN
+      const tiNo = String(d.supTaxInvNumber || (req && req.supTaxInvNumber) || '').trim();
+      let tiSet = null;   // 🆕 verify 1: ใบยังไม่มีเลข → เขียนเลข/วันที่/งวดเคลมลง PI
+      if(inv){
+        const cur = String(inv.supTaxInvNumber || '').trim();
+        if(cur && tiNo && E.normTaxInvNo(cur) !== E.normTaxInvNo(tiNo)){ alert('⛔ เลขใบกำกับ ' + tiNo + ' ไม่ใช่ใบเดิมของ PI นี้ (' + cur + ') — เอกสารใหม่จากผู้ขาย = ใบเพิ่ม/ลดหนี้ → บันทึก DN/CN'); return s; }
+        if(!cur){
+          if(!tiNo){ alert('⛔ ใบนี้ยังไม่มีเลขใบกำกับ — ใส่เลขใบกำกับของผู้ขายที่ใช้ยืนยันราคา'); return s; }
+          if((E.findDupTaxInv(s, inv, { number:tiNo, excludeInvId:inv.id }).block || []).length){ alert('⛔ เลขใบกำกับ ' + tiNo + ' ของผู้ขายนี้ถูกใช้กับใบอื่นแล้ว'); return s; }
+          // 🆕 verify 1: เขียนเลขลง PI แบบ SET_TAX_INV (ΔVAT ที่ลง 1150 ต้องมีใบกำกับรองรับในรายงานภาษีซื้อ · จองเลขกันซ้ำ)
+          const _tiD = String(d.supTaxInvDate || (req && req.supTaxInvDate) || d.date || getToday()).slice(0, 10);
+          const _tiClaim = _taxInvClaimDate(s, inv, _tiD, getToday());
+          if(_tiClaim === null || (_tiClaim && _vatPeriodLocked(s, _tiClaim))){ alert('📅 งวดภาษีซื้อของใบกำกับ ' + tiNo + ' ปิด/ยื่น ภ.พ.30 แล้ว (ปิดถึง ' + _vatLockOf(s) + ') — ปรับราคาไม่ได้'); return s; }
+          tiSet = { supTaxInvNumber:tiNo, supTaxInvDate:_tiD, supVatClaimDate:_tiClaim };
+        }
+      }
+      const jeDate = d.date || getToday();
+      { const locked = _checkDateLock(s, jeDate, 'ปรับราคาตามใบกำกับ'); if(locked) return locked; }
+      if(inv && Math.abs(P.dVat) >= 0.005){   // งวดภาษีซื้อของใบปิด/ยื่นแล้ว — เฉพาะเมื่อฐานภาษีเปลี่ยน
+        const _tp = _invTaxPeriodDate(inv);
+        if((String(inv.supTaxInvNumber || '').trim() && _vatPeriodLocked(s, _tp)) || _invTaxFiled(s, inv)){
+          alert('📅 งวดภาษีซื้อของใบกำกับใบนี้ปิด/ยื่น ภ.พ.30 แล้ว (ปิดถึง ' + _vatLockOf(s) + ') — ปรับราคาย้อนหลังไม่ได้ → ขอปลดล็อกงวด หรือขอใบลด/เพิ่มหนี้จากผู้ขาย'); return s; }
+      }
+      // เกณฑ์อนุมัติ (สะสมเทียบราคาแรกสุด) · บัญชีคีย์เอง (ไม่มีคำขอ) + ราคาขึ้น = ต้องอนุมัติทุกกรณี · GM ทำเอง = direct
+      // 🆕 verify 1: บัญชียืนยันด้วยราคาสูงกว่าที่จัดซื้อเสนอ (หรือบรรทัดนอกข้อเสนอ) = บัญชีคีย์เอง → ราคาขึ้นต้องอนุมัติ (R2.6)
+      const overProp = !!req && (d.lines || []).some(x => { const p = ((req.proposal && req.proposal.lines) || []).find(y => y.grId === x.grId && Number(y.lineIdx) === Number(x.lineIdx));
+        return !p || Number(x.newUnitPrice) > Number(p.newUnitPrice) + 1e-9; });
+      const needAp = !gmDirect && (P.needsApproval || ((!req || overProp) && P.isIncrease));
+      const usedDoc = inv || grs0[0];
+      if(needAp || d.approvalReqId){
+        const J = E.approvalStableJson, normL = (ls) => (ls || []).map(x => ({ grId:x.grId, lineIdx:Number(x.lineIdx), newUnitPrice:Number(x.newUnitPrice) }));
+        const g = _approvalGate(s, d.approvalReqId, 'adjust_inv_price', { scope:'accounting', amount:Math.abs(P.cumGoods), isIncrease:P.isIncrease, wasPaid:false },
+          (q) => { const p = q.payload || {};
+            return q.entityId === usedDoc.id && p.mode === P.mode && J(normL(p.lines)) === J(normL(d.lines)) && Math.abs((Number(q.amount) || 0) - Math.abs(P.cumGoods)) < 0.01
+              && !(p.proposalBy && (q.steps || []).some(x => x && x.decidedBy === p.proposalBy))
+              // 🆕 PRICE-FIX verify 2 (SoD): เทียบผู้คีย์ "ข้อเสนอสด" — ส่งกลับแล้วคีย์ใหม่ = คำขออนุมัติเดิมใช้ไม่ได้ · ผู้คีย์สดห้ามเป็นผู้อนุมัติ
+              && (p.proposalBy || '') === (proposalBy || '') && !(proposalBy && (q.steps || []).some(x => x && x.decidedBy === proposalBy))
+              && (p.proposalAt == null || !req || !req.proposal || Number(p.proposalAt) === Number(req.proposal.at)); }, usedDoc.usedApprovalIds);
+        if(g.deny){ alert('⛔ ' + (needAp && !d.approvalReqId ? 'ส่วนต่างราคา (สะสม ' + P.cumGoods.toFixed(2) + ' ฿) ' + ((!req || overProp) && P.isIncrease ? 'เป็นราคาขึ้นที่บัญชีคีย์เอง — ' : 'เกินเกณฑ์ — ') : '') + g.deny); return s; }
+      }
+      const r2 = (v) => Number((Number(v) || 0).toFixed(2));
+      const at = Number(d.at) || 0, atK = at.toString(36), docRef = inv ? inv.invNumber : grs0.map(g => g.grNumber).join(',');
+      const s1 = _ensureCoa5391(s);
+      const sgn = [];   // [code, ยอดฝั่งเดบิต (ลบ = เครดิต), คำอธิบาย]
+      if(P.mode === 'post_pi'){
+        sgn.push(['1300', P.dInv, 'ปรับต้นทุนสินค้าคงเหลือ ' + docRef], ['5391', P.dVar, 'ผลต่างราคาซื้อ (ส่วนที่ใช้/ขายไปแล้ว) ' + docRef],
+          ['1150', P.dVat, 'ปรับภาษีซื้อ ' + docRef + ((inv.supTaxInvNumber || tiNo) ? ' ตามใบกำกับ ' + (inv.supTaxInvNumber || tiNo) : '')], ['2100', -P.dNet, 'ปรับเจ้าหนี้ ' + docRef + ' (ราคา)']);
+      } else if(Math.abs(P.dVar) >= 0.005){
+        sgn.push(['5391', P.dVar, 'ผลต่างราคาซื้อ (ส่วนที่ใช้/ขายไปแล้ว) ' + docRef], ['1300', -P.dVar, 'ปรับต้นทุนสินค้าคงเหลือ ' + docRef]);
+      }
+      const jl = [];
+      for(const [code, v, desc] of sgn){
+        const x = r2(v); if(Math.abs(x) < 0.005) continue;
+        const ln = _accLine(s1, code, x > 0 ? x : 0, x < 0 ? -x : 0, desc);
+        if(!ln){ alert('ไม่พบบัญชี ' + code + ' ในผังบัญชี'); return s; }
+        jl.push(ln);
+      }
+      const tD = r2(jl.reduce((t, l) => t + l.debit, 0)), tC = r2(jl.reduce((t, l) => t + l.credit, 0));
+      if(Math.abs(tD - tC) > 0.009){ alert('⛔ JE ไม่สมดุล (' + tD + ' / ' + tC + ') — ยกเลิก'); return s; }
+      let je = null, seqJe = (s.seq && s.seq.je) || 0;
+      if(jl.length){
+        seqJe += 1;
+        const jd = new Date(jeDate), src = inv ? { source:'inv', sourceId:inv.id, refId:inv.id } : { source:'gr', sourceId:grs0[0].id, refId:grs0[0].id };
+        je = { id:'je_pxadj_' + usedDoc.id + '_' + atK, jeNumber:`JE-${jd.getFullYear()}-${String(jd.getMonth()+1).padStart(2,'0')}-${String(seqJe).padStart(4,'0')}`,
+          date:jeDate, description:'ปรับราคาตามใบกำกับ ' + docRef + ' (' + (P.dGoods > 0 ? '+' : '') + P.dGoods.toFixed(2) + ') — ' + reason,
+          refType:'inv_price_adjust', ...src, sourceRef:docRef, branchId:(inv && inv.branch) || grs0[0].branch || s.currentBranch,
+          lines:jl, totalDebit:tD, totalCredit:tC, status:'posted', createdBy:by, postedBy:by, createdAt:at, postedAt:at,
+          priceAdjust:{ mode:P.mode, dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet, dInventory:P.dInv, dVariance:P.dVar } };
+      }
+      const confirmedLines = P.lines.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, itemId:x.itemId, old:x.oldUnitPrice, new:x.newUnitPrice }));
+      const proposalLines = req && req.proposal ? (req.proposal.lines || []).map(x => ({ grId:x.grId, lineIdx:x.lineIdx, itemId:x.itemId, old:x.oldUnitPrice, new:x.newUnitPrice })) : null;
+      const hist = { at, by, mode:P.mode, reqId:d.reqId || null, approvalReqId:d.approvalReqId || null, direct:!!gmDirect, reason, proposalBy:proposalBy || null,
+        proposalLines, confirmedLines, supTaxInvNumber:tiNo || null, dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet, dInventory:P.dInv, dVariance:P.dVar, jeId:je ? je.id : null, jeNumber:je ? je.jeNumber : null };
+      const closeReq = (doc) => (req && doc === reqDoc) ? { priceFixRequest:{ ...req, status:'done', doneAt:at, doneBy:by,
+        history:[...(req.history || []), { at, by, act:'confirm', note:reason, lines:confirmedLines.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, old:x.old, new:x.new })) }] } } : {};
+      const useAp = (doc) => (d.approvalReqId && doc === usedDoc) ? { usedApprovalIds:[...(doc.usedApprovalIds || []), d.approvalReqId] } : {};
+      const cp = new Map(P.costPlan.map(c => [c.layerId, c]));
+      const fifoLayers = (s1.fifoLayers || []).map(f => {
+        const c = f && cp.get(f.id); if(!c) return f;
+        return { ...f, unitCost:c.to, costHistory:[...(f.costHistory || []), { at, by, from:c.from, to:c.to, remainingAtAdjust:c.remaining, adjRef:usedDoc.id,
+          invNumber:inv ? inv.invNumber : null, jeNumber:je ? je.jeNumber : null, reason }] };
+      });
+      const byGr = new Map();
+      for(const x of P.lines){ if(!byGr.has(x.grId)) byGr.set(x.grId, []); byGr.get(x.grId).push(x); }
+      const grs = (s1.grs || []).map(g => {
+        const mine = g && byGr.get(g.id); if(!mine) return g;
+        const dG = r2(mine.reduce((t, x) => t + x.dAmt, 0)), dI = r2(mine.reduce((t, x) => t + x.dInv, 0));
+        // 🆕 PRICE-FIX verify 2: ส่วนลด PI ค้างจากใบที่ยกเลิกแล้ว — แผนคิดจากมุมมองจริง (ไม่หักส่วนลด) → บรรทัดที่ปรับ ล้าง piDiscAlloc ค้าง
+        const stalePi = E.grEffective(g, s1.invoices) !== g;
+        const lines = (g.lines || []).map((l, idx) => {
+          const x = mine.find(y => y.lineIdx === idx); if(!x) return l;
+          return { ...l, unitPrice:x.newUnitPrice, lineTotal:x.newLineTotal, priceAdjustedFrom:(l.priceAdjustedFrom != null ? l.priceAdjustedFrom : x.oldUnitPrice),
+            ...(stalePi && l.piDiscAlloc ? { piDiscAlloc:0 } : {}),
+            ...(l.grossTotal != null ? { grossTotal:r2(x.newUnitPrice * x.qty) } : {}), ...(l.lineTotalBeforePiDisc != null ? { lineTotalBeforePiDisc:r2((Number(l.lineTotalBeforePiDisc) || 0) + x.dAmt) } : {}) };
+        });
+        return { ...g, lines, ...(g.totalValue != null ? { totalValue:r2((Number(g.totalValue) || 0) + dG) } : {}),
+          ...(g.totalValueBeforePiDisc != null ? { totalValueBeforePiDisc:r2((Number(g.totalValueBeforePiDisc) || 0) + dG) } : {}), priceAdjustedAt:at,
+          priceAdjustHistory:[...(g.priceAdjustHistory || []), { ...hist, dGoods:dG, dInventory:dI, dVariance:r2(dG - dI), invTotals:{ dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet } }],
+          ...closeReq(g), ...useAp(g) };
+      });
+      let invoices = s1.invoices;
+      if(inv){
+        const before = { amount:inv.amount, vat:inv.vat, netPayable:inv.netPayable, vatableBase:inv.vatableBase, exemptBase:inv.exemptBase };
+        const after = { amount:P.newAmount, vat:P.newVat, netPayable:P.newNet, vatableBase:P.newVatableBase, exemptBase:P.newExemptBase };
+        const newInv = { ...inv, ...after, priceAdjustHistory:[...(inv.priceAdjustHistory || []), hist],
+          editHistory:[...(inv.editHistory || []), { id:'eh_px_' + atK, editedBy:by, editedAt:at, kind:'price_adjust', reason, before, after }],
+          revisionHistory:[...(inv.revisionHistory || []), { rev:(inv.revisionHistory || []).length + 1, ts:at, by, wasPaid:false,
+            changes:`ปรับราคาตามใบกำกับ · amount: ${inv.amount} → ${P.newAmount} · vat: ${inv.vat} → ${P.newVat} · netPayable: ${inv.netPayable} → ${P.newNet}` }],
+          editedBy:by, editedAt:at, ...closeReq(inv), ...useAp(inv),
+          ...(tiSet ? { ...tiSet, supTaxInvReceivedAt:at, supTaxInvReceivedBy:by,
+            supTaxInvHistory:[...(inv.supTaxInvHistory || []), { action:'set', number:tiSet.supTaxInvNumber, date:tiSet.supTaxInvDate, claimDate:tiSet.supVatClaimDate, by, ts:at, prev:null, via:'price_adjust' }] } : {}) };
+        invoices = (s1.invoices || []).map(i => i.id === inv.id ? newInv : i);
+      }
+      const al = { id:'al_pxadj_' + usedDoc.id + '_' + atK, ts:at, type:'inv_price_adjust', by, entityId:usedDoc.id, entityRef:docRef, amount:Math.abs(P.dNet),
+        note:`ปรับราคาตามใบกำกับ (${P.mode}) สินค้า ${P.dGoods > 0 ? '+' : ''}${P.dGoods.toFixed(2)} · VAT ${P.dVat.toFixed(2)} · ต้นทุนคงเหลือ ${P.dInv.toFixed(2)} · ผลต่าง 5391 ${P.dVar.toFixed(2)} · ${reason}`
+          + (proposalBy ? ` · จัดซื้อคีย์ ${proposalBy}` : '') + (d.approvedBy && d.approvedBy !== by ? ` · อนุมัติโดย ${d.approvedBy}` : '') };
+      return { ...s1, invoices, grs, fifoLayers, journalEntries:je ? [...(s1.journalEntries || []), je] : s1.journalEntries,
+        seq:je ? { ...(s1.seq || {}), je:seqJe } : s1.seq, auditLog:[...(s1.auditLog || []), al] };
+    }
+
+    // 🆕 PRICE-FIX ขั้น 3 (PRICE_VARIANCE_CONTRACT REFRESH R2.1/R2.2): คำขอแก้ราคา P3 — บัญชีขอ → จัดซื้อคีย์ → บัญชียืนยัน (ADJUST_INV_PRICE reqId)
+    //   อยู่บน GR (ยังไม่ตั้งหนี้) หรือ INV (ตั้งหนี้แล้ว) · data: { target:'gr'|'inv', id, reqId?, reason?, supTaxInvNumber?, attachments?, lines?, note?, by, at }
+    //   ไม่ลง JE ไม่แตะยอดหนี้/ต้นทุน/จำนวน (SoD · P4) · ไม่ต้องอนุมัติ · ทุก guard alert + return s
+    case 'REQUEST_INV_PRICE_FIX':
+    case 'SUBMIT_INV_PRICE_FIX':
+    case 'RETURN_INV_PRICE_FIX':
+    case 'CANCEL_INV_PRICE_FIX': {
+      const d = a.data || {}, E = global.ERP, T = a.type;
+      // 🆕 PRICE-FIX UAT M1 (T12): ปิดสวิตช์แล้ว ยังยกเลิกคำขอที่ค้างได้ (เก็บกวาด) — เปิดคำขอใหม่/ส่ง/ส่งกลับไม่ได้
+      if(T !== 'CANCEL_INV_PRICE_FIX' && !(s.settings && s.settings.priceKeyInEnabled === true)){ alert('⛔ ยังไม่เปิดใช้การปรับราคาตามใบกำกับ (ตั้งค่า → นโยบาย)'); return s; }
+      if(d.target !== 'gr' && d.target !== 'inv'){ alert('⛔ ชนิดเอกสารไม่ถูกต้อง (gr/inv)'); return s; }
+      const arr0 = (d.target === 'gr' ? s.grs : s.invoices) || [];
+      const doc0 = arr0.find(x => x && x.id === d.id);
+      if(!doc0){ alert('⛔ ไม่พบเอกสารนี้'); return s; }
+      const ref = (d.target === 'gr' ? doc0.grNumber : doc0.invNumber) || doc0.id;
+      if(doc0.voided || doc0.status === 'voided' || doc0.paymentStatus === 'voided'){ alert('⛔ ' + ref + ' ยกเลิกแล้ว'); return s; }
+      const by = (s.currentUser && s.currentUser.username) || d.by || '';
+      const actor = _actorOf(s, by);
+      const isAcct = !!actor && (E.isSuperUser(actor) || E.hasPerm(actor, 'accounting', 'invQueue', 'edit'));
+      const isPur = !!actor && (E.isSuperUser(actor) || E.hasPerm(actor, 'purchase', 'po', 'edit'));
+      if(T === 'SUBMIT_INV_PRICE_FIX' ? !isPur : !isAcct){ alert('⛔ ไม่มีสิทธิ์ — ' + (T === 'SUBMIT_INV_PRICE_FIX' ? 'ต้องเป็นฝ่ายจัดซื้อ (แก้ไข PO)' : 'ต้องเป็นฝ่ายบัญชี (คิวตั้งหนี้ แก้ไข)')); return s; }
+      const r0 = doc0.priceFixRequest || null, live = !!r0 && E.PRICE_FIX_LIVE.includes(r0.status);
+      const at = Number(d.at) || 0, hn = r0 && live ? (r0.history || []).length : 0;
+      const atK = (at || hn).toString(36), note = String(d.note || '').trim();
+      let r1 = null, act = '';
+      // 🆕 PRICE-FIX verify 2 (SoD): มีคำขออนุมัติ adjust_inv_price ค้างผูกเอกสารนี้ → ห้ามขอ/ส่งราคา/ส่งกลับ (กันคีย์ใหม่แล้วอนุมัติเองด้วยข้อเสนอเก่า)
+      if(T !== 'CANCEL_INV_PRICE_FIX' && (s.approvalRequests || []).some(q => q && q.action === 'adjust_inv_price' && (q.status || 'pending') === 'pending'
+        && (q.entityId === doc0.id || (q.payload && q.payload.invId === doc0.id) || ((q.payload && q.payload.grIds) || []).includes(doc0.id)
+          || ((q.payload && q.payload.lines) || []).some(l => l && l.grId === doc0.id)))){
+        alert('⛔ มีคำขออนุมัติปรับราคาค้าง — ปฏิเสธ/ยกเลิกคำขออนุมัติก่อน'); return s; }
+      if(T === 'REQUEST_INV_PRICE_FIX'){
+        if(live){ alert('⛔ ' + ref + ' มีคำขอแก้ราคาเปิดอยู่แล้ว (' + (r0.status === 'open' ? 'รอจัดซื้อแก้' : 'รอบัญชียืนยัน') + ')'); return s; }
+        const reason = String(d.reason || '').trim();
+        if(!reason){ alert('ใส่เหตุผลที่ขอให้จัดซื้อแก้ราคา'); return s; }
+        const tiNo = String(d.supTaxInvNumber || '').trim();
+        const grIds = d.target === 'gr' ? [doc0.id] : ((doc0.grIds && doc0.grIds.length) ? doc0.grIds : (doc0.grId ? [doc0.grId] : []));
+        for(const gid of grIds){
+          const g = (s.grs || []).find(x => x && x.id === gid); if(!g) continue;
+          const ls = g.lines || [];
+          if(E.grMigOpening(g) || (ls.length && ls.every(l => E.grLineIsCapex(s, g, l)))){ alert('⛔ ใบรับของ ' + (g.grNumber || gid) + ' เป็นรายการทรัพย์สิน/ยอดยกมา — ใช้ ↩️ ย้อนไปตั้งหนี้ หรือ JE ปรับปรุง'); return s; }
+        }
+        // ด่านระดับเอกสารชุดเดียวกับ ADJUST_INV_PRICE (มัดจำ/จ่ายแล้ว/คำขอจ่ายค้าง/WHT/ส่วนลดท้ายบิล/RTV/ตั้งหนี้แล้ว…) — ขอไปก็ยืนยันไม่ได้
+        const P = E.planInvPriceAdjust(s, d.target === 'gr' ? { mode:'at_gr', grIds, lines:[] } : { mode:'post_pi', invId:doc0.id, lines:[] });
+        const pb = P.blocks.filter(m => m !== 'ไม่มีรายการที่เปลี่ยนราคา');
+        if(pb.length){ alert('⛔ ส่งให้จัดซื้อแก้ราคาไม่ได้ — ' + pb.join('\n• ')); return s; }
+        if(d.target === 'gr' && (s.invoices || []).some(i => i && !i.voided && i.status !== 'voided' && i.paymentStatus !== 'voided'
+          && (i.id === doc0.invoiceId || i.grId === doc0.id || (i.grIds || []).includes(doc0.id)))){ alert('⛔ ' + ref + ' ตั้งหนี้แล้ว — ขอแก้ราคาที่ใบตั้งหนี้แทน'); return s; }
+        let useNo = tiNo;
+        if(d.target === 'inv'){
+          const cur = String(doc0.supTaxInvNumber || '').trim();
+          if(cur && tiNo && E.normTaxInvNo(cur) !== E.normTaxInvNo(tiNo)){ alert('⛔ เลขใบกำกับ ' + tiNo + ' ไม่ใช่ใบเดิมของ ' + ref + ' (' + cur + ') — เอกสารใหม่จากผู้ขาย = ใบเพิ่ม/ลดหนี้ → บันทึก DN/CN'); return s; }
+          if(!cur && !tiNo){ alert('⛔ ใบนี้ยังไม่มีเลขใบกำกับ — ใส่เลขใบกำกับของผู้ขาย'); return s; }
+          if(!cur && (E.findDupTaxInv(s, doc0, { number:tiNo, excludeInvId:doc0.id }).block || []).length){ alert('⛔ เลขใบกำกับ ' + tiNo + ' ของผู้ขายนี้ถูกใช้กับใบอื่นแล้ว'); return s; }
+          useNo = cur || tiNo;
+        } else {
+          if(!tiNo){ alert('⛔ ใส่เลขใบกำกับของผู้ขาย'); return s; }
+          const po = (s.pos || []).find(p => p && p.id === doc0.poId);
+          const probe = { id:'pfr_probe_' + doc0.id, supplierId:doc0.supplierId || (po && po.supplierId) || null, supTaxInvNumber:tiNo, supTaxInvDate:d.supTaxInvDate || '', vat:1 };
+          if((E.findDupTaxInv(s, probe, { number:tiNo }).block || []).length){ alert('⛔ เลขใบกำกับ ' + tiNo + ' ของผู้ขายนี้ถูกใช้กับใบอื่นแล้ว'); return s; }
+        }
+        const att = (Array.isArray(d.attachments) ? d.attachments : []).filter(x => x && x.dataUrl).slice(0, 1).map(x => ({ name:String(x.name || 'ใบกำกับ'), size:Number(x.size) || 0, dataUrl:String(x.dataUrl) }));
+        const hist0 = r0 ? (r0.history || []) : [];
+        r1 = { id:'pfr_' + doc0.id + '_' + (at || hist0.length).toString(36), round:1, status:'open', requestedAt:at, requestedBy:by, reason, supTaxInvNumber:useNo, attachments:att,
+          proposal:null, history:[{ at, by, act:'request', note:reason }] };
+        act = 'request';
+      } else {
+        if(!r0 || (d.reqId && r0.id !== d.reqId)){ alert('⛔ ไม่พบคำขอแก้ราคานี้ (อาจถูกยกเลิก/เปิดใหม่ไปแล้ว)'); return s; }
+        if(T === 'SUBMIT_INV_PRICE_FIX'){
+          if(r0.status !== 'open'){ alert('⛔ คำขอนี้ไม่ได้รอจัดซื้อแก้ราคา (สถานะ ' + r0.status + ')'); return s; }
+          const grIds = d.target === 'gr' ? [doc0.id] : ((doc0.grIds && doc0.grIds.length) ? doc0.grIds : (doc0.grId ? [doc0.grId] : []));
+          const ls = Array.isArray(d.lines) ? d.lines : [], seen = new Set(), out = [];
+          const blockPct = E.priceKeyInSetting(s, 'priceKeyInBlockPct');
+          for(const w of ls){
+            const g = grIds.includes(w && w.grId) ? (s.grs || []).find(x => x && x.id === w.grId) : null;
+            const idx = Number(w && w.lineIdx), l = g && Number.isInteger(idx) ? (g.lines || [])[idx] : null;
+            if(!l){ alert('⛔ บรรทัดที่ส่งมาไม่อยู่ในใบรับของของคำขอนี้'); return s; }
+            const k = g.id + ':' + idx; if(seen.has(k)){ alert('⛔ บรรทัดซ้ำ'); return s; } seen.add(k);
+            const it = (s.items || []).find(x => x && x.id === l.itemId), nm = (it && it.name) || l.itemId || '';
+            const nu = Number(w.newUnitPrice), ou = Number(l.unitPrice) || 0, first = l.priceAdjustedFrom != null ? Number(l.priceAdjustedFrom) || 0 : ou;
+            if(!(isFinite(nu) && nu > 0)){ alert('⛔ ราคาใหม่ของ ' + nm + ' ต้องมากกว่า 0'); return s; }
+            if(first > 0 && Math.abs(nu - first) / first * 100 > blockPct + 1e-9){ alert('⛔ ' + nm + ': ราคาใหม่ต่างจากราคาเดิมเกิน ' + blockPct + '% — น่าจะคีย์ผิดหน่วย'); return s; }
+            if(Math.abs(nu - ou) < 1e-9) continue;   // ราคาเท่าเดิม = ไม่ส่ง
+            out.push({ grId:g.id, lineIdx:idx, itemId:l.itemId || null, oldUnitPrice:ou, newUnitPrice:nu });   // P4: ไม่มีจำนวน
+          }
+          if(!out.length){ alert('⛔ ยังไม่มีบรรทัดที่เปลี่ยนราคา'); return s; }
+          r1 = { ...r0, status:'submitted', proposal:{ lines:out, note, at, by },
+            history:[...(r0.history || []), { at, by, act:'submit', note, round:r0.round || 1, lines:out.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, old:x.oldUnitPrice, new:x.newUnitPrice })) }] };
+          act = 'submit';
+        } else if(T === 'RETURN_INV_PRICE_FIX'){
+          if(r0.status !== 'submitted'){ alert('⛔ คำขอนี้ไม่ได้รอบัญชียืนยัน (สถานะ ' + r0.status + ')'); return s; }
+          if(!note){ alert('ใส่เหตุผลที่ส่งกลับให้จัดซื้อแก้อีกรอบ'); return s; }
+          r1 = { ...r0, status:'open', round:(Number(r0.round) || 1) + 1, history:[...(r0.history || []), { at, by, act:'return', note, round:r0.round || 1 }] };
+          act = 'return';
+        } else {
+          if(!live){ alert('⛔ คำขอนี้ปิดไปแล้ว (สถานะ ' + r0.status + ')'); return s; }
+          r1 = { ...r0, status:'cancelled', cancelledAt:at, cancelledBy:by, history:[...(r0.history || []), { at, by, act:'cancel', note, round:r0.round || 1 }] };
+          act = 'cancel';
+        }
+      }
+      const doc1 = { ...doc0, priceFixRequest:r1 };
+      const al = { id:'al_pf_' + act + '_' + doc0.id + '_' + atK + '_' + (r1.history || []).length, ts:at, type:'inv_price_fix_' + act, action:'inv_price_fix_' + act, by,
+        entityType:d.target, entityId:doc0.id, entityRef:ref, reqId:r1.id, round:r1.round,
+        note:({ request:'ส่งให้จัดซื้อแก้ราคา', submit:'จัดซื้อส่งราคาที่แก้ให้บัญชี', return:'ส่งกลับให้จัดซื้อแก้อีกรอบ', cancel:'ยกเลิกคำขอแก้ราคา' })[act] + ' ' + ref
+          + (act === 'submit' ? ' (' + r1.proposal.lines.length + ' บรรทัด · รอบที่ ' + (r1.round || 1) + ')' : '')
+          + (act === 'request' ? ' — ' + r1.reason : note ? ' — ' + note : '') };
+      const arr1 = arr0.map(x => x === doc0 ? doc1 : x), al1 = [...(s.auditLog || []), al];
+      return d.target === 'gr' ? { ...s, grs:arr1, auditLog:al1 } : { ...s, invoices:arr1, auditLog:al1 };
+    }
+
     case 'UPDATE_WHT_CERT_INFO': {
       const { invId, certIdx, fields, by, reason } = a.data;
       const inv = (s.invoices||[]).find(i => i.id === invId);
@@ -22737,7 +23336,7 @@ function reducer(s, a){
       // 🆕 กันจ่ายเต็มทั้งที่คืนของไปแล้วแต่จัดซื้อยังไม่ตัดสินใจ (ระบบจ่ายตามที่รับจริง)
       //   🆕 PV-GROUP: คำขอรวมหลาย PI (invoiceIds[]) → ตรวจทุกใบ
       for(const _iid of (a.data.invId ? [a.data.invId] : (a.data.invoiceIds || [a.data.invoiceId]))){
-        const _b = _iid ? _blockIfPendingRtv(s, _iid) : null;
+        const _b = _iid ? (_blockIfPendingRtv(s, _iid) || _blockIfPriceFix(s, _iid)) : null;   // 🆕 PRICE-FIX ขั้น 3
         if(_b) return _b;
         // 🆕 นำเข้า2569 UAT SF3: เจ้าหนี้ยกมาที่ไม่มีผู้ขายในระบบ (ชื่อจาก Ecount) → ห้ามจ่ายตามชื่อพิมพ์เอง (ข้ามด่านบัญชีธนาคารผู้ขาย)
         const _mi = _iid ? (s.invoices||[]).find(i => i.id === _iid) : null;
@@ -22835,7 +23434,7 @@ function reducer(s, a){
         const _prev = (s.payments||[]).find(x => x.id === _ud.id);
         if(!_prev || _prev.approvalStatus !== 'approved'){   // เพิ่งเปลี่ยนเป็นอนุมัติ
           for(const _iid of (_ud.invId ? [_ud.invId] : (_ud.invoiceIds || [_ud.invoiceId]))){   // 🆕 PV-GROUP: ทุกใบในคำขอรวม
-            const _b = _iid ? _blockIfPendingRtv(s, _iid) : null;
+            const _b = _iid ? (_blockIfPendingRtv(s, _iid) || _blockIfPriceFix(s, _iid)) : null;   // 🆕 PRICE-FIX ขั้น 3
             if(_b) return _b;
           }
           // 🆕 ACCT-V2 UAT (บัญชี): วันจ่ายจริงต้องไม่อยู่ในงวดที่ปิดแล้ว/อนาคตเกินกำหนด (backstop — modal เช็คก่อนแล้ว)
@@ -23002,6 +23601,8 @@ function reducer(s, a){
       if(!inv) return s;
       if(inv.voided) { alert('INV นี้ยกเลิกไปแล้ว'); return s; }
       if(_invWhtMergedInto(inv)){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบรวมอยู่ใน 50 ทวิ ของ PV
+      // 🆕 PRICE-FIX ขั้น 2 (R2.2): ใบที่ปรับราคาหลังตั้งหนี้แล้ว — การกลับ JE จะไม่คืนต้นทุนล็อต/ราคา GR (GL 1300 ≠ FIFO ถาวร) → ใช้ DN/CN
+      if((inv.priceAdjustHistory || []).some(h => h && h.mode === 'post_pi')){ alert('⛔ ใบนี้ปรับราคาแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN)'); return s; }
       // 🆕 MIG_AP_NORMAL N1 (แทน UAT MF2 เดิมที่ห้ามทุกใบ): ใบนำเข้า Ecount ที่ "ยังไม่จ่าย" ย้อนไปตั้งหนี้ได้เหมือนใบปกติ (ด่านเดิมทุกด่านด้านล่าง)
       //   ใบนำเข้าที่จ่ายแล้ว/จ่ายบางส่วน (ใน Ecount) หรือมี PV/คำขอจ่ายในระบบนี้ = เหมือนใบจ่ายแล้ว → ยกเลิกไม่ได้
       const _migV = _invIsMigrated(inv);
@@ -24466,6 +25067,8 @@ function reducer(s, a){
       const _cp = _invCreatePrep(s, { ...((a.data && a.data.inv) || {}), ...(a.data && a.data.today ? { today: a.data.today } : {}) });
       if(_cp.deny){ alert('⛔ ตั้งหนี้ไม่ได้ — ' + _cp.deny); return s; }
       const inv = _cp.inv, { grIds } = a.data;
+      { const _rv = _grPriceRevDeny(s, grIds, a.data.grPriceRev); if(_rv){ alert('⛔ ตั้งหนี้ไม่ได้ — ' + _rv); return s; } }   // 🆕 PRICE-FIX ขั้น 2
+      { const _od = global.ERP.invOverrideDeny(s, a.data.inv, grIds); if(_od){ alert('⛔ ตั้งหนี้ไม่ได้ — ' + _od); return s; } }   // 🆕 PRICE-FIX ขั้น 4
       // UAT คลื่น 2 🔴: GR ใบไหนมี PI (ที่ยังไม่ยกเลิก) อยู่แล้ว → ห้ามตั้งหนี้ซ้ำ (เดิมเขียนทับ grs[].invoiceId เงียบ = PI 2 ใบ/จ่ายซ้ำ)
       { const _ids = new Set(grIds || []);
         const _live = (id) => id && id !== (inv && inv.id) && (s.invoices||[]).some(i => i && i.id === id && !i.voided && i.status !== 'voided' && i.paymentStatus !== 'voided');
@@ -24478,7 +25081,8 @@ function reducer(s, a){
         const _poIds = Array.from(new Set((s.grs||[]).filter(g => (grIds||[]).includes(g.id)).map(g => g.poId).filter(Boolean)));
         if(_poIds.length){
           const _recvVal = (s.pos||[]).filter(p => _poIds.includes(p.id))
-            .reduce((sum,p) => sum + (p.lines||[]).reduce((s2,pl) => s2 + (Number(pl.receivedQty)||0)*(Number(pl.unitPrice)||0), 0), 0);
+            .reduce((sum,p) => sum + (p.lines||[]).reduce((s2,pl) => s2 + (Number(pl.receivedQty)||0)*(Number(pl.unitPrice)||0), 0), 0)
+            + _grPriceAdjSum(s, g => _poIds.includes(g.poId));   // 🆕 PRICE-FIX: + ส่วนต่างราคาที่ปรับแล้ว
           const _priorVal = (s.invoices||[]).filter(i => i.id !== inv.id && !i.voided && i.status !== 'voided' && i.paymentStatus !== 'voided' && i.type !== 'deposit_pi'
             && (_poIds.includes(i.poId) || (grIds||[]).includes(i.grId) || (i.grIds||[]).some(gid => (grIds||[]).includes(gid))))
             .reduce((sum,i) => sum + (Number(i.amount)||0), 0);
@@ -28957,6 +29561,12 @@ const ACTION_MERGE = Object.freeze({
   ADJUST_BANK_BALANCE: { kind:'delta' },
   ADJUST_BRANCH_STOCK: { kind:'delta' },
   ADJUST_INV_VAT: { kind:'delta' },
+  // 🆕 PRICE-FIX ขั้น 3 (R2.9): คำขอแก้ราคา P3 — เอกสารใบเดียว (GR หรือ INV ตาม target) · ชนเฉพาะช่องที่ตัดสินผล (union คงที่ ช่องที่ไม่มีข้ามเอง)
+  REQUEST_INV_PRICE_FIX: { kind:'replace', coll: d => (d && d.target === 'gr') ? 'grs' : 'invoices', id: d => d && d.id, cmpOnly:['priceFixRequest','invoiceId','paidAmount','paymentStatus','voided'] },
+  SUBMIT_INV_PRICE_FIX: { kind:'replace', coll: d => (d && d.target === 'gr') ? 'grs' : 'invoices', id: d => d && d.id, cmpOnly:['priceFixRequest','invoiceId','paidAmount','paymentStatus','voided'] },
+  RETURN_INV_PRICE_FIX: { kind:'replace', coll: d => (d && d.target === 'gr') ? 'grs' : 'invoices', id: d => d && d.id, cmpOnly:['priceFixRequest','invoiceId','paidAmount','paymentStatus','voided'] },
+  CANCEL_INV_PRICE_FIX: { kind:'replace', coll: d => (d && d.target === 'gr') ? 'grs' : 'invoices', id: d => d && d.id, cmpOnly:['priceFixRequest','invoiceId','paidAmount','paymentStatus','voided'] },
+  ADJUST_INV_PRICE: { kind:'delta' },   // 🆕 PRICE-FIX ขั้น 2: reducer ตรวจ guard ใหม่บน state สด (ΔInv/ΔVar คิดจาก remaining สด)
   ADJUST_INV_WHT: { kind:'replace', coll:'invoices', id: d => d && d.invId, cmpOmit:['prints'] },   // PRINT-MARK UAT M1: พิมพ์จากเครื่องอื่นไม่ทำให้ชน
   ADJUST_INV_PARTY_BRANCH: { kind:'replace', coll:'invoices', id: d => d && d.invId, cmpOmit:['prints'] },   // UAT S4 · PRINT-MARK UAT M1
   ADJUST_STOCK: { kind:'delta' },
@@ -29196,7 +29806,8 @@ const ACTION_READS = Object.freeze({
   ADD_COMBINED_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','suppliers'],   // VAT-DEFER verify: + approvalRequests
   UPDATE_INV: ['auditLog','invoices'],
   PATCH_INV: ['invoices'],
-  ADD_PAY: ['invoices','payTags','payments','returns'],   // UAT M1 (PAY-TAGS): tagId ไม่อยู่ในทะเบียน → โยงด้วยชื่อ (อ่าน payTags)
+  ADD_PAY: ['approvalRequests','invoices','payTags','payments','returns'],   // 🆕 PRICE-FIX UAT S3: คำขออนุมัติ adjust_inv_price ค้าง = ห้ามขอจ่าย
+  // UAT M1 (PAY-TAGS): tagId ไม่อยู่ในทะเบียน → โยงด้วยชื่อ (อ่าน payTags)
   // ADD_PAY · DEPOSIT-VAT review R8: จ่าย DP ทาง ADD_PAY ถูกปฏิเสธเสมอ → ไม่อ่าน/เขียน deposits แล้ว (เปิดมัดจำที่ UPDATE_PAY)
   ADD_PAY_TAG: ['auditLog','payTags'],   // 🆕 PAY-TAGS T1: กันชื่อซ้ำ (อ่านทั้งทะเบียน) — ชื่อซ้ำ = ไม่เขียน จึงต้องตรวจหมวดนี้เสมอ
   SET_PAY_TAG: ['auditLog','payTags','payments'],   // 🆕 PAY-TAGS T3: payTags = ตรวจว่าแท็กยังอยู่ + snapshot ชื่อ
@@ -29279,6 +29890,9 @@ const ACTION_READS = Object.freeze({
   CLEAR_ASSET_STOCK: ['auditLog','fifoLayers','grs','items','movements'],   // 💎 FA-S3: อ่าน/เขียนหมวดเหล่านี้ + settings/users (หมวดคุม)
   ADD_JE: ['auditLog','invoices','journalEntries'],   // DEPOSIT-VAT E-5 R5: JE ของใบตั้งหนี้ต้องมีใบจริง
   ADJUST_INV_VAT: ['auditLog','grs','invoices','journalEntries','payments','pos','returns'],
+  REQUEST_INV_PRICE_FIX: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'], SUBMIT_INV_PRICE_FIX: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 PRICE-FIX ขั้น 3 (R2.9) · case ร่วม → หมวดชุดเดียว (ด่านเอกสารผ่าน planInvPriceAdjust: pos/returns/items · findDupTaxInv: suppliers/filedTaxInvKeys)
+  RETURN_INV_PRICE_FIX: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'], CANCEL_INV_PRICE_FIX: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'],
+  ADJUST_INV_PRICE: ['approvalRequests','auditLog','fifoLayers','filedTaxInvKeys','grs','invoices','items','journalEntries','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 PRICE-FIX ขั้น 2 (approvalRequests = ทางอนุมัติ · filedTaxInvKeys/suppliers = findDupTaxInv ตอนใบยังไม่มีเลข)
   SET_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],     // 🆕 DEPOSIT-VAT E-5 R1/R2 (งวดล็อกอยู่ใน settings = หมวดคุม)
   ADD_TAX_INV_ENTRY: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],   // 🆕 MULTI-TAXINV: แถวเดียวกับ SET_TAX_INV
   CLEAR_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],   // 🆕 TAXINV-ANYWHERE R3: + journalEntries (vatExpireJeLive)
@@ -29293,6 +29907,7 @@ const ACTION_READS = Object.freeze({
   MIG_AP_CLOSE: ['approvalRequests','auditLog','invoices','journalEntries','payments'],   // 🆕 MIG_AP_CLOSE C3: ด่านคำขอจ่าย/คำขอแก้ใบค้าง · JE ต่อท้าย (settings/users/chartOfAccounts = หมวดคุม)
   MIG_AP_CLOSE_UNDO: ['approvalRequests','auditLog','invoices','journalEntries','payments'],   // ตัวตรวจร่วมกับ MIG_AP_CLOSE
   MARK_DOC_PRINTED: ['invoices','payments'],   // 🆕 PRINT-MARK K1: เขียน prints บน PV/PI เท่านั้น
+  UPDATE_FIFO_LAYER: ['auditLog','fifoLayers'],   // 🆕 PRICE-FIX ขั้น 1: whitelist lot/expiryDate/locId + grLot + ต่อท้าย audit fifo_layer_edit
   UNMARK_DOC_PRINTED: ['auditLog','invoices','payments'],   // 🆕 PRINT-MARK UAT M2: ล้าง prints + ต่อท้าย audit
   WHT_MERGE_PV: ['approvalRequests','auditLog','invoices','payments','suppliers'],   // 🆕 WHT-MERGE M2: คำขอแก้ใบค้าง (pendingInvChangeReq) · ผู้ถูกหักจากทะเบียน (whtPayee)
   WHT_UNMERGE_PV: ['auditLog','invoices','payments'],
@@ -29332,8 +29947,10 @@ const APPEND_ONLY_READS = Object.freeze({
   UPDATE_PAY: ['auditLog'],   // B18: GM อนุมัติจ่ายของตัวเองทางคิวปกติ → ต่อท้าย gm_self_approved อย่างเดียว
   ADD_PAY_TAG: ['auditLog'],   // 🆕 PAY-TAGS T1: ต่อท้าย audit pay_tag_add อย่างเดียว
   SET_PAY_TAG: ['auditLog'],   // 🆕 PAY-TAGS T3: ต่อท้าย audit pay_tag_set อย่างเดียว
+  UPDATE_FIFO_LAYER: ['auditLog'],   // 🆕 PRICE-FIX ขั้น 1: ต่อท้าย fifo_layer_edit อย่างเดียว (id ตายตัว al_fle_<layer>_<at>)
   UNMARK_DOC_PRINTED: ['auditLog'],   // 🆕 PRINT-MARK UAT M2: ต่อท้าย audit doc_print_unmark อย่างเดียว
   SET_DOC_TAG: ['auditLog'],   // 🆕 DOC-TAGS D5: ต่อท้าย audit doc_tag_set อย่างเดียว
+  REQUEST_INV_PRICE_FIX: ['auditLog'], SUBMIT_INV_PRICE_FIX: ['auditLog'], RETURN_INV_PRICE_FIX: ['auditLog'], CANCEL_INV_PRICE_FIX: ['auditLog'],   // 🆕 PRICE-FIX ขั้น 3: ต่อท้าย inv_price_fix_* อย่างเดียว (id ตายตัวจาก at/รอบ)
   UPDATE_PO_SOFT: ['auditLog'],
   CONFIRM_PO_SERVICE: ['auditLog'], VOID_PO_SERVICE_CONFIRM: ['auditLog'], CLOSE_PO_SERVICE_LINE: ['auditLog'],   // 🔧 EXPENSE_PO B4.4
   UPDATE_PO_PAYMODE: ['auditLog'],   // 🆕 PO-PAYMODE: ต่อท้าย po_paymode_change อย่างเดียว (id ตายตัว al_pomode_<reqId>)
@@ -29412,6 +30029,7 @@ Object.assign(global.ERP, {
   nextDayDocNo: _dayDocNo,   // 🆕 เลข TO/GR ที่ SHIP_TR/ADD_HANDOVER_TO/RECEIVE_INTRA_TO จะออก (หน้าจอใช้บอกผู้ใช้)
   saveState, loadState, migrateState,
   ensureLocStock,
+  ensureCoa5391: _ensureCoa5391,   // 🆕 PRICE-FIX ขั้น 1 (ใช้ใน ADJUST_INV_PRICE ขั้น 2 · เทสต์)
   MIGRATION_WIPE_KEYS: WIPE_KEYS, MIGRATION_WIPE_KEEP: WIPE_KEEP, MIGRATION_WIPE_CONFIRM: WIPE_CONFIRM_TEXT,   // 🧹 M1
   migrationWipeSig: _wipeSig, migrationWipeSigDiff: _wipeSigDiff, migrationWipeActorOk: _wipeActorOk,
 });
@@ -31104,7 +31722,7 @@ function MainShell(){
     // เฉพาะผู้ดูแลระบบ (gm/admin) — ไม่งั้น user ทั่วไปข้ามทุก gate ฝั่ง UI ได้จาก console
     if(!state.currentUser || !global.ERP.isSuperUser(state.currentUser)){ global.ERP.__dispatch = null; return; }
     // 🆕 DEPOSIT-VAT verify: + ADD_INV/ADD_COMBINED_INV — ข้อยกเว้นใบกำกับซ้ำ (splitGroup/createdAt) เชื่อ payload → สร้าง PI ผ่านหน้าจอเท่านั้น
-    const BLOCKED = ['IMPORT_STATE','RESET_STATE','CLEAR_TRANSACTIONS','ADD_INV','ADD_COMBINED_INV','MERGE_IMPORT','MIGRATION_WIPE'];   // 🧹 M1: ล้างข้อมูลต้องผ่านหน้าตั้งค่า (สำรอง + พิมพ์ยืนยัน)   // 🆕 VAT-CLAIM V3b: นำเข้าบางส่วนต้องผ่านเมนูนำเข้า (snapshot + ยืนยัน)
+    const BLOCKED = ['IMPORT_STATE','RESET_STATE','CLEAR_TRANSACTIONS','ADD_INV','ADD_COMBINED_INV','MERGE_IMPORT','MIGRATION_WIPE','UPDATE_FIFO_LAYER','SPLIT_FIFO_LAYER'];   // 🆕 PRICE-FIX ขั้น 1: ล็อต/ต้นทุน FIFO แก้ผ่านหน้าคลังเท่านั้น   // 🧹 M1: ล้างข้อมูลต้องผ่านหน้าตั้งค่า (สำรอง + พิมพ์ยืนยัน)   // 🆕 VAT-CLAIM V3b: นำเข้าบางส่วนต้องผ่านเมนูนำเข้า (snapshot + ยืนยัน)
     global.ERP.__dispatch = (action) => {
       const t = (action && action.type) || '';
       if(BLOCKED.includes(t) || t.indexOf('DELETE_') === 0){
@@ -32054,6 +32672,7 @@ function _selfPermOk(req, state, user){
 global.ERP.selfPermOk = _selfPermOk;
 // UAT S2: audit self_approved_perm ของคำขอเขียนใน reducer UPDATE_APPROVAL_REQUEST แล้ว (atomic) — ไม่ dispatch ADD_AUDIT_LOG แยกจากเครื่อง
 function _execGated(req, state, dispatch, user, act, what){
+  if(global.ERP.approvalIsProposer && global.ERP.approvalIsProposer(req, user)){ executeApprovedAction.lastDeny = 'ผู้คีย์ราคา (จัดซื้อ) อนุมัติราคาที่ตัวเองคีย์ไม่ได้'; alert('⛔ ' + executeApprovedAction.lastDeny); return false; }   // 🆕 PRICE-FIX ขั้น 3 (R2.6): proposalBy = ผู้ขอ
   if(req.requestedBy === user.username && !_gmSelfOk(req, state, user) && !_selfPermOk(req, state, user)){ executeApprovedAction.lastDeny = 'ผู้ขออนุมัติคำขอของตัวเองไม่ได้' + global.ERP.selfApproveDenyTail(req, state); alert('⛔ ' + executeApprovedAction.lastDeny); return false; }   // UAT S1/M1: สต๊อก = บอกให้หาอีกคน · ติดเพดาน PO = บอกเพดาน
   const now = Date.now();
   const _apReq = { ...req, steps:(req.steps || []).map(s => s.decision == null ? { ...s, decision:'approved', decidedBy:user.username, decidedByName:user.name || user.username, decidedAt:now } : s) };
@@ -32134,6 +32753,10 @@ function executeApprovedAction(req, state, dispatch, user){
     }
     // 🆕 PO Edit Tier 3α — Post-GR Edit (with variance JE)
     case 'edit_po_post_gr': {
+      // 🆕 PRICE-FIX ขั้น 1: ปิดถาวร (PO_POSTGR_EDIT_ENABLED=false) — คำขอเก่าที่ค้าง pending อนุมัติแล้วต้องไม่ลง · reducer ก็ปฏิเสธอีกชั้น
+      executeApprovedAction.lastDeny = 'ปิดการแก้ PO หลังรับของแล้ว — ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา จากหน้าเจ้าหนี้';
+      alert('⛔ ' + executeApprovedAction.lastDeny);
+      if(executeApprovedAction.lastDeny) return false;
       dispatch({ type:'UPDATE_PO_POST_GR', data:{
         id: req.entityId, newLines: p.newLines, varianceAmount: p.varianceAmount,
         varianceJe: p.varianceJe, reason: p.reason||req.reason||'', by: user.username }});
@@ -32327,6 +32950,16 @@ function executeApprovedAction(req, state, dispatch, user){
       dispatch(_act);
       break;
     }
+    // 🆕 PRICE-FIX ขั้น 2 (R2.6): ปรับราคาตามใบกำกับหลังอนุมัติ — ผู้ทำ = ผู้ขอ (บัญชี) · ผู้อนุมัติแยกเก็บ · JE ลงวันอนุมัติ (getToday ตอน execute)
+    //   _execGated = บันทึกขั้นอนุมัติ + dry-run reducer ก่อน (ใบเปลี่ยนระหว่างรอ/ด่านใด ๆ ไม่ผ่าน → คำขอเป็น blocked พร้อมเหตุผล)
+    case 'adjust_inv_price': {
+      if(!(p.invId || (p.grIds && p.grIds.length))){ executeApprovedAction.lastDeny = 'คำขอปรับราคาไม่ครบ'; alert('⛔ ' + executeApprovedAction.lastDeny); return false; }
+      if(p.proposalBy && p.proposalBy === user.username){ executeApprovedAction.lastDeny = 'ผู้คีย์ราคา (จัดซื้อ) อนุมัติราคาที่ตัวเองคีย์ไม่ได้'; alert('⛔ ' + executeApprovedAction.lastDeny); return false; }
+      const _pd = { mode:p.mode, invId:p.invId, grIds:p.grIds, lines:p.lines, prevAmount:p.prevAmount, prevVat:p.prevVat, expect:p.expect, reqId:p.reqId, reason:p.reason || req.reason || '',
+        supTaxInvNumber:p.supTaxInvNumber, by:req.requestedBy || user.username, approvedBy:user.username, approvalReqId:req.id, date:global.ERP.getToday(), at:Date.now() };
+      if(!_execGated(req, state, dispatch, user, { type:'ADJUST_INV_PRICE', data:_pd }, 'ปรับราคาตามใบกำกับ')) return false;
+      break;
+    }
     // 🆕 VAT-CLAIM V4 (B4.4 · §D OQ2): ปลดล็อกงวด ภ.พ.30 — ผจก.บัญชีขอ → GM/เจ้าของอนุมัติ (คนละคน) · reducer UNLOCK_VAT_PERIOD ตรวจคำขอใน state
     //   คำขอใน state ยังไม่มี step อนุมัติตอน executor ทำงาน → บันทึก step อนุมัติ (ผู้อนุมัติ = คนกด) ก่อน แล้ว dry-run → dispatch UNLOCK
     case 'vat_unlock': {
@@ -32460,6 +33093,8 @@ function executeApprovedAction(req, state, dispatch, user){
           alert('⛔ จ่ายไม่ได้ — บิล ' + (iv.invNumber||'') + ' มีของคืน (RTV) ที่ยังไม่ปิดเคส ' + _pr.length + ' ใบ\nให้จัดซื้อปิดเคสของคืนก่อน');
           return false;
         }
+        // 🆕 PRICE-FIX ขั้น 3 (R1 แถว 11): ชั้นที่ 2 — คำขอแก้ราคาเปิดอยู่ (reducer UPDATE_PAY บล็อกอีกชั้น)
+        if(global.ERP.priceFixOpenForInv && global.ERP.priceFixOpenForInv(state, iv.id)){ executeApprovedAction.lastDeny = 'บิล ' + (iv.invNumber||'') + ' รอแก้ราคา — ยืนยันหรือยกเลิกคำขอก่อน'; alert('⛔ จ่ายไม่ได้ — ' + executeApprovedAction.lastDeny); return false; }
         // 🆕 VAT-FIX: มีคำขอปรับ VAT/แก้ไขใบค้างอยู่ → ยอดจะเปลี่ยน ห้ามจ่ายทับ
         const _pc = global.ERP.pendingInvChangeReq && global.ERP.pendingInvChangeReq(state, iv.id);
         if(_pc){ alert('⛔ จ่ายไม่ได้ — บิล ' + (iv.invNumber||'') + ' มีคำขอ' + (_pc.action === 'adjust_inv_vat' ? 'ปรับ VAT' : 'แก้ไข') + 'ค้างอยู่ (ขอโดย ' + (_pc.requestedBy||'-') + ')\nรอผลอนุมัติคำขอนั้นก่อน แล้วขอจ่ายใหม่'); return false; }
@@ -36358,6 +36993,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         lot: resolvedLots[idx],
         expiryDate: l.expiryDate || '',
         grRef: grNumber, sourcePO: poLive.poNumber,
+        grLineIdx: idx,   // 🆕 PRICE-FIX: ผูกล็อตกับบรรทัดใบรับ (gr.lines ใช้ index เดียวกับ receiving)
         isFreebie: !!l.isFreebie,  // 🆕 mark layer as freebie
         allocatedCost: allocCost !== null,  // 🆕 DC-3: flag ว่า cost ถูก allocate
       };
@@ -38162,7 +38798,8 @@ function EditLotModal({ layer, state, dispatch, onClose }){
   const saveEdit = () => {
     dispatch({ type:'UPDATE_FIFO_LAYER', data:{
       id: layer.id,
-      patch: { lot: lot || null, expiryDate: expiryDate || null }
+      patch: { lot: lot || null, expiryDate: expiryDate || null },
+      at: new Date().toISOString(),   // 🆕 PRICE-FIX: เวลา audit มากับ payload (reducer deterministic)
     }});
     onClose();
   };
@@ -68860,6 +69497,406 @@ function VatAdjustBanner({ info }){
     info.invNumbers.length > 0 && h('span', { className:'text-gray-600' }, ' · ', info.invNumbers.join(', ')),
     h('div', { className:'text-[11px] text-amber-800 mt-0.5' }, '💡 ครั้งหน้าระบบจะตั้งอัตรานี้ให้อัตโนมัติเมื่อสั่งรายการเดิมจาก supplier รายนี้'));
 }
+// ==================== 🆕 PRICE-FIX ขั้น 3 (PRICE_VARIANCE_CONTRACT REFRESH R2.7 หน้าจัดซื้อ) ====================
+// บัญชีส่งให้จัดซื้อแก้ราคา (คำขอบน GR/INV) → จัดซื้อคีย์ราคาใหม่/หน่วย (จำนวนล็อก) → 📤 ส่งกลับบัญชี (SUBMIT_INV_PRICE_FIX)
+//   ไม่ลงบัญชี/ไม่แตะยอด — บัญชียืนยันเองที่หน้าเจ้าหนี้ · รายการมาจาก ERP.priceFixList (ตัวเดียวกับงานค้าง → นับตรงกัน)
+const PF_STATUS = { open:['⏳ รอจัดซื้อแก้ราคา', 'bg-orange-100 text-orange-800'], submitted:['🔍 รอบัญชียืนยันราคา', 'bg-blue-100 text-blue-800'],
+  done:['✅ ยืนยันแล้ว', 'bg-green-100 text-green-700'], cancelled:['✖ ยกเลิก', 'bg-gray-100 text-gray-600'] };
+function _pfGrIdsOf(x){ return x.target === 'gr' ? [x.doc.id] : ((x.doc.grIds && x.doc.grIds.length) ? x.doc.grIds : (x.doc.grId ? [x.doc.grId] : [])); }
+// คำขอที่เปิดอยู่ (open/submitted) ที่เกี่ยวกับ PO หรือ GR นี้
+function priceFixForDocs(state, { poId, grId }){
+  const grs = state.grs || [];
+  return (global.ERP.priceFixList ? global.ERP.priceFixList(state) : []).filter(x => {
+    const gids = _pfGrIdsOf(x);
+    if(grId) return gids.includes(grId);
+    return x.doc.poId === poId || gids.some(id => { const g = grs.find(y => y && y.id === id); return g && g.poId === poId; });
+  });
+}
+function _pfAgeDays(r){ const t = Number(r && (r.history || []).slice(-1)[0] && (r.history || []).slice(-1)[0].at) || Number(r && r.requestedAt) || 0; return t ? Math.floor((Date.now() - t) / 864e5) : 0; }
+// แบนเนอร์ส้มบน PO/GR (ทรงเดียวกับ 🔧 บัญชีส่งกลับ PO ให้แก้)
+function PriceFixBanner({ state, dispatch, user, poId, grId }){
+  const list = priceFixForDocs(state, { poId, grId });
+  const [keyFor, setKeyFor] = useState(null);
+  if(!list.length) return null;
+  return h('div', { className:'bg-orange-50 border-2 border-orange-300 rounded p-3', 'data-testid':'pricefix-banner' },
+    h('div', { className:'font-bold text-orange-900 mb-1' }, '💰 บัญชีขอให้แก้ราคาตามใบกำกับ'),
+    list.map(x => h('div', { key:x.target + x.id, className:'text-xs text-orange-800 flex items-center gap-2 flex-wrap py-0.5' },
+      h('span', { className:cls('px-2 py-0.5 rounded', (PF_STATUS[x.req.status] || [])[1]) }, (PF_STATUS[x.req.status] || [x.req.status])[0]),
+      h('b', null, x.ref), ' · รอบที่ ', x.req.round || 1, ' · ขอโดย ', h('b', null, x.req.requestedBy || '-'),
+      x.req.supTaxInvNumber && h('span', null, ' · ใบกำกับ ', x.req.supTaxInvNumber),
+      h('span', null, ' · 💬 ', x.req.reason || ''),
+      x.req.status === 'open' && h(Button, { size:'sm', variant:'warning', onClick:() => setKeyFor(x) }, '💰 คีย์ราคาใหม่'))),
+    h('div', { className:'text-xs mt-2 bg-white rounded p-2 text-orange-700' },
+      '💡 จัดซื้อคีย์ราคาต่อหน่วยตามใบกำกับ (จำนวนแก้ไม่ได้) → 📤 ส่งกลับบัญชี → บัญชียืนยันแล้วระบบปรับยอดหนี้/ต้นทุนให้เอง · ระหว่างนี้บิลนี้ขอจ่ายไม่ได้'),
+    keyFor && h(PriceFixKeyModal, { state, dispatch, user, entry:keyFor, onClose:() => setKeyFor(null) }));
+}
+// ฟอร์มคีย์ราคาใหม่/หน่วย — สินค้า · จำนวน (ล็อก) · ราคา GR · ราคาใหม่ · รวม · เหตุผล/รูปจากบัญชี · รอบที่ · หมายเหตุ → 📤 ส่งกลับบัญชี
+function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
+  const doc = ((entry.target === 'gr' ? state.grs : state.invoices) || []).find(x => x && x.id === entry.id) || entry.doc;
+  const req = doc.priceFixRequest || entry.req;
+  const rows = _pfGrIdsOf({ target:entry.target, doc }).flatMap(gid => {
+    const g = (state.grs || []).find(x => x && x.id === gid); if(!g) return [];
+    return (g.lines || []).map((l, idx) => ({ g, l, idx, key:gid + ':' + idx })).filter(r => !r.l.isFreebie);
+  });
+  const prevOf = (r) => { const p = ((req.proposal && req.proposal.lines) || []).find(x => x.grId === r.g.id && x.lineIdx === r.idx); return p ? p.newUnitPrice : null; };
+  const [price, setPrice] = useState(() => Object.fromEntries(rows.map(r => [r.key, String(prevOf(r) != null ? prevOf(r) : (Number(r.l.unitPrice) || 0))])));
+  const [note, setNote] = useState('');
+  const canKey = isSuperUser(user) || hasPerm(user, 'purchase', 'po', 'edit');
+  const live = req && req.status === 'open';
+  const lastRet = (req.history || []).filter(x => x.act === 'return').slice(-1)[0];
+  const itemName = (id) => ((state.items || []).find(x => x && x.id === id) || {}).name || id;
+  const changed = rows.filter(r => { const v = Number(price[r.key]); return isFinite(v) && v > 0 && Math.abs(v - (Number(r.l.unitPrice) || 0)) > 1e-9; });
+  // 🆕 UAT S2: บรรทัดราคา 0/ว่าง บอกชัดว่าบรรทัดไหน (ข้อมูลจริงราคา 0 เยอะ — ปุ่มเทาเฉย ๆ ไม่รู้เหตุ)
+  const zeroIdx = rows.map((r, i) => !(Number(price[r.key]) > 0) ? i + 1 : 0).filter(Boolean);
+  const bad = zeroIdx.length > 0;
+  // 🆕 UAT S1: เตือนก่อนส่ง — ต่างจากราคาแรกเกิน BlockPct = แดง (ระบบไม่รับ) · เกิน WarnPct = เหลือง (บัญชีต้องใส่เหตุผล)
+  const E = global.ERP, blockPct = E.priceKeyInSetting(state, 'priceKeyInBlockPct'), warnPct = E.priceKeyInSetting(state, 'priceKeyInWarnPct');
+  const pctOf = (r) => { const nu = Number(price[r.key]), first = r.l.priceAdjustedFrom != null ? Number(r.l.priceAdjustedFrom) || 0 : (Number(r.l.unitPrice) || 0);
+    return first > 0 && nu > 0 ? Math.abs(nu - first) / first * 100 : 0; };
+  const lvlOf = (r) => !(Number(price[r.key]) > 0) ? 'zero' : pctOf(r) > blockPct + 1e-9 ? 'block' : pctOf(r) > warnPct + 1e-9 ? 'warn' : '';
+  const blockIdx = rows.map((r, i) => lvlOf(r) === 'block' ? i + 1 : 0).filter(Boolean);
+  const warnIdx = rows.map((r, i) => lvlOf(r) === 'warn' ? i + 1 : 0).filter(Boolean);
+  const dTotal = changed.reduce((t, r) => t + (Number(price[r.key]) - (Number(r.l.unitPrice) || 0)) * (Number(r.l.qty) || 0), 0);
+  const whyOff = !canKey ? 'ต้องเป็นฝ่ายจัดซื้อ (สิทธิ์แก้ไข PO)' : bad ? 'บรรทัด ' + zeroIdx.join(', ') + ' ราคา 0 — ใส่ราคาใหม่ (> 0) ก่อน'
+    : blockIdx.length ? 'บรรทัด ' + blockIdx.join(', ') + ' ราคาต่างเกิน ' + blockPct + '% — น่าจะคีย์ผิดหน่วย' : !changed.length ? 'ยังไม่มีบรรทัดที่เปลี่ยนราคา' : null;
+  const submit = () => {
+    if(whyOff){ alert('⛔ ' + whyOff); return; }
+    const act = { type:'SUBMIT_INV_PRICE_FIX', data:{ target:entry.target, id:doc.id, reqId:req.id, note:note.trim(), by:user.username, at:Date.now(),
+      lines:changed.map(r => ({ grId:r.g.id, lineIdx:r.idx, newUnitPrice:Number(price[r.key]) })) } };
+    const r = _pfQuiet(state, act);   // ตรวจก่อน — ไม่ผ่าน = ฟอร์มค้างไว้ ราคาที่คีย์ไม่หาย
+    if(r.next === state){ alert(r.why || '⛔ ส่งไม่สำเร็จ'); return; }
+    dispatch(act); onClose();
+  };
+  const att = (req.attachments || [])[0];
+  return h(Modal, { isOpen:true, title:'💰 แก้ราคาตามใบกำกับ — ' + (entry.ref || doc.id), onClose, size:'xl', docKey:'pf:key:' + entry.target + ':' + doc.id },   // ย่อ/สลับแอปบนแท็บเล็ต ราคาที่คีย์ไม่หาย
+    h('div', { className:'space-y-3', 'data-testid':'pricefix-key-modal' },
+      h('div', { className:'bg-orange-50 border border-orange-200 rounded p-2 text-sm text-orange-900 space-y-0.5' },
+        h('div', null, '🔁 รอบที่ ', h('b', null, req.round || 1), ' · ขอโดย ', h('b', null, req.requestedBy || '-'), ' · เลขใบกำกับผู้ขาย ', h('b', null, req.supTaxInvNumber || '-')),
+        h('div', null, '💬 เหตุผลจากบัญชี: ', req.reason || '-'),
+        lastRet && h('div', { className:'text-red-700' }, '↩️ บัญชีส่งกลับ: ', lastRet.note || '-'),
+        att && h('a', { href:att.dataUrl, target:'_blank', rel:'noopener', className:'text-blue-700 underline' }, '🖼️ ดูรูปใบกำกับ')),
+      h('table', { className:'w-full text-sm' },
+        h('thead', null, h('tr', { className:'bg-gray-50 text-left' },
+          ['ใบรับของ', 'สินค้า', 'จำนวน (ล็อก)', 'ราคา GR/หน่วย', 'ราคาใหม่/หน่วย (ก่อน VAT)', 'รวมใหม่'].map(t => h('th', { key:t, className:'p-1.5' }, t)))),
+        h('tbody', null, rows.map((r, i) => {
+          const v = Number(price[r.key]), q = Number(r.l.qty) || 0, lv = live ? lvlOf(r) : '';
+          return h('tr', { key:r.key, className:cls('border-t', (lv === 'zero' || lv === 'block') && 'bg-red-50', lv === 'warn' && 'bg-yellow-50'), 'data-pf-lvl':lv || undefined },
+            h('td', { className:'p-1.5 text-xs' }, h('span', { className:'text-gray-400 mr-1' }, i + 1, '.'), r.g.grNumber || r.g.id),
+            h('td', { className:'p-1.5' }, itemName(r.l.itemId)),
+            h('td', { className:'p-1.5 text-gray-600', title:'จำนวนแก้ไม่ได้ (ถ้าจำนวนไม่ตรง ใช้คืนของ/ใบลดหนี้)' }, '🔒 ', fmtNum(q), ' ', r.l.unit || ''),
+            h('td', { className:'p-1.5' }, fmtCur(Number(r.l.unitPrice) || 0)),
+            h('td', { className:'p-1.5' }, live
+              ? h('input', { type:'number', step:'0.0001', min:'0', value:price[r.key], 'data-testid':'pricefix-input', className:'border rounded px-2 py-1 w-28 text-right',
+                  onChange:(e) => setPrice(p => ({ ...p, [r.key]:e.target.value })) })
+              : fmtCur(v)),
+            h('td', { className:'p-1.5 text-right' }, isFinite(v) ? fmtCur(v * q) : '-'));
+        }))),
+      live && bad && h('div', { className:'text-xs text-red-700', 'data-testid':'pricefix-zero-note' }, '🔴 บรรทัด ', zeroIdx.join(', '), ' ราคา 0 — ใส่ราคาใหม่ตามใบกำกับ (> 0) ทุกบรรทัด'),
+      live && blockIdx.length > 0 && h('div', { className:'text-xs text-red-700', 'data-testid':'pricefix-block-note' }, '🔴 บรรทัด ', blockIdx.join(', '), ' ราคาต่างจากราคาเดิมเกิน ', blockPct, '% — ระบบไม่รับ (น่าจะคีย์ผิดหน่วย)'),
+      live && warnIdx.length > 0 && h('div', { className:'text-xs text-yellow-800', 'data-testid':'pricefix-warn-note' }, '🟡 บรรทัด ', warnIdx.join(', '), ' ราคาต่างเกิน ', warnPct, '% — ส่งได้ แต่ตรวจหน่วยให้ดี (บัญชีต้องใส่เหตุผลตอนยืนยัน)'),
+      h('div', { className:'text-sm text-right' }, 'ส่วนต่างก่อน VAT (ประมาณ): ', h('b', { className:dTotal > 0 ? 'text-red-700' : 'text-green-700' }, (dTotal > 0 ? '+' : '') + fmtCur(dTotal))),
+      live && h('textarea', { className:'w-full border rounded p-2 text-sm', rows:2, placeholder:'หมายเหตุถึงบัญชี (ไม่บังคับ)', value:note, onChange:(e) => setNote(e.target.value) }),
+      h('div', { className:'flex justify-end gap-2' },
+        h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'),
+        live && h(Button, { variant:'primary', disabled:!!whyOff, onClick:submit, 'data-testid':'pricefix-submit',
+          title:whyOff || undefined }, '📤 ส่งกลับบัญชี'))));
+}
+// ================= 🆕 PRICE-FIX ขั้น 4 (REFRESH R2.7 · P5): ฝั่งบัญชี — หน้าเจ้าหนี้ =================
+//   ทุกปุ่มฝั่งบัญชีเช็ก accounting.invQueue.edit · ทุกอย่างซ่อนเมื่อ settings.priceKeyInEnabled ปิด · ตัวเลข ฿ ผ่าน canSeeStockValue
+const pfOn = (state) => !!(state && state.settings && state.settings.priceKeyInEnabled === true);
+const pfCanAcct = (user) => !!user && (isSuperUser(user) || hasPerm(user, 'accounting', 'invQueue', 'edit'));
+const pfMoney = (user, state) => (v) => (global.ERP.canSeeStockValue ? global.ERP.canSeeStockValue(user, state) : true) ? fmtCur(Number(v) || 0) : '🔒';
+const pfSigned = (m, v) => ((Number(v) || 0) > 0.004 ? '+' : '') + m(v);
+// ลองเล่น reducer เงียบ ๆ (เก็บข้อความ alert) — ใช้ตรวจก่อน dispatch จริง
+const _pfQuiet = (st, act) => {
+  let why = null; const _oa = global.alert;
+  try { global.alert = (m) => { why = String(m || ''); }; return { next: global.ERP.reducer(st, act), why }; }
+  catch(e){ return { next: st, why: 'ตรวจไม่สำเร็จ: ' + (e && e.message) }; }
+  finally { global.alert = _oa; }
+};
+// ป้ายสถานะแก้ราคาของ GR (คิวตั้งหนี้) / PI · hold = เหตุผลที่ตั้งหนี้/ขอจ่ายไม่ได้ (null = ทำต่อได้)
+function priceFixBadgeOf(state, target, doc){
+  if(!doc) return null;
+  const r = doc.priceFixRequest;
+  if(r && global.ERP.priceFixLive && global.ERP.priceFixLive(doc)){
+    if(r.status === 'open') return { key:'open', tag:'⏳ รอจัดซื้อแก้ราคา', cls:'bg-orange-100 text-orange-800',
+      hold:'รอจัดซื้อแก้ราคา (บัญชีส่งไปแล้ว) — รอจัดซื้อส่งกลับ หรือ ✖ ยกเลิกคำขอ' };
+    return target === 'gr'
+      ? { key:'submitted', tag:'✏️ จัดซื้อแก้ราคาแล้ว', cls:'bg-blue-100 text-blue-800', hold:null }
+      : { key:'submitted', tag:'🔍 รอบัญชียืนยันราคา', cls:'bg-blue-100 text-blue-800', hold:'รอบัญชียืนยันราคา — เปิดใบ PI แล้ว ✅ ยืนยัน หรือ ✖ ยกเลิกคำขอ' };
+  }
+  const ap = (state.approvalRequests || []).find(q => q && q.action === 'adjust_inv_price' && (q.status || 'pending') === 'pending'
+    && (q.entityId === doc.id || ((q.payload && q.payload.grIds) || []).includes(doc.id)));
+  return ap ? { key:'approval', tag:'⏳ รออนุมัติราคา', cls:'bg-purple-100 text-purple-800', hold:'มีคำขออนุมัติปรับราคาค้างอยู่ — รอผู้อนุมัติ (🔔)' } : null;
+}
+const PriceFixBadge = ({ b }) => b ? h('span', { className:cls('inline-block text-[10px] font-bold rounded px-1 mt-0.5 whitespace-nowrap font-sans', b.cls), 'data-testid':'pf-badge', title:b.hold || '' }, b.tag) : null;
+// บรรทัด GR ที่แก้ราคาได้ (ข้ามของแถม)
+function pfRowsOf(state, grIds){
+  return (grIds || []).flatMap(gid => {
+    const g = (state.grs || []).find(x => x && x.id === gid); if(!g) return [];
+    return (g.lines || []).map((l, idx) => ({ g, l, idx, key:gid + ':' + idx })).filter(r => r.l && !r.l.isFreebie);
+  });
+}
+const pfChanged = (rows, price) => rows.filter(r => { const v = Number(price[r.key]); return isFinite(v) && v > 0 && Math.abs(v - (Number(r.l.unitPrice) || 0)) > 1e-9; })
+  .map(r => ({ grId:r.g.id, lineIdx:r.idx, newUnitPrice:Number(price[r.key]) }));
+// ฟอร์ม ↩️ ส่งให้จัดซื้อแก้ราคา (เหตุผล + เลขใบกำกับผู้ขาย + รูป 1 รูป ย่อแล้ว) → REQUEST_INV_PRICE_FIX
+function PriceFixRequestModal({ target, doc, state, dispatch, user, onClose, onDone }){
+  const ref = (target === 'gr' ? doc.grNumber : doc.invNumber) || doc.id;
+  const curNo = String(doc.supTaxInvNumber || '').trim(), lockNo = target === 'inv' && !!curNo;
+  const [reason, setReason] = useState('');
+  const [tiNo, setTiNo] = useState(curNo);
+  const [img, setImg] = useState(null);
+  const onImg = async (e) => {
+    const f = e.target.files && e.target.files[0]; if(!f) return;
+    try { const r = await global.ERP.resizeImageToBase64(f, 1600, 0.75); setImg({ name:f.name, size:Math.round((Number(r.sizeKB) || 0) * 1024), dataUrl:r.dataUrl }); }
+    catch(err){ alert('อัปโหลดรูปไม่สำเร็จ: ' + (err && err.message)); }
+    finally { e.target.value = ''; }
+  };
+  const send = () => {
+    if(!pfCanAcct(user)) return alert('⛔ ต้องเป็นฝ่ายบัญชี (คิวตั้งหนี้ แก้ไข)');
+    if(!reason.trim()) return alert('ใส่เหตุผล เช่น ราคาในใบกำกับไม่ตรงกับที่รับของ');
+    if(!tiNo.trim()) return alert('ใส่เลขใบกำกับของผู้ขาย');
+    const act = { type:'REQUEST_INV_PRICE_FIX', data:{ target, id:doc.id, reason:reason.trim(), supTaxInvNumber:tiNo.trim(), attachments:img ? [img] : [], by:user.username, at:Date.now() } };
+    const r = _pfQuiet(state, act);
+    if(r.next === state) return alert(r.why || '⛔ ส่งไม่สำเร็จ');
+    dispatch(act);
+    if(global.ERP.toast) global.ERP.toast('📤 ส่งให้จัดซื้อแก้ราคา ' + ref + ' แล้ว — รอจัดซื้อคีย์ราคาใหม่', 'info');
+    onClose(); onDone && onDone();
+  };
+  return h(Modal, { isOpen:true, title:'↩️ ส่งให้จัดซื้อแก้ราคา — ' + ref, onClose, size:'md', docKey:'pf:req:' + target + ':' + doc.id },
+    h('div', { className:'space-y-3', 'data-testid':'pf-req-modal' },
+      h('div', { className:'bg-orange-50 border border-orange-200 rounded p-2 text-xs text-orange-900' },
+        '💡 ใช้เมื่อราคาต่อหน่วยในใบกำกับไม่ตรงกับที่รับของ — จัดซื้อจะคีย์ราคาใหม่รายบรรทัด (จำนวนแก้ไม่ได้) แล้วส่งกลับมาให้บัญชียืนยัน · ',
+        target === 'gr' ? 'ระหว่างรอ ตั้งหนี้ใบนี้ไม่ได้' : 'ระหว่างรอ ขอจ่ายใบนี้ไม่ได้', ' · ยกเลิกคำขอได้ทุกเมื่อ'),
+      h('label', { className:'block text-sm' }, 'เหตุผล / สิ่งที่ไม่ตรง *',
+        h('textarea', { className:'w-full border rounded p-2 text-sm mt-1', rows:3, value:reason, 'data-testid':'pf-req-reason',
+          placeholder:'เช่น ใบกำกับคิดแป้ง 120 บาท/กก. แต่รับของไว้ 100', onChange:(e) => setReason(e.target.value) })),
+      h('label', { className:'block text-sm' }, 'เลขใบกำกับของผู้ขาย *',
+        h('input', { className:cls('w-full border rounded px-2 py-1 text-sm mt-1', lockNo && 'bg-gray-100'), value:tiNo, readOnly:lockNo, 'data-testid':'pf-req-tino',
+          title:lockNo ? 'ใบนี้มีเลขใบกำกับแล้ว — เลขต่าง = เอกสารใหม่ (ใบเพิ่ม/ลดหนี้) ใช้ DN/CN' : undefined, onChange:(e) => setTiNo(e.target.value) })),
+      h('div', { className:'text-sm' }, '🖼️ รูปใบกำกับ (ไม่บังคับ · 1 รูป) ',
+        h('input', { type:'file', accept:'image/*', onChange:onImg, className:'text-xs', 'data-testid':'pf-req-img' }),
+        img && h('div', { className:'mt-1 flex items-center gap-2' }, h('img', { src:img.dataUrl, className:'h-16 border rounded' }),
+          h('button', { className:'text-xs text-red-600 underline', onClick:() => setImg(null) }, 'ลบรูป'))),
+      h('div', { className:'flex justify-end gap-2' },
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
+        h(Button, { variant:'warning', onClick:send, 'data-testid':'pf-req-send', disabled:!pfCanAcct(user) }, '📤 ส่งให้จัดซื้อ'))));
+}
+// ตารางราคา/หน่วย เก่า → ใหม่ (จำนวนล็อก · P4)
+function PriceKeyTable({ rows, price, setPrice, editable, state, user }){
+  const m = pfMoney(user, state);
+  const nm = (id) => ((state.items || []).find(x => x && x.id === id) || {}).name || id;
+  return h('table', { className:'w-full text-xs bg-white border rounded', 'data-testid':'pf-price-table' },
+    h('thead', null, h('tr', { className:'bg-gray-50 text-left' },
+      ['ใบรับของ', 'สินค้า', 'จำนวน', 'ราคาเดิม/หน่วย', 'ราคาใหม่/หน่วย', 'ส่วนต่าง'].map(t => h('th', { key:t, className:'p-1.5' }, t)))),
+    h('tbody', null, rows.map(r => {
+      const ou = Number(r.l.unitPrice) || 0, v = Number(price[r.key]), q = Number(r.l.qty) || 0, ch = isFinite(v) && v > 0 && Math.abs(v - ou) > 1e-9;
+      return h('tr', { key:r.key, className:cls('border-t', ch && 'bg-yellow-50') },
+        h('td', { className:'p-1.5 font-mono' }, r.g.grNumber || r.g.id),
+        h('td', { className:'p-1.5' }, nm(r.l.itemId)),
+        h('td', { className:'p-1.5 text-gray-600', title:'จำนวนแก้ไม่ได้ — จำนวนผิดใช้คืนของ (RTV) / ใบลดหนี้' }, '🔒 ', fmtNum(q), ' ', r.l.unit || ''),
+        h('td', { className:'p-1.5' }, m(ou)),
+        h('td', { className:'p-1.5' }, editable
+          ? h('input', { type:'number', step:'0.0001', min:'0', value:price[r.key] == null ? '' : price[r.key], 'data-testid':'pf-price-input',
+              className:'border rounded px-1.5 py-0.5 w-24 text-right', onChange:(e) => { const val = e.target.value; setPrice(p => ({ ...p, [r.key]:val })); } })
+          : h('b', null, m(isFinite(v) ? v : ou))),
+        h('td', { className:cls('p-1.5 text-right', ch && (v > ou ? 'text-red-700' : 'text-green-700')) }, ch ? pfSigned(m, (v - ou) * q) : '-'));
+    })));
+}
+// กล่องผลต่อต้นทุน (ห้ามซ่อน — R2.7): เหลือในสต๊อก → ต้นทุนล็อต c0→c1 · ใช้ไปแล้ว → ผลต่าง 5391 เดือนนี้ · blocks = เหตุผลที่ทำไม่ได้
+function PriceFixImpact({ plan, state, user }){
+  if(!plan) return null;
+  const m = pfMoney(user, state);
+  const nm = (id) => ((state.items || []).find(x => x && x.id === id) || {}).name || id;
+  const blocks = plan.blocks.filter(b => b !== 'ไม่มีรายการที่เปลี่ยนราคา');
+  return h('div', { className:'space-y-1' },
+    plan.lines.length > 0 && h('div', { className:'bg-slate-50 border border-slate-200 rounded p-2 text-xs space-y-1', 'data-testid':'pf-impact' },
+      h('div', { className:'font-semibold text-slate-800' }, '📦 ผลต่อต้นทุน'),
+      plan.lines.map(l => {
+        const c0 = (plan.costPlan.find(c => c.grId === l.grId && c.lineIdx === l.lineIdx) || {}).from;
+        return h('div', { key:l.grId + ':' + l.lineIdx },
+          h('b', null, nm(l.itemId)), ' — เหลือในสต๊อก ', h('b', null, fmtNum(l.remaining)), ' → ต้นทุนล็อต ', m(c0 || 0), ' → ', h('b', null, m(l.c1)), ' (', pfSigned(m, l.dInv), ')',
+          ' · ใช้ไปแล้ว ', h('b', null, fmtNum(l.used)), ' → ผลต่าง ', h('b', null, pfSigned(m, l.dVar)), ' ลง 5391 เดือนนี้');
+      }),
+      h('div', { className:'border-t pt-1 text-slate-700' }, 'รวม: มูลค่าสินค้า ', h('b', null, pfSigned(m, plan.dGoods)), ' · VAT ', pfSigned(m, plan.dVat),
+        ' · สต๊อก (1300) ', pfSigned(m, plan.dInv), ' · ผลต่างราคาซื้อ (5391) ', pfSigned(m, plan.dVar),
+        plan.needsApproval && h('span', { className:'ml-1 text-purple-700 font-semibold' }, '· เกินเกณฑ์ต้องอนุมัติ'))),
+    blocks.length > 0 && h('div', { className:'bg-red-50 border border-red-200 rounded p-2 text-xs text-red-800', 'data-testid':'pf-blocks' },
+      '⛔ ทำไม่ได้: ', blocks.map((b, i) => h('div', { key:i }, '• ', b))));
+}
+// ลงราคาใหม่ (ADJUST_INV_PRICE) — ในเกณฑ์ + มีคนที่สอง = ทำเลย · เกินเกณฑ์ / บัญชีคีย์เองราคาขึ้น = ยื่นอนุมัติ (payload.proposalBy) · คืน 'done' | 'approval' | 'blocked'
+//   defer = ในเกณฑ์ไม่ dispatch เอง → คืน { act, next } ให้ผู้เรียก dispatch พร้อม ADD_INV (CreateINVModal)
+function pfRunAdjust({ state, dispatch, user, mode, invId, grIds, lines, req, reason, supTaxInvNumber, defer }){
+  const E = global.ERP;
+  if(!pfCanAcct(user)){ alert('⛔ ต้องเป็นฝ่ายบัญชี (คิวตั้งหนี้ แก้ไข)'); return 'blocked'; }
+  if(!String(reason || '').trim()){ alert('ใส่เหตุผลที่ปรับราคา'); return 'blocked'; }
+  const P = E.planInvPriceAdjust(state, { mode, invId, grIds, lines });
+  if(P.blocks.length){ alert('⛔ ปรับราคาไม่ได้ — ' + P.blocks.join('\n• ')); return 'blocked'; }
+  const inv = P.inv, doc = inv || (state.grs || []).find(g => g && g.id === P.grIds[0]);
+  const data = { mode, ...(inv ? { invId:inv.id, prevAmount:Number(inv.amount) || 0, prevVat:Number(inv.vat) || 0 } : { grIds:P.grIds }),
+    lines:lines.map(x => ({ grId:x.grId, lineIdx:Number(x.lineIdx), newUnitPrice:Number(x.newUnitPrice) })),
+    expect:{ dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet }, ...(req ? { reqId:req.id } : {}), reason:String(reason).trim(),
+    ...(supTaxInvNumber ? { supTaxInvNumber } : {}), by:user.username, date:getToday(), at:Date.now() };
+  const act = { type:'ADJUST_INV_PRICE', data };
+  const ref = inv ? inv.invNumber : (doc && doc.grNumber) || '';
+  // ราคาสูงกว่าที่จัดซื้อเสนอ (หรือบรรทัดนอกข้อเสนอ) = บัญชีคีย์เอง → ราคาขึ้นต้องอนุมัติ (ตรงกับ reducer)
+  const overProp = !!req && lines.some(x => { const p = ((req.proposal && req.proposal.lines) || []).find(y => y.grId === x.grId && Number(y.lineIdx) === Number(x.lineIdx));
+    return !p || Number(x.newUnitPrice) > Number(p.newUnitPrice) + 1e-9; });
+  if(P.needsApproval || ((!req || overProp) && P.isIncrease)){
+    if(typeof E.requestApprovalIfNeeded !== 'function'){ alert('⛔ ระบบอนุมัติยังไม่พร้อม — โหลดหน้าใหม่แล้วลองอีกครั้ง'); return 'blocked'; }
+    const proposalBy = req && req.proposal ? req.proposal.by : undefined;
+    const dAct = { type:'ADJUST_INV_PRICE', data:{ ...data, direct:true } };
+    const sent = E.requestApprovalIfNeeded({ direct:true, directAct:dAct, action:'adjust_inv_price', user, state, dispatch,
+      context:{ entityType:inv ? 'inv' : 'gr', entityId:doc.id, entityRef:ref, scope:'accounting', amount:Math.abs(P.cumGoods), isIncrease:P.isIncrease, wasPaid:false,
+        reason:'ปรับราคาตามใบกำกับ ' + ref + ' (' + pfSigned(fmtCur, P.dGoods) + ' ก่อน VAT) · ' + String(reason).trim(),
+        payload:{ ...data, ...(proposalBy ? { proposalBy } : {}), ...(req && req.proposal && req.proposal.at != null ? { proposalAt:req.proposal.at } : {}) } } });
+    if(sent === 'blocked') return 'blocked';
+    if(sent) return 'approval';
+    return E.gmDirectApply(state, dAct, dispatch, user, 'ปรับราคา ' + ref + ' ไม่สำเร็จ') ? 'done' : 'blocked';
+  }
+  const r = _pfQuiet(state, act);
+  if(r.next === state){ alert(r.why || '⛔ ปรับราคาไม่สำเร็จ'); return 'blocked'; }
+  if(defer) return { act, next:r.next };
+  dispatch(act);
+  return 'done';
+}
+// 💰 ปรับราคาตามใบกำกับ (บัญชีคีย์เอง · ตั้งหนี้แล้ว → post_pi) · ราคาขึ้น = ต้องอนุมัติเสมอ (R2.6)
+function AdjustInvPriceModal({ inv, state, dispatch, user, onClose }){
+  const live = (state.invoices || []).find(i => i && i.id === inv.id) || inv;
+  const grIds = (live.grIds && live.grIds.length) ? live.grIds : (live.grId ? [live.grId] : []);
+  const rows = pfRowsOf(state, grIds);
+  const [price, setPrice] = useState(() => Object.fromEntries(rows.map(r => [r.key, String(Number(r.l.unitPrice) || 0)])));
+  const [reason, setReason] = useState('');
+  const curNo = String(live.supTaxInvNumber || '').trim();
+  const [tiNo, setTiNo] = useState(curNo);
+  const lines = pfChanged(rows, price);
+  const plan = lines.length ? global.ERP.planInvPriceAdjust(state, { mode:'post_pi', invId:live.id, lines }) : null;
+  const save = () => {
+    if(!lines.length) return alert('ยังไม่มีบรรทัดที่เปลี่ยนราคา');
+    if(!tiNo.trim()) return alert('ใส่เลขใบกำกับของผู้ขายที่ใช้ยืนยันราคา');
+    const res = pfRunAdjust({ state, dispatch, user, mode:'post_pi', invId:live.id, lines, req:null, reason, supTaxInvNumber:tiNo.trim() });
+    if(res === 'done' && global.ERP.toast) global.ERP.toast('💰 ปรับราคา ' + live.invNumber + ' แล้ว — ตรวจ JE ส่วนต่างในหน้า PI', 'info');
+    if(res !== 'blocked') onClose();
+  };
+  return h(Modal, { isOpen:true, title:'💰 ปรับราคาตามใบกำกับ: ' + live.invNumber, onClose, size:'xl', docKey:'inv:price:' + live.id },
+    h('div', { className:'space-y-3', 'data-testid':'pf-adjust-modal' },
+      h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 text-xs text-amber-900' },
+        '💡 ใช้เมื่อใบกำกับเดิมถูก แต่ระบบคีย์ราคาต่อหน่วยผิด — แก้ราคาได้รายบรรทัด จำนวนแก้ไม่ได้ · ของที่ยังอยู่ปรับต้นทุนล็อต ส่วนที่ใช้ไปแล้วลงผลต่างราคาซื้อ (5391) · ',
+        h('b', null, 'บัญชีคีย์เองแล้วราคาขึ้น = ต้องอนุมัติ'), ' (ไม่อยากรออนุมัติ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา)'),
+      h(PriceKeyTable, { rows, price, setPrice, editable:true, state, user }),
+      h(PriceFixImpact, { plan, state, user }),
+      h('label', { className:'block text-sm' }, 'เลขใบกำกับของผู้ขาย *',
+        h('input', { className:cls('w-full border rounded px-2 py-1 text-sm mt-1', curNo && 'bg-gray-100'), value:tiNo, readOnly:!!curNo, onChange:(e) => setTiNo(e.target.value) })),
+      h('label', { className:'block text-sm' }, 'เหตุผล *',
+        h('textarea', { className:'w-full border rounded p-2 text-sm mt-1', rows:2, value:reason, 'data-testid':'pf-adjust-reason', onChange:(e) => setReason(e.target.value) })),
+      h('div', { className:'flex justify-end gap-2' },
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
+        h(Button, { variant:'warning', onClick:save, 'data-testid':'pf-adjust-save', disabled:!lines.length || !!(plan && plan.blocks.length) },
+          plan && (plan.needsApproval || plan.isIncrease) ? '📤 ส่งขออนุมัติปรับราคา' : '💰 ปรับราคา'))));
+}
+// ปุ่มฝั่งบัญชีของคำขอที่จัดซื้อส่งกลับ (submitted): ↩️ ส่งกลับ (เหตุผลบังคับ) / ✖ ยกเลิกคำขอ
+function PriceFixReqActions({ target, doc, state, dispatch, user, onDone }){
+  const req = doc.priceFixRequest;
+  const [note, setNote] = useState('');
+  if(!req || !pfCanAcct(user)) return null;   // 🆕 UAT M1 (T12): ปิดสวิตช์แล้วยัง ✖ ยกเลิกคำขอที่ค้างได้ (เก็บกวาด) — ↩️ ส่งกลับต้องเปิดสวิตช์
+  const sw = pfOn(state);
+  const run = (type) => {
+    if(type === 'RETURN_INV_PRICE_FIX' && !note.trim()) return alert('ใส่เหตุผลที่ส่งกลับให้จัดซื้อแก้อีกรอบ');
+    if(type === 'CANCEL_INV_PRICE_FIX' && !confirm('✖ ยกเลิกคำขอแก้ราคานี้? (ราคาเดิมคงไว้ · ตั้งหนี้/ขอจ่ายได้ตามปกติ)')) return;
+    const act = { type, data:{ target, id:doc.id, reqId:req.id, note:note.trim(), by:user.username, at:Date.now() } };
+    const r = _pfQuiet(state, act);
+    if(r.next === state) return alert(r.why || '⛔ ทำไม่สำเร็จ');
+    dispatch(act); setNote(''); onDone && onDone();
+  };
+  return h('div', { className:'flex gap-2 flex-wrap items-center' },
+    sw && req.status === 'submitted' && h('input', { className:'border rounded px-2 py-1 text-xs flex-1 min-w-[12rem]', placeholder:'เหตุผลส่งกลับ (บังคับเมื่อกด ↩️)', value:note,
+      'data-testid':'pf-return-note', onChange:(e) => setNote(e.target.value) }),
+    sw && req.status === 'submitted' && h(Button, { size:'sm', variant:'outline', onClick:() => run('RETURN_INV_PRICE_FIX'), 'data-testid':'pf-return' }, '↩️ ส่งกลับจัดซื้อ'),
+    h(Button, { size:'sm', variant:'outline', onClick:() => run('CANCEL_INV_PRICE_FIX'), 'data-testid':'pf-cancel' }, '✖ ยกเลิกคำขอ'));
+}
+// แผงในหน้า PI (INVDetailModal): คำขอเปิดอยู่ — open = รอจัดซื้อ · submitted = 🔍 รอบัญชียืนยันราคา (เก่า→ใหม่ + รูป + ผลต่อต้นทุน → ✅/↩️/✖)
+function PriceFixReviewPanel({ inv, state, dispatch, user }){
+  const req = inv.priceFixRequest;
+  const grIds = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+  const rows = pfRowsOf(state, grIds);
+  const propOf = (r) => { const p = ((req && req.proposal && req.proposal.lines) || []).find(x => x.grId === r.g.id && x.lineIdx === r.idx); return p ? p.newUnitPrice : Number(r.l.unitPrice) || 0; };
+  const [price, setPrice] = useState(() => Object.fromEntries(rows.map(r => [r.key, String(propOf(r))])));
+  const canAcct = pfCanAcct(user) && pfOn(state);   // สวิตช์ปิด = ดูอย่างเดียว
+  const lines = pfChanged(rows, price);
+  const sub = !!req && req.status === 'submitted';
+  const plan = sub && lines.length ? global.ERP.planInvPriceAdjust(state, { mode:'post_pi', invId:inv.id, lines }) : null;
+  const att = req && (req.attachments || [])[0];
+  if(!req || !global.ERP.priceFixLive(inv)) return null;
+  const confirmIt = () => {
+    if(!lines.length) return alert('ไม่มีบรรทัดที่เปลี่ยนราคา — ถ้าราคาเดิมถูกแล้ว กด ✖ ยกเลิกคำขอ');
+    pfRunAdjust({ state, dispatch, user, mode:'post_pi', invId:inv.id, lines, req, supTaxInvNumber:req.supTaxInvNumber,
+      reason:'ยืนยันราคาตามใบกำกับ ' + (req.supTaxInvNumber || '') + (req.reason ? ' — ' + req.reason : '') });
+  };
+  return h('div', { className:cls('border-2 rounded p-3 space-y-2', sub ? 'bg-blue-50 border-blue-300' : 'bg-orange-50 border-orange-300'), 'data-testid':'pf-review-panel' },
+    h('div', { className:'font-bold text-sm' }, sub ? '🔍 รอบัญชียืนยันราคา' : '⏳ รอจัดซื้อแก้ราคา',
+      h('span', { className:'font-normal text-xs text-gray-600 ml-2' }, 'รอบที่ ', req.round || 1, ' · ขอโดย ', req.requestedBy || '-', ' · ใบกำกับ ', req.supTaxInvNumber || '-',
+        sub && req.proposal ? ' · จัดซื้อคีย์โดย ' + (req.proposal.by || '-') : '')),
+    h('div', { className:'text-xs text-gray-700' }, '💬 ', req.reason || '-', sub && req.proposal && req.proposal.note ? ' · หมายเหตุจัดซื้อ: ' + req.proposal.note : ''),
+    att && h('a', { href:att.dataUrl, target:'_blank', rel:'noopener', className:'inline-block' }, h('img', { src:att.dataUrl, className:'h-24 border rounded', alt:'ใบกำกับ', 'data-testid':'pf-photo' })),
+    sub && h(PriceKeyTable, { rows, price, setPrice, editable:canAcct, state, user }),
+    sub && h(PriceFixImpact, { plan, state, user }),
+    !pfOn(state) ? h('div', { className:'text-xs text-gray-700', 'data-testid':'pf-switch-off-note' }, 'ปิดการปรับราคาตามใบกำกับแล้ว — คำขอนี้ไม่กันขอจ่ายอีก · กด ✖ ยกเลิกคำขอ เพื่อเก็บกวาด')
+      : !sub && h('div', { className:'text-xs text-orange-800' }, 'ระหว่างรอ ขอจ่ายใบนี้ไม่ได้ · ยกเลิกคำขอได้ทุกเมื่อ'),
+    pfCanAcct(user) && h('div', { className:'flex gap-2 flex-wrap items-center' },
+      canAcct && sub && h(Button, { size:'sm', variant:'success', onClick:confirmIt, 'data-testid':'pf-confirm', disabled:!!(plan && plan.blocks.length) },
+        plan && plan.needsApproval ? '📤 ยืนยัน + ส่งขออนุมัติ' : '✅ ยืนยันราคา'),
+      h(PriceFixReqActions, { target:'inv', doc:inv, state, dispatch, user })));
+}
+// แผงราคาตามใบกำกับใน CreateINVModal (ยังไม่ตั้งหนี้ → at_gr): ป้ายสถานะ · ตาราง เก่า→ใหม่ (เติมราคาจัดซื้อ) · ผลต่อต้นทุน · ↩️/✖ ของคำขอ
+function CreateInvPricePanel({ state, dispatch, user, grLive, pfReq, pfSub, pfShow, pfKeyOpen, setPfKeyOpen, pfRows, pfPrice, setPfPrice, pfPlan, pfReason, setPfReason, pfPiRemnant, pfBadge }){
+  const canAcct = pfCanAcct(user);
+  if(pfBadge && pfBadge.key !== 'submitted') return h('div', { className:'bg-orange-50 border-2 border-orange-300 rounded p-3 text-sm space-y-2', 'data-testid':'inv-pf-hold' },
+    h('div', { className:'font-bold text-orange-900' }, pfBadge.tag),
+    h('div', { className:'text-xs text-orange-800' }, pfBadge.hold, pfReq ? ' · 💬 ' + (pfReq.reason || '') : ''),
+    pfReq && h(PriceFixReqActions, { target:'gr', doc:grLive, state, dispatch, user }));
+  if(!canAcct) return null;
+  if(!pfShow) return h('div', { className:'text-xs text-gray-600 flex items-center gap-2 flex-wrap' },
+    '💰 ราคาในใบกำกับไม่ตรงกับที่รับของ?',
+    h('button', { className:cls('underline', pfPiRemnant ? 'text-gray-400 cursor-not-allowed' : 'text-blue-700'), disabled:pfPiRemnant, 'data-testid':'inv-pf-keyopen',
+      title:pfPiRemnant ? 'ใบรับของนี้มีส่วนลดท้ายบิลจากใบกำกับเดิมค้างอยู่ — คีย์ราคาที่นี่ไม่ได้' : undefined, onClick:() => setPfKeyOpen(true) }, '✏️ คีย์ราคา/หน่วยตามใบกำกับ'),
+    'หรือ ↩️ ส่งให้จัดซื้อแก้ราคา (ปุ่มด้านล่าง)');
+  return h('div', { className:cls('border-2 rounded p-3 space-y-2', pfSub ? 'bg-blue-50 border-blue-300' : 'bg-amber-50 border-amber-300'), 'data-testid':'inv-pf-panel' },
+    h('div', { className:'font-bold text-sm' }, pfSub ? '✏️ จัดซื้อแก้ราคาแล้ว — ตรวจแล้วกด 💾 ตั้งหนี้ = ยืนยันราคา' : '✏️ คีย์ราคา/หน่วยตามใบกำกับ (บัญชีคีย์เอง)',
+      pfSub && h('span', { className:'font-normal text-xs text-gray-600 ml-2' }, 'รอบที่ ', pfReq.round || 1, ' · จัดซื้อคีย์โดย ', (pfReq.proposal && pfReq.proposal.by) || '-', ' · ใบกำกับ ', pfReq.supTaxInvNumber || '-')),
+    pfSub && h('div', { className:'text-xs text-gray-700' }, '💬 ', pfReq.reason || '-', pfReq.proposal && pfReq.proposal.note ? ' · หมายเหตุจัดซื้อ: ' + pfReq.proposal.note : '',
+      ((pfReq.attachments || [])[0]) && h('a', { href:pfReq.attachments[0].dataUrl, target:'_blank', rel:'noopener', className:'ml-2 text-blue-700 underline' }, '🖼️ ดูรูปใบกำกับ')),
+    !pfSub && h('div', { className:'text-xs text-amber-900' }, 'จำนวนแก้ไม่ได้ · ราคาขึ้นที่บัญชีคีย์เอง = ต้องอนุมัติก่อนตั้งหนี้ (ไม่อยากรอ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา)'),
+    h(PriceKeyTable, { rows:pfRows, price:pfPrice, setPrice:setPfPrice, editable:true, state, user }),
+    h(PriceFixImpact, { plan:pfPlan, state, user }),
+    !pfSub && h('input', { className:'w-full border rounded px-2 py-1 text-sm', placeholder:'เหตุผลที่แก้ราคา (บังคับ)', value:pfReason, 'data-testid':'inv-pf-reason', onChange:(e) => setPfReason(e.target.value) }),
+    pfSub ? h(PriceFixReqActions, { target:'gr', doc:grLive, state, dispatch, user })
+      : h('button', { className:'text-xs text-gray-600 underline', onClick:() => { setPfKeyOpen(false); setPfPrice(Object.fromEntries(pfRows.map(r => [r.key, String(Number(r.l.unitPrice) || 0)]))); } }, 'ยกเลิกการคีย์ราคา (ใช้ราคาเดิม)'));
+}
+// แท็บ "💰 รอแก้ราคาตามใบกำกับ" — คำขอ open (นับที่แท็บ) + submitted (ดูอย่างเดียว)
+function PriceFixTab({ state, dispatch, user }){
+  const all = global.ERP.priceFixList ? global.ERP.priceFixList(state) : [];
+  const open = all.filter(x => x.req.status === 'open'), sub = all.filter(x => x.req.status === 'submitted');
+  const [keyFor, setKeyFor] = useState(null);
+  useOpenDoc('pricefix', (k) => { const x = all.find(y => y.target + ':' + y.id === String(k) || y.id === String(k)); if(x) setKeyFor(x); });   // 🎯 งานค้าง/🔔 → เปิดฟอร์มใบนั้น
+  const supName = (id) => ((state.suppliers || []).find(s => s && s.id === id) || {}).name || '-';
+  const row = (x) => h('tr', { key:x.target + x.id, className:'border-t', 'data-testid':'pricefix-row' },
+    h('td', { className:'p-2' }, h('span', { className:cls('px-2 py-0.5 rounded text-xs', (PF_STATUS[x.req.status] || [])[1]) }, (PF_STATUS[x.req.status] || [x.req.status])[0])),
+    h('td', { className:'p-2 font-mono text-xs' }, x.ref, h('div', { className:'text-gray-500' }, x.target === 'gr' ? 'ใบรับของ (ยังไม่ตั้งหนี้)' : 'ใบตั้งหนี้')),
+    h('td', { className:'p-2' }, supName(x.supplierId || ((state.pos || []).find(p => p && p.id === x.doc.poId) || {}).supplierId)),
+    h('td', { className:'p-2 text-xs' }, x.req.reason || '', h('div', { className:'text-gray-500' }, 'ใบกำกับ ', x.req.supTaxInvNumber || '-')),
+    h('td', { className:'p-2 text-center' }, x.req.round || 1),
+    h('td', { className:'p-2 text-xs' }, x.req.requestedBy || '-', ' · ', _pfAgeDays(x.req), ' วัน'),
+    h('td', { className:'p-2' }, h(Button, { size:'sm', variant:x.req.status === 'open' ? 'warning' : 'outline', onClick:() => setKeyFor(x) }, x.req.status === 'open' ? '💰 คีย์ราคา' : 'ดู')));
+  const table = (list) => h('table', { className:'w-full text-sm bg-white rounded border' },
+    h('thead', null, h('tr', { className:'bg-gray-50 text-left' }, ['สถานะ', 'เอกสาร', 'ผู้ขาย', 'เหตุผลจากบัญชี', 'รอบ', 'ขอโดย/ค้าง', ''].map(t => h('th', { key:t, className:'p-2' }, t)))),
+    h('tbody', null, list.map(row)));
+  return h('div', { className:'space-y-3', 'data-focus-scope':'purchase.pricefix' },
+    h('div', { className:'bg-orange-50 border border-orange-200 rounded p-2 text-xs text-orange-800' },
+      '💡 บัญชีพบว่าราคาตามใบกำกับไม่ตรงกับที่รับของไว้ → คีย์ราคาต่อหน่วยใหม่ (จำนวนแก้ไม่ได้) แล้ว 📤 ส่งกลับบัญชี · บัญชีเป็นคนยืนยันและลงบัญชี'),
+    open.length ? table(open) : h('div', { className:'text-sm text-gray-500 p-4 text-center bg-white rounded border' }, '✅ ไม่มีคำขอแก้ราคาค้าง'),
+    sub.length > 0 && h('div', null, h('div', { className:'text-sm font-medium text-gray-700 mb-1' }, '🔍 ส่งบัญชีแล้ว รอยืนยัน (' + sub.length + ')'), table(sub)),
+    keyFor && h(PriceFixKeyModal, { state, dispatch, user, entry:keyFor, onClose:() => setKeyFor(null) }));
+}
 
 // 🆕 CREDIT-UNSET: เครดิต supplier (วัน) — 0/ว่าง = "ยังไม่ตั้ง" (supplier ~500 รายที่นำเข้าจาก Ecount เป็น 0 หมด) ไม่ใช่ "เงินสด"
 //   isSet=false → หน้าตั้งหนี้ใช้ CREDIT_FALLBACK_DAYS ชั่วคราว + hint ให้ตรวจกับเอกสาร (ไม่บล็อก)
@@ -69329,6 +70366,9 @@ function PurchaseModule({ state, dispatch }){
   // 🆕 F1-4: นับ PO ที่มี line รอ decide
   const decisionPendingPOs = (state.pos||[]).filter(p =>
     (p.lines||[]).some(l => l.shortStatus === 'pending_decision')).length;
+  // 🆕 PRICE-FIX ขั้น 3: คำขอแก้ราคาที่รอจัดซื้อคีย์ (open) — แท็บโผล่เมื่อเปิดสวิตช์ หรือมีคำขอค้าง
+  const priceFixOpen = (global.ERP.priceFixList ? global.ERP.priceFixList(state, ['open']) : []).length;
+  const priceFixOn = (state.settings && state.settings.priceKeyInEnabled === true) || priceFixOpen > 0;
 
   return h('div', null,
     h('div', { className:'mb-4' },
@@ -69357,6 +70397,8 @@ function PurchaseModule({ state, dispatch }){
       // 🆕 F1-4: เมนูใหม่ "📋 รายการต้องตัดสินใจ"
       h(TabBtn, { active:tab==='decision', onClick:()=>setTab('decision'),
         label:'📋 รายการต้องตัดสินใจ', count: decisionPendingPOs, countHint:'GR รับขาด รอเลือก' }),
+      priceFixOn && h(TabBtn, { active:tab==='pricefix', onClick:()=>setTab('pricefix'),
+        label:'💰 รอแก้ราคาตามใบกำกับ', count: priceFixOpen, countHint:'บัญชีขอให้แก้ราคา' }),
       h(TabBtn, { active:tab==='incoming', onClick:()=>setTab('incoming'),
         label:'🚚 รอเข้า' }),
       h(TabBtn, { active:tab==='lowstock', onClick:()=>setTab('lowstock'),
@@ -69380,6 +70422,7 @@ function PurchaseModule({ state, dispatch }){
       po:        ()=>h(POList,      { state, dispatch, user }),
       gr:        ()=>h(GRList,      { state, dispatch, user }),
       decision:  ()=>h(ShortDecisionTab, { state, dispatch, user }),
+      pricefix:  ()=>h(PriceFixTab, { state, dispatch, user }),   // 🆕 PRICE-FIX ขั้น 3
       incoming:  ()=>h(IncomingScheduleTab, { state, user }),
       lowstock:  ()=>h(LowStockTab, { state, user, dispatch }),
       rtv:       ()=>h(RTVViewTab, { state, dispatch, user }),
@@ -72072,6 +73115,8 @@ function PODetailModal({ po:poProp, state, dispatch, user, onClose, viewOnly }){
         h('div', { className:'text-xs mt-2 bg-white rounded p-2 text-orange-700' },
           '💡 ขั้นตอน: แก้ PO → ส่ง re-approve → หลังอนุมัติ → ออก INV ใหม่ (จะมี badge "🔧 จาก PO correction")')),
 
+      // 🆕 PRICE-FIX ขั้น 3: บัญชีขอให้แก้ราคาตามใบกำกับ (คำขอบน GR/INV ของ PO นี้)
+      h(PriceFixBanner, { state, dispatch, user, poId: po.id }),
       // 🆕 VAT-FIX R15: บัญชีปรับ VAT ให้ตรงใบกำกับ — PO/GR ไม่ถูกย้อน แต่จัดซื้อต้องรู้ (ตาราง PO ยังโชว์อัตราเดิม)
       vatAdjInfo && h(VatAdjustBanner, { info: vatAdjInfo }),
 
@@ -73734,6 +74779,7 @@ function GRDetailModal({ gr:grProp, state, dispatch, user, onClose }){
         )
       ),
 
+      h(PriceFixBanner, { state, dispatch, user, grId: gr.id }),   // 🆕 PRICE-FIX ขั้น 3
       // 🆕 VAT-FIX R15: GR ไม่ถูกย้อน (qty/ต้นทุน/lot เดิม) — แค่อัตรา VAT ของ line ถูกบัญชี sync ให้ตรงใบกำกับ
       vatAdjInfo && h(VatAdjustBanner, { info: vatAdjInfo }),
 
@@ -73865,7 +74911,28 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   const { WHT_CATEGORIES, WHT_SUB5_TYPES, Combobox, genWHNumber, getPOReceiveStatus } = global.ERP;
   // 🆕 FRESH-GR: อ่าน GR สดจาก state ตาม id — prop อาจค้าง (หน้าต่างเปิดค้าง/ย่อไว้ ระหว่างนั้น cloud refresh หรืออีกเครื่องตั้งหนี้ไปแล้ว)
   //   UPDATE_GR ด้านล่าง spread จาก gr สด → ไม่ทับข้อมูลใหม่ด้วยของเก่า
-  const gr = (state.grs||[]).find(g => g.id === grProp.id) || grProp;
+  const grLive = (state.grs||[]).find(g => g.id === grProp.id) || grProp;
+  // 🆕 PRICE-FIX ขั้น 4 (R2.7 · P5): คีย์ราคา/หน่วย ตามใบกำกับในฟอร์มตั้งหนี้ — จัดซื้อส่งราคามาแล้ว (submitted) = เติมให้ · บัญชีคีย์เองได้ (ราคาขึ้น = ต้องอนุมัติ)
+  //   จำนวนล็อก (P4) · มีบรรทัดเปลี่ยนราคา → gr เสมือน (ราคาใหม่) ใช้คำนวณยอด/VAT ทั้งฟอร์ม · กด 💸 = ADJUST_INV_PRICE at_gr แล้ว ADD_INV (grPriceRev)
+  const pfSw = pfOn(state);
+  const pfReq = grLive.priceFixRequest && global.ERP.priceFixLive && global.ERP.priceFixLive(grLive) ? grLive.priceFixRequest : null;
+  const pfSub = pfSw && !!pfReq && pfReq.status === 'submitted';
+  const pfRows = pfRowsOf(state, [grLive.id]);
+  const pfPropOf = (r) => { const p = ((pfReq && pfReq.proposal && pfReq.proposal.lines) || []).find(x => x.grId === r.g.id && x.lineIdx === r.idx); return p ? p.newUnitPrice : Number(r.l.unitPrice) || 0; };
+  const [pfKeyOpen, setPfKeyOpen] = useState(false);
+  const [pfPrice, setPfPrice] = useState(() => Object.fromEntries(pfRows.map(r => [r.key, String(pfPropOf(r))])));
+  const [pfReason, setPfReason] = useState('');
+  const [pfReqOpen, setPfReqOpen] = useState(false);
+  const _pfSig = pfReq ? pfReq.id + ':' + pfReq.status + ':' + (pfReq.round || 1) : '';
+  useEffect(() => { setPfPrice(Object.fromEntries(pfRows.map(r => [r.key, String(pfPropOf(r))]))); }, [_pfSig]);   // จัดซื้อส่งรอบใหม่ระหว่างเปิดฟอร์ม
+  const pfPiRemnant = !!(grLive.piBillDiscount || grLive.totalValueBeforePiDisc != null || (grLive.lines||[]).some(l => l && l.lineTotalBeforePiDisc != null));
+  const pfShow = pfSw && pfCanAcct(user) && (pfSub || (pfKeyOpen && !pfReq));
+  const pfLines = pfShow ? pfChanged(pfRows, pfPrice) : [];
+  const pfPlan = pfLines.length ? global.ERP.planInvPriceAdjust(state, { mode:'at_gr', grIds:[grLive.id], lines:pfLines }) : null;
+  const pfKeyed = !!pfPlan;
+  const pfBadge = pfSw ? priceFixBadgeOf(state, 'gr', grLive) : null;
+  const gr = !pfKeyed ? grLive : { ...grLive, totalValue: global.ERP.bdR2((Number(grLive.totalValue) || 0) + pfPlan.dGoods),
+    lines: (grLive.lines||[]).map((l, i) => { const x = pfPlan.lines.find(y => y.lineIdx === i); return x ? { ...l, unitPrice:x.newUnitPrice, lineTotal:x.newLineTotal } : l; }) };
   const sup = state.suppliers.find(s => s.id === gr.supplierId);
   const po = gr.poId ? state.pos.find(p => p.id === gr.poId) : null;
   const poStatus = po ? getPOReceiveStatus(po, state) : null;
@@ -74137,6 +75204,12 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   const _netAbsLimit = Number(state.settings?.priceEditAbsLimit ?? 1.00);
   const netOvDiff = netOverride !== null ? _r2(netCalc - Number(netOverride)) : 0;
   const netOvBlock = netOvDiff > _netAbsLimit + 0.005;
+  // 🆕 PRICE-FIX ขั้น 4 (R2.7 ก/ข · สวิตช์เปิดเท่านั้น): มูลค่าสินค้าเกิน Σ GR > 1 ฿ (ยกเว้นยอดหัก RTV ที่เติมให้) · ยอดสุทธิห่างสูตรเกิน ±1 ฿
+  const _pfRtvPrefill = rtvDeduct > 0 && rtvMode === 'deduct';
+  const pfAmtBlock = pfSw && amountOverride !== null && !_pfRtvPrefill && (Number(amountOverride) || 0) > _r2(grAmountExVat) + 1.005
+    ? 'มูลค่าสินค้าที่พิมพ์ (' + fmtCur(Number(amountOverride) || 0) + ') เกินยอดรับของ (' + fmtCur(grAmountExVat) + ') — ราคาไม่ตรงใบกำกับ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา หรือคีย์ราคา/หน่วย' : '';
+  const pfNetBlock = pfSw && netOverride !== null && Math.abs(netOvDiff) > 1.005
+    ? 'ยอดต้องจ่ายสุทธิห่างจากสูตร ' + fmtCur(Math.abs(netOvDiff)) + ' (ปัดเศษได้ไม่เกิน 1 ฿) — ราคาไม่ตรงใบกำกับ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา' : '';
   const moveNetOverride = () => { setOffDisc({ kind:'coupon', note:'', ...(offDisc || {}), amount: String(_r2(offAmt + netOvDiff)) }); setNetOverride(null); };
 
   // WHT line ops
@@ -74221,6 +75294,16 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
     }
     // 🎟️ OFF-INV-DISC §B8: ส่วนลดนอกใบกำกับผิด / พิมพ์ยอดสุทธิต่ำกว่าใบกำกับ → บันทึกไม่ได้
     if(offErr) return alert('⛔ ส่วนลดนอกใบกำกับ: ' + offErr);
+    // 🆕 PRICE-FIX ขั้น 4 (R2.7 ก/ข): สวิตช์เปิด → พิมพ์ทับยอดเกินยอดรับของ/ห่างสูตรเกิน 1 ฿ ไม่ได้ (ราคาไม่ตรงใบกำกับ = ↩️ ส่งให้จัดซื้อแก้ราคา)
+    if(pfAmtBlock) return alert('⛔ ' + pfAmtBlock);
+    if(pfNetBlock) return alert('⛔ ' + pfNetBlock);
+    if(pfSw && pfReq && pfReq.status === 'open') return alert('⛔ ' + (pfBadge ? pfBadge.hold : 'รอจัดซื้อแก้ราคา'));
+    if(pfKeyed){
+      if(piDiscAmt > 0 || pfPiRemnant) return alert('⛔ แก้ราคารายบรรทัดพร้อมส่วนลดท้ายบิลจากใบกำกับยังไม่รองรับ — ลบส่วนลดท้ายบิล หรือตั้งหนี้ราคาเดิมแล้วใช้ ↩️ ส่งให้จัดซื้อแก้ราคา');
+      if(amountOverride !== null) return alert('⛔ แก้ราคารายบรรทัดแล้ว — ล้างช่อง "มูลค่าสินค้า" ที่พิมพ์ทับก่อน (ยอดคิดจากราคาใหม่ให้เอง)');
+      if(pfPlan.blocks.length) return alert('⛔ แก้ราคาไม่ได้ — ' + pfPlan.blocks.join('\n• '));
+      if(!pfSub && !pfReason.trim()) return alert('ใส่เหตุผลที่แก้ราคา (ช่องใต้ตารางราคา)');
+    }
     if(netOvBlock) return alert('⛔ ยอดจ่ายน้อยกว่าใบกำกับ ' + fmtCur(netOvDiff) + ' — ถ้าเป็นคูปอง/คะแนน ใช้ช่อง 🎟️ ส่วนลดนอกใบกำกับ (หรือกด ↺ คืนยอดจากสูตร)'
       + '\n→ ถ้าไม่ใช่คูปอง/คะแนน หรือช่อง 🎟️ ใช้ไม่ได้ → ตั้งหนี้ตามใบกำกับ แล้วขอใบลดหนี้ (CN) จากผู้ขาย');
     // 🆕 DUP-INV: ตรวจ GR สดจาก state ตอนกดบันทึก — GR นี้ถูกตั้งหนี้ไปแล้ว (จากหน้าต่างอื่น/อีกเครื่อง/advance back-fill) → ห้ามตั้งซ้ำ
@@ -74310,6 +75393,18 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
     }
 
     // ถ้าเลือก "แยก INV ตาม WHT" + มี >=2 WHT lines → สร้างหลาย INV (เลข supplier เดียวกัน + /1, /2)
+    // 🆕 PRICE-FIX ขั้น 4: แก้ราคาแล้ว → ADJUST_INV_PRICE at_gr ก่อน ADD_INV (ในเกณฑ์ = dispatch คู่กัน · เกินเกณฑ์/บัญชีคีย์เองราคาขึ้น = ยื่นอนุมัติ ปิดฟอร์ม ไม่ตั้งหนี้)
+    let pfSt = state, pfLiveGr = liveGr, pfAct = null;
+    if(pfKeyed){
+      const res = pfRunAdjust({ state, dispatch, user, mode:'at_gr', grIds:[liveGr.id], lines:pfLines, req:pfSub ? pfReq : null, defer:true,
+        reason: pfSub ? ('ยืนยันราคาตามใบกำกับ ' + (pfReq.supTaxInvNumber || '') + (pfReq.reason ? ' — ' + pfReq.reason : '')) : pfReason.trim(),
+        supTaxInvNumber: pfSub ? pfReq.supTaxInvNumber : undefined });
+      if(res === 'blocked') return;
+      if(res === 'approval'){ if(global.ERP.toast) global.ERP.toast('📤 ส่งขออนุมัติราคา ' + (liveGr.grNumber || '') + ' แล้ว — ตั้งหนี้ได้หลังอนุมัติ', 'info'); onClose(); return; }
+      if(res === 'done'){ alert('✅ ปรับราคา ' + (liveGr.grNumber || '') + ' แล้ว — กด 💸 ตั้งหนี้อีกครั้ง (ยอดตามราคาใหม่)'); onClose(); return; }
+      pfAct = res.act; pfSt = res.next; pfLiveGr = (pfSt.grs || []).find(g => g.id === liveGr.id) || liveGr;
+    }
+    const pfRev = { [liveGr.id]: (pfLiveGr.priceAdjustHistory || []).length };   // R2.2: ADD_INV ต้องส่ง rev ตรง state สด
     if(splitByWHT && whtLines.filter(l => (l.whtAmount||0) > 0).length >= 2){
       if(!confirm(`แยกเป็น ${whtLines.length} ใบ — จะสร้าง ${whtLines.length} INV คนละเลข ใช้เลข supplier เดิม${finalSupInv ? ' ('+finalSupInv+'/1, /2, ...)' : ''}\nดำเนินการต่อ?`)) return;
       const activeLines = whtLines.filter(l => (l.whtAmount||0) > 0);
@@ -74374,14 +75469,15 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
         createdNos.push(invNo);
       }
       // 🆕 DEPOSIT-VAT UAT: ตรวจครบทุกใบก่อน — ใบหลังถูกปฏิเสธ = ห้ามสร้างครึ่งชุด
-      if(_invCreateBlocked(state, createdInvs)) return;
+      if(_invCreateBlocked(pfSt, createdInvs)) return;
+      if(pfAct) dispatch(pfAct);   // 🆕 PRICE-FIX ขั้น 4
       createdInvs.forEach((segData, idx) => {
-        dispatch({ type:'ADD_INV', data: segData });
+        dispatch({ type:'ADD_INV', data: { ...segData, grPriceRev: pfRev } });
         if(idx === 0) logVatOverride(segData.id, segData.invNumber);
-        autoPostINV(segData, state, dispatch, user);
+        autoPostINV(segData, pfSt, dispatch, user);
       });
       // ผูก GR กับใบแรก (GR มี invoiceId เดียว — อ้างอิงใบแรก splitGroup bind)
-      dispatch({ type:'UPDATE_GR', data:{ ...piGrPatch(liveGr, createdInvs[0].id), invoiceId: createdInvs[0].id, splitInvoiceIds: createdInvs.map(i => i.id) }});   // 🆕 BILL-DISC: แยกใบ = ไม่มีส่วนลด PI → ล้าง patch ค้าง
+      dispatch({ type:'UPDATE_GR', data:{ ...piGrPatch(pfLiveGr, createdInvs[0].id), invoiceId: createdInvs[0].id, splitInvoiceIds: createdInvs.map(i => i.id) }});   // 🆕 BILL-DISC: แยกใบ = ไม่มีส่วนลด PI → ล้าง patch ค้าง
       alert(`✅ สร้าง INV แยก ${createdNos.length} ใบ\n${createdNos.join('\n')}\n✓ JE posted ทุกใบ`);
       onClose(); onDone && onDone();
       return;
@@ -74466,9 +75562,10 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
       createdBy: user.username, createdAt: Date.now(),
     };
     // 🆕 DEPOSIT-VAT UAT: ADD_INV ถูกปฏิเสธ (ใบกำกับซ้ำ/เกิน 6 เดือน/อนาคต/งวดล็อก) → หยุดก่อน UPDATE_GR/RTV/เครดิต/มัดจำ/PO
-    if(_invCreateBlocked(state, [invData])) return;
-    dispatch({ type:'ADD_INV', data:invData });
-    dispatch({ type:'UPDATE_GR', data:{ ...piGrPatch(liveGr, invData.id), invoiceId:invData.id } });   // 🆕 BILL-DISC §B5 ข้อ 4
+    if(_invCreateBlocked(pfSt, [invData])) return;
+    if(pfAct){ const _q = _pfQuiet(pfSt, { type:'ADD_INV', data:{ ...invData, grPriceRev: pfRev } }); if(_q.next === pfSt) return alert(_q.why || '⛔ ตั้งหนี้ไม่ได้'); dispatch(pfAct); }   // 🆕 PRICE-FIX ขั้น 4
+    dispatch({ type:'ADD_INV', data:{ ...invData, grPriceRev: pfRev } });
+    dispatch({ type:'UPDATE_GR', data:{ ...piGrPatch(pfLiveGr, invData.id), invoiceId:invData.id } });   // 🆕 BILL-DISC §B5 ข้อ 4
     logVatOverride(invData.id, invNumber);   // 🆕 VAT-FIX R13: audit log เมื่อปรับ VAT ราย line ตอนตั้งหนี้
 
     // 🆕 F1F-3 / F1A-2: apply CN auto ทันที (ลด AP/Inv/VAT) + ยัง track เอกสาร
@@ -74545,7 +75642,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
       }
     }
 
-    autoPostINV(invData, state, dispatch, user);
+    autoPostINV(invData, pfSt, dispatch, user);   // 🆕 PRICE-FIX ขั้น 4: state หลังปรับราคา
 
     // 🆕 หักมัดจำ/จ่ายล่วงหน้า (FIFO: PO-bound ของ PO นี้ก่อน) — DR เจ้าหนี้ / CR เงินมัดจำ
     // verify คลื่น 2 (บัญชี): เพดานหักมัดจำ = ยอดหลังหักใบลดหนี้ที่เพิ่ง apply ด้านบน (เดิมใช้ยอดก่อนหัก → มัดจำถูกใช้เกินบิล · 2100 ค้างเดบิต)
@@ -74594,6 +75691,11 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   return h(Modal, { isOpen:true, title:`💸 ตั้งหนี้จาก GR: ${gr.grNumber}`, onClose, size:'lg', docKey:'inv:gr:'+gr.id },
     h('div', { className:'space-y-4' },
 
+      // 🆕 PRICE-FIX ขั้น 4: แผงราคาตามใบกำกับ (P1 รายบรรทัด · P4 จำนวนล็อก)
+      pfSw && h(CreateInvPricePanel, { state, dispatch, user, grLive, pfReq, pfSub, pfShow, pfKeyOpen, setPfKeyOpen, pfRows, pfPrice, setPfPrice, pfPlan, pfReason, setPfReason, pfPiRemnant, pfBadge }),
+      // 🆕 UAT M1 (T12): ปิดสวิตช์แล้ว คำขอค้างไม่กันตั้งหนี้ — ให้บัญชี ✖ ยกเลิกเก็บกวาดได้
+      !pfSw && pfReq && pfCanAcct(user) && h('div', { className:'bg-gray-50 border rounded p-2 text-xs flex items-center gap-2 flex-wrap', 'data-testid':'inv-pf-stale' },
+        'มีคำขอแก้ราคาค้าง (ปิดการปรับราคาตามใบกำกับแล้ว — ไม่กันตั้งหนี้)', h(PriceFixReqActions, { target:'gr', doc:grLive, state, dispatch, user })),
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800' },
         '💡 สร้าง INV ผูกกับ GR + JE posted อัตโนมัติ · จ่ายได้ที่ "บัญชี → 💸 เจ้าหนี้ (AP) → 💰 รอจ่าย"'
       ),
@@ -74892,8 +75994,9 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
           h('div', { className:'flex items-center gap-1' },
             h('input', { type:'number', step:'0.01',
               value: amountOverride !== null ? amountOverride : Number(amountCalc.toFixed(2)),
-              onChange:e=>setAmountOverride(Number(e.target.value)),
-              className: cls('w-28 px-2 py-1 border rounded text-right font-mono text-xs',
+              readOnly: pfKeyed, title: pfKeyed ? 'คีย์ราคา/หน่วยแล้ว — มูลค่าคิดจากราคาใหม่ (แก้ที่ตารางราคา)' : undefined, 'data-testid':'inv-amount-input',   // 🆕 PRICE-FIX ขั้น 4
+              onChange:e=>{ if(!pfKeyed) setAmountOverride(Number(e.target.value)); },
+              className: cls('w-28 px-2 py-1 border rounded text-right font-mono text-xs', pfKeyed && 'bg-gray-100 cursor-not-allowed',
                 amountOverride !== null && 'bg-yellow-50 border-yellow-400') }),
             amountOverride !== null && h('button', { onClick:()=>setAmountOverride(null),
               title:'คืนค่าจาก GR',
@@ -75039,10 +76142,16 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
       ),
 
-      h('div', { className:'flex gap-2 pt-3 border-t' },
-        h(Button, { variant:'primary', onClick:save }, '💾 สร้าง INV + Post JE'),
+      (pfAmtBlock || pfNetBlock) && h('div', { className:'bg-red-50 border border-red-200 rounded p-2 text-xs text-red-800', 'data-testid':'inv-override-block' }, '⛔ ', pfAmtBlock || pfNetBlock),
+      h('div', { className:'flex gap-2 pt-3 border-t flex-wrap' },
+        h(Button, { variant:'primary', onClick:save, 'data-testid':'inv-create-save', disabled:!!(pfBadge && pfBadge.hold) || !!pfAmtBlock || !!pfNetBlock,
+          title:(pfBadge && pfBadge.hold) || pfAmtBlock || pfNetBlock || undefined },
+          pfKeyed && pfPlan && (pfPlan.needsApproval || (!pfSub && pfPlan.isIncrease)) ? '📤 ส่งขออนุมัติราคา (ยังไม่ตั้งหนี้)' : pfKeyed ? '💾 ยืนยันราคา + สร้าง INV + Post JE' : '💾 สร้าง INV + Post JE'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
-      )
+        // 🆕 PRICE-FIX ขั้น 4 (P5): ↩️ ส่งให้จัดซื้อแก้ราคา (ยังไม่มีคำขอ) · คำขอที่จัดซื้อส่งกลับแล้ว → ↩️ ส่งกลับ / ✖ ยกเลิก อยู่ในแผงราคาด้านบน
+        pfSw && pfCanAcct(user) && !pfReq && !pfBadge && h(Button, { variant:'outline', 'data-testid':'inv-create-pfreq', onClick:() => setPfReqOpen(true) }, '↩️ ส่งให้จัดซื้อแก้ราคา'),
+      ),
+      pfReqOpen && h(PriceFixRequestModal, { target:'gr', doc:grLive, state, dispatch, user, onClose:() => setPfReqOpen(false), onDone:onClose })
     )
   );
 }
@@ -76202,7 +77311,7 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
     }
     if(_invCreateBlocked(state, createdInvs)) return;
     for(const { gr, row, invData, invNumber, vat } of plan){
-      dispatch({ type:'ADD_INV', data: invData });
+      dispatch({ type:'ADD_INV', data: { ...invData, grPriceRev: { [gr.id]: (((state.grs || []).find(g => g.id === gr.id) || gr).priceAdjustHistory || []).length } } });   // 🆕 PRICE-FIX ขั้น 4: rev ราคา GR (R2.2)
       if((row._ov||[]).length){
         // 🆕 VAT-FIX R13: audit log เมื่อปรับ VAT ราย line ตอนตั้งหนี้ (Batch)
         const rc0 = _rowVatCalc(gr, {}, row.vatRate);
@@ -76762,7 +77871,8 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
       const fixed = raw && grStripStalePiDisc(raw, state.invoices);
       if(raw && fixed !== raw) dispatch({ type:'UPDATE_GR', data: fixed });
     }
-    dispatch({ type:'ADD_COMBINED_INV', data:{ inv, grIds:selected.map(g => g.id) }});
+    dispatch({ type:'ADD_COMBINED_INV', data:{ inv, grIds:selected.map(g => g.id),
+      grPriceRev: Object.fromEntries(selected.map(g => [g.id, (((state.grs || []).find(x => x.id === g.id) || g).priceAdjustHistory || []).length])) }});   // 🆕 PRICE-FIX ขั้น 4: rev ราคา GR (R2.2)
     if(hasLineOv){
       // 🆕 VAT-FIX R13: audit log เมื่อปรับ VAT ราย line ตอนตั้งหนี้ (Combined)
       const origVat = vatBreakdown.perGR.reduce((s,x) => s + calcGRVatBreakdown(x.g, {}, vatRate, poPriceModeOf(x.g)).vatTotal, 0);
@@ -77104,7 +78214,9 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
               '🔧 ปรับยอด/ปัดเศษ (± บาท):'),
             h('div', { className:'flex items-center gap-2' },
               h('input', { type:'number', value:roundingAdj, step:'0.01', placeholder:'0.00',
-                onChange:e=>setRoundingAdj(Number(e.target.value)||0),
+                // verify 3: สวิตช์ปรับราคาเปิด → ปัดเศษได้ไม่เกิน ±1 ฿ (ราคาผิดต้องผ่าน ↩️ ส่งให้จัดซื้อแก้ราคา)
+                min: pfOn(state) ? -1 : undefined, max: pfOn(state) ? 1 : undefined, 'data-testid':'cinv-round-adj',
+                onChange:e=>{ const v = Number(e.target.value)||0; setRoundingAdj(pfOn(state) ? Math.max(-1, Math.min(1, v)) : v); },
                 className: cls('w-24 px-2 py-1 border rounded text-right text-xs',
                   roundAdjNum !== 0 && 'bg-yellow-50 border-yellow-400') }),
               h('button', { type:'button',
@@ -77121,6 +78233,8 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
           roundAdjNum !== 0 && h('div', { className:'text-[11px] text-yellow-800 bg-yellow-50 border border-yellow-300 rounded px-2 py-1' },
             `ผลต่างปัดทศนิยม ${roundAdjNum > 0 ? '+' : ''}${fmtCur(roundAdjNum)} จะลงบัญชี 5390 ผลต่างปัดทศนิยม`),
           // 🎟️ OFF-INV-DISC R13: ปัดเศษเกิน 1 บาท มักเป็นคูปอง/คะแนนที่ใส่ผิดช่อง (ไม่บล็อก)
+          pfOn(state) && h('div', { className:'text-[11px] text-gray-600', 'data-testid':'cinv-round-limit' },
+            'ปัดเศษได้ไม่เกิน ±1 ฿ — ถ้าราคาไม่ตรงใบกำกับ ตั้งหนี้ตามรับของ แล้วกด ↩️ ส่งให้จัดซื้อแก้ราคา'),
           Math.abs(roundAdjNum) > 1 && h('div', { className:'text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1', 'data-testid':'rounding-offdisc-warn' },
             '⚠️ ปัดเศษเกิน 1 บาท — ถ้าเป็นคูปอง/คะแนน (ใบกำกับคิด VAT เต็ม) ให้ล้างช่องนี้ ตั้งหนี้แล้วกด ✏️ แก้ไขใบ → ใส่ 🎟️ ส่วนลดนอกใบกำกับ'),
           h('div', { className:'flex justify-between font-bold text-lg pt-1 border-t' },
@@ -77379,6 +78493,8 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
   const [showAddWHT, setShowAddWHT] = useState(false);          // 🆕 RW: เพิ่ม WHT ย้อนหลัง
   const [showAdjustVat, setShowAdjustVat] = useState(false);    // 🆕 VAT-FIX: ปรับ VAT ตามใบกำกับ (หลัง PI ยังไม่จ่าย)
   const [showAdjustWht, setShowAdjustWht] = useState(false);    // 🆕 WHT-EDIT: แก้ WHT หลังตั้งหนี้ (ยังไม่จ่าย) → ADJUST_INV_WHT
+  const [showAdjPrice, setShowAdjPrice] = useState(false);      // 🆕 PRICE-FIX ขั้น 4: 💰 ปรับราคาตามใบกำกับ (post_pi)
+  const [showPfReq, setShowPfReq] = useState(false);            // 🆕 PRICE-FIX ขั้น 4: ↩️ ส่งให้จัดซื้อแก้ราคา (target inv)
   const vatOvList = inv.vatLineOverrides || [];
   const vatAdjList = inv.vatAdjustHistory || [];
   const whtAdjList = inv.whtAdjustHistory || [];                 // 🆕 WHT-EDIT: ประวัติแก้ WHT (reducer ADJUST_INV_WHT append)
@@ -77407,6 +78523,15 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
   // 🆕 VAT-FIX R15: สถานะที่กันแก้ไข/ปรับ VAT (mirror reducer ADJUST_INV_VAT + executor edit_inv)
   //   pendingReq = คำขอ adjust_inv_vat / edit_inv ค้างอนุมัติ → ห้ามส่งซ้ำ/ส่งทับ (คำขอที่ 2 จะติด prevVat/stale snapshot)
   const pendingReq = _pendingInvReq(state, inv.id);
+  // 🆕 PRICE-FIX ขั้น 4: เหตุผลที่ 💰/↩️ ใช้ไม่ได้ (ด่านระดับเอกสารชุดเดียวกับ reducer · null = ใช้ได้)
+  const priceAdjBlock = (() => {
+    if(ro || !pfOn(state) || inv.voided) return 'ดูอย่างเดียว';
+    if(!pfCanAcct(user)) return 'ต้องเป็นฝ่ายบัญชี (สิทธิ์คิวตั้งหนี้ แก้ไข)';
+    if(global.ERP.priceFixLive(inv)) return 'มีคำขอแก้ราคาเปิดอยู่ — ดูแผงด้านบน';
+    if(pendingReq) return 'มีคำขอค้างอนุมัติ — ' + _reqLabel(pendingReq);
+    const b = global.ERP.planInvPriceAdjust(state, { mode:'post_pi', invId:inv.id, lines:[] }).blocks.filter(m => m !== 'ไม่มีรายการที่เปลี่ยนราคา');
+    return b.length ? b.join(' · ') : null;
+  })();
   const isMigratedInv = _isMigratedInv(inv);
   const _migDenyMsg = (isMigratedInv && global.ERP.migInvBackDeny && global.ERP.migInvBackDeny(state, inv)) || '';   // 🆕 UAT2 N1
   const _migDenyPaid = _migDenyMsg.indexOf('ใบนำเข้าจาก Ecount ที่จ่ายแล้ว') === 0;   // ข้อความจาก migInvBackDeny (00-core)
@@ -77446,6 +78571,11 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
 
   return h(Modal, { isOpen:true, title:`INV: ${inv.invNumber}`, onClose, size:'lg' },
     h('div', { className:'space-y-4' },
+      // 🆕 PRICE-FIX ขั้น 4: คำขอแก้ราคาเปิดอยู่ → แผง ⏳ รอจัดซื้อ / 🔍 รอบัญชียืนยันราคา (เก่า→ใหม่ + รูป + ผลต่อต้นทุน)
+      !inv.voided && global.ERP.priceFixLive && global.ERP.priceFixLive(inv) && h(PriceFixReviewPanel, { key:'pf_' + ((inv.priceFixRequest || {}).id || '') + '_' + ((inv.priceFixRequest || {}).status || ''), inv, state, dispatch, user:ro ? null : user }),
+      (inv.priceAdjustHistory || []).length > 0 && h('div', { className:'bg-emerald-50 border border-emerald-300 rounded p-2 text-xs text-emerald-900', 'data-testid':'inv-price-hist' },
+        '💰 ปรับราคาตามใบกำกับแล้ว ', inv.priceAdjustHistory.length, ' ครั้ง — ล่าสุด ', (inv.priceAdjustHistory.slice(-1)[0] || {}).by || '-',
+        ' · สินค้า ', pfSigned(pfMoney(user, state), (inv.priceAdjustHistory.slice(-1)[0] || {}).dGoods), ' · JE ', (inv.priceAdjustHistory.slice(-1)[0] || {}).jeNumber || '-'),
 
       h('div', { className:'grid grid-cols-2 gap-3 text-sm' },
         h('div', { className:'bg-red-50 border border-red-200 rounded p-3' },
@@ -77997,7 +79127,8 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
             title: _reqLabel(pendingReq) + ' — รออนุมัติ หรือยกเลิกคำขอที่ 🔔 คำขออนุมัติ ก่อนจึงแก้ไข/ปรับ VAT ได้' },
           '⏳ มีคำขอปรับ VAT/แก้ไขค้าง'),
         // 🆕 นำเข้า2569 MF2: ใบนำเข้า Ecount ไม่มี JE ในระบบนี้ — แก้ INV (ลง JE ใหม่) / ลบ ไม่ได้ · ยอดผิด = ใบลด/เพิ่มหนี้
-        canChangeInv && !isMigratedInv &&
+        // 🆕 PRICE-FIX verify 1: ปรับราคาแล้ว (post_pi) → แก้ INV ไม่ได้ (invUpdateDeny กันซ้ำ) · ยอดผิด = DN/CN
+        canChangeInv && !isMigratedInv && !(inv.priceAdjustHistory || []).some(x => x && x.mode === 'post_pi') &&
           h('span', { title: pendingReq ? 'มีคำขอค้างอนุมัติ — ' + _reqLabel(pendingReq) : '' },
             h(Button, { variant:'warning', disabled: !!pendingReq, onClick:()=>setShowEdit(true) }, '✏️ แก้ไข INV')),
         !inv.voided && isMigratedInv && !inv.supplierId && (inv.paidAmount||0) === 0 && hasPerm(user,'purchase','inv','edit')
@@ -78034,6 +79165,15 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
               '🧾 ปรับ VAT ตามใบกำกับ')),
         canChangeInv && (!isMigratedInv || vatMovedHere) && vatAdjustBlock && !pendingReq && h('div', { className:'basis-full text-[11px] text-gray-600 -mt-1' },
           '🧾 ปรับ VAT ตามใบกำกับ ใช้ไม่ได้: ', vatAdjustBlock),
+        // 🆕 PRICE-FIX ขั้น 4 (R2.7 · P5): 💰 ปรับราคาตามใบกำกับ (คีย์เอง) + ↩️ ส่งให้จัดซื้อแก้ราคา — เห็นเสมอเมื่อเปิดสวิตช์ · ทำไม่ได้ = disabled + เหตุผล
+        pfOn(state) && !inv.voided && h('span', { title:priceAdjBlock || 'แก้ราคาต่อหน่วยรายบรรทัดให้ตรงใบกำกับ — ต้นทุนล็อตเดินตาม (ราคาขึ้นต้องอนุมัติ)' },
+          h(Button, { variant:'warning', disabled:!!priceAdjBlock, 'data-testid':'inv-price-adjust',
+            onClick:() => { if(!global.ERP.restoreMinimized('inv:price:' + inv.id)) setShowAdjPrice(true); } }, '💰 ปรับราคาตามใบกำกับ')),
+        pfOn(state) && !inv.voided && h('span', { title:priceAdjBlock || 'ส่งให้จัดซื้อคีย์ราคาใหม่ แล้วกลับมาให้บัญชียืนยัน (ระหว่างรอ ขอจ่ายไม่ได้)' },
+          h(Button, { variant:'outline', disabled:!!priceAdjBlock, 'data-testid':'inv-price-req',
+            onClick:() => { if(!global.ERP.restoreMinimized('pf:req:inv:' + inv.id)) setShowPfReq(true); } }, '↩️ ส่งให้จัดซื้อแก้ราคา')),
+        pfOn(state) && !inv.voided && priceAdjBlock && h('div', { className:'basis-full text-[11px] text-gray-600 -mt-1', 'data-testid':'inv-price-block' },
+          '💰 ปรับราคา / ↩️ ส่งให้จัดซื้อ ใช้ไม่ได้: ', priceAdjBlock),
         !inv.voided && (!isMigratedInv || _migBackOk) && hasPerm(user,'purchase','inv','delete') && (inv.paidAmount||0) === 0 && /* MIG_AP_NORMAL N1 */
           !(state.payments||[]).some(p => (p.invId===inv.id || p.invoiceIds?.includes(inv.id)) && p.approvalStatus==='pending') &&
           h(Button, { variant:'danger',
@@ -78059,7 +79199,7 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
               const _sibV = inv.splitGroup ? (state.invoices||[]).filter(x => x && x.id !== inv.id && !x.voided && x.splitGroup === inv.splitGroup) : [];   // 🆕 DEPOSIT-VAT verify
               const reason = prompt('↩️ ย้อน ' + inv.invNumber + ' ไปตั้งหนี้?\n\nระบบจะ:\n• ใบตั้งหนี้นี้ถูกยกเลิก' + (isMigratedInv ? ' + กลับยอดเจ้าหนี้ยกมา (Dr 2100 / Cr 3900)' : ' (กลับ JE อัตโนมัติ)') + '\n' + (_sibV.length
                 ? '• ใบนี้แยกตาม WHT กับอีก ' + _sibV.length + ' ใบ (' + _sibV.map(x => x.invNumber || x.id).join(', ') + ') — GR กลับเข้าคิวเมื่อยกเลิกครบทุกใบในชุด'
-                : '• ปลดล็อก GR (ตั้งหนี้ INV ใหม่ได้ · แก้ PO: จัดซื้อใช้ 🔧 แก้เต็ม แล้วส่งอนุมัติใหม่)') +
+                : '• ปลดล็อก GR (ตั้งหนี้ INV ใหม่ได้ · ราคาผิด: ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา)') +
                 (activeWhtCerts.length > 0 ? '\n• Mark WHT cert ' + activeWhtCerts.length + ' ฉบับ เป็น voided' : '') +
                 ((global.ERP.migChargeNote && global.ERP.migChargeNote(inv)) || '') +   // 🆕 MIG_AP_NORMAL UAT SF3
                 '\n\nเหตุผล:', '');
@@ -78148,6 +79288,8 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
     // 🆕 VAT-FIX: จอปรับ VAT ตามใบกำกับ (key + docKey ตามกติกา modal ที่รับเอกสาร)
     showAdjustVat && h(AdjustINVVatModal, { key:'vat_'+inv.id, inv, state, dispatch, user,
       onClose:()=>setShowAdjustVat(false), onDone:onClose }),
+    showAdjPrice && h(AdjustInvPriceModal, { key:'price_' + inv.id, inv, state, dispatch, user, onClose:() => setShowAdjPrice(false) }),   // 🆕 PRICE-FIX ขั้น 4
+    showPfReq && h(PriceFixRequestModal, { key:'pfreq_' + inv.id, target:'inv', doc:inv, state, dispatch, user, onClose:() => setShowPfReq(false) }),
     // 🆕 WHT-EDIT: จอแก้ WHT — ปิดแล้วหน้าต่าง INV นี้ (อ่าน inv สดจาก state) โชว์ใบ 50ทวิ ชุดใหม่ + ประวัติทันที
     showAdjustWht && h(AdjustINVWhtModal, { key:'wht_'+inv.id, inv, state, dispatch, user,
       onClose:()=>setShowAdjustWht(false), onDone:()=>setShowAdjustWht(false) }),
@@ -81809,7 +82951,7 @@ function postNonDeductibleReclassJE(pay, inv, state, dispatch, user){
   // 🎟️ OFF-INV-DISC verify 1: JE ตั้งหนี้ "ตัวล่าสุดที่ยังไม่ถูกกลับรายการ" (หลังแก้ใบ JE แรกถูกกลับแล้ว — .find() เดิมได้ยอดก่อนแก้) · ข้าม JE ปรับ WHT/VAT (ไม่มีบรรทัดค่าใช้จ่าย)
   const invJe = (global.ERP.invOpenJes ? global.ERP.invOpenJes(state.journalEntries, inv.id)
       : (state.journalEntries||[]).filter(j => j.source === 'inv' && j.sourceId === inv.id && j.status === 'posted'))
-    .filter(j => j.refType !== 'wht_adjust' && j.refType !== 'inv_vat_adjust' && !j.migApVoid).slice(-1)[0];
+    .filter(j => j.refType !== 'wht_adjust' && j.refType !== 'inv_vat_adjust' && j.refType !== 'inv_price_adjust' && !j.migApVoid).slice(-1)[0];
   const expLines = (invJe?.lines||[]).filter(l => (l.debit||0) > 0 && ['expense','cogs'].includes((accByCode(l.accountCode)||{}).type));
   const crLines = [];
   if(expLines.length){
@@ -85814,6 +86956,7 @@ global.ERP.registerModule('purchase', {
   calcPOVatBreakdown,           // 🆕 VAT-FIX: helper VAT ราย line จาก PO (INV ล่วงหน้า)
   resolveVatableBase,           // 🆕 VAT-FIX §7: ฐาน VAT เมื่อ override ยอด VAT
   getLastConfirmedVatRate,      // 🆕 VAT-FIX R15: อัตรา VAT ที่ใบกำกับยืนยันล่าสุด (supplier+item) — default ให้ PO ใบถัดไป
+  PriceFixRequestModal, AdjustInvPriceModal, PriceFixReviewPanel, PriceFixReqActions, PriceFixBadge, priceFixBadgeOf, pfOn, pfCanAcct,   // 🆕 PRICE-FIX ขั้น 4 (หน้าเจ้าหนี้)
   collectVatAdjustInfo,         // 🆕 VAT-FIX R15: สรุป "บัญชีปรับ VAT ให้ตรงใบกำกับ" ของ INV/GR ที่ผูก (แบนเนอร์ PO/GR)
   INV_STATUS,
   PAY_METHODS, PAY_INTENT_METHODS,
@@ -86194,6 +87337,11 @@ function AccountingModule({ state, dispatch }){
   // pending count: GR ที่ยังไม่ออก INV — กติกาเดียวกับคิวตั้งหนี้ใน INVQueueTab (replacement GR ที่ต้องตั้ง PI นับด้วย · UAT #64)
   const pendingGRs = (state.grs||[]).filter(g => !g.invoiceId && !global.ERP.grMigApHeld(g) && g.supplierId && (!g.isReplacement || g.replacementNeedsPI)).length; /* นำเข้า2569 MF2: GR ประวัติ Ecount ไม่เข้าคิวตั้งหนี้ */
 
+  // 🆕 PRICE-FIX ขั้น 4: คำขอแก้ราคาที่จัดซื้อส่งกลับแล้ว (submitted) = งานบัญชี — นับตรงกับงานค้าง acct_price_fix_review (GR ที่คิวเจ้าหนี้ · PI ที่ PI ทั้งหมด)
+  //   verify 3: สวิตช์ปิด (rollback) → นับคำขอค้างทั้ง open+submitted = งานเก็บกวาด (✖ ยกเลิก) — ตรงกับงานค้าง acct_price_fix_stale
+  const _pfSwOn = !!(state.settings && state.settings.priceKeyInEnabled === true);
+  const _pfSubL = global.ERP.priceFixList ? global.ERP.priceFixList(state, _pfSwOn ? ['submitted'] : ['open', 'submitted']) : [];
+  const pfGrSub = _pfSubL.filter(x => x.target === 'gr').length, pfInvSub = _pfSubL.filter(x => x.target === 'inv').length;
   // Count INVs ที่ค้างจ่าย
   const pendingPay = (state.invoices||[]).filter(i => !i.voided && i.paymentStatus !== 'paid').length;
   const pendingApproval = (state.payments||[]).filter(p => p.approvalStatus === 'pending').length;
@@ -86216,11 +87364,11 @@ function AccountingModule({ state, dispatch }){
     || (subKey === 'vatClaims' && hasPerm(user, 'accounting', 'vat', 'view'));   // 🆕 VAT-CLAIM V6: คนดู VAT สรุปเดือนได้ = ดูทะเบียนได้ (ผู้ใช้เดิมที่ตั้งสิทธิ์รายตัวไว้ไม่หลุด)
   const allTabs = [
     { k:'dashboard', label:'📊 Dashboard' },
-    { k:'ap',        label:'💸 เจ้าหนี้ (AP)', badge: pendingGRs + pendingApproval + pettyOpenAdv,
+    { k:'ap',        label:'💸 เจ้าหนี้ (AP)', badge: pendingGRs + pendingApproval + pettyOpenAdv + pfInvSub,
       subs:[
-        { k:'invAll',     label:'📑 PI ทั้งหมด (ตั้งหนี้)' },
+        { k:'invAll',     label:'📑 PI ทั้งหมด (ตั้งหนี้)' + (pfInvSub ? ' (' + (_pfSwOn ? '🔍 ' : '✖ ') + pfInvSub + ')' : '') },
         // 🆕 1.5: เปลี่ยนชื่อที่แสดงให้ตรงภาษาที่ใช้งานจริง (key เดิมห้ามเปลี่ยน — usePersistedTab + permission ผูกกับ key)
-        { k:'invQueue',   label:`🧾 เจ้าหนี้ ${pendingGRs?'('+pendingGRs+')':''}` },
+        { k:'invQueue',   label:`🧾 เจ้าหนี้ ${pendingGRs?'('+pendingGRs+')':''}${pfGrSub?(_pfSwOn?' · ✏️ ':' · ✖ ')+pfGrSub:''}` },
         { k:'recurring',  label:'🔁 Recurring PI' },
         { k:'payment',    label:`💰 รอจ่าย ${pendingPay?'('+pendingPay+')':''}` },
         { k:'payApprove', label:`🔒 รออนุมัติ ${pendingApproval?'('+pendingApproval+')':''}` },
@@ -93666,6 +94814,8 @@ function INVAllOverviewTab({ state, dispatch, user }){
                   h('td', { className:'px-3 py-2 text-xs' }, fmtDate(i.invDate)),
                   h('td', { className:'px-3 py-2 font-mono text-xs text-red-700 font-semibold' },
                     i.invNumber,
+                    (() => { const _pm = global.ERP.MODULES.purchase; const b = _pm && _pm.priceFixBadgeOf && (_pm.pfOn(state) || (global.ERP.priceFixLive && global.ERP.priceFixLive(i))) ? _pm.priceFixBadgeOf(state, 'inv', i) : null;
+                      return b ? h('div', { className:'font-sans' }, h(_pm.PriceFixBadge, { b })) : null; })(),   // 🆕 PRICE-FIX ขั้น 4: ⏳ รอจัดซื้อ / 🔍 รอบัญชียืนยัน / ⏳ รออนุมัติราคา
                     i.tagId && h('span', { className:'ml-1 font-sans font-normal' }, h(global.ERP.DocTagChip, { state, doc:i })),   // 🆕 DOC-TAGS D3
                     i.supInvImage && h('button', {
                       title:'ดูรูปใบแจ้งหนี้',
@@ -94153,6 +95303,11 @@ function INVQueueTab({ state, dispatch, user }){
   const GRDetailModal = purchaseMod?.GRDetailModal;
   const QuickUpdateSupInvModal = purchaseMod?.QuickUpdateSupInvModal;
   const [showAdvanceINV, setShowAdvanceINV] = useState(null); // po obj
+  // 🆕 PRICE-FIX ขั้น 4 (P5): ↩️ ส่งให้จัดซื้อแก้ราคา + ป้าย ⏳/✏️/⏳อนุมัติ ในแถว — ซ่อนทั้งหมดเมื่อสวิตช์ปิด
+  const pfOnA = !!(purchaseMod && purchaseMod.pfOn && purchaseMod.pfOn(state));
+  const pfCanA = pfOnA && purchaseMod.pfCanAcct(user);
+  const PriceFixRequestModal = purchaseMod?.PriceFixRequestModal, PriceFixBadge = purchaseMod?.PriceFixBadge;
+  const [pfReqGr, setPfReqGr] = useState(null);
   const [showBatchINV, setShowBatchINV] = useState(false);
 
   const canCreateInv = hasPerm(user, 'purchase','inv','create');
@@ -94557,6 +95712,7 @@ function INVQueueTab({ state, dispatch, user }){
                     const blockPi = decisionPendingLines.length > 0;
                     const allWaitExtra = blockPi && decisionPendingLines
                       .every(l => l.shortStatus === 'wait_extra');
+                    const pfB = pfOnA ? purchaseMod.priceFixBadgeOf(state, 'gr', g) : null;   // 🆕 PRICE-FIX ขั้น 4: ⏳ รอจัดซื้อ / ✏️ แก้แล้ว / ⏳ รออนุมัติราคา
                     return h('tr', { key:g.id, 'data-row-id':g.id, className: cls('hover:bg-gray-50', blockPi && 'bg-red-50/40', F.rowCls(g.id)) },
                       h('td', { className:'px-3 py-2 text-xs whitespace-nowrap' }, fmtDate(g.grDate)),
                       // 🆕 เลขที่ใบกำกับ (คลังบันทึกตอนรับ) — ว่าง = ยังไม่ได้ใบกำกับ ตั้งหนี้ได้แล้วคีย์ทีหลัง
@@ -94571,7 +95727,8 @@ function INVQueueTab({ state, dispatch, user }){
                           : grDocNone
                             ? h('span', { className:'text-gray-500 font-sans', title:'คลังระบุว่าของมาโดยไม่มีเอกสาร — ตรวจกับ supplier ก่อนตั้งหนี้' }, '📭 ไม่มีเอกสาร')
                             : h('span', { className:'text-gray-400 font-sans' }, '—')),
-                      h('td', { className:'px-3 py-2 font-mono text-xs text-green-700 font-semibold break-all' }, g.grNumber, global.ERP.grOnBehalfTag && global.ERP.grOnBehalfTag(g, state)),   // 🆕 RECV-ONBEHALF UAT S3
+                      h('td', { className:'px-3 py-2 font-mono text-xs text-green-700 font-semibold break-all' }, g.grNumber, global.ERP.grOnBehalfTag && global.ERP.grOnBehalfTag(g, state),   // 🆕 RECV-ONBEHALF UAT S3
+                        pfB && PriceFixBadge && h('div', null, h(PriceFixBadge, { b:pfB }))),   // 🆕 PRICE-FIX ขั้น 4
                       h('td', { className:'px-3 py-2 font-mono text-xs text-blue-700 break-all' },
                         g.poNumber||'-',
                         poNotFull && h('div', {
@@ -94611,9 +95768,15 @@ function INVQueueTab({ state, dispatch, user }){
                                 title: allWaitExtra ? 'รอ supplier ส่งของให้ครบก่อน' : 'รอจัดซื้อตัดสินใจ short-receive',
                                 className:'px-2 py-1 text-xs bg-gray-200 text-gray-400 rounded cursor-not-allowed' },
                                 allWaitExtra ? '🚧 รอ supplier' : '🚫 รอ decision')
+                            : (pfB && pfB.hold) ? h('button', { disabled:true, title:pfB.hold, 'data-testid':'grq-inv-held',   // 🆕 PRICE-FIX ขั้น 4: ตั้งหนี้ไม่ได้ระหว่างรอ
+                                className:'px-2 py-1 text-xs bg-gray-200 text-gray-400 rounded cursor-not-allowed' }, '💸 ตั้งหนี้')
                             : h(Button, { variant:'primary', size:'sm',
                                 // ฟอร์มตั้งหนี้ของ GR นี้ย่ออยู่ (docKey 'inv:gr:'+id ใน CreateINVModal) → เด้งอันเดิมขึ้นมาแทนเปิดใหม่
                                 onClick:()=>{ if(global.ERP.restoreMinimized && global.ERP.restoreMinimized('inv:gr:'+g.id)) return; setShowCreateINV(g); } }, '💸 ตั้งหนี้')),
+                          // 🆕 PRICE-FIX ขั้น 4 (P5): ปุ่มที่ 3 — ราคาในใบกำกับไม่ตรง → ส่งให้จัดซื้อคีย์ราคาใหม่ (กลับมาที่คิวนี้ ป้าย ✏️)
+                          pfCanA && !pfB && !blockPi && PriceFixRequestModal && h(Button, { variant:'outline', size:'sm', 'data-testid':'grq-pf-req',
+                            title:'ราคาในใบกำกับไม่ตรงกับที่รับของ — ส่งให้จัดซื้อคีย์ราคาใหม่ แล้วกลับมาตั้งหนี้ที่คิวนี้',
+                            onClick:()=>{ if(global.ERP.restoreMinimized && global.ERP.restoreMinimized('pf:req:gr:'+g.id)) return; setPfReqGr(g); } }, '↩️ ส่งให้จัดซื้อแก้ราคา'),
                         )
                       ),
                     );
@@ -94632,6 +95795,7 @@ function INVQueueTab({ state, dispatch, user }){
       onClose:()=>setShowCreateINV(null),
       onDone:()=>setShowCreateINV(null),
     }),
+    pfReqGr && PriceFixRequestModal && h(PriceFixRequestModal, { key:'pfreq_'+pfReqGr.id, target:'gr', doc:(state.grs||[]).find(x => x.id === pfReqGr.id) || pfReqGr, state, dispatch, user, onClose:()=>setPfReqGr(null) }),   // 🆕 PRICE-FIX ขั้น 4
     showCombined && CombinedINVModal && h(CombinedINVModal, {
       state, dispatch, user, onClose:()=>setShowCombined(false)
     }),
@@ -98112,9 +99276,12 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
   // 🆕 บิลที่ถูก hold เพราะของคืนยังไม่เคลียร์ — โชว์ในคิวได้ แต่เลือกจ่ายไม่ได้
   // 🆕 บิลที่มีคำขอปรับ VAT / แก้ไข INV รออนุมัติ (adjust_inv_vat / edit_inv) — ยอดค้างจะเปลี่ยนหลังอนุมัติ → ยังโชว์ในคิวแต่เลือกไม่ได้ (กันขอจ่ายยอดเก่าทับ · executor ปรับ VAT จะบล็อกใบที่มีคำขอจ่ายค้าง)
   // เลือกทั้งหมด = เฉพาะแถวในหน้าปัจจุบัน (บิลที่ถูกพักจ่าย/รอปรับ VAT ยังเลือกไม่ได้เหมือนเดิม)
-  const holdReason = (i) => i.rtvHoldPayment ? 'ถูกพักจ่าย — มีของคืนที่ยังไม่ปิดเคส'
+  // 🆕 PRICE-FIX ขั้น 4 (P5): คำขอแก้ราคาเปิดอยู่ = ขอจ่ายไม่ได้จนกว่าจะจบ (reducer ADD_PAY ก็บล็อก — ที่นี่บอกเหตุผลก่อนกด)
+  const _pfHold = (i) => { const r = global.ERP.priceFixOpenForInv ? global.ERP.priceFixOpenForInv(state, i.id) : null;
+    return r ? (r.status === 'open' ? '⏳ รอจัดซื้อแก้ราคา' : '🔍 รอบัญชียืนยันราคา') + ' — ขอจ่ายไม่ได้จนกว่าจะยืนยัน/ยกเลิกคำขอ (เปิดใบ PI)' : ''; };
+  const holdReason = (i) => _pfHold(i) || (i.rtvHoldPayment ? 'ถูกพักจ่าย — มีของคืนที่ยังไม่ปิดเคส'
     : (((global.ERP && global.ERP.pendingRtvForInv) || function(){ return []; })(state, i.id).length ? 'มีของคืน (RTV) รอจัดซื้อตัดสินใจ — ขอจ่ายหลังปิดเคส'   // 🆕 UAT (คลัง): ติ๊กไม่ได้ตั้งแต่ต้น
-    : pendingInvChange(state, i.id) ? 'รอปรับ VAT/แก้ไข — ขอจ่ายหลังอนุมัติ' : '');
+    : pendingInvChange(state, i.id) ? 'รอปรับ VAT/แก้ไข — ขอจ่ายหลังอนุมัติ' : ''));
   const selectable = pg.shown.filter(i => !holdReason(i));
   const selectableIds = selectable.map(i => i.id);
   const allChecked = selectable.length > 0 && selectableIds.every(id => selectedIds.includes(id));
@@ -98179,6 +99346,7 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
               h('div', { className:'font-mono text-xs text-red-700 font-semibold' }, i.invNumber,
                 global.ERP.invOnBehalfGR && global.ERP.grOnBehalfTag(global.ERP.invOnBehalfGR(i, state), state),   // 🆕 RECV-ONBEHALF UAT S3
                 h(MigLatePill, { inv:i })),   // 🆕 MIG_LATE_INV
+              _pfHold(i) && h('div', { className:'text-[10px] text-orange-700 font-semibold', 'data-testid':'pay-pf-hold', title:_pfHold(i) }, _pfHold(i).split(' — ')[0], ' · ขอจ่ายไม่ได้'),   // 🆕 PRICE-FIX ขั้น 4
               i.rtvHoldPayment && h('div', { className:'text-[10px] text-rose-700 font-semibold',
                 title:'ไปที่ บัญชี → 🔄 ศูนย์จัดการคืนของ เพื่อปิดเคสก่อน' },
                 '🔒 พักจ่าย — ของคืนยังไม่ปิดเคส'),
@@ -103970,6 +105138,26 @@ function SystemPolicyToggles({ state, dispatch }){
         h('div', null,
           h('div', { className:'font-bold text-indigo-900' }, '🏠 หน้าแรกแบบใหม่ (ทำเลย · ตัวเลขสำคัญ · รอฉันตัดสินใจ · สาขา×วันนี้)'),
           h('div', { className:'text-xs text-indigo-800 mt-0.5' }, 'ปิด = กลับไปใช้หน้าแรกแบบเดิมทุกเครื่องทันที (ใช้เมื่อหน้าใหม่มีปัญหา) · เมนูซ้ายสว่าง/เข้ม สลับได้ต่อเครื่องที่เมนูผู้ใช้มุมขวาบน')))),
+
+    // 🆕 PRICE-FIX ขั้น 4 (PRICE_VARIANCE_CONTRACT R2.6/R2.7): ปรับราคาตามใบกำกับหลังรับของ — default ปิด (ปิด = ปุ่ม/ป้ายทั้งหมดหาย ระบบเดิม)
+    //   เกณฑ์ไม่ต้องอนุมัติ: ส่วนต่างสะสมทั้งใบ ≤ TolAbs ฿ และ ≤ TolPct % (เฉพาะมีคนที่สอง: จัดซื้อคีย์ บัญชียืนยัน) · BlockPct = ราคาต่างเกินนี้ = น่าจะคีย์ผิดหน่วย บล็อก
+    (() => { const D = global.ERP.PRICE_KEYIN_DEFAULTS || { priceKeyInTolAbs:200, priceKeyInTolPct:2, priceKeyInBlockPct:150 };
+      const num = (k) => h('input', { type:'number', min:'0', step:'any', className:'w-24 border rounded px-2 py-1 text-right text-sm', 'data-testid':'policy-' + k,
+        value: st[k] == null || st[k] === '' ? D[k] : st[k],
+        onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ [k]: e.target.value === '' ? null : Number(e.target.value) } }) });
+      return h('div', { className:'bg-orange-50 border-2 border-orange-300 rounded p-4 space-y-2', 'data-testid':'policy-price-keyin' },
+        h('label', { className:'flex items-center gap-3 cursor-pointer' },
+          h('input', { type:'checkbox', checked: st.priceKeyInEnabled === true, className:'w-5 h-5', 'data-testid':'toggle-price-keyin',
+            onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ priceKeyInEnabled: e.target.checked ? true : false } }) }),
+          h('div', null,
+            h('div', { className:'font-bold text-orange-900' }, '💰 ปรับราคาตามใบกำกับหลังรับของ (บัญชีส่งให้จัดซื้อแก้ราคา → บัญชียืนยัน · ต้นทุนเดินตาม)'),
+            h('div', { className:'text-xs text-orange-800 mt-0.5' }, 'เปิด = หน้าเจ้าหนี้มีปุ่ม ↩️ ส่งให้จัดซื้อแก้ราคา / 💰 ปรับราคาตามใบกำกับ · จัดซื้อมีแท็บ 💰 รอแก้ราคา · แก้ได้แค่ราคา/หน่วย (จำนวนแก้ไม่ได้) · ระหว่างรอ ตั้งหนี้/ขอจ่ายใบนั้นไม่ได้ · ช่องพิมพ์ทับยอดตั้งหนี้เกินยอดรับของไม่ได้'))),
+        h('div', { className:'flex flex-wrap gap-4 text-sm text-orange-900 pl-8' },
+          h('label', { className:'flex items-center gap-1' }, 'ไม่ต้องอนุมัติถ้าส่วนต่าง ≤ ', num('priceKeyInTolAbs'), ' ฿'),
+          h('label', { className:'flex items-center gap-1' }, 'และ ≤ ', num('priceKeyInTolPct'), ' %'),
+          h('label', { className:'flex items-center gap-1' }, 'บล็อกราคาที่ต่างจากเดิมเกิน ', num('priceKeyInBlockPct'), ' %')),
+        h('div', { className:'text-[11px] text-orange-700 pl-8' }, 'เกินเกณฑ์ = ผจก.บัญชี/GM อนุมัติ (ราคาขึ้น 2 ขั้น) · บัญชีคีย์เองแล้วราคาขึ้น = ต้องอนุมัติทุกครั้ง · ผู้คีย์ราคาอนุมัติ/ยืนยันเองไม่ได้'));
+    })(),
 
     // 🆕 MULTI-TAXINV (D-3): ใบตั้งหนี้ 1 ใบใส่ใบกำกับภาษีซื้อได้หลายใบ — default ปิด · เปิดเมื่อทุกเครื่องรีโหลดรุ่นนี้แล้ว (≥ 1 วันทำการหลัง deploy) · settings.multiTaxInvOn
     h('div', { className:'bg-emerald-50 border-2 border-emerald-300 rounded p-4', 'data-testid':'policy-multi-taxinv' },
@@ -115965,6 +117153,21 @@ const daysAgoOf = (ctx, v) => { const d = v ? ctx.daysAgo(v) : null; return (d =
 C.registerGroup({
   key:'purchasing', label:'จัดซื้อ', icon:'🛍️', roles:['purchasing'], primary:['purchasing'],
   checks:[
+    // 🆕 PRICE-FIX ขั้น 3 (PRICE_VARIANCE_CONTRACT R2.8): บัญชีขอให้แก้ราคาตามใบกำกับ (คำขอ open บน GR/INV) — นับตรงกับแท็บ 💰 รอแก้ราคาตามใบกำกับ (ERP.priceFixList)
+    //   🔴 เมื่อค้างเกิน 3 วัน (นับจากวันที่บัญชีขอ/ส่งกลับล่าสุด) · id = <target>:<docId> → ใบเดียวเปิดฟอร์มคีย์ราคา
+    { key:'pur_price_fix_open', label:'💰 บัญชีขอให้แก้ราคาตามใบกำกับ',
+      severity: (ctx, res) => (res && res.maxDays > 3) ? 'block' : 'warn',
+      show: (ctx) => !!(ctx.state && ctx.state.settings && ctx.state.settings.priceKeyInEnabled === true) && ctx.can('purchase') && ctx.perm('purchase','po','edit'),   // verify 3: สวิตช์ปิด = จัดซื้อส่งราคาไม่ได้ → ไม่ขึ้นงาน
+      nav: docNav({ tab:'purchase', subs:{ purchase:'pricefix' } }, { kind:'pricefix', scope:'purchase.pricefix' }),
+      todo: tdo(d => `${d.ref} บัญชีขอให้แก้ราคา (รอบ ${d.round}) — กด «💰 คีย์ราคา» ใส่ราคาต่อหน่วยตามใบกำกับ แล้ว «📤 ส่งกลับบัญชี»`,
+                n => `${n} ใบรอจัดซื้อแก้ราคา — เปิดทีละใบ กด «💰 คีย์ราคา» แล้ว «📤 ส่งกลับบัญชี»`),
+      btn: 'คีย์ราคา',
+      hint: 'จัดซื้อ → แท็บ 💰 รอแก้ราคาตามใบกำกับ → 💰 คีย์ราคา → ใส่ราคาต่อหน่วยใหม่ (จำนวนแก้ไม่ได้) → 📤 ส่งกลับบัญชี · ระหว่างนี้บิลนั้นขอจ่ายไม่ได้',
+      run: (ctx) => { const l = ctx.H.priceFixList ? ctx.H.priceFixList(ctx.state, ['open']) : [];
+        const age = (x) => { const h0 = (x.req.history || []).slice(-1)[0], t = Number(h0 && h0.at) || Number(x.req.requestedAt) || 0; return t ? Math.max(0, Math.floor((Date.now() - t) / 864e5)) : 0; };
+        return { count:l.length, maxDays:l.reduce((m, x) => Math.max(m, age(x)), 0),
+          detail:l.map(x => `${x.ref} · รอบ ${x.req.round || 1} · ${x.req.requestedBy || '-'}: ${x.req.reason || ''} · ค้าง ${fmtNum(age(x))} วัน`),
+          docs:l.map(x => ({ kind:'pricefix', id:x.target + ':' + x.id, ref:x.ref, round:x.req.round || 1 })) }; } },
     // 🔧 EXPENSE_PO B10: งานบริการเลยวันนัด > 7 วันยังไม่ยืนยันเลย · สินค้าที่จริงเป็นค่าบริการ
     // 🎯 งานค้าง deeplink: docs = PO (1 แถว/บรรทัด · id ซ้ำได้) → ใบเดียว = เปิด PO · หลายใบ = รายการ PO ที่กรองเหลือเฉพาะใบที่ค้าง (เดิมไม่มี docs → POList ขยายช่วงวันถึง PO เก่าสุด)
     { key:'svc_po_stale', label:'🔧 PO ค่าบริการเลยวันนัดเกิน 7 วัน ยังไม่มีการยืนยันงาน', severity:'warn',
@@ -117352,11 +118555,48 @@ const repairAcctPath = (ctx, res) => {
 const NAV_CT = { tab:'accounting', subs:{ acct:'contracts' } };
 // ปุ่มในหน้าต่างสัญญา: «ลงทะเบียนเลย»/«🏁 พร้อมใช้งาน/เปิดสาขา» = canAsset (mod-accounting ContractDetailModal) · «➕ เพิ่มบัญชีสำหรับสัญญา» = canCoa (ContractsTab)
 const _ctCanAsset = (ctx) => ctx.perm('accounting','contracts','view') && (ctx.isSuper || ctx.perm('accounting','assets','edit'));
+// 🆕 PRICE-FIX verify 3: สวิตช์ปรับราคาตามใบกำกับ (settings.priceKeyInEnabled) — ปิด = งานค้างแก้ราคาไม่ขึ้น (ยกเว้นงานเก็บกวาด)
+const _pfSwOn = (ctx) => !!(ctx && ctx.state && ctx.state.settings && ctx.state.settings.priceKeyInEnabled === true);
 const _ctCanCoa = (ctx) => ctx.perm('accounting','contracts','view') && (ctx.isSuper || ctx.perm('accounting','coa','create'));
 
 C.registerGroup({
   key:'accounting', label:'บัญชี', icon:'💰', roles:['accounting'], primary:['accounting'],
   checks:[
+    // 🆕 PRICE-FIX ขั้น 3 (R2.8): จัดซื้อแก้ราคาแล้ว รอบัญชียืนยัน (submitted) — นับตรงกับ ERP.priceFixList · PI → เปิดใบตั้งหนี้ · GR → คิวตั้งหนี้
+    { key:'acct_price_fix_review', label:'🔍 จัดซื้อแก้ราคาแล้ว รอบัญชียืนยัน', severity:'warn',
+      show: (ctx) => _pfSwOn(ctx) && ctx.can('accounting') && ctx.perm('accounting','invQueue','edit'),
+      nav: docNav((ctx, res) => ((res && res.docs) || []).every(d => d.kind === 'pi') ? { tab:'accounting', subs:{ acct:'invAll' } } : NAV_INVQ),
+      todo: tdo(d => `${d.ref} จัดซื้อแก้ราคาแล้ว (คีย์โดย ${d.by}) — ตรวจกับใบกำกับ แล้ว «✅ ยืนยัน» หรือ «↩️ ส่งกลับ»`,
+                n => `${n} ใบจัดซื้อแก้ราคาแล้ว — ตรวจกับใบกำกับทีละใบ แล้ว «✅ ยืนยัน» หรือ «↩️ ส่งกลับ»`),
+      btn: 'ตรวจราคา',
+      hint: 'ผู้คีย์ราคายืนยันเองไม่ได้ (ต้องคนละคน) · ยกเลิกคำขอได้ทุกเมื่อ = ปลดการขอจ่าย',
+      run: (ctx) => { const l = ctx.H.priceFixList ? ctx.H.priceFixList(ctx.state, ['submitted']) : [];
+        return { count:l.length, detail:l.map(x => `${x.ref} · รอบ ${x.req.round || 1} · คีย์โดย ${(x.req.proposal && x.req.proposal.by) || '-'}`),
+          docs:l.map(x => ({ kind:x.target === 'gr' ? 'gr_inv' : 'pi', id:x.id, ref:x.ref, by:(x.req.proposal && x.req.proposal.by) || '-' })) }; } },
+    // 🆕 PRICE-FIX ขั้น 3 (R2.8): ยอดสินค้าใบตั้งหนี้ไม่เท่ายอดรับของ (Σ GR lineTotal) เกิน ±1 ฿ และไม่เคยปรับราคา = ใบเก่าที่พิมพ์ทับยอด (amountOverride) · ข้ามใบนำเข้า
+    // 🆕 PRICE-FIX verify 3: สวิตช์ปิด (rollback) แต่มีคำขอแก้ราคาค้าง (open/submitted) → งานเก็บกวาดอย่างเดียว ✖ ยกเลิกคำขอ
+    //   นับตรงกับป้ายแท็บ 💸 เจ้าหนี้ (mod-accounting: สวิตช์ปิด = priceFixList open+submitted)
+    { key:'acct_price_fix_stale', label:'✖ คำขอแก้ราคาค้าง (ปิดการปรับราคาแล้ว) — ยกเลิกคำขอ', severity:'warn',
+      show: (ctx) => !_pfSwOn(ctx) && ctx.can('accounting') && ctx.perm('accounting','invQueue','edit'),
+      nav: docNav((ctx, res) => ((res && res.docs) || []).every(d => d.kind === 'pi') ? { tab:'accounting', subs:{ acct:'invAll' } } : NAV_INVQ),
+      todo: tdo(d => `${d.ref} มีคำขอแก้ราคาค้าง — ปิดการปรับราคาตามใบกำกับแล้ว กด «✖ ยกเลิกคำขอ» เพื่อเก็บกวาด`,
+                n => `${n} ใบมีคำขอแก้ราคาค้าง — เปิดทีละใบ กด «✖ ยกเลิกคำขอ»`),
+      btn: 'ยกเลิกคำขอ',
+      hint: 'ปิดสวิตช์ปรับราคาตามใบกำกับแล้ว จัดซื้อส่งราคาไม่ได้ — คำขอค้างไม่กันขอจ่าย แค่ยกเลิกเพื่อเก็บกวาด',
+      run: (ctx) => { const l = ctx.H.priceFixList ? ctx.H.priceFixList(ctx.state, ['open', 'submitted']) : [];
+        return { count:l.length, detail:l.map(x => `${x.ref} · ${x.req.status === 'open' ? 'รอจัดซื้อแก้' : 'รอบัญชียืนยัน'}`),
+          docs:l.map(x => ({ kind:x.target === 'gr' ? 'gr_inv' : 'pi', id:x.id, ref:x.ref })) }; } },
+    { key:'acct_inv_amount_vs_gr', label:'ยอดใบตั้งหนี้ไม่เท่ายอดรับของ (พิมพ์ทับยอด)', severity:'warn',
+      show: (ctx) => _pfSwOn(ctx) && ctx.can('accounting') && ctx.perm('accounting','invAll','view'),
+      nav: docNav({ tab:'accounting', subs:{ acct:'invAll' } }, { kind:'pi' }),
+      todo: tdo(d => `${d.ref} ยอดสินค้าต่างจากใบรับของ ${fmtCur(d.diff)} — ตรวจกับใบกำกับ ถ้าราคาผิดให้ «↩️ ส่งให้จัดซื้อแก้ราคา»`,
+                n => `${n} ใบยอดสินค้าไม่เท่าใบรับของ — ตรวจกับใบกำกับทีละใบ`),
+      btn: 'ตรวจใบ',
+      hint: 'ใบที่ตั้งหนี้โดยพิมพ์ทับ "มูลค่าสินค้า" ทำให้ต้นทุนสต๊อกไม่ตรงยอดหนี้ — แก้ราคาตามใบกำกับแทนการพิมพ์ทับ',
+      run: (ctx) => { const E = ctx.H; if(!E.invAmountVsGrDiff) return { count:0, detail:[], docs:[] };
+        const l = (ctx.state.invoices || []).map(i => ({ i, d:E.invAmountVsGrDiff(ctx.state, i) })).filter(x => x.d != null && Math.abs(x.d) > 1);
+        return { count:l.length, detail:l.map(x => `${x.i.invNumber || x.i.id} · ต่าง ${fmtCur(x.d)}`),
+          docs:l.map(x => ({ kind:'pi', id:x.i.id, ref:x.i.invNumber || x.i.id, diff:x.d })) }; } },
 
     // 🔧 EXPENSE_PO B10: งานบริการจาก PO ยืนยันแล้วยังไม่ตั้งหนี้ · ผังบัญชียังไม่มีค่าซ่อมแซม
     // 🎯 งานค้าง deeplink: docs = PO (1 แถว/บรรทัด · id ซ้ำได้ · kind svc_bill) → PO เดียว = เปิดหน้าต่าง 🔧 ตั้งหนี้งานบริการ · หลายใบ = 🧾 เจ้าหนี้ กรองกล่อง 🔧 เหลือเฉพาะ PO นั้น
