@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="1592a0c155b4";window.__ERP_BUILT_AT__="2026-10-09T14:56:57";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="5bc7e19db521";window.__ERP_BUILT_AT__="2026-10-09T16:45:54";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -9114,6 +9114,12 @@ function docFieldsTH(doc, state, ctx){
   return { rows, hidden };
 }
 // ตารางรายการสินค้า → [{item, qty, unit, price, total}]
+// ยอดสุทธิของบรรทัดที่บันทึกไว้ (หลังส่วนลดบรรทัด) — SI: inclusive = lineTotal · exclusive = lineEx · อื่น ๆ lineTotal
+function _lnNet(l, doc){
+  const inc = doc && doc.priceMode === 'inclusive';
+  const a = inc ? l.lineTotal : l.lineEx, b = inc ? l.lineEx : l.lineTotal;
+  return a != null && a !== '' ? a : (b != null && b !== '' ? b : null);
+}
 function linesTH(doc, state){
   const ls = doc && (Array.isArray(doc.lines) ? doc.lines : Array.isArray(doc.items) ? doc.items : null);
   if(!ls) return [];
@@ -9121,7 +9127,7 @@ function linesTH(doc, state){
     const it = l.itemId && state && (state.items || []).find(x => x && x.id === l.itemId);
     const qty = Number(l.qty != null ? l.qty : l.quantity != null ? l.quantity : l.orderQty != null ? l.orderQty : l.receivedQty);
     const price = Number(l.unitPrice != null ? l.unitPrice : l.price != null ? l.price : l.unitCost != null ? l.unitCost : l.cost);
-    const tot = Number(l.total != null ? l.total : l.amount != null ? l.amount : l.totalCost != null ? l.totalCost : (isFinite(qty) && isFinite(price) ? qty * price : NaN));
+    const tot = Number(l.total != null ? l.total : l.amount != null ? l.amount : l.totalCost != null ? l.totalCost : _lnNet(l, doc) != null ? _lnNet(l, doc) : (isFinite(qty) && isFinite(price) ? qty * price : NaN));
     const m = (n) => isFinite(n) ? n.toLocaleString('th-TH', { minimumFractionDigits:2, maximumFractionDigits:2 }) : '—';
     return { item: (it && (it.name || it.code)) || l.itemName || l.name || l.description || '(สินค้า)', qty: isFinite(qty) ? qty.toLocaleString('th-TH') : '—',
       unit: l.unit || l.uom || l.baseUnit || (it ? getBaseUnit(it) : '') || '', price: m(price), total: m(tot) };
@@ -102389,6 +102395,37 @@ function siBuyer(state, si){
   return { name: (si && si.customerName) || '', taxId:'', branchCode:'', address:'', phone:'' };
 }
 
+// 🆕 SI_PRINT SP3: ยอดบรรทัดใบกำกับขาย — จำนวน × ราคา − ส่วนลด (บาท ตามโหมดราคาเดิม: รวม VAT = ส่วนลดรวม VAT)
+//   discountPct (ใส่ % ในฟอร์ม) → แปลงเป็นบาทจากยอดบรรทัด · ไม่มีส่วนลด = ตัวเลขเหมือนเดิมทุกตัว
+//   คืน { gross, disc, ex, discEx, vat, inc, over } — over = ส่วนลดเกินยอดบรรทัด/ติดลบ (ห้ามออกใบ)
+// 🆕 UAT M1: แปลงข้อความส่วนลดที่พิมพ์ → { discountPct, discount, bad }
+//   ตัด , ฿ บาท ช่องว่าง · เลขไทย ๐-๙ → อารบิก · "10%" = เปอร์เซ็นต์ · ไม่ใช่ตัวเลขจริง = bad (ห้ามออกใบ ไม่แอบเป็น 0)
+function siParseDisc(raw){
+  let t = String(raw == null ? '' : raw).trim();
+  t = t.replace(/[๐-๙]/g, d => String(d.charCodeAt(0) - 0x0E50)).replace(/[,\s฿]/g, '').replace(/บาท/g, '');
+  if(t === '') return { discountPct:null, discount:undefined, bad:false };
+  const isPct = /%$/.test(t);
+  const num = isPct ? t.slice(0, -1) : t;
+  const ok = /^-?(\d+\.?\d*|\.\d+)$/.test(num) && Number.isFinite(Number(num));
+  if(!ok) return { discountPct:null, discount:undefined, bad:true };
+  return isPct ? { discountPct:Number(num), discount:undefined, bad:false } : { discountPct:null, discount:Number(num), bad:false };
+}
+
+function siLineCalc(l, priceMode){
+  const r = Number(l.vatRate) || 0;
+  const gross = (Number(l.unitPrice) || 0) * (Number(l.qty) || 0);
+  const pct = l.discountPct != null && l.discountPct !== '' ? Number(l.discountPct) : null;
+  const disc0 = pct != null && Number.isFinite(pct) ? Math.round(gross * pct) / 100 : (Number(l.discount) || 0);
+  const bad = !!l._discBad;   // UAT M1: พิมพ์ส่วนลดไม่ใช่ตัวเลข → ห้ามออกใบเหมือน over
+  const over = bad || disc0 < 0 || disc0 > gross + 0.0001;
+  const disc = Math.min(Math.max(0, disc0), Math.max(0, gross));
+  const inc0 = priceMode === 'inclusive';
+  const ex = inc0 ? (gross - disc) / (1 + r/100) : gross - disc;
+  const discEx = inc0 ? disc / (1 + r/100) : disc;
+  const vat = ex * r / 100;
+  return { gross, disc, ex, discEx, vat, inc: ex + vat, over, bad };
+}
+
 // 🆕 UAT S3/S4 (นำเข้าขาย2569): ป้ายใบนำเข้า — ไม่ยกลูกหนี้ (บัญชีคัด) · วันครบกำหนดรอตั้ง
 function SIMigArBadge({ si }){
   if(!global.ERP.siArUnsettled(si)) return null;
@@ -102739,14 +102776,8 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote }){
   }, [customerId, invDate]);
 
   // 🧾 W3: บล็อกเลือกสินค้า/ตารางบรรทัด ย้ายไป SalesLineTable (ใช้ร่วมกับใบเสนอราคา)
-  // totals
-  const calc = lines.map(l => {
-    const lineEx = priceMode === 'inclusive'
-      ? (l.unitPrice * l.qty) / (1 + (l.vatRate||0)/100)
-      : l.unitPrice * l.qty;
-    const vat = lineEx * (l.vatRate||0) / 100;
-    return { ex:lineEx, vat, inc:lineEx + vat };
-  });
+  // totals — 🆕 SI_PRINT SP3: หักส่วนลดรายบรรทัดก่อนคิดฐาน VAT (siLineCalc)
+  const calc = lines.map(l => siLineCalc(l, priceMode));
   const subtotal = calc.reduce((s,c) => s + c.ex, 0);
   const vatTotal = calc.reduce((s,c) => s + c.vat, 0);
   const total = subtotal + vatTotal;
@@ -102758,6 +102789,17 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote }){
     if(!customerId) return alert('เลือกลูกค้า');
     const valid = lines.filter(l => l.itemId && l.qty > 0);
     if(valid.length === 0) return alert('ใส่สินค้าอย่างน้อย 1 รายการ');
+    // 🆕 SI_PRINT SP3: ส่วนลดเกินยอดบรรทัด/ติดลบ = ห้ามออกใบ
+    {
+      const _bad = valid.filter(l => calc[lines.indexOf(l)].bad);
+      if(_bad.length) return alert('⛔ ส่วนลดอ่านเป็นตัวเลขไม่ได้:\n\n'
+        + _bad.map(l => '• ' + ((state.items.find(x => x.id === l.itemId)||{}).name || l.itemId) + ' — "' + (l._discRaw || '') + '"').join('\n')
+        + '\n\nใส่ตัวเลข เช่น 50 หรือ 10%');
+      const _ov = valid.filter(l => calc[lines.indexOf(l)].over);
+      if(_ov.length) return alert('⛔ ส่วนลดเกินยอดของบรรทัด (หรือติดลบ):\n\n'
+        + _ov.map(l => '• ' + ((state.items.find(x => x.id === l.itemId)||{}).name || l.itemId)).join('\n')
+        + '\n\nแก้ส่วนลดให้ไม่เกิน จำนวน × ราคา/หน่วย ก่อนออกใบ');
+    }
     // 🆕 FIX-8: period lock check ที่ UI (กัน split-brain — stock ตัดแต่ JE ถูก reject)
     const lock = state.settings?.periodLockUntil;
     if(lock && String(invDate) <= String(lock)){
@@ -102931,6 +102973,8 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote }){
           lineVat: Number(c.vat.toFixed(2)),
           lineTotal: Number(c.inc.toFixed(2)),
         };
+        // 🆕 SI_PRINT SP3: ส่วนลดรายบรรทัด (บาท ตามโหมดราคา) + ส่วนลดก่อน VAT (พิมพ์คอลัมน์ส่วนลด) — ไม่มีส่วนลด = ไม่ใส่ฟิลด์ (รูปใบเดิม)
+        if(c.disc > 0){ base.discount = Number(c.disc.toFixed(2)); base.discountEx = Number(c.discEx.toFixed(2)); }
         // 📝 W3: ผูกกลับบรรทัดใบเสนอราคาด้วย lineNo (ห้ามใช้ itemId — ของซ้ำชื่อในใบเดียวมีจริง)
         if(l._qtLineNo) base.qtLineNo = l._qtLineNo;
         if(l.lineKind !== 'kit'){ out.push({ ...base, lineNo: out.length + 1 }); return; }
@@ -103165,10 +103209,13 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote }){
       ),
 
       h(SalesLineTable, { state, dispatch, user, branch: sourceBranch, customer,
-        lines, setLines, vatRate, priceMode, testPrefix:'si' }),
+        lines, setLines, vatRate, priceMode, testPrefix:'si', showDiscount:true }),
 
       // Totals
       lines.length > 0 && h('div', { className:'bg-gray-50 rounded p-3 space-y-1 text-sm' },
+        // 🆕 SI_PRINT SP3: ส่วนลดรวม (หักแล้วในยอดก่อน VAT)
+        calc.some(c => c.disc > 0) && h('div', { className:'flex justify-between text-rose-700', 'data-testid':'si-disc-total' },
+          h('span', null, 'ส่วนลดรายบรรทัด (หักแล้ว):'), h('span', null, fmtCur(calc.reduce((a,c) => a + c.disc, 0)))),
         h('div', { className:'flex justify-between' }, h('span', null, 'ยอดก่อน VAT:'), h('span', null, fmtCur(subtotal))),
         h('div', { className:'flex justify-between' }, h('span', null, 'VAT:'), h('span', null, fmtCur(vatTotal))),
         h('div', { className:'flex justify-between font-bold border-t pt-1' }, h('span', null, 'ยอดรวม:'), h('span', null, fmtCur(total))),
@@ -104151,7 +104198,7 @@ function dueFromCredit(customer, baseDate){
 //   - ราคาเด้งตามหน่วย/กลุ่มลูกค้า (resolvePrice) · เปลี่ยนหน่วยแล้วราคาตาม
 //   - 🎁 ชุดสินค้า: เปิดหน้าจัดกล่อง · แถวเดียวในเอกสาร
 //   ⚠️ ห้ามใส่ side-effect (ตัดสต๊อก/JE) ที่นี่ — ผู้เรียกเป็นคนจัดการตอนบันทึกเอกสาร
-function SalesLineTable({ state, dispatch, user, branch, customer, lines, setLines, vatRate, priceMode, testPrefix }){
+function SalesLineTable({ state, dispatch, user, branch, customer, lines, setLines, vatRate, priceMode, testPrefix, showDiscount }){
   const [itemSearch, setItemSearch] = useState('');
   const [showAllItems, setShowAllItems] = useState(false);
   const [itemLimit, setItemLimit] = useState(200);
@@ -104173,13 +104220,15 @@ function SalesLineTable({ state, dispatch, user, branch, customer, lines, setLin
   const shownItems = filteredItems.slice(0, showAllItems ? itemLimit : 20);
   const moreItems  = filteredItems.length - shownItems.length;
 
-  const calc = lines.map(l => {
-    const lineEx = priceMode === 'inclusive'
-      ? (l.unitPrice * l.qty) / (1 + (l.vatRate||0)/100)
-      : l.unitPrice * l.qty;
-    const vat = lineEx * (l.vatRate||0) / 100;
-    return { ex:lineEx, vat, inc:lineEx + vat };
-  });
+  // 🆕 SI_PRINT SP3: ใบกำกับ (showDiscount) หักส่วนลดรายบรรทัด · ใบเสนอราคาไม่มีช่องส่วนลด → siLineCalc ได้ค่าเดิม
+  const calc = lines.map(l => siLineCalc(showDiscount ? l : { ...l, discount:0, discountPct:null }, priceMode));
+  // ใส่ส่วนลด: "50" = 50 บาท · "10%" = 10% ของ จำนวน × ราคา (คิดใหม่เมื่อแก้จำนวน/ราคา) · ว่าง = ไม่มีส่วนลด
+  const setDiscount = (i, raw) => setLines(lines.map((l,idx) => {
+    if(idx !== i) return l;
+    const t = String(raw == null ? '' : raw);
+    const p = siParseDisc(t);   // UAT M1: "1,000" / "฿50" / "๑๐๐" อ่านได้ · "abc" = กรอบแดง+ห้ามออกใบ
+    return { ...l, _discRaw:t, discountPct:p.discountPct, discount:p.discount, _discBad:p.bad || undefined };
+  }));
 
   const addLine = (item) => {
     const sellUnits = unitsForPurpose(item, 'sale') || [{ name:item.issueUnit||'' }];
@@ -104272,6 +104321,10 @@ function SalesLineTable({ state, dispatch, user, branch, customer, lines, setLin
               h('th', { className:'px-2 py-1.5 text-right text-xs w-20' }, 'จำนวน'),
               h('th', { className:'px-2 py-1.5 text-left text-xs w-24' }, 'หน่วย'),
               h('th', { className:'px-2 py-1.5 text-right text-xs w-24' }, 'ราคา/หน่วย'),
+              showDiscount && h('th', { className:'px-2 py-1.5 text-right text-xs w-24', title:'บาท หรือใส่ % เช่น 10% · ' + (priceMode === 'inclusive' ? 'ราคารวม VAT' : 'ก่อน VAT') }, 'ส่วนลด',
+                // UAT S1: คำอธิบายเห็นได้บนแท็บเล็ต (ไม่ซ่อนใน title)
+                h('div', { className:'text-[10px] font-normal text-gray-500', 'data-testid':tp + '-disc-hint' },
+                  '(บาท ' + (priceMode === 'inclusive' ? 'รวม VAT' : 'ก่อน VAT') + ' / ใส่ %)')),
               h('th', { className:'px-2 py-1.5 text-center text-xs w-16' }, 'VAT%'),
               h('th', { className:'px-2 py-1.5 text-right text-xs w-28' }, 'รวม'),
               h('th', { className:'px-2 py-1.5 w-8' }),
@@ -104313,6 +104366,15 @@ function SalesLineTable({ state, dispatch, user, branch, customer, lines, setLin
                     title: !(Number(l.unitPrice) > 0) ? 'ยังไม่ได้ตั้งราคาขายของสินค้านี้' : '',
                     className: cls('w-full px-1 py-1 border rounded text-xs text-right font-mono',
                       !(Number(l.unitPrice) > 0) && 'border-orange-400 bg-orange-50') })),
+                showDiscount && h('td', { className:'px-2 py-1' },
+                  h('input', { type:'text', inputMode:'text', 'data-testid':tp + '-disc-' + i,
+                    value: l._discRaw != null ? l._discRaw : (l.discountPct != null ? l.discountPct + '%' : (l.discount || '')),
+                    placeholder:'0 / %', onChange:e=>setDiscount(i, e.target.value),
+                    title: calc[i]?.bad ? 'ใส่ตัวเลข เช่น 50 หรือ 10%' : calc[i]?.over ? 'ส่วนลดเกินยอดบรรทัด' : ((calc[i]?.disc||0) > 0 ? '= ' + fmtCur(calc[i]?.disc||0) : ''),
+                    className: cls('w-full px-1 py-1 border rounded text-xs text-right font-mono', calc[i]?.over && 'border-red-500 bg-red-50') }),
+                  calc[i]?.bad ? h('div', { className:'text-[10px] text-red-600 text-right', 'data-testid':tp + '-disc-err-' + i }, 'ใส่ตัวเลข เช่น 50 หรือ 10%')
+                  : calc[i]?.over ? h('div', { className:'text-[10px] text-red-600 text-right' }, 'เกินยอดบรรทัด')
+                  : (calc[i]?.disc||0) > 0 && h('div', { className:'text-[10px] text-gray-500 text-right', 'data-testid':tp + '-disc-eq-' + i }, '= ' + fmtCur(calc[i]?.disc||0))),
                 h('td', { className:'px-2 py-1' },
                   h('select', { value:l.vatRate, onChange:e=>updateLine(i,'vatRate',Number(e.target.value)),
                     className:'w-full px-1 py-1 border rounded text-xs' },
@@ -104671,6 +104733,7 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
               h('th', { className:'px-2 py-1 text-left' }, 'สินค้า'),
               h('th', { className:'px-2 py-1 text-right' }, 'จำนวน'),
               h('th', { className:'px-2 py-1 text-right' }, 'ราคา'),
+              (si.lines||[]).some(l => Number(l.discount) > 0) && h('th', { className:'px-2 py-1 text-right' }, 'ส่วนลด'),   // 🆕 SI_PRINT SP3
               h('th', { className:'px-2 py-1 text-right' }, 'รวม'))),
           h('tbody', { className:'divide-y' },
             (si.lines||[]).map((l,i) => {
@@ -104684,6 +104747,8 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
                     `(${fmtNum(l.qtyPerKit)} ต่อกล่อง)`) : null),
                 h('td', { className: cls('px-2 py-1 text-right', isChild && 'text-xs') }, `${fmtNum(l.qty)} ${l.unit||''}`),
                 h('td', { className:'px-2 py-1 text-right' }, isChild ? '—' : fmtCur(l.unitPrice||0)),
+                (si.lines||[]).some(x => Number(x.discount) > 0) && h('td', { className:'px-2 py-1 text-right text-rose-700' },
+                  isChild || !(Number(l.discount) > 0) ? '-' : fmtCur(l.discount)),
                 h('td', { className:'px-2 py-1 text-right font-medium' }, isChild ? '—' : fmtCur(l.lineTotal||0)));
             }))
         )),
@@ -105384,6 +105449,7 @@ function printSalesInvoice(si, state, opts){
     return `${parseInt(d)}/${parseInt(m)}/${parseInt(y)+543}`;
   };
   const fmt = n => Number(n||0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const _esc = (t) => String(t == null ? '' : t).replace(/[&<>"]/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[ch]));
 
   // ⚖️ ม.86/4(6): มูลค่าสินค้าบนใบกำกับต้องเป็นยอด "ก่อน VAT" เพื่อให้ Σ บรรทัด = ยอดก่อน VAT แล้วบวก VAT ท้ายใบ
   //    (ราคาที่คีย์อาจเป็นแบบรวม VAT — lineEx ถูกถอด VAT ไว้ให้แล้วตอนออกใบ)
@@ -105391,8 +105457,14 @@ function printSalesInvoice(si, state, opts){
   const _rates = [...new Set((si.lines||[]).filter(l => l.lineKind !== 'kit_child')
     .map(l => Number(l.vatRate)||0))];
   const _vatLabel = _rates.length === 1 ? `ภาษีมูลค่าเพิ่ม ${_rates[0]}%` : 'ภาษีมูลค่าเพิ่ม (หลายอัตรา)';
+  // 🆕 SI_PRINT SP2/SP3: ส่วนลดรายบรรทัด (ก่อน VAT) — ราคา/หน่วย = (ยอดสุทธิ + ส่วนลด) ÷ จำนวน · ไม่มีส่วนลด = เหมือนเดิม
+  const _discEx = (l) => {
+    if(!(Number(l.discount) > 0)) return 0;
+    if(l.discountEx != null) return Number(l.discountEx) || 0;
+    return si.priceMode === 'inclusive' ? Number(l.discount) / (1 + (Number(l.vatRate)||0)/100) : Number(l.discount);
+  };
   const _unitEx = (l) => (Number(l.qty) > 0 && l.lineEx != null)
-    ? Number(l.lineEx) / Number(l.qty)
+    ? (Number(l.lineEx) + _discEx(l)) / Number(l.qty)
     : Number(l.unitPrice || 0);
   // 🎁 SALES-W2: ยุบแถวลูกของชุดเข้าแถวแม่ — โหมด single = ไม่โชว์ของข้างในเลย (ค่าตั้งต้น)
   const _kitMode = opts.showChildren ? 'withChildren' : 'single';   // ชัดเจนเสมอ — ห้าม fallback ไปค่าบนบรรทัด (ต้นฉบับ/สำเนาต้องตรงกัน)
@@ -105403,20 +105475,23 @@ function printSalesInvoice(si, state, opts){
     const it = state.items.find(x => x.id === l.itemId);
     // 🆕 ใช้ชื่อ ณ วันออกใบก่อนเสมอ (ใบเก่าพิมพ์ซ้ำต้องเหมือนฉบับที่ออกไป)
     const _nm = l.itemName || it?.name || l.itemId;
-    const _cd = l.itemCode || it?.code || '';
+    // 🆕 SI_PRINT SP2: ไม่พิมพ์รหัสสินค้าใต้ชื่อ (เจ้าของ 2026-10-09)
     const _kids = (l._children || []).map(ch => `<tr>
       <td></td>
       <td style="padding-left:8mm;font-size:9pt;color:#444">• ${ch.itemName || ''}</td>
       <td style="text-align:right;font-size:9pt;color:#444">${fmt(ch.qty)} ${ch.unit||''}</td>
       <td style="text-align:right;color:#888">—</td>
       <td style="text-align:right;color:#888">—</td>
+      <td style="text-align:right;color:#888">—</td>
     </tr>`).join('');
-    return `<tr>
+    const _de = _discEx(l);
+    return `<tr data-si-line="${i+1}">
       <td style="text-align:center">${i+1}</td>
-      <td>${_nm}<br/><span style="font-size:8pt;color:#666">${_cd}</span>${
+      <td>${_nm}${
         l._kidNames ? `<br/><span style="font-size:8pt;color:#666">ประกอบด้วย: ${l._kidNames}</span>` : ''}</td>
       <td style="text-align:right">${fmt(l.qty)} ${l.unit||''}</td>
       <td style="text-align:right">${fmt(_unitEx(l))}</td>
+      <td style="text-align:right" data-si-disc>${_de > 0 ? fmt(_de) : '-'}</td>
       <td style="text-align:right">${fmt(l.lineEx != null ? l.lineEx : (l.lineTotal||0))}</td>
     </tr>${_kids}`;
   }).join('');
@@ -105439,8 +105514,25 @@ function printSalesInvoice(si, state, opts){
   .totals { margin-left: auto; width: 70mm; font-size: 10pt; }
   .totals .row { display: flex; justify-content: space-between; padding: 1mm 3mm; }
   .totals .row.final { font-weight: bold; font-size: 12pt; border-top: 2px solid #000; background:#f5f5f5; }
-  .footer { margin-top: 12mm; display: grid; grid-template-columns: 1fr 1fr; gap: 6mm; font-size: 10pt; }
+  .footer { margin-top: 8mm; display: grid; grid-template-columns: 1fr 1fr; gap: 6mm; font-size: 10pt; }
+  /* UAT S1: ใบยาวขึ้นหน้า 2 — ห้ามตัดแถวกลางบรรทัด · หัวตารางซ้ำทุกหน้า · ยอดรวม+หมายเหตุ+บรรทัดใบเสร็จ+ลายเซ็น ยกไปด้วยกันเป็นก้อนเดียว (ลายเซ็นไม่หลุดไปอยู่หน้าเปล่าเดี่ยว ๆ) */
+  table.items thead { display: table-header-group; }
+  table.items tr { break-inside: avoid; page-break-inside: avoid; }
+  .si-tail { break-inside: avoid; page-break-inside: avoid; }
+  /* verify 1: ใบยาวหลายหน้า — ทุกหน้ามีเลขที่ใบกำกับ (แถวบนหัวตารางซ้ำทุกหน้า + บรรทัดบนก้อนท้าย เผื่อหน้าสุดท้ายมีแต่ยอดรวม/ลายเซ็น) */
+  table.items th.si-ref { background: none; border: none; padding: 0 0 1mm; text-align: right; font-size: 8pt; font-weight: normal; }
+  .si-ref-tail { text-align: right; font-size: 8pt; margin-bottom: 1mm; }
   .sig { text-align: center; margin-top: 15mm; border-top: 1px dotted #000; padding-top: 2mm; }
+  .sig .sdate { margin-top: 3mm; }
+  .head { position: relative; }
+  .badge { position: absolute; top: 0; right: 0; border: 2px solid #000; padding: 1mm 4mm; font-size: 13pt; font-weight: bold; text-align: center; line-height: 1.2; }
+  .badge small { display: block; font-size: 8pt; font-weight: normal; }
+  .badge.void { border-color: #c00; color: #c00; }
+  .remark { border: 1px solid #000; padding: 2mm 3mm; margin-top: 4mm; min-height: 16mm; font-size: 10pt; }
+  .remark .label { font-weight: bold; font-size: 9pt; margin-bottom: 1mm; }
+  /* SP6: บรรทัดใบเสร็จสมบูรณ์เมื่อได้รับชำระ — พิมพ์ทุกใบ (ไม่ใส่คำป้ายในคอมเมนต์ เทสหาคำในใบ) */
+  .rcpt-note { margin-top: 2mm; font-size: 9pt; font-weight: bold; text-align: center; }
+  .rcpt-note small { display: block; font-weight: normal; font-size: 8pt; }
   .noprint { padding: 8px 12px; background: #eee; border-bottom: 1px solid #999; }
   @media print { .noprint { display: none !important; } }
 </style></head>
@@ -105451,8 +105543,12 @@ function printSalesInvoice(si, state, opts){
   ${_siBrMiss.length ? `<div data-testid="si-branch-warn" style="margin-top:6px;color:#b00;font-weight:bold">⚠️ สาขา "${sellerBranch.name}" ยังไม่ได้ตั้ง ${_siBrMiss.join(' · ')} — ใบกำกับภาษีเต็มรูปของสาขาต้องมีที่อยู่และรหัสสาขาของสาขาที่ออกใบ (ม.86/4) · แก้ที่ ตั้งค่า → 🏢 องค์กร → 🏪 สาขา ก่อนส่งให้ลูกค้า</div>` : ''}
 </div>
 <div class="sheet">
-  <h1>ใบกำกับภาษี / ใบส่งของ</h1>
-  <div class="sub">(Tax Invoice / Delivery Note) — ${si.voided ? '<b style="color:#c00">*** ยกเลิกแล้ว / CANCELLED ***</b>' : (opts.copy ? 'สำเนา (COPY)' : 'ต้นฉบับ')}</div>
+  <div class="head">
+    ${si.voided ? '<div class="badge void" data-testid="si-badge">ยกเลิกแล้ว<small>CANCELLED</small></div>'
+      : (opts.copy ? '<div class="badge" data-testid="si-badge">สำเนา<small>COPY</small></div>' : '<div class="badge" data-testid="si-badge">ต้นฉบับ<small>ORIGINAL</small></div>')}
+    <h1>ใบกำกับภาษี / ใบเสร็จรับเงิน</h1>
+    <div class="sub">(Tax Invoice / Receipt)${si.voided ? ' — <b style="color:#c00">*** ยกเลิกแล้ว / CANCELLED ***</b>' : ''}</div>
+  </div>
   <div class="info">
     <div class="box">
       <div class="label">ผู้ขาย / Seller</div>
@@ -105475,15 +105571,18 @@ function printSalesInvoice(si, state, opts){
     <div>ครบกำหนด: <b>${thDate(si.dueDate)}</b></div>
   </div>
   <table class="items">
-    <thead><tr>
+    <thead><tr><th colspan="6" class="si-ref" data-si-ref>ใบกำกับเลขที่ ${si.siNumber}</th></tr><tr>
       <th style="width:10mm">#</th>
       <th>รายการ</th>
       <th style="width:24mm">จำนวน</th>
       <th style="width:24mm">ราคา/หน่วย</th>
+      <th style="width:22mm">ส่วนลด</th>
       <th style="width:28mm">รวม (บาท)</th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>
+  <div class="si-tail" data-testid="si-tail">
+  <div class="si-ref-tail" data-si-ref>ใบกำกับเลขที่ ${si.siNumber}</div>
   <div class="totals">
     <div class="row"><span>ยอดก่อน VAT:</span><span>${fmt(si.subtotal||0)}</span></div>
     <div class="row"><span>${_vatLabel}</span><span>${fmt(si.vat||0)}</span></div>
@@ -105491,10 +105590,12 @@ function printSalesInvoice(si, state, opts){
     ${(si.whtAmount||0) > 0 ? `<div class="row"><span>หัก ณ ที่จ่าย (${si.whtRate||0}%):</span><span>- ${fmt(si.whtAmount||0)}</span></div>` : ''}
     <div class="row final"><span>สุทธิ:</span><span>${fmt(si.netTotal||0)}</span></div>
   </div>
-  ${si.note ? `<div style="margin-top:4mm;font-size:9pt"><b>หมายเหตุ:</b> ${si.note}</div>` : ''}
+  <div class="remark" data-testid="si-remark"><div class="label">หมายเหตุ / Remarks</div><div style="white-space:pre-wrap">${_esc(si.note || '')}</div></div>
+  <div class="rcpt-note" data-testid="si-receipt-note">ใบเสร็จรับเงินฉบับนี้จะสมบูรณ์ต่อเมื่อบริษัทได้รับชำระเงินเรียบร้อยแล้ว<small>This receipt is valid only when payment has been received.</small></div>
   <div class="footer">
-    <div class="sig">ผู้รับของ / Customer</div>
-    <div class="sig">ผู้ส่งของ / Seller</div>
+    <div class="sig">ผู้รับของ / Customer<div class="sdate">วันที่ ........./........./.........</div></div>
+    <div class="sig">ผู้อนุมัติ / Authorized<div class="sdate">วันที่ ........./........./.........</div></div>
+  </div>
   </div>
 </div>
 </body></html>`;
@@ -105568,7 +105669,7 @@ function printPackingList(si, state){
   w.document.open(); w.document.write(html); w.document.close();
 }
 
-global.ERP.registerModule('sales-full', { main: SalesFullModule, printSalesInvoice, printPackingList, printQuote, printBilling });
+global.ERP.registerModule('sales-full', { main: SalesFullModule, printSalesInvoice, siLineCalc, siParseDisc, printPackingList, printQuote, printBilling });
 // helper ที่โมดูลอื่นต้องใช้ (คลัง: คิวจัดของจากใบเสนอราคาที่ตอบรับแล้ว)
 global.ERP.quoteStatus = quoteStatus;
 global.ERP.billingStatus = billingStatus;
