@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="6eccefe1364d";window.__ERP_BUILT_AT__="2026-10-14T14:43:26";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="d952e8e7949e";window.__ERP_BUILT_AT__="2026-10-14T15:48:53";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -7597,6 +7597,45 @@ function siReplacementBlock(si, d, s){
   }
   return '';
 }
+// 🆕 SP14 (เจ้าของ 2026-10-14 "แค่ขึ้นงานค้างให้ผู้จัดการเห็นพอ"): พิมพ์ใบกำกับผิดปกติ → งานค้างผู้จัดการ (ไม่บล็อก/ไม่ขออนุมัติ)
+//   siPrintSig = ตัวเลขนับต่อใบ { repl ใบแทน, cancel ตอบ "ไม่ออก", dup ต้นฉบับ/ใบแทนซ้ำ, ign พิมพ์ออกแต่ไม่นับ }
+//   🆕 verify 1: printLog เก็บแค่ 100 รายการล่าสุด → นับจากตัวนับสะสม si.printStats (เพิ่มอย่างเดียว ใน SI_PRINT_MARK) · ใบเก่าไม่มี = นับจาก log
+function siPrintSig(si){
+  const log = (si && si.printLog) || [], ps = (si && si.printStats) || {};
+  const lg = { cancel:log.filter(e => e && (e.kind === 'cancel' || e.kind === 'repl_cancel')).length,
+    dup:log.filter(e => e && e.dupOriginal).length,
+    ign:log.filter(e => e && e.ignored && (e.kind === 'original' || e.kind === 'repl')).length };
+  const g = { repl:((si && si.replacements) || []).filter(Boolean).length };
+  ['cancel','dup','ign'].forEach(k => { g[k] = Math.max(lg[k], Math.floor(Number(ps[k]) || 0)); });
+  return g;
+}
+// คืนเหตุผล (ข้อความไทย) เมื่อเข้าเงื่อนไข และมีเหตุใหม่หลังผู้จัดการกด ✔ ตรวจแล้ว (ตัวเลขใดมากกว่า printReview.sig) · [] = ไม่ต้องตรวจ
+function siPrintNeedsReview(si){
+  if(!si || siIsMigrated(si)) return [];
+  const g = siPrintSig(si), why = [];
+  if(g.repl >= 2) why.push('ออกใบแทน ' + g.repl + ' ครั้ง');
+  if(g.cancel >= 2) why.push('ตอบ "ไม่ออก" ' + g.cancel + ' ครั้ง');
+  if(g.dup >= 1) why.push('พิมพ์ต้นฉบับ/ใบแทนซ้ำ ' + g.dup + ' ครั้ง');
+  if(g.ign >= 1) why.push('พิมพ์ออกแต่ระบบไม่นับ ' + g.ign + ' ครั้ง');
+  if(!why.length) return [];
+  const rv = (si.printReview && si.printReview.sig) || null;
+  if(rv && !['repl','cancel','dup','ign'].some(k => g[k] > (Number(rv[k]) || 0))) return [];
+  return why;
+}
+// ผู้ตรวจ = superuser · role gm/admin/manager/owner · ตำแหน่ง ≥ gm · ผู้จัดการแผนกบัญชีหรือขาย (ผู้ใช้ปิดใช้งาน = ไม่ได้)
+function siPrintReviewer(user){
+  if(!user || user.active === false) return false;
+  if(isSuperUser(user) || user.role === 'manager' || user.role === 'owner') return true;
+  if((POSITION_RANK[user.position] || 0) >= POSITION_RANK.gm) return true;
+  const dp = user.departmentIds || [];
+  // 🆕 verify 1: ผู้จัดการสาขา (role branch · แผนก sales ตั้งต้น) ไม่ใช่ผู้ตรวจ — เข้าเมนูขายเต็มไม่ได้ เปิดใบ/กด ✔ ไม่ได้
+  return user.role !== 'branch' && user.position === 'manager' && (dp.includes('accounting') || dp.includes('sales'));
+}
+// 🆕 UAT ชุด 1 S1: ผู้ตรวจเป็นคนพิมพ์/ออกใบแทนใบนี้เอง (printLog[].by / replacements[].by / originalPrintedBy) — แค่แสดงให้เห็น ไม่บล็อก (เจ้าของ: ไม่ต้องขออนุมัติ)
+function siPrintSelfReview(si, by){
+  if(!si || !by) return false;
+  return si.originalPrintedBy === by || (si.printLog || []).some(e => e && e.by === by) || (si.replacements || []).some(r => r && r.by === by);
+}
 // ภาษีขายของใบนำเข้า ยื่น ภ.พ.30 ใน Ecount แล้ว (ใบ มี.ค.–ก.ย.) → ไม่เข้ารายงานภาษีขาย/ภ.พ.30 ระบบนี้ · ใบลงวันที่ ต.ค. (vatFiledElsewhere:false) = ยื่นในระบบนี้
 // 🆕 UAT S2: ตัดสินจากวันที่ใบในระบบ (ใบก่อน 1 ต.ค. 2569 = ยื่นใน Ecount แล้ว) ไม่เชื่อธง vatFiledElsewhere ในไฟล์ — ไฟล์แก้มือ/ไม่มีธง ไม่ทำภาษีขาย ต.ค. หาย
 const SI_MIG_VAT_FROM = '2026-10-01';
@@ -8886,7 +8925,7 @@ Object.assign(_ACT_LABEL, {
   ADD_SALES_INV:'ออกใบกำกับขาย', UPDATE_SALES_INV:'แก้ใบกำกับขาย', VOID_SALES_INV:'ยกเลิกใบกำกับขาย',
   ADD_SALES_PAY:'รับชำระเงินลูกค้า', UPDATE_SALES_PAY:'แก้การรับชำระเงินลูกค้า', VOID_SALES_PAY:'ยกเลิกการรับชำระเงินลูกค้า',
   ADD_SALES_BILLING:'ออกใบวางบิล', UPDATE_SALES_BILLING:'แก้ใบวางบิล', VOID_SALES_BILLING:'ยกเลิกใบวางบิล',
-  ADD_SALES_LIGHT:'บันทึกขายหน้าร้าน', VOID_SALES_LIGHT:'ยกเลิกรายการขายหน้าร้าน', LINK_SALES_INV_CUSTOMER:'ผูกใบกำกับขายกับลูกค้า', SI_PRINT_MARK:'บันทึกการพิมพ์ใบกำกับขาย', ISSUE_SI_REPLACEMENT:'ออกใบแทนใบกำกับภาษี', SET_SUPPLIER_WHT_PAYEE:'จำผู้ถูกหักประจำของผู้ขาย',
+  ADD_SALES_LIGHT:'บันทึกขายหน้าร้าน', VOID_SALES_LIGHT:'ยกเลิกรายการขายหน้าร้าน', LINK_SALES_INV_CUSTOMER:'ผูกใบกำกับขายกับลูกค้า', SI_PRINT_MARK:'บันทึกการพิมพ์ใบกำกับขาย', ISSUE_SI_REPLACEMENT:'ออกใบแทนใบกำกับภาษี', ACK_SI_PRINT_REVIEW:'ผู้จัดการตรวจการพิมพ์ใบกำกับขาย', SET_SUPPLIER_WHT_PAYEE:'จำผู้ถูกหักประจำของผู้ขาย',
   ADD_SO:'ออกใบเสนอราคา', UPDATE_SO:'แก้ใบเสนอราคา', SET_SALE_PRICES:'ตั้งราคาขาย', SET_PARTY_CREDIT:'ตั้งวงเงิน/เครดิตคู่ค้า',
   ADD_APPROVAL_RULE:'เพิ่มกฎอนุมัติ', UPDATE_APPROVAL_RULE:'แก้กฎอนุมัติ', DELETE_APPROVAL_RULE:'ลบกฎอนุมัติ', DELETE_APPROVAL_REQUEST:'ลบคำขออนุมัติ',
   // สินค้า กลุ่ม หน่วย
@@ -12026,7 +12065,7 @@ Object.assign(global.ERP, {
   amtR2, invNetPayable, invOffInvDisc, invGrossInclVat, invDeductions, invAmtView, dedText, AMT_DED_KEYS, AMT_DED_LABEL, paySourceKey, paySourceLabel, payAmtView, paidRowAmtView, paidSrcSplit, memoAmtView, grGrossInclVat, sumAmt,   // 🆕 AMOUNT-INCL-VAT B2
   canAddPayTag, canSetDocTag, docTagOf, commonDocTag, poTagDefault, InvTagField, DocTagChip, TagSelect, DocTagEdit,   // 🆕 DOC-TAGS D1/D5
   invVatInEcount, invVatHereMoved, invVatHereAuto, MIG_VAT_HERE_FROM_YM,   // 🆕 MIG_VAT_HERE V1
-  siIsMigrated, SI_REPL_REASONS, siReplReasonLabel, siReplacementBlock, siVatExcluded, siAwaitingDue, siOverdue, siArUnsettled,   // 🆕 SALES_HISTORY: ใบขายประวัติ Ecount
+  siIsMigrated, SI_REPL_REASONS, siReplReasonLabel, siReplacementBlock, siPrintSig, siPrintNeedsReview, siPrintReviewer, siPrintSelfReview, siVatExcluded, siAwaitingDue, siOverdue, siArUnsettled,   // 🆕 SALES_HISTORY: ใบขายประวัติ Ecount
   // React bits
   R, h, useState, useEffect, useMemo, useCallback, useRef, useReducer, createContext, useContext, Fragment,
   isReplacementRTV, describeAction, describeActionFull, reapplyPermNeed, WRITE_BLOCKED_TAIL, WRITE_BLOCKED_MSG, FIELD_TH, fmtFieldTH, docFieldsTH, linesTH, diffTH,
@@ -14768,7 +14807,7 @@ Object.assign(global.ERP, {
   // เล่น entries บนฐาน · ref = ก้อนที่ผู้ใช้เห็นตอนแก้ (เช็ก replace / นับสต๊อก) · คืน {ok, state, renum} | {ok:false, reason}
   //   numMap0 = เลขที่เปลี่ยนไปแล้วในรอบก่อน (งานที่กดระหว่าง rebase อ้างเลขเดิม) · cmpBase = ก้อน cloud "ก่อนเล่นงานของเรา" ใช้เทียบว่าเครื่องอื่นแก้อะไร
   //   (verify คลื่น 2: รอบเล่นงานที่กดระหว่าง rebase เดิมเทียบกับก้อนในเครื่อง → เวลา/เลขที่ reducer ออกใหม่ต่างกัน = ฟ้อง "มีคนแก้" ผิด ๆ)
-  var _DROP_IF_REJECTED = { REVIEW_WEIGH_LOG:'weigh_review_lost', MARK_WEIGH_REPRINT:'weigh_reprint_lost', VOID_WEIGH_LOG_STOCK:'weigh_void_lost', SET_PAY_TAG:'pay_tag_lost', SET_DOC_TAG:'doc_tag_lost', SI_PRINT_MARK:'si_print_lost' };   // verify 1 (si-print-2): log การพิมพ์ใบกำกับที่แพ้ = ทิ้ง+แจ้ง ไม่ลาก batch ไปงานค้าง   // verify PAY-TAGS: แท็ก = ข้อมูลรายงาน แพ้แล้วทิ้ง+แจ้ง ไม่ลากงานอื่นไปงานค้าง
+  var _DROP_IF_REJECTED = { REVIEW_WEIGH_LOG:'weigh_review_lost', MARK_WEIGH_REPRINT:'weigh_reprint_lost', VOID_WEIGH_LOG_STOCK:'weigh_void_lost', SET_PAY_TAG:'pay_tag_lost', SET_DOC_TAG:'doc_tag_lost', SI_PRINT_MARK:'si_print_lost', ACK_SI_PRINT_REVIEW:'si_print_review_lost' };   // verify 1 (si-print-2): log การพิมพ์ใบกำกับที่แพ้ = ทิ้ง+แจ้ง ไม่ลาก batch ไปงานค้าง   // verify PAY-TAGS: แท็ก = ข้อมูลรายงาน แพ้แล้วทิ้ง+แจ้ง ไม่ลากงานอื่นไปงานค้าง
   // 🆕 OPQ-READABLE B2.1: พังแล้วบอกด้วยว่า "ตัวไหน" (entry + idx ในรายการที่ส่งเข้า) — งานค้างชี้ใบที่ชนได้ ไม่ต้องเดา
   function _foldEntries(base, entries, ref, numMap0, cmpBase, sameBase){
     var pos = { i:-1 };
@@ -14991,6 +15030,15 @@ Object.assign(global.ERP, {
         line = '🏷️ แก้แท็ก ' + (x.ref || x.id || '-') + ' ไม่ถูกบันทึก — เอกสารถูกยกเลิก/ลบจากเครื่องอื่น หรือสิทธิ์เปลี่ยน (เงินไม่เปลี่ยน)';
         lines.push(line);
         try { logAudit({ ts:new Date().toISOString(), action:x.why, label:line.slice(0, 240), ref:String(x.ref || x.id || ''), device:deviceId(), detail:{ by:x.by || null } }); } catch(_l3){}
+        return;
+      }
+      if(x.type === 'ACK_SI_PRINT_REVIEW' || x.type === 'SI_PRINT_MARK'){   // 🆕 SP14 verify 1: ใบกำกับขาย — ไม่ใช่ฉลากชั่ง
+        var _si = ((st && st.salesInvoices) || []).find(function(y){ return y && y.id === x.id; });
+        line = x.type === 'ACK_SI_PRINT_REVIEW'
+          ? '✔ ตรวจการพิมพ์ใบกำกับ ' + ((_si && _si.siNumber) || x.id || '-') + ' ไม่ถูกบันทึก — ใบถูกยกเลิก/ลบ หรือบัญชีนี้ไม่ใช่ผู้ตรวจแล้ว · งานอื่นบันทึกตามปกติ'
+          : '🖨️ ประวัติการพิมพ์ใบกำกับ ' + ((_si && _si.siNumber) || x.id || '-') + ' ไม่ถูกบันทึก — ใบถูกลบ/เปลี่ยนจากเครื่องอื่น · งานอื่นบันทึกตามปกติ';
+        lines.push(line);
+        try { logAudit({ ts:new Date().toISOString(), action:x.why, label:line.slice(0, 240), ref:String((_si && _si.siNumber) || x.id || ''), device:deviceId(), detail:{ by:x.by || null } }); } catch(_l4){}
         return;
       }
       if(x.type === 'SET_PAY_TAG'){   // verify PAY-TAGS
@@ -15262,7 +15310,7 @@ Object.assign(global.ERP, {
   function _onConflictFallback(u, why, info, rb){
     _inDoubt = false; _fallbackWhy = (why === 'version' || why === 'switch') ? why : 'other';
     //   ต้องเขียนคิวให้สำเร็จก่อน ถึงจะยอมล้างของในเครื่อง/โหลดใหม่ได้
-    var hasWeigh = false; try { hasWeigh = _liveEntries().some(function(e){ return !!_DROP_IF_REJECTED[e.type] && e.type !== 'SET_PAY_TAG' && e.type !== 'SI_PRINT_MARK'; }); } catch(_hw){}   // 🌊 คลื่น 4 must-fix 9
+    var hasWeigh = false; try { hasWeigh = _liveEntries().some(function(e){ return !!_DROP_IF_REJECTED[e.type] && e.type !== 'SET_PAY_TAG' && e.type !== 'SI_PRINT_MARK' && e.type !== 'ACK_SI_PRINT_REVIEW'; }); } catch(_hw){}   // 🌊 คลื่น 4 must-fix 9
     var extra = { cause: rb && rb.reason ? String(rb.reason) : null, causeMsg: rb && rb.msg ? String(rb.msg).slice(0, 300) : null,
       failedSeq: rb && rb.entry && rb.entry.seq != null ? rb.entry.seq : null, tabs: _tabsAlive };
     var sp = _spillJournalToOpq(u, why === 'numlock' && info ? ('numlock:' + info.type + ':' + info.number) : 'conflict', extra);
@@ -17004,7 +17052,7 @@ function _siKeepMigrated(old, nu){
 // 🆕 SP12/SP13 UAT M1: UPDATE_SALES_INV จากหน้าจอที่ถือใบเก่า (รับชำระ/ตั้งวันครบกำหนด/ส่งของ) ห้ามล้างประวัติพิมพ์
 //   printLog / replacements (ใบแทน ม.86/12) / originalPrinted* = ของใบปัจจุบันเสมอ · printCount ไม่ลดลง · lastPrinted* ตามใบที่นับมากกว่า
 //   แก้ประวัติพิมพ์ได้ทาง SI_PRINT_MARK / ISSUE_SI_REPLACEMENT เท่านั้น
-const _SI_PRINT_KEEP = ['printLog','replacements','originalPrintedAt','originalPrintedBy'];
+const _SI_PRINT_KEEP = ['printLog','replacements','originalPrintedAt','originalPrintedBy','printReview','printStats'];   // 🆕 SP14: printReview แก้ได้ทาง ACK_SI_PRINT_REVIEW เท่านั้น
 function _siKeepPrint(old, nu){
   if(!old || !nu) return nu;
   const out = { ...nu };
@@ -18913,11 +18961,21 @@ const _dupInBranch = (field, get) => (s, d) => {
   return !!(b && (b[field] || []).some(x => x && x.id === id));
 };
 // 🆕 MULTI-TAXINV: แถว DEFER/CLAIM/MARK หาประวัติจากใบกำกับของ d.tiId
+// 🆕 SP14 verify 1: sig ที่ ACK จะบันทึก = max รายช่อง (ที่ตรวจไว้, sig ผู้กด clamp ตัวเลขปัจจุบัน) · null = ไม่มีช่องไหนเพิ่ม (มีที่ตรวจไว้แล้ว)
+function _siPrvMerged(si, d){
+  const cur = global.ERP.siPrintSig(si), sg = (d && d.sig) || {}, old = (si.printReview && si.printReview.sig) || null, sig = {};
+  let up = !old;
+  ['repl','cancel','dup','ign'].forEach(k => { const c = Math.max(0, Math.min(cur[k], Math.floor(Number(sg[k]) || 0))), o = old ? Math.floor(Number(old[k]) || 0) : 0;
+    sig[k] = Math.max(o, c); if(c > o) up = true; });
+  return up ? sig : null;
+}
 const _dupTiView = (s, d) => { const i = d && (s.invoices || []).find(x => x && x.id === d.invId); return i && d.tiId ? global.ERP.invTaxInvViewOf(i, d.tiId) : i; };
 const _ADD_DUP = {
   // 🆕 SP12: log พิมพ์ at+by+kind เดิมอยู่บนใบแล้ว = ส่งซ้ำ · SP13: ใบแทน at เดิม = ซ้ำ
   SI_PRINT_MARK:        (s, d) => { const i = d && (s.salesInvoices || []).find(x => x && x.id === d.siId);
                           return !!(i && (i.printLog || []).some(e => e && e.at === Number(d.at) && e.by === (d.by || '') && e.kind === d.kind)); },
+  ACK_SI_PRINT_REVIEW:  (s, d) => { const i = d && (s.salesInvoices || []).find(x => x && x.id === d.siId);   // 🆕 SP14 · verify 1: ตรวจครอบคลุมแล้ว (sig ไม่เพิ่ม) = ซ้ำ/ถูกแซง
+                          return !!(i && i.printReview && !_siPrvMerged(i, d)); },
   ISSUE_SI_REPLACEMENT: (s, d) => { const i = d && (s.salesInvoices || []).find(x => x && x.id === d.siId);
                           return !!(i && (i.replacements || []).some(e => e && e.at === Number(d.at))); },
   // 🆕 MULTI-TAXINV: entry.id มีใน supTaxInvMore แล้ว (รวมใบที่ลบแล้ว) = ซ้ำ
@@ -28794,7 +28852,11 @@ function reducer(s, a){
       const _dup = !_ign && ((d.kind === 'original' && pc > 0) || (d.kind === 'repl' && _rp && (Number(_rp.printCount) || 0) > 0));
       const ent = { at, by:d.by || '', kind:d.kind, ...(_seq != null ? { seq:Number(_seq) } : {}),
         ...(_isRp && d.replAt != null ? { replAt:Number(d.replAt) } : {}), ...(_ign ? { ignored:_ign } : {}), ...(_dup ? { dupOriginal:true } : {}) };
-      const nu = { ...si, printLog:[...(si.printLog||[]), ent].slice(-100) };
+      // 🆕 verify 1: ตัวนับสะสม (เพิ่มอย่างเดียว) — log ถูกตัดเหลือ 100 รายการ ตัวเลขพิมพ์ผิดปกติต้องไม่ลดลง · ใบเก่าเริ่มจากนับใน log
+      const _ps0 = global.ERP.siPrintSig(si);
+      const printStats = { cancel:_ps0.cancel + ((d.kind === 'cancel' || d.kind === 'repl_cancel') ? 1 : 0),
+        dup:_ps0.dup + (_dup ? 1 : 0), ign:_ps0.ign + ((_ign && (d.kind === 'original' || d.kind === 'repl')) ? 1 : 0) };
+      const nu = { ...si, printLog:[...(si.printLog||[]), ent].slice(-100), printStats };
       if(_ign){ /* เก็บ log อย่างเดียว ไม่นับ */ }
       else if(d.kind === 'original' || d.kind === 'copy'){
         // อีกเครื่องนับต้นฉบับไปแล้ว → ครั้งนี้นับเป็นสำเนา (ต้นฉบับมีได้ใบเดียว)
@@ -28818,6 +28880,27 @@ function reducer(s, a){
       const reps = si.replacements || [];
       const ent = { seq:reps.length + 1, at, by:d.by || '', reason:d.reason, note:String(d.note || '').trim(), printCount:0 };
       return { ...s, salesInvoices:(s.salesInvoices||[]).map(i => i.id === si.id ? { ...si, replacements:[...reps, ent] } : i) };
+    }
+    // 🆕 SP14: ผู้จัดการกด ✔ ตรวจแล้ว (พิมพ์ผิดปกติ) — ไม่บล็อกอะไร แค่เก็บตัวเลขที่ตรวจแล้ว งานค้างกลับมาเมื่อมีเหตุใหม่
+    //   a.data = { siId, sig:{repl,cancel,dup,ign} (ตัวเลขบนจอผู้จัดการ), by, at } · at+by เดิม = ซ้ำ (_ADD_DUP)
+    case 'ACK_SI_PRINT_REVIEW': {
+      const d = a.data || {}, at = Number(d.at) || 0;
+      const si = (s.salesInvoices||[]).find(i => i && i.id === d.siId);
+      if(!si || !at || global.ERP.siIsMigrated(si)) return s;
+      // fail-closed: หาผู้กดจาก s.users ตาม by (ไม่เชื่อ payload) · ไม่เจอ/ไม่ใช่ผู้ตรวจ = ไม่บันทึก
+      const u = d.by ? (s.users || []).find(x => x && x.username === d.by) : null;
+      if(!u || !global.ERP.siPrintReviewer(u)) return s;
+      // clamp ไม่เกินตัวเลขปัจจุบัน — อีกเครื่องเพิ่มเหตุใหม่ระหว่างนั้น ตัวเลขใหม่ยังไม่ถือว่าตรวจ (หรือ sig ปลอมสูงเกิน)
+      // 🆕 verify 1: ตัดสินด้วย sig ไม่ใช่ at (นาฬิกาเครื่องเพี้ยน/ลำดับ rebase ไม่มีผล) — sig ใหม่ = max รายช่องกับที่ตรวจไว้
+      //   ไม่มีช่องไหนเพิ่ม = ตรวจครอบคลุมแล้ว (ซ้ำ/ถูกแซง) → ไม่ทำอะไร (_ADD_DUP ถือว่าลงแล้ว)
+      const sig = _siPrvMerged(si, d);
+      if(!sig) return s;
+      const _self = global.ERP.siPrintSelfReview(si, d.by);   // 🆕 UAT ชุด 1 S1: ตรวจใบที่ตัวเองพิมพ์ — บันทึกไว้ให้เห็น ไม่บล็อก
+      const nu = { ...si, printReview:{ at, by:d.by, sig, ...(_self ? { selfReview:true } : {}) } };
+      const _e = { id:'al_si_prv_' + _sanId(si.id) + '_' + at, ts:at, type:'si_print_review', by:d.by, action:'ack_print_review',
+        label:'ผู้จัดการตรวจการพิมพ์ใบกำกับ', entityType:'si', entityId:si.id, entityRef:si.siNumber || si.id,
+        summary:'✔ ตรวจการพิมพ์ใบกำกับ ' + (si.siNumber || si.id) + ' (ใบแทน ' + sig.repl + ' · ไม่ออก ' + sig.cancel + ' · ซ้ำ ' + sig.dup + ' · ไม่นับ ' + sig.ign + ')' + (_self ? ' · selfReview:true (ตรวจใบที่ตัวเองพิมพ์)' : ''), ...(_self ? { selfReview:true } : {}) };
+      return { ...s, salesInvoices:(s.salesInvoices||[]).map(i => i.id === si.id ? nu : i), auditLog:[...(s.auditLog || []), _e] };
     }
     case 'ADD_SALES_PAY':  return { ...s, salesPayments:[...(s.salesPayments||[]), a.data], seq:{ ...s.seq, sipay:(s.seq.sipay||1)+1 } };
     case 'UPDATE_SALES_PAY': return { ...s, salesPayments:(s.salesPayments||[]).map(p => p.id===a.data.id ? a.data : p) };
@@ -30538,8 +30621,9 @@ const ACTION_MERGE = Object.freeze({
   UPDATE_RTV: { kind:'replace', coll:'returns', id: d => d && d.id },
   UPDATE_SALES_BILLING: { kind:'replace', coll:'salesBillings', id: d => d && d.id },
   UPDATE_SALES_INV: { kind:'replace', coll:'salesInvoices', id: d => d && d.id,
-    cmpOmit:['printLog','replacements','printCount','lastPrintedAt','lastPrintedBy','originalPrintedAt','originalPrintedBy','kitShowChildren'] },   // verify 1 (si-print-2): พิมพ์/ใบแทนจากอีกเครื่องไม่ทำให้รับชำระชน (_siKeepPrint คงฟิลด์พิมพ์ปัจจุบันอยู่แล้ว)
+    cmpOmit:['printLog','replacements','printReview','printStats','printCount','lastPrintedAt','lastPrintedBy','originalPrintedAt','originalPrintedBy','kitShowChildren'] },   // verify 1 (si-print-2): พิมพ์/ใบแทนจากอีกเครื่องไม่ทำให้รับชำระชน (_siKeepPrint คงฟิลด์พิมพ์ปัจจุบันอยู่แล้ว)
   SI_PRINT_MARK: { kind:'delta' },   // 🆕 SP12: นับต้นฉบับ/สำเนาจากใบปัจจุบัน (ต่อท้าย printLog)
+  ACK_SI_PRINT_REVIEW: { kind:'delta' },   // 🆕 SP14: ผู้จัดการตรวจการพิมพ์ (clamp sig กับใบปัจจุบัน)
   ISSUE_SI_REPLACEMENT: { kind:'delta' },   // 🆕 SP13: ใบแทนใบกำกับ ต่อท้าย replacements (seq จากใบปัจจุบัน)
   LINK_SALES_INV_CUSTOMER: { kind:'delta' },   // 🆕 UAT S1: ผูกลูกค้าใบนำเข้า (เช็กว่ายังว่างจาก state ปัจจุบัน)
   UPDATE_SALES_PAY: { kind:'replace', coll:'salesPayments', id: d => d && d.id },
@@ -30636,6 +30720,7 @@ const ACTION_READS = Object.freeze({
   ADD_SALES_INV: ['auditLog','salesInvoices','vatFilings'],   // 🆕 DOC-NUMBER UAT S1: ด่านงวด ภ.พ.30 (settings = หมวดคุม) · verify 1: ต่อท้าย si_filed_period
   ADD_SALES_PAY: ['salesPayments'],
   SI_PRINT_MARK: ['salesInvoices'],   // 🆕 SP12
+  ACK_SI_PRINT_REVIEW: ['auditLog','salesInvoices'],   // 🆕 SP14 (ผู้ตรวจหาจาก users = หมวดคุม · audit id ตายตัว al_si_prv_<si>_<at>)
   ISSUE_SI_REPLACEMENT: ['salesInvoices'],   // 🆕 SP13 (สิทธิ์อ่าน users = หมวดคุมอยู่แล้ว)
   LINK_SALES_INV_CUSTOMER: ['auditLog','customers','salesInvoices'],   // 🆕 UAT S1
   UPDATE_SALES_INV: ['salesInvoices'],   // 🆕 SALES_HISTORY: ใบนำเข้า Ecount คงฟิลด์เอกสารเดิม (อ่านใบเดิม)
@@ -105169,6 +105254,7 @@ function SIMigDueRow({ si, state, dispatch }){
 function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive }){
   // 🆕 UAT S1/S3: อ่านใบสดจาก state (ผูกลูกค้า/ตั้งวันครบกำหนดแล้วหน้าต่างเห็นค่าใหม่)
   const si = (state.salesInvoices||[]).find(i => i.id === (siProp && siProp.id)) || siProp;
+  const _siLive = useRef(si); _siLive.current = si;   // 🆕 SP14 verify 2: ใบล่าสุด ไว้เช็กหลังกด ✔ ตรวจแล้ว ว่าบันทึกจริงไหม
   const c = siBuyer(state, si);   // 🆕 snapshot ผู้ซื้อ ณ วันออกใบ
   const remain = (si.netTotal||0) - (si.paidAmount||0);
   const pays = (state.salesPayments||[]).filter(p => p.siId === si.id);
@@ -105326,6 +105412,31 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
       // 🆕 SP12/SP13: ประวัติการพิมพ์ต้นฉบับ + ใบแทน (ผู้จัดการ/บัญชีเห็น)
       !isMig && (si.originalPrintedAt || (si.printLog||[]).length > 0 || (si.replacements||[]).length > 0) && h('div', {
         'data-testid':'si-print-history', className:'text-xs text-gray-600 bg-gray-50 border rounded p-2 space-y-1' },
+        // 🆕 SP14: พิมพ์ผิดปกติ → แถบเหลืองทุกคนเห็น · ปุ่ม ✔ ตรวจแล้ว เฉพาะผู้จัดการ (ไม่บล็อกการพิมพ์/ออกใบแทน)
+        (() => {
+          const why = global.ERP.siPrintNeedsReview(si);
+          if(!why.length) return null;
+          const canAck = global.ERP.siPrintReviewer(user);
+          return h('div', { 'data-testid':'si-print-review-banner',
+            className:'flex flex-wrap items-center gap-2 bg-amber-50 border border-amber-300 text-amber-900 rounded p-2 font-semibold' },
+            h('span', null, '⚠️ รอผู้จัดการตรวจ: ' + why.join(' · ')),
+            canAck
+              ? h(Button, { size:'sm', variant:'secondary', 'data-testid':'si-print-review-ack', onClick:()=>{
+                  // 🆕 UAT N1: กันแตะพลาดบนแท็บเล็ต (กดแล้วงานค้างหาย ย้อนไม่ได้)
+                  if(!confirm('✔ ตรวจแล้ว?\n\nยืนยันว่าตรวจประวัติการพิมพ์ใบ ' + (si.siNumber || '') + ' แล้ว — กระดาษที่พิมพ์เกิน/ซ้ำ เก็บคืนแล้ว หรือยืนยันว่าไม่ได้ออกไปถึงลูกค้า')) return;
+                  const pr0 = si.printReview;
+                  dispatch({ type:'ACK_SI_PRINT_REVIEW', data:{ siId:si.id, sig:global.ERP.siPrintSig(si), by:(user && user.username) || '', at:Date.now() } });
+                  // 🆕 SP14 verify 2: reducer ไม่บันทึก (ไม่มีสิทธิ์ในรายชื่อผู้ใช้/ใบเปลี่ยน) = ไม่เงียบ — แจ้งให้รู้
+                  setTimeout(() => { const cur = _siLive.current;
+                    if(cur && cur.id === si.id && cur.printReview === pr0 && global.ERP.siPrintNeedsReview(cur).length){
+                      try { if(toast && toast.warning) toast.warning('บันทึกไม่สำเร็จ — ตรวจสิทธิ์/เวลาเครื่อง'); else alert('บันทึกไม่สำเร็จ — ตรวจสิทธิ์/เวลาเครื่อง'); } catch(_e){} } }, 700);
+                } }, '✔ ตรวจแล้ว')
+              : h('span', { className:'font-normal' }, '(เก็บกระดาษที่พิมพ์เกิน/พิมพ์เสียไว้ อย่าทิ้ง แล้วแจ้งผู้จัดการบัญชี/ขาย หรือ GM ให้กด «✔ ตรวจแล้ว»)'));
+        })(),
+        si.printReview && si.printReview.at && h('div', { 'data-testid':'si-print-reviewed', className:'text-green-700' },
+          `✔ ผู้จัดการตรวจแล้ว โดย ${si.printReview.by || '-'} เวลา ${new Date(si.printReview.at).toLocaleString('th-TH')}`
+          // 🆕 UAT ชุด 1 S1: ผู้ตรวจพิมพ์/ออกใบแทนใบนี้เอง → แสดงให้เห็น (ไม่บล็อก)
+          + (si.printReview.selfReview ? ' (ตรวจใบที่ตัวเองพิมพ์)' : '')),
         h('div', null, si.originalPrintedAt
           ? `🖨️ พิมพ์ต้นฉบับแล้ว ${new Date(si.originalPrintedAt).toLocaleString('th-TH')} โดย ${si.originalPrintedBy || '-'}`
           // 🆕 UAT S1: ใบที่พิมพ์ก่อนมีบันทึกประวัติ (printCount > 0 แต่ไม่มี originalPrintedAt) — ไม่ใช่ "ยังไม่ได้พิมพ์"
@@ -121574,6 +121685,24 @@ C.registerGroup({
         return { count:l.length, detail:l.map(c => c.name || c.id), docs:mkDocs(l, c => ({ kind:'cus', id:c.id, ref:c.name || c.id })) };
       } },
 
+    // ref: SI_PRINT_CONTRACT SP14 (เจ้าของ 2026-10-14 "แค่ขึ้นงานค้างให้ผู้จัดการเห็นพอ") · 00-core siPrintNeedsReview/siPrintReviewer · 01-state ACK_SI_PRINT_REVIEW
+    //   พิมพ์ใบกำกับผิดปกติ (ใบแทน ≥2 · ไม่ออก ≥2 · ต้นฉบับซ้ำ · พิมพ์ออกแต่ไม่นับ) — ไม่บล็อก แค่ให้ผู้จัดการตรวจ · ใบนำเข้า Ecount ไม่นับ
+    //   canonical (store.sl_si_print_review alias มาที่นี่)
+    { key:'acct_si_print_review', label:'ใบกำกับขายพิมพ์ผิดปกติ — รอผู้จัดการตรวจ', severity:'warn',
+      show: (ctx) => !!global.ERP.siPrintReviewer(ctx.user),
+      nav: (ctx) => (ctx.can('sales-full') && ctx.H.isHQ(ctx.state, ctx.state.currentBranch)) ? { tab:'sales-full', subs:{ sales:'invoices' } } : null,
+      todo: (ctx, res) => (ctx.can('sales-full') ? '' : 'บัญชีนี้เข้าเมนูขายไม่ได้ — แจ้งผู้มีสิทธิ์เปิดใบ · ')
+        + tdo(d => `${d.ref}: ${d.why} — เปิดใบ ดูประวัติการพิมพ์ ตรวจว่ากระดาษไม่หลุดออกไปหลายใบ (เก็บคืน) แล้วกด «✔ ตรวจแล้ว»`,
+          n => `ใบกำกับ ${n} ใบนี้พิมพ์ผิดปกติ — เปิดใบ ดูประวัติการพิมพ์ ตรวจว่ากระดาษไม่หลุดออกไปหลายใบ (เก็บคืน) แล้วกด «✔ ตรวจแล้ว»`)(ctx, res),
+      btn: 'ตรวจการพิมพ์',
+      hint: (ctx) => (ctx.H.isHQ(ctx.state, ctx.state.currentBranch) ? '' : 'สลับสาขาเป็น HQ (มุมบนซ้าย) แล้ว ')
+        + 'ขาย → 🧾 ใบกำกับ → เปิดใบ → กล่องประวัติการพิมพ์ (แถบเหลือง) → «✔ ตรวจแล้ว» · ไม่บล็อกการพิมพ์/ออกใบแทน · มีเหตุใหม่จะขึ้นอีก',
+      run: (ctx) => {
+        const l = (ctx.state.salesInvoices||[]).map(i => ({ i, why:(i && !isMig(i)) ? global.ERP.siPrintNeedsReview(i) : [] })).filter(x => x.why.length);
+        return { count:l.length, detail:l.map(x => `${x.i.siNumber || x.i.id}: ${x.why.join(' · ')}`),
+          docs:mkDocs(l, x => ({ kind:'si', id:x.i.id, ref:x.i.siNumber || x.i.id, why:x.why.join(' · ') })) };
+      } },
+
     // ref: src/mod-settings.js PartyEditModal save — กฎเจ้าของ 2026-09-28 "เลขผู้เสียภาษีถ้ามีไม่ครบ 13 หลัก ให้กดเซฟไม่ได้"
     //      ใช้ทุกการบันทึก (รายเดิมที่ไม่ได้แตะช่องเลขภาษีก็บล็อก) → รายเก่าที่เลขผิดจะแก้อะไรอื่นไม่ได้เลยจนกว่าจะแก้เลข
     //      เงื่อนไข = global.ERP.partyTaxBad (ไม่ว่าง · ไม่ใช่ 🌐 ต่างประเทศ · ตัดช่องว่าง/ขีดแล้วไม่ใช่เลข 13 หลัก → 'len' · หลักตรวจสอบ mod-11 ไม่ตรง → 'checksum' กฎ 2026-09-28) · ต่างจาก acct_pi_vat_sup_no_taxid (ดูเฉพาะผู้ขายที่มี PI VAT รวมเลขว่าง)
@@ -123817,6 +123946,21 @@ C.registerGroup({
         l.sort((a,b) => String(a.dueDate||'9999').localeCompare(String(b.dueDate||'9999')));
         return { count:l.length, docs:C.mkDocs(l, i => ({ kind:'si', id:i.id, ref:i.siNumber || i.id, cus:i.customerName || ctx.cusName(i.customerId), due:i.dueDate ? fmtDate(i.dueDate) : '' })), dueSoon:l.filter(soon).length, amount:l.reduce((s,i) => s + arRemain(i), 0),
           detail:l.slice(0,6).map(i => `${i.siNumber||i.id} ${fmtCur(arRemain(i))}${i.dueDate ? ' ครบ ' + fmtDate(i.dueDate) : ' (ไม่มีวันครบกำหนด)'}${soon(i) ? ' ⏰' : ''}`) }; } },
+
+    // ref: SI_PRINT_CONTRACT SP14 — ใบกำกับพิมพ์ผิดปกติ ให้ผู้จัดการฝ่ายขายเห็น (ไม่เห็นกลุ่มบัญชี) · alias ซ่อนเมื่อเห็น accounting.acct_si_print_review แล้ว
+    { key:'sl_si_print_review', label:'ใบกำกับขายพิมพ์ผิดปกติ — รอผู้จัดการตรวจ', alias:'accounting.acct_si_print_review', severity:'warn',
+      todo: (ctx, res) => (ctx.can('sales-full') ? '' : 'บัญชีนี้เข้าเมนูขายไม่ได้ — แจ้งผู้มีสิทธิ์เปิดใบ · ')
+        + tdo(d => `${d.ref}: ${d.why} — เปิดใบ ดูประวัติการพิมพ์ ตรวจว่ากระดาษไม่หลุดออกไปหลายใบ (เก็บคืน) แล้วกด «✔ ตรวจแล้ว»`,
+          n => `ใบกำกับ ${n} ใบนี้พิมพ์ผิดปกติ — เปิดใบ ดูประวัติการพิมพ์ ตรวจว่ากระดาษไม่หลุดออกไปหลายใบ (เก็บคืน) แล้วกด «✔ ตรวจแล้ว»`)(ctx, res),
+      btn: 'ตรวจการพิมพ์',
+      show: (ctx) => !!global.ERP.siPrintReviewer(ctx.user),
+      nav: (ctx) => (ctx.can('sales-full') && atHQ(ctx)) ? { tab:'sales-full', subs:{ sales:'invoices' } } : null,
+      hint: (ctx) => hqPrefix(ctx) + 'ขาย → 🧾 ใบกำกับ → เปิดใบ → กล่องประวัติการพิมพ์ (แถบเหลือง) → «✔ ตรวจแล้ว» · ไม่บล็อกการพิมพ์/ออกใบแทน · มีเหตุใหม่จะขึ้นอีก',
+      run: (ctx) => {
+        const l = (ctx.state.salesInvoices||[]).map(i => ({ i, why:(i && !(i._migrated === true || i.createdBy === 'migration')) ? global.ERP.siPrintNeedsReview(i) : [] })).filter(x => x.why.length);
+        return { count:l.length, detail:l.map(x => `${x.i.siNumber || x.i.id}: ${x.why.join(' · ')}`),
+          docs:C.mkDocs(l, x => ({ kind:'si', id:x.i.id, ref:x.i.siNumber || x.i.id, why:x.why.join(' · ') })) };
+      } },
 
     // ref: 01-state.js:274-275 (customers[].taxId/credit/priceTier — c2 taxId:'' ตัวอย่างในข้อมูลตั้งต้น) · mod-sales-full.js:312-317 (regex 13 หลัก soft-warn ตอนออก SI)
     //      mod-settings.js:2803 (CUSTOMER_FIELDS taxId required) · mod-settings.js:2812-2814 (priceTier retail/wholesale/vip) · mod-sales-full.js:358-364 (snapshot ลงใบ)
