@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="438183643c1e";window.__ERP_BUILT_AT__="2026-10-14T13:44:40";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="6eccefe1364d";window.__ERP_BUILT_AT__="2026-10-14T14:43:26";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -7302,11 +7302,37 @@ const PRICE_FIX_NODOCVAT_VAT_MSG = 'เอกสารนี้ตั้งเ�
 function priceFixNonVatVatMsg(state, target, doc){ return priceFixNonVatBySupplier(state, target, doc) ? PRICE_FIX_NONVAT_VAT_MSG : PRICE_FIX_NODOCVAT_VAT_MSG; }
 function _pvR2(v){ return Number((Number(v) || 0).toFixed(2)); }
 function _pvInvLive(S, id){ return !!id && ((S && S.invoices) || []).some(i => i && i.id === id && !i.voided && i.status !== 'voided' && i.paymentStatus !== 'voided'); }
+// 🆕 PV4-1: RTV ที่ "ปรับมูลค่าตามได้" ตอนแก้ราคา at_gr — ยังไม่ผูกบิล · ยังไม่ลง JE · ไม่มีของชดเชย · สถานะยังไม่เคลียร์ · memo ยังรอเอกสาร (ยังไม่ใช้/ไม่ได้เงินคืน/ไม่ได้ CN)
+const PV_RTV_ADJ_STATUSES = Object.freeze(['pending_decision', 'pending', 'await_replacement', 'await_cn_doc']);
+function _pvRtvAdjustable(S, r){
+  if(!r || r.rtvStatus === 'cancelled' || r.linkedINV || r.decideJeId || (r.replacements || []).length) return false;
+  if(!PV_RTV_ADJ_STATUSES.includes(r.rtvStatus)) return false;
+  return ((S && S.supplierMemos) || []).filter(m => m && m.rtvId === r.id && m.status !== 'cancelled')
+    .every(m => ['await_doc', 'open'].includes(m.status) && !m.supMemoNumber && !m.docReceivedAt && !m.decideJeId && !((Number(m.appliedAmount) || 0) > 0.005) && !m.appliedAt);
+}
+// 🆕 UAT N3: บอกว่าใบคืนของใบไหนบล็อก และเพราะอะไร (สถานะ/ผูกบิล/ลงบัญชี/ของชดเชย/เอกสารผู้ขาย)
+const PV_RTV_ST_TH = Object.freeze({ pending_decision:'รอจัดซื้อตัดสินใจ', pending:'รอดำเนินการ', await_replacement:'รอของชดเชย', await_cn_doc:'รอใบลดหนี้',
+  credit_received:'รับเครดิตแล้ว', replacement_received:'รับของชดเชยแล้ว', closed:'ปิดเคสแล้ว' });
+function _pvRtvBlockWhy(S, r){
+  if(r.linkedINV) return 'ผูกใบตั้งหนี้แล้ว';
+  if(r.decideJeId) return 'ลงบัญชีแล้ว';
+  if((r.replacements || []).length) return 'รับของชดเชยแล้ว';
+  if(!PV_RTV_ADJ_STATUSES.includes(r.rtvStatus)) return 'สถานะ ' + (PV_RTV_ST_TH[r.rtvStatus] || r.rtvStatus || '-');
+  return 'ได้เอกสาร/เงินคืนจากผู้ขายแล้ว';
+}
+// 🆕 UAT S1: ใบคืนของที่ถูกปรับมูลค่าตามการแก้ราคา — หัวกระดาษ "ฉบับแก้ไขมูลค่า" (ใช้ทั้ง printRTV 2 ตัว) · '' ถ้าไม่เคยปรับ
+function rtvRevisedBannerHtml(rtv){
+  const hs = ((rtv && rtv.priceAdjustHistory) || []).filter(Boolean); if(!hs.length) return '';
+  const last = hs[hs.length - 1], f = (v) => (Number(v) || 0).toLocaleString('th-TH', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  const d = last.at ? new Date(last.at).toLocaleDateString('th-TH') : '-';
+  return '<div style="color:#b45309;font-weight:bold;font-size:13pt;margin:4px 0;border:2px solid #b45309;padding:4px">'
+    + 'ฉบับแก้ไขมูลค่า ครั้งที่ ' + hs.length + ' · วันที่ ' + d + ' · เดิม ฿' + f(hs[0].from) + ' → ฿' + f(last.to) + ' (แทนฉบับเดิม)</div>';
+}
 function planInvPriceAdjust(state, opts){
   const o = opts || {}, S = state || {}, blocks = [];
   const push = (m) => { if(m && !blocks.includes(m)) blocks.push(m); };
   const mode = o.mode === 'at_gr' || o.mode === 'post_pi' ? o.mode : null;
-  const out = { mode, lines:[], costPlan:[], dGoods:0, dVat:0, dNet:0, dInv:0, dVar:0, blocks, inv:null, grIds:[], cumGoods:0, cumBase:0, needsApproval:false, isIncrease:false, warnLines:[] };
+  const out = { mode, lines:[], costPlan:[], rtvPlan:[], rtvDocs:[], dRet:0, dGoods:0, dVat:0, dNet:0, dInv:0, dVar:0, blocks, inv:null, grIds:[], cumGoods:0, cumBase:0, needsApproval:false, isIncrease:false, warnLines:[] };
   if(!mode){ push('โหมดปรับราคาไม่ถูกต้อง'); return out; }
   let inv = null, grIds = [];
   if(mode === 'post_pi'){
@@ -7317,7 +7343,7 @@ function planInvPriceAdjust(state, opts){
   } else grIds = Array.from(new Set((o.grIds || []).filter(Boolean)));
   out.inv = inv; out.grIds = grIds;
   if(!grIds.length){ push('ไม่มีใบรับของ (GR) ให้ปรับราคา'); return out; }
-  const grs = [];
+  const grs = [], rtvByGr = {};
   for(const gid of grIds){
     const g = (S.grs || []).find(x => x && x.id === gid);
     if(!g){ push('ไม่พบใบรับของ ' + gid); continue; }
@@ -7327,7 +7353,13 @@ function planInvPriceAdjust(state, opts){
     if(mode === 'at_gr' && (_pvInvLive(S, g.invoiceId) || (g.splitInvoiceIds || []).some(x => _pvInvLive(S, x)))) push('ใบรับของ ' + gn + ' ตั้งหนี้แล้ว — ปรับราคาที่ใบตั้งหนี้แทน');
     const po = (S.pos || []).find(p => p && p.id === g.poId);
     if((g.priceMode || (po && po.priceMode) || 'exclusive') === 'inclusive') push('ใบรับของ ' + gn + ' เป็นราคารวม VAT — ปรับราคาทางนี้ไม่ได้ (↩️ ย้อนไปตั้งหนี้ แล้วตั้งใหม่)');
-    if(mode === 'at_gr' && (S.returns || []).some(r => r && r.grId === g.id && r.rtvStatus !== 'cancelled')) push('ใบรับของ ' + gn + ' มีการคืนของ (RTV) ผูกอยู่ — มูลค่าคืนใช้ราคาเดิม ใช้ CN/DN แทน');
+    // 🆕 PV4-1: at_gr — RTV ที่ยังไม่เคลียร์ (ปรับมูลค่าตามได้) ไม่บล็อกแล้ว · RTV อื่น (ลงบัญชี/รับชดเชย/ผูกบิล/CN ได้แล้ว) = บล็อกเหมือนเดิม
+    if(mode === 'at_gr'){
+      const _rs = (S.returns || []).filter(r => r && r.grId === g.id && r.rtvStatus !== 'cancelled');
+      const _bad = _rs.filter(r => !_pvRtvAdjustable(S, r));
+      if(_bad.length) push('ใบรับของ ' + gn + ' มีการคืนของ (RTV) ผูกอยู่ — ' + _bad.map(r => (r.rtvNumber || r.id) + ' (' + _pvRtvBlockWhy(S, r) + ')').join(', ') + ' — มูลค่าคืนใช้ราคาเดิม ใช้ CN/DN แทน');
+      else if(_rs.length) rtvByGr[g.id] = _rs;
+    }
     // 🆕 PRICE-FIX verify 2: มุมมองที่มีผลจริง — ส่วนลด PI ของใบที่ยกเลิกแล้วไม่หักซ้ำ (ตรงกับ CreateINVModal)
     grs.push(grEffective(g, S.invoices));
   }
@@ -7379,10 +7411,25 @@ function planInvPriceAdjust(state, opts){
       out.costPlan.push({ layerId:f.id, grId:g.id, lineIdx:idx, itemId:l.itemId, from:c0, to:c1, remaining:rem });
     }
     dInv = _pvR2(dInv);
+    // 🆕 PV4-2: คืนของ (RTV) ที่ปรับได้ของบรรทัดนี้ — จับคู่ grLineIdx → ไม่มีก็ itemId ที่มีบรรทัดเดียว · dRet = (nlt − olt) × retBase / baseQty
+    let retBase = 0, dRet = 0, ambig = false;
+    const rplan = [];
+    for(const r of (rtvByGr[g.id] || [])) (r.lines || []).forEach((rl, ri) => {
+      if(!rl) return;
+      const hit = rl.grLineIdx != null ? Number(rl.grLineIdx) === idx : (rl.itemId === l.itemId && sameItem.length === 1);
+      if(!hit){ if(rl.grLineIdx == null && rl.itemId === l.itemId) ambig = true; return; }
+      const rb = Number(rl.baseQty) || ((Number(rl.qty) || 0) * baseQty / qty), rd = _pvR2((nlt - olt) * rb / baseQty);
+      const from = _pvR2(rl.lineTotal != null ? rl.lineTotal : (Number(rl.unitPrice) || 0) * (Number(rl.qty) || 0)), to = _pvR2(from + rd);
+      retBase += rb; dRet += rd;
+      rplan.push({ rtvId:r.id, rtvNumber:r.rtvNumber, lineIdx:ri, grId:g.id, grLineIdx:idx, itemId:l.itemId, qty:Number(rl.qty) || 0, baseQty:rb, from, to, dRet:rd,
+        fromUnit:Number(rl.unitPrice) || 0, toUnit:(Number(rl.qty) || 0) > 0 ? Number((to / Number(rl.qty)).toFixed(4)) : nu, newGross:nu });
+    });
+    if(ambig){ push(nm + ' (' + gn + '): ใบคืนของ (RTV) ไม่ระบุบรรทัด และใบมีสินค้านี้หลายบรรทัด — ใช้ CN/DN หรือยกเลิกใบคืนแล้วเปิดใหม่โดยเลือกบรรทัด'); continue; }
+    dRet = _pvR2(dRet); out.rtvPlan.push(...rplan);
     const dAmt = _pvR2(nlt - olt), rate = rateOf(g, l, idx);
     newLt[key] = nlt;
     out.lines.push({ grId:g.id, grNumber:g.grNumber, lineIdx:idx, itemId:l.itemId, qty, baseQty, unit:l.unit, oldUnitPrice:ou, newUnitPrice:nu, firstUnitPrice:first,
-      oldLineTotal:olt, newLineTotal:nlt, dAmt, vatRate:rate, c1, remaining:R, used:Math.max(0, baseQty - R), dInv, dVar:_pvR2(dAmt - dInv) });
+      oldLineTotal:olt, newLineTotal:nlt, dAmt, vatRate:rate, c1, remaining:R, returned:retBase, used:Math.max(0, baseQty - R - retBase), dInv, dRet, dVar:_pvR2(dAmt - dInv - dRet) });
   }
   let vOld = 0, vNew = 0, sumLt = 0, cum = 0, cumBase = 0, dvb = 0, deb = 0, volatile = false;
   for(const g of grs) (g.lines || []).forEach((l, idx) => {
@@ -7400,6 +7447,13 @@ function planInvPriceAdjust(state, opts){
   out.dNet = _pvR2(out.dGoods + out.dVat);
   out.dInv = _pvR2(out.lines.reduce((t, x) => t + x.dInv, 0));
   out.dVar = _pvR2(out.lines.reduce((t, x) => t + x.dVar, 0));
+  out.dRet = _pvR2(out.lines.reduce((t, x) => t + (x.dRet || 0), 0));
+  // 🆕 PV4-6: สรุปรายใบคืนของ — มูลค่าเดิม → ใหม่ (พรีวิว/แผงยืนยัน)
+  for(const rp of out.rtvPlan){
+    let e = out.rtvDocs.find(x => x.rtvId === rp.rtvId);
+    if(!e){ const r = (S.returns || []).find(x => x && x.id === rp.rtvId) || {}; e = { rtvId:rp.rtvId, rtvNumber:rp.rtvNumber, from:_pvR2(r.totalValue), to:_pvR2(r.totalValue), dRet:0 }; out.rtvDocs.push(e); }
+    e.dRet = _pvR2(e.dRet + rp.dRet); e.to = _pvR2(e.from + e.dRet);
+  }
   out.cumGoods = _pvR2(cum); out.cumBase = _pvR2(cumBase);
   out.isIncrease = out.dNet > 0.005;
   const tA = priceKeyInSetting(S, volatile ? 'priceKeyInVolatileTolAbs' : 'priceKeyInTolAbs'), tP = priceKeyInSetting(S, volatile ? 'priceKeyInVolatileTolPct' : 'priceKeyInTolPct');
@@ -12069,7 +12123,7 @@ Object.assign(global.ERP, {
   vatLockOf, vatPeriodLocked, depositKindOf, depositAvail, depositEligible, planDepositApplication, depositVatSplit, invDepositVatOffset, invDepositBaseOffset, invClaimableVatBase, invVatConflictOpen,
   normTaxInvNo, taxInvKey, taxInvKey2, findDupTaxInv, findTaxInvGrant, taxInvClaimWindow, TAX_INV_OVERRIDE_ANYOF, taxInvOverrideApprover,
   // 🆕 VAT-CLAIM (§B1)
-  planInvPriceAdjust, priceKeyInSetting, PRICE_KEYIN_DEFAULTS, priceFixNonVat, priceFixNonVatBySupplier, priceFixNonVatVatMsg, PRICE_KEYIN_GM_KEYS, PRICE_FIX_NONVAT_VAT_MSG, PRICE_FIX_NODOCVAT_VAT_MSG,   // 🆕 PRICE-FIX ขั้น 2 (+ PV2-1/PV2-2)
+  planInvPriceAdjust, pvRtvAdjustable:_pvRtvAdjustable, rtvRevisedBannerHtml, priceKeyInSetting, PRICE_KEYIN_DEFAULTS, priceFixNonVat, priceFixNonVatBySupplier, priceFixNonVatVatMsg, PRICE_KEYIN_GM_KEYS, PRICE_FIX_NONVAT_VAT_MSG, PRICE_FIX_NODOCVAT_VAT_MSG,   // 🆕 PRICE-FIX ขั้น 2 (+ PV2-1/PV2-2)
   approvalIsProposer, PRICE_FIX_LIVE, priceFixLive, priceFixOpenForInv, invPriceApprovalPending, grPriceFixHold, priceFixList, invAmountVsGrDiff, invOverrideDeny,   // 🆕 PRICE-FIX ขั้น 3 (+ invOverrideDeny ขั้น 4)
   TAXINV_VAT_TOL, invTaxMultiOk, invTaxInvViews, invTaxInvViewOf, invTaxInvBlankView, invTaxUncoveredVat, invTaxPaperSum, invTaxInvProgress, invTaxInvLabel, invTaxInvNumbers, vatDocKey,   // 🆕 MULTI-TAXINV
   ymOf, ymAdd, ymDiff, ymEnd, vatDeferred, vatDeferUsed, VAT_DEFER_ONCE_MSG, vatClaimDateOf, vatClaimWindowEnd, vatPaperDateBase, vatPendingDeadlineYm, supMemoNettedInInv, pendingTaxInvIds,
@@ -23517,7 +23571,7 @@ function reducer(s, a){
       for(const x of P.lines){ if(!byGr.has(x.grId)) byGr.set(x.grId, []); byGr.get(x.grId).push(x); }
       const grs = (s1.grs || []).map(g => {
         const mine = g && byGr.get(g.id); if(!mine) return g;
-        const dG = r2(mine.reduce((t, x) => t + x.dAmt, 0)), dI = r2(mine.reduce((t, x) => t + x.dInv, 0));
+        const dG = r2(mine.reduce((t, x) => t + x.dAmt, 0)), dI = r2(mine.reduce((t, x) => t + x.dInv, 0)), dR = r2(mine.reduce((t, x) => t + (x.dRet || 0), 0));   // verify 1: ส่วนที่คืนไปแล้ว (RTV) ตรงกับ JE
         // 🆕 PRICE-FIX verify 2: ส่วนลด PI ค้างจากใบที่ยกเลิกแล้ว — แผนคิดจากมุมมองจริง (ไม่หักส่วนลด) → บรรทัดที่ปรับ ล้าง piDiscAlloc ค้าง
         const stalePi = E.grEffective(g, s1.invoices) !== g;
         const lines = (g.lines || []).map((l, idx) => {
@@ -23528,7 +23582,7 @@ function reducer(s, a){
         });
         return { ...g, lines, ...(g.totalValue != null ? { totalValue:r2((Number(g.totalValue) || 0) + dG) } : {}),
           ...(g.totalValueBeforePiDisc != null ? { totalValueBeforePiDisc:r2((Number(g.totalValueBeforePiDisc) || 0) + dG) } : {}), priceAdjustedAt:at,
-          priceAdjustHistory:[...(g.priceAdjustHistory || []), { ...hist, dGoods:dG, dInventory:dI, dVariance:r2(dG - dI), invTotals:{ dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet } }],
+          priceAdjustHistory:[...(g.priceAdjustHistory || []), { ...hist, dGoods:dG, dInventory:dI, dReturn:dR, dVariance:r2(dG - dI - dR), invTotals:{ dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet } }],
           ...closeReq(g), ...useAp(g) };
       });
       let invoices = s1.invoices;
@@ -23544,10 +23598,30 @@ function reducer(s, a){
             supTaxInvHistory:[...(inv.supTaxInvHistory || []), { action:'set', number:tiSet.supTaxInvNumber, date:tiSet.supTaxInvDate, claimDate:tiSet.supVatClaimDate, by, ts:at, prev:null, via:'price_adjust' }] } : {}) };
         invoices = (s1.invoices || []).map(i => i.id === inv.id ? newInv : i);
       }
+      // 🆕 PV4-3: ใบคืนของ (RTV) ที่ยังไม่เคลียร์ของ GR นี้ → มูลค่าคืนตามราคาใหม่ใน return เดียวกัน (ก่อนตั้งหนี้ยังไม่มี JE ของ RTV → ไม่ลง JE เพิ่ม)
+      let returns = s1.returns, supplierMemos = s1.supplierMemos;
+      if((P.rtvPlan || []).length){
+        const rdoc = new Map((P.rtvDocs || []).map(x => [x.rtvId, x]));
+        returns = (s1.returns || []).map(r => {
+          const mine = r && P.rtvPlan.filter(x => x.rtvId === r.id); if(!mine || !mine.length) return r;
+          const lines = (r.lines || []).map((rl, ri) => { const x = mine.find(y => y.lineIdx === ri); if(!x) return rl;
+            return { ...rl, unitPrice:x.toUnit, lineTotal:x.to, ...(rl.grossUnitPrice != null ? { grossUnitPrice:x.newGross } : {}), priceAdjustedFrom:(rl.priceAdjustedFrom != null ? rl.priceAdjustedFrom : x.fromUnit) }; });
+          const e = rdoc.get(r.id), tv = r2((Number(r.totalValue) || 0) + e.dRet);
+          return { ...r, lines, totalValue:tv, priceAdjustedAt:at,
+            priceAdjustHistory:[...(r.priceAdjustHistory || []), { at, by, grIds:P.grIds, from:r2(r.totalValue), to:tv, dRet:e.dRet, reason, jeNumber:je ? je.jeNumber : null,
+              lines:mine.map(x => ({ lineIdx:x.lineIdx, itemId:x.itemId, from:x.from, to:x.to, fromUnit:x.fromUnit, toUnit:x.toUnit })) }] };
+        });
+        supplierMemos = (s1.supplierMemos || []).map(m => {
+          const e = m && m.rtvId && ['await_doc', 'open'].includes(m.status) ? rdoc.get(m.rtvId) : null; if(!e) return m;   // UAT N1: ตรงกับ _pvRtvAdjustable (PV4-1)
+          const a0 = Number(m.amount) || 0, na = r2(a0 + e.dRet), nv = a0 > 0.005 ? r2((Number(m.vatAmount) || 0) * na / a0) : (Number(m.vatAmount) || 0);
+          return { ...m, amount:na, vatAmount:nv, netAmount:r2(na + nv), priceAdjustHistory:[...(m.priceAdjustHistory || []), { at, by, from:a0, to:na, reason }] };
+        });
+      }
       const al = { id:'al_pxadj_' + usedDoc.id + '_' + atK, ts:at, type:'inv_price_adjust', by, entityId:usedDoc.id, entityRef:docRef, amount:Math.abs(P.dNet),
         note:`ปรับราคาตามใบกำกับ (${P.mode}) สินค้า ${P.dGoods > 0 ? '+' : ''}${P.dGoods.toFixed(2)} · VAT ${P.dVat.toFixed(2)} · ต้นทุนคงเหลือ ${P.dInv.toFixed(2)} · ผลต่าง 5391 ${P.dVar.toFixed(2)} · ${reason}`
+          + (P.rtvDocs || []).map(x => ` · RTV ${x.rtvNumber || x.rtvId} ${r2(x.from).toFixed(2)}→${r2(x.to).toFixed(2)}`).join('')   // 🆕 UAT S2: ใบคืนที่ปรับมูลค่าตาม
           + (proposalBy ? ` · จัดซื้อคีย์ ${proposalBy}` : '') + (d.approvedBy && d.approvedBy !== by ? ` · อนุมัติโดย ${d.approvedBy}` : '') };
-      return { ...s1, invoices, grs, fifoLayers, journalEntries:je ? [...(s1.journalEntries || []), je] : s1.journalEntries,
+      return { ...s1, invoices, grs, fifoLayers, ...((P.rtvPlan || []).length ? { returns, supplierMemos } : {}), journalEntries:je ? [...(s1.journalEntries || []), je] : s1.journalEntries,
         seq:je ? { ...(s1.seq || {}), je:seqJe } : s1.seq, auditLog:[...(s1.auditLog || []), al] };
     }
 
@@ -25110,6 +25184,13 @@ function reducer(s, a){
       const { rtv, stockUpdates, movements, invAdjust } = a.data;
       // 🆕 นำเข้า2569 UAT MF1: GR ประวัติ Ecount ไม่ได้เข้าสต๊อก → คืนไม่ได้ (กันตัดสต๊อกนับจริง + แก้บิลที่ยื่น VAT ใน Ecount แล้ว)
       if(rtv && _grIsMigrated((s.grs||[]).find(g => g.id === rtv.grId))){ alert(_MIG_GR_MSG); return s; }
+      // 🆕 PV4 verify 2: ราคาบรรทัดคืนมาจากฝั่ง client (ราคา GR ตอนเปิดฟอร์ม) — GR ถูกแก้ราคา (at_gr) หลังเปิดฟอร์ม = ปฏิเสธ
+      //   ไม่ส่ง grPriceRev = rev 0 · ไม่บล็อกตอนคำขอแก้ราคาค้าง (ยืนยันแล้ว PV4 ปรับมูลค่าใบคืนที่ยังไม่เคลียร์ให้เอง)
+      if(rtv && rtv.grId){
+        const _g = (s.grs||[]).find(g => g && g.id === rtv.grId);
+        const _cur = _g ? (_g.priceAdjustHistory || []).length : 0;
+        if(_g && _cur !== (Number(((a.data.grPriceRev) || {})[rtv.grId]) || 0)){ alert('⛔ บันทึกใบคืนไม่ได้ — ราคาใบรับของ ' + (_g.grNumber || _g.id) + ' ถูกปรับแล้ว (ครั้งที่ ' + _cur + ') — ปิดแล้วเปิดหน้าคืนของใหม่'); return s; }
+      }
       // 💎 FA-S2: คืนบรรทัดทรัพย์สิน (noStock) ของ GR ที่ลงทะเบียนแล้ว = จำหน่ายทรัพย์สิน + ใบลดหนี้ ไม่ใช่ RTV
       if(rtv && (rtv.lines||[]).some(l => l && l.noStock === true)){
         const _g = (s.grs||[]).find(g => g.id === rtv.grId);
@@ -25186,7 +25267,15 @@ function reducer(s, a){
       const _or = (s.returns||[]).find(r => r.id === (a.data && a.data.id));
       if(_or && a.data && a.data.linkedINV && a.data.linkedINV !== _or.linkedINV && !(s.invoices||[]).some(i => i && i.id === a.data.linkedINV)){
         try { console.warn('⛔ UPDATE_RTV ' + (_or.rtvNumber||_or.id) + ': ใบตั้งหนี้ ' + a.data.linkedINV + ' ไม่มีในระบบ — ไม่ผูก'); } catch(_w){} return s; }
-      return { ...s, returns: (s.returns||[]).map(r => r.id===a.data.id ? a.data : r) };
+      // 🆕 PV4-4: กันสำเนาเก่าทับราคาใหม่ (แบบ UPDATE_GR) — priceAdjustHistory คนละความยาว = คงบรรทัด/มูลค่า/ประวัติของตัวจริง
+      let _nr = a.data;
+      if(_or && _nr){
+        _nr = { ..._nr };
+        const _stale = (_or.priceAdjustHistory || []).length !== (_nr.priceAdjustHistory || []).length;
+        if('priceAdjustHistory' in _or) _nr.priceAdjustHistory = _or.priceAdjustHistory; else delete _nr.priceAdjustHistory;
+        if(_stale){ if(Array.isArray(_or.lines)) _nr.lines = _or.lines; _nr.totalValue = _or.totalValue; if('priceAdjustedAt' in _or) _nr.priceAdjustedAt = _or.priceAdjustedAt; }
+      }
+      return { ...s, returns: (s.returns||[]).map(r => r.id===a.data.id ? _nr : r) };
     }
 
     // 🆕 RTV ที่เปิดก่อนตั้งหนี้ + เลือกโหมด "เปิดบิลเต็ม เก็บเป็นเครดิต"
@@ -25534,8 +25623,16 @@ function reducer(s, a){
       const auditLog = [...(s.auditLog||[]), { id:'al_'+Date.now().toString(36),
         ts:Date.now(), type:'rtv_cancel', by, entityId:rtvId,
         entityRef:rtv.rtvNumber, amount:rtv.totalValue||0, note:reason||'' }];
+      // 🆕 PV4 verify 1: ต้นทุนล็อตที่คืนเข้า คิดใหม่จากบรรทัด RTV ปัจจุบัน (payload อาจถือราคาก่อนแก้ราคา GR — rebase/หลายเครื่อง)
+      const _cxFifo = (fifoLayers||[]).map(f => {
+        if(!f || typeof f.lot !== 'string') return f;
+        const pre = 'RTVCXL-' + rtv.rtvNumber + '-', k = f.lot.indexOf(pre) === 0 ? Number(f.lot.slice(pre.length)) - 1 : -1;
+        const l = k >= 0 ? (rtv.lines||[])[k] : null; if(!l) return f;
+        const bq = Number(f.qty) || 0, up = Number(l.unitPrice) || 0;
+        return { ...f, unitCost: bq > 0 ? (up * (Number(l.qty)||0)) / bq : up };
+      });
       return { ...s, items,
-        fifoLayers: [...s.fifoLayers, ...(fifoLayers||[])],
+        fifoLayers: [...s.fifoLayers, ..._cxFifo],
         invoices, journalEntries, supplierMemos,
         movements: [...s.movements, ...(movements||[])],
         returns: (s.returns||[]).map(r => r.id === rtvId
@@ -25548,7 +25645,21 @@ function reducer(s, a){
     // ---------- Supplier ส่งชดเชย (replacement) — restore INV deduction ----------
     // a.data: { gr, stockUpdates, fifoLayers, movements, invRestore? {invId, restoreAmount}, rtvUpdate }
     case 'ADD_REPLACEMENT_GR': {
-      const { gr, stockUpdates, fifoLayers, movements, invRestore, rtvUpdate } = a.data;
+      const { gr, stockUpdates, fifoLayers, movements, invRestore } = a.data;
+      // 🆕 PV4 verify 1: rtvUpdate = สำเนา RTV จากหน้าต่างที่เปิดค้าง → กันทับราคาใหม่ (แบบ UPDATE_RTV) + ตัดสินสถานะจากมูลค่าปัจจุบัน
+      const rtvUpdate = (() => {
+        const u = a.data.rtvUpdate; if(!u) return u;
+        const o = (s.returns||[]).find(r => r.id === u.id); if(!o) return u;
+        const n = { ...u };
+        const stale = (o.priceAdjustHistory || []).length !== (u.priceAdjustHistory || []).length;
+        if('priceAdjustHistory' in o) n.priceAdjustHistory = o.priceAdjustHistory; else delete n.priceAdjustHistory;
+        if(stale){
+          if(Array.isArray(o.lines)) n.lines = o.lines; n.totalValue = o.totalValue; if('priceAdjustedAt' in o) n.priceAdjustedAt = o.priceAdjustedAt;
+          const rep = (n.replacements || []).reduce((t, r) => t + (Number(r && r.totalValue) || 0), 0);
+          n.rtvStatus = rep >= (Number(o.totalValue) || 0) - 0.01 ? 'replacement_received' : (u.rtvStatus === 'replacement_received' ? (o.rtvStatus || 'pending') : u.rtvStatus);
+        }
+        return n;
+      })();
       let items = s.items;
       (stockUpdates||[]).forEach(su => {
         items = items.map(it => it.id === su.itemId
@@ -41285,6 +41396,13 @@ function AssetInfoModal({ gr, line, lineIdx, state, dispatch, user, onClose }){
 // ================================================================
 // RTV TAB (คืนของ Return to Vendor)
 // ================================================================
+// 🆕 UAT S1: ป้าย "มูลค่าปรับแล้ว" — ใบคืนที่ถูกปรับมูลค่าตามการแก้ราคา GR (PV4) · ฉบับพิมพ์ใหม่ยอดไม่ตรงฉบับเดิม
+function _rtvAdjBadge(r, showValue){
+  const hs = ((r && r.priceAdjustHistory) || []).filter(Boolean); if(!hs.length) return null;
+  const last = hs[hs.length - 1];
+  const tip = 'แก้ไขมูลค่า ' + hs.length + ' ครั้ง' + (last.at ? ' · ล่าสุด ' + fmtDate(last.at) : '') + (showValue ? ' · เดิม ' + fmtCur(hs[0].from) + ' → ' + fmtCur(last.to) : '') + ' — ฉบับที่พิมพ์ไปก่อนหน้าใช้ไม่ได้ พิมพ์ใหม่ให้ผู้ขาย';
+  return h('span', { className:'ml-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800 font-sans font-normal whitespace-nowrap', title:tip, 'data-rtv-adj':'1' }, '💰 มูลค่าปรับแล้ว');
+}
 function RTVTab({ state, dispatch, user }){
   const showValue = global.ERP.canSeeStockValue(user, state);   // 🆕 GO-LIVE: มูลค่าคืนของเฉพาะผู้มีสิทธิ์เห็นต้นทุน
   const [showNew, setShowNew] = useState(false);
@@ -41365,7 +41483,7 @@ function RTVTab({ state, dispatch, user }){
             return h('li', { key:r.id },
               h('button', { type:'button', onClick:()=>setDetail(r),
                 className:'w-full text-left hover:bg-orange-100 rounded px-2 py-1 transition flex items-center gap-2' },
-                h('span', { className:'font-mono text-red-700 font-semibold' }, r.rtvNumber),
+                h('span', { className:'font-mono text-red-700 font-semibold' }, r.rtvNumber, _rtvAdjBadge(r, showValue)),
                 h('span', { className:'text-gray-500' }, '·'),
                 h('span', { className:'flex-1 truncate' }, sup?.name || '-', _supChip(sup, state)),
                 showValue && h('span', { className:'font-medium text-amber-800' }, fmtCur(r.totalValue)),
@@ -41410,7 +41528,7 @@ function RTVTab({ state, dispatch, user }){
                 };
                 const [stLbl, stClr] = RTV_ST[r.rtvStatus] || [r.rtvStatus||'-', 'bg-gray-100 text-gray-600'];
                 return h('tr', { key:r.id, 'data-row-id':r.id, className: cls('hover:bg-gray-50', F.hl(r.id) && 'bg-blue-50') },
-                  h('td', { className:'px-3 py-2 font-mono text-xs text-red-700 font-semibold' }, r.rtvNumber, _focusDoneMark(F, r.id)),
+                  h('td', { className:'px-3 py-2 font-mono text-xs text-red-700 font-semibold' }, r.rtvNumber, _rtvAdjBadge(r, showValue), _focusDoneMark(F, r.id)),
                   h('td', { className:'px-3 py-2 text-xs' }, fmtDate(r.rtvDate)),
                   h('td', { className:'px-3 py-2 font-mono text-xs text-green-700' }, gr?.grNumber || '-'),
                   h('td', { className:'px-3 py-2 text-sm' }, sup?.name || '-', _supChip(sup, state)),
@@ -41459,6 +41577,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
   const [reason, setReason] = useState('');
   const [note, setNote] = useState('');
   const [lines, setLines] = useState([]);
+  const [linesRev, setLinesRev] = useState(0);   // 🆕 PV4 verify 2: rev ราคา GR ตอนดึงราคาบรรทัด → ส่ง grPriceRev ให้ reducer ปฏิเสธถ้า GR ถูกแก้ราคาระหว่างนั้น
   // 🆕 RTV-1: ไม่ต้องเลือก method แล้ว — จัดซื้อตัดสินใจในขั้น decision
   const [printAfterSubmit, setPrintAfterSubmit] = useState(true);
 
@@ -41471,6 +41590,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
       // 🆕 BILL-DISC UAT M2: GR lineTotal หลังส่วนลด (บรรทัด+ท้ายบิล+PI) แล้ว → คืนของตามราคาสุทธิต่อหน่วย (lineTotal/qty)
       //   ไม่ใช่ราคาเต็ม unitPrice · GR เก่าไม่มีส่วนลด lineTotal = unitPrice×qty → ได้ค่าเดิม
       const _gE = global.ERP.grEffective ? global.ERP.grEffective(gr, state.invoices) : gr;
+      setLinesRev((gr.priceAdjustHistory || []).length);
       setLines((_gE.lines||[]).map((l, _li) => {
         const q = Number(l.qty)||0, lt = Number(l.lineTotal), gp = Number(l.unitPrice)||0;
         const net = q > 0 && isFinite(lt) && ((Number(l.discAmt)||0) > 0 || (Number(l.piDiscAlloc)||0) > 0 || Math.abs(lt - gp * q) > 0.005);
@@ -41503,6 +41623,8 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
     if(!reason.trim()) return alert('ใส่เหตุผล');
     const returning = lines.filter(l => l.returnQty > 0);
     if(returning.length === 0) return alert('ใส่จำนวนคืน');
+    // 🆕 PV4 verify 2: ราคา GR ถูกแก้ (at_gr) หลังเปิดฟอร์ม → ราคาบรรทัดคืนเป็นราคาเก่า · ให้เปิดใหม่ (reducer ก็ปฏิเสธซ้ำ)
+    if(((gr && gr.priceAdjustHistory) || []).length !== linesRev) return alert('⛔ ราคาใบรับของ ' + (gr.grNumber || gr.id) + ' ถูกปรับแล้วระหว่างเปิดฟอร์ม — ปิดแล้วเปิดหน้าคืนของใหม่');
     // 🆕 §U U3: หน่วยฐานที่คืน = สัดส่วนจากที่ GR รับจริง (baseQty/qty ของบรรทัด GR) — ไม่ใช้ตัวคูณหน่วยปัจจุบัน
     //    (ถ้าแก้ตัวคูณหน่วยหลังรับของ ต้องคืนตามที่รับเข้าจริง) · กติกาอยู่ที่ ERP.rtvReturnBaseQty (00-core)
     const _rtvBase = (l) => global.ERP.rtvReturnBaseQty(state.items.find(i => i.id === l.itemId), l, l.returnQty);
@@ -41593,7 +41715,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId }){
       createdAt: Date.now(),
     };
 
-    dispatch({ type:'ADD_RTV', data:{ rtv, stockUpdates, movements, invAdjust: null }});
+    dispatch({ type:'ADD_RTV', data:{ rtv, stockUpdates, movements, invAdjust: null, grPriceRev: { [gr.id]: linesRev } }});
     dispatch({ type:'APPEND_AUDIT_LOG', data:{ type:'rtv_create', by:user.username,
       entityId:rtv.id, entityRef:rtvNumber, amount:totalValue,
       note:`รอจัดซื้อตัดสินใจ · ${reason}`+(totalValue>=10000?' · มูลค่าสูง':'') }});
@@ -41776,6 +41898,7 @@ function printRTV(rtv, state, sup){
     <h1>ใบคืนสินค้า / Return to Vendor</h1>
     ${(rtv.rtvStatus === 'pending_decision' || rtv.rtvStatus === 'pending')
       ? '<div style="color:#c00;font-weight:bold;font-size:14pt;margin:4px 0">*** ร่าง — รอจัดซื้ออนุมัติ (ยังไม่ใช่เอกสารตัวจริง) ***</div>' : ''}
+    ${global.ERP.rtvRevisedBannerHtml ? global.ERP.rtvRevisedBannerHtml(rtv) : ''}
     <div>${company} ${company2 ? '· ' + company2 : ''}</div>
   </div>
 
@@ -42053,7 +42176,9 @@ window.onload = function(){ setTimeout(function(){ try{ window.print(); }catch(e
   return true;
 }
 
-function RTVViewModal({ rtv, state, dispatch, user, onClose }){
+function RTVViewModal({ rtv: rtvProp, state, dispatch, user, onClose }){
+  // 🆕 PV4 verify 1: อ่านใบคืนตัวจริงจาก state ทุกครั้ง (ราคาอาจถูกปรับหลังเปิดหน้าต่าง) — ป้าย 💰 / ฟอร์มรับชดเชยเห็นค่าปัจจุบัน
+  const rtv = (state.returns||[]).find(r => r && r.id === rtvProp.id) || rtvProp;
   const showValue = global.ERP.canSeeStockValue(user, state);   // 🆕 GO-LIVE: ราคา/ยอดหัก INV เฉพาะผู้มีสิทธิ์เห็นต้นทุน
   const gr = state.grs.find(g => g.id === rtv.grId);
   const sup = state.suppliers.find(s => s.id === rtv.supplierId);
@@ -42081,6 +42206,12 @@ function RTVViewModal({ rtv, state, dispatch, user, onClose }){
 
   return h(Modal, { isOpen:true, title:`🔄 RTV: ${rtv.rtvNumber}`, onClose, size:'lg', docKey:'rtv:view:'+rtv.id },   // 🆕 docKey: เปิดซ้ำ/เปิดจาก palette = เด้งอันเดิม
     h('div', { className:'space-y-4' },
+      // 🆕 UAT S1: ใบคืนถูกปรับมูลค่าตามการแก้ราคา — แจ้งทุกคนที่เปิดดู (ฉบับที่ส่งผู้ขายไปแล้วยอดเก่า)
+      (rtv.priceAdjustHistory || []).length ? h('div', { className:'bg-amber-50 border border-amber-300 rounded p-3 text-sm text-amber-900', 'data-rtv-adj-note':'1' },
+        h('div', { className:'font-bold' }, '💰 มูลค่าปรับแล้ว ' + rtv.priceAdjustHistory.length + ' ครั้ง (แก้ราคาใบรับของ)'),
+        ...rtv.priceAdjustHistory.filter(Boolean).map((x, i) => h('div', { key:i, className:'text-xs' },
+          `ครั้งที่ ${i + 1} · ${x.at ? fmtDate(x.at) : '-'} · โดย ${x.by || '-'}` + (showValue ? ` · ${fmtCur(x.from)} → ${fmtCur(x.to)}` : ''))),
+        h('div', { className:'text-xs mt-1 font-semibold' }, 'ถ้าส่งใบคืนให้ผู้ขายไปแล้ว — พิมพ์ฉบับใหม่ (ระบุ "ฉบับแก้ไขมูลค่า") แล้วส่งแทนฉบับเดิม')) : null,
       h('div', { className:'bg-red-50 border border-red-200 rounded p-3 text-sm' },
         h('div', { className:'font-bold text-red-800' }, `คืน ${sup?.name}`, _supChip(sup, state)),
         h('div', { className:'text-xs text-gray-600' },
@@ -70434,8 +70565,13 @@ function PriceFixImpact({ plan, state, user }){
         const c0 = (plan.costPlan.find(c => c.grId === l.grId && c.lineIdx === l.lineIdx) || {}).from;
         return h('div', { key:l.grId + ':' + l.lineIdx },
           h('b', null, nm(l.itemId)), ' — เหลือในสต๊อก ', h('b', null, fmtNum(l.remaining)), ' → ต้นทุนล็อต ', m(c0 || 0), ' → ', h('b', null, m(l.c1)), ' (', pfSigned(m, l.dInv), ')',
-          ' · ใช้ไปแล้ว ', h('b', null, fmtNum(l.used)), ' → ผลต่าง ', h('b', null, pfSigned(m, l.dVar)), ' ลง 5391 เดือนนี้');
+          ' · ใช้ไปแล้ว ', h('b', null, fmtNum(l.used)), ' → ผลต่าง ', h('b', null, pfSigned(m, l.dVar)), ' ลง 5391 เดือนนี้',
+          (l.returned || 0) > 0 && h('span', null, ' · คืนของแล้ว ', h('b', null, fmtNum(l.returned)), ' (', pfSigned(m, l.dRet || 0), ')'));
       }),
+      // 🆕 PV4-6: ใบคืนของ (RTV) ที่ยังไม่เคลียร์ — มูลค่าคืนเปลี่ยนตามราคาใหม่ในขั้นเดียวกัน
+      (plan.rtvDocs || []).length > 0 && h('div', { className:'bg-amber-50 border border-amber-200 rounded p-1.5', 'data-testid':'pf-rtv' },
+        plan.rtvDocs.map(r => h('div', { key:r.rtvId }, '↩️ คืนของ ', h('b', { className:'font-mono' }, r.rtvNumber || r.rtvId), ' มูลค่า ', m(r.from), ' → ', h('b', null, m(r.to)))),
+        h('div', { className:'text-amber-800 font-semibold' }, '🖨️ พิมพ์ใบคืนของใหม่ให้ผู้ขาย (มูลค่าเปลี่ยน)')),
       h('div', { className:'border-t pt-1 text-slate-700' }, 'รวม: มูลค่าสินค้า ', h('b', null, pfSigned(m, plan.dGoods)), ' · VAT ', pfSigned(m, plan.dVat),
         ' · สต๊อก (1300) ', pfSigned(m, plan.dInv), ' · ผลต่างราคาซื้อ (5391) ', pfSigned(m, plan.dVar),
         plan.needsApproval && h('span', { className:'ml-1 text-purple-700 font-semibold' }, '· เกินเกณฑ์ต้องอนุมัติ'))),
@@ -75709,7 +75845,9 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   const rtvsReplaced = (state.returns||[]).filter(r =>
     r.grId === gr.id && !r.linkedINV && r.rtvStatus === 'replacement_received'
   );
-  const rtvDeduct = rtvsBeforeINV.reduce((s,r) => s + (r.totalValue||0), 0);
+  // 🆕 PV4 verify 1: คีย์ราคาใหม่แล้ว (pfPlan) → ยอดหักคืนของพรีวิวตามมูลค่า RTV หลังปรับ (ให้ตรงบิลที่จะได้หลังกดปรับแล้วเปิดใหม่)
+  const rtvDeduct = rtvsBeforeINV.reduce((s,r) => s + (r.totalValue||0)
+    + (pfPlan ? (pfPlan.rtvPlan||[]).filter(x => x.rtvId === r.id).reduce((t,x) => t + (Number(x.dRet)||0), 0) : 0), 0);
   // 🆕 BILL-DISC §B5 ข้อ 1: ฐาน = GR ก่อนส่วนลดระดับ PI (ตัด patch ของ PI ที่ถูก void ทิ้งเสมอ · GR ไม่มี patch = gr ตัวเดิม)
   const grB = (gr.totalValueBeforePiDisc != null || (gr.lines||[]).some(l => l && l.lineTotalBeforePiDisc != null)) ? { ...gr,
     totalValue: gr.totalValueBeforePiDisc != null ? gr.totalValueBeforePiDisc : gr.totalValue,
@@ -76149,12 +76287,14 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
     // 🆕 PRICE-FIX ขั้น 4: แก้ราคาแล้ว → ADJUST_INV_PRICE at_gr ก่อน ADD_INV (ในเกณฑ์ = dispatch คู่กัน · เกินเกณฑ์/บัญชีคีย์เองราคาขึ้น = ยื่นอนุมัติ ปิดฟอร์ม ไม่ตั้งหนี้)
     let pfSt = state, pfLiveGr = liveGr, pfAct = null;
     if(pfKeyed){
-      const res = pfRunAdjust({ state, dispatch, user, mode:'at_gr', grIds:[liveGr.id], lines:pfLines, req:pfSub ? pfReq : null, defer:true,
+      // 🆕 PV4-5: GR มีใบคืนของ (RTV) → ห้ามปรับราคา + ตั้งหนี้ในคลิกเดียว (ยอดหักคืนของคิดจาก state เก่า) → ปรับก่อน แล้วกดตั้งหนี้อีกครั้ง
+      const pfHasRtv = (state.returns || []).some(r => r && r.grId === liveGr.id && r.rtvStatus !== 'cancelled');
+      const res = pfRunAdjust({ state, dispatch, user, mode:'at_gr', grIds:[liveGr.id], lines:pfLines, req:pfSub ? pfReq : null, defer:!pfHasRtv,
         reason: pfSub ? ('ยืนยันราคาตาม' + pfDocNo(pfReq) + (pfReq.reason ? ' — ' + pfReq.reason : '')) : pfReason.trim(),
         supTaxInvNumber: pfSub ? pfReq.supTaxInvNumber : undefined, cashBillNo: pfSub ? pfReq.cashBillNo : undefined });
       if(res === 'blocked') return;
       if(res === 'approval'){ if(global.ERP.toast) global.ERP.toast('📤 ส่งขออนุมัติราคา ' + (liveGr.grNumber || '') + ' แล้ว — ตั้งหนี้ได้หลังอนุมัติ', 'info'); onClose(); return; }
-      if(res === 'done'){ alert('✅ ปรับราคา ' + (liveGr.grNumber || '') + ' แล้ว — กด 💸 ตั้งหนี้อีกครั้ง (ยอดตามราคาใหม่)'); onClose(); return; }
+      if(res === 'done'){ alert('✅ ปรับราคา ' + (liveGr.grNumber || '') + ' แล้ว — กด 💸 ตั้งหนี้อีกครั้ง (ยอดตามราคาใหม่)' + (pfHasRtv ? '\n↩️ มูลค่าใบคืนของปรับตามราคาใหม่แล้ว — 🖨️ พิมพ์ใบคืนของใหม่ให้ผู้ขาย' : '')); onClose(); return; }
       pfAct = res.act; pfSt = res.next; pfLiveGr = (pfSt.grs || []).find(g => g.id === liveGr.id) || liveGr;
     }
     const pfRev = { [liveGr.id]: (pfLiveGr.priceAdjustHistory || []).length };   // R2.2: ADD_INV ต้องส่ง rev ตรง state สด
@@ -83663,6 +83803,7 @@ function printRTV(rtv, state){
   <h1>ใบลดหนี้ / Credit Note · ใบคืนของ</h1>
     ${(rtv.rtvStatus === 'pending_decision' || rtv.rtvStatus === 'pending')
       ? '<div style="color:#c00;font-weight:bold;font-size:14pt;margin:4px 0">*** ร่าง — รอจัดซื้ออนุมัติ (ยังไม่ใช่เอกสารตัวจริง) ***</div>' : ''}
+    ${global.ERP.rtvRevisedBannerHtml ? global.ERP.rtvRevisedBannerHtml(rtv) : ''}
   <div class="sub">เลขที่ ${rtv.rtvNumber} ${linkedInv ? `· อ้างอิง INV ${linkedInv.invNumber}` : ''}</div>
   <div class="info">
     <div class="box"><div class="label">ผู้คืน</div>
@@ -96457,7 +96598,7 @@ function INVQueueTab({ state, dispatch, user }){
     if(!pfOnA || !purchaseMod.pfProposedGr) return m;
     for(const g of pendingGRs){ const v = purchaseMod.pfProposedGr(state, g); if(v) m.set(g.id, _AE.grGrossInclVat(v.gr, (state.pos || []).find(p => p.id === g.poId))); }
     return m;
-  }, [pendingGRs, state.pos, state.grs, state.invoices, state.settings, state.fifoLayers, state.returns, state.items, pfOnA]);   /* verify 1: planInvPriceAdjust อ่าน lot/RTV/สินค้าด้วย */
+  }, [pendingGRs, state.pos, state.grs, state.invoices, state.settings, state.fifoLayers, state.returns, state.supplierMemos, state.items, pfOnA]);   /* verify 1: planInvPriceAdjust อ่าน lot/RTV/สินค้าด้วย */
   // Group by supplier
   const bySupplier = useMemo(() => {
     const m = {};
@@ -98426,7 +98567,7 @@ function RTVManageTab({ state, dispatch, user }){
                       const sup = state.suppliers.find(s => s.id === r.supplierId);
                       const inv = r.linkedINV ? state.invoices.find(i => i.id === r.linkedINV) : null;
                       return h('tr', { key:r.id, className:'hover:bg-amber-50' },
-                        h('td', { className:'px-3 py-2 font-mono text-xs text-red-700' }, r.rtvNumber),
+                        h('td', { className:'px-3 py-2 font-mono text-xs text-red-700' }, r.rtvNumber, (r.priceAdjustHistory || []).length ? h('span', { className:'ml-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800 font-sans', title:'มูลค่าปรับตามการแก้ราคาใบรับของ ' + r.priceAdjustHistory.length + ' ครั้ง — ฉบับพิมพ์เดิมยอดเก่า', 'data-rtv-adj':'1' }, '💰 มูลค่าปรับแล้ว') : null),   // 🆕 UAT S1
                         h('td', { className:'px-3 py-2 text-xs' }, fmtDate(r.rtvDate)),
                         h('td', { className:'px-3 py-2 text-sm' }, sup?.name || '-', sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
                         h('td', { className:'px-3 py-2 text-xs' },
@@ -98469,7 +98610,7 @@ function RTVManageTab({ state, dispatch, user }){
                 const st = r.rtvStatus || 'pending';
                 const [label, clr] = RTV_STATUS[st] || [st, 'bg-gray-100'];
                 return h('tr', { key:r.id, className:'hover:bg-gray-50' },
-                  h('td', { className:'px-3 py-2 font-mono text-xs text-red-700' }, r.rtvNumber),
+                  h('td', { className:'px-3 py-2 font-mono text-xs text-red-700' }, r.rtvNumber, (r.priceAdjustHistory || []).length ? h('span', { className:'ml-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800 font-sans', title:'มูลค่าปรับตามการแก้ราคาใบรับของ ' + r.priceAdjustHistory.length + ' ครั้ง — ฉบับพิมพ์เดิมยอดเก่า', 'data-rtv-adj':'1' }, '💰 มูลค่าปรับแล้ว') : null),   // 🆕 UAT S1
                   h('td', { className:'px-3 py-2 text-xs' }, fmtDate(r.rtvDate)),
                   h('td', { className:'px-3 py-2 text-sm' }, sup?.name || '-', sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
                   h('td', { className:'px-3 py-2 text-xs font-mono' },
