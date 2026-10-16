@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="ceb7839f8656";window.__ERP_BUILT_AT__="2026-10-15T15:00:44";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="946302387142";window.__ERP_BUILT_AT__="2026-10-16T11:16:17";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -10239,6 +10239,155 @@ function exportCSV(filename, rows){
   setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
+// ============================================================
+// 🆕 VAT_RD_FORM RD2 — ตัวเขียน Excel (.xlsx) กลาง ไม่ใช้ไลบรารีภายนอก
+//   zip แบบ store (ไม่บีบอัด) + CRC32 · inlineStr · รูปแบบตัวเลข · รวมเซลล์ · ตั้งค่าพิมพ์
+// ============================================================
+let _xlsxCrcTable = null;
+function _xlsxCrc32(bytes){
+  if(!_xlsxCrcTable){
+    _xlsxCrcTable = new Uint32Array(256);
+    for(let n = 0; n < 256; n++){
+      let c = n;
+      for(let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      _xlsxCrcTable[n] = c >>> 0;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for(let i = 0; i < bytes.length; i++) crc = _xlsxCrcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+// รวมไฟล์เป็น zip (store) — files: [{name, data(Uint8Array)}] · เวลาไฟล์คงที่ 1980-01-01 (ผลลัพธ์ deterministic)
+function _xlsxZip(files){
+  const enc = new TextEncoder();
+  const chunks = []; const central = []; let offset = 0;
+  const u16 = v => [v & 0xFF, (v >>> 8) & 0xFF];
+  const u32 = v => [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF];
+  files.forEach(f => {
+    const name = enc.encode(f.name); const data = f.data; const crc = _xlsxCrc32(data);
+    const common = [...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0)];
+    const local = new Uint8Array([...u32(0x04034b50), ...common]);
+    chunks.push(local, name, data);
+    central.push(new Uint8Array([...u32(0x02014b50), ...u16(20), ...common, ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset)]), name);
+    offset += local.length + name.length + data.length;
+  });
+  const cdSize = central.reduce((s, c) => s + c.length, 0);
+  const eocd = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(cdSize), ...u32(offset), ...u16(0)]);
+  const all = [...chunks, ...central, eocd];
+  const out = new Uint8Array(all.reduce((s, c) => s + c.length, 0));
+  let p = 0; all.forEach(c => { out.set(c, p); p += c.length; });
+  return out;
+}
+// ตัดอักขระควบคุมที่ XML ไม่รับ + escape
+function _xlsxEsc(s){
+  return String(s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+// 0 → A, 25 → Z, 26 → AA
+function _xlsxCol(i){
+  let s = ''; i = i + 1;
+  while(i > 0){ const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); }
+  return s;
+}
+// ทะเบียนสไตล์: font(ตัวหนา) × numFmt × จัดแนว × เส้นขอบ → index ใน cellXfs
+function _xlsxStyles(fontName, fontSize){
+  const fmts = []; const xfs = [{ bold:false, fmtId:0, align:'', valign:'', border:false, wrap:false }]; const keyMap = { '0|0||||0': 0 };
+  const fmtId = f => {
+    if(!f) return 0;
+    let i = fmts.indexOf(f); if(i < 0){ fmts.push(f); i = fmts.length - 1; }
+    return 164 + i;
+  };
+  const get = c => {
+    const x = { bold:!!c.bold, fmtId:fmtId(c.fmt), align:c.align || '', valign:c.valign || '', border:!!c.border, wrap:!!c.wrap };
+    const k = [x.bold ? 1 : 0, x.fmtId, x.align, x.valign, x.border ? 1 : 0, x.wrap ? 1 : 0].join('|');
+    if(keyMap[k] === undefined){ xfs.push(x); keyMap[k] = xfs.length - 1; }
+    return keyMap[k];
+  };
+  const xml = () => {
+    const font = b => '<font>' + (b ? '<b/>' : '') + '<sz val="' + fontSize + '"/><name val="' + _xlsxEsc(fontName) + '"/><family val="2"/></font>';
+    const nf = fmts.length ? '<numFmts count="' + fmts.length + '">' + fmts.map((f, i) => '<numFmt numFmtId="' + (164 + i) + '" formatCode="' + _xlsxEsc(f) + '"/>').join('') + '</numFmts>' : '';
+    const thin = '<left style="thin"><color auto="1"/></left><right style="thin"><color auto="1"/></right><top style="thin"><color auto="1"/></top><bottom style="thin"><color auto="1"/></bottom><diagonal/>';
+    const xf = x => {
+      const al = (x.align || x.valign || x.wrap) ? '<alignment' + (x.align ? ' horizontal="' + x.align + '"' : '') + (x.valign ? ' vertical="' + x.valign + '"' : '') + (x.wrap ? ' wrapText="1"' : '') + '/>' : '';
+      return '<xf numFmtId="' + x.fmtId + '" fontId="' + (x.bold ? 1 : 0) + '" fillId="0" borderId="' + (x.border ? 1 : 0) + '" xfId="0"'
+        + (x.fmtId ? ' applyNumberFormat="1"' : '') + (x.bold ? ' applyFont="1"' : '') + (x.border ? ' applyBorder="1"' : '') + (al ? ' applyAlignment="1">' + al + '</xf>' : '/>');
+    };
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' + nf
+      + '<fonts count="2">' + font(false) + font(true) + '</fonts>'
+      + '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+      + '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border>' + thin + '</border></borders>'
+      + '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+      + '<cellXfs count="' + xfs.length + '">' + xfs.map(xf).join('') + '</cellXfs>'
+      + '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+  };
+  return { get, xml };
+}
+// buildXLSX(sheet) → Uint8Array ของไฟล์ .xlsx
+//   sheet = { name, rows:[[cell]], cols:[ความกว้าง], merges:['A1:I1'], orientation:'portrait'|'landscape',
+//             paperSize:9(A4), printTitleRows:'1:4', fitToWidth:true, font:{name,size}, rowHeights:{1:24},
+//             margins:{left,right,top,bottom} (นิ้ว) }
+//   cell = null | 'ข้อความ' (เก็บเป็นข้อความเสมอ — เลข 0 นำหน้าไม่หาย) | 123.45 (ตัวเลข)
+//        | { v, f:'SUM(G5:G9)', bold, align:'center'|'right'|'left', valign, fmt:'#,##0.00', border, wrap }
+function buildXLSX(sheet){
+  sheet = sheet || {};
+  const font = sheet.font || {};
+  const st = _xlsxStyles(font.name || 'Tahoma', font.size || 10);
+  const rowsXml = (sheet.rows || []).map((row, ri) => {
+    const r = ri + 1;
+    const cells = (row || []).map((raw, ci) => {
+      if(raw === null || raw === undefined) return '';
+      const c = (typeof raw === 'object') ? raw : { v: raw };
+      const ref = _xlsxCol(ci) + r; const s = st.get(c); const sa = s ? ' s="' + s + '"' : '';
+      const v = c.v;
+      if(c.f){
+        const num = (typeof v === 'number' && isFinite(v)) ? '<v>' + v + '</v>' : '';
+        return '<c r="' + ref + '"' + sa + '><f>' + _xlsxEsc(String(c.f).replace(/^=/, '')) + '</f>' + num + '</c>';
+      }
+      if(typeof v === 'number' && isFinite(v)) return '<c r="' + ref + '"' + sa + '><v>' + v + '</v></c>';
+      if(v === null || v === undefined || v === '') return s ? '<c r="' + ref + '"' + sa + '/>' : '';
+      return '<c r="' + ref + '"' + sa + ' t="inlineStr"><is><t xml:space="preserve">' + _xlsxEsc(v) + '</t></is></c>';
+    }).join('');
+    const ht = sheet.rowHeights && sheet.rowHeights[r] ? ' ht="' + sheet.rowHeights[r] + '" customHeight="1"' : '';
+    return '<row r="' + r + '"' + ht + '>' + cells + '</row>';
+  }).join('');
+  const cols = (sheet.cols || []).map((w, i) => w ? '<col min="' + (i + 1) + '" max="' + (i + 1) + '" width="' + w + '" customWidth="1"/>' : '').join('');
+  const merges = sheet.merges || [];
+  const fit = !!sheet.fitToWidth;
+  // ขอบกระดาษ (นิ้ว) · sheet.margins = { left, right, top, bottom } · ไม่ระบุ/ค่าไม่ใช่ตัวเลข = ค่าเดิม 0.5/0.6
+  const mg = (k, d) => { const v = sheet.margins && Number(sheet.margins[k]); return (v >= 0 && isFinite(v)) ? v : d; };
+  const ws = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    + (fit ? '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' : '')
+    + '<sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/>'
+    + (cols ? '<cols>' + cols + '</cols>' : '') + '<sheetData>' + rowsXml + '</sheetData>'
+    + (merges.length ? '<mergeCells count="' + merges.length + '">' + merges.map(m => '<mergeCell ref="' + m + '"/>').join('') + '</mergeCells>' : '')
+    + '<pageMargins left="' + mg('left', 0.5) + '" right="' + mg('right', 0.5) + '" top="' + mg('top', 0.6) + '" bottom="' + mg('bottom', 0.6) + '" header="0.3" footer="0.3"/>'
+    + '<pageSetup paperSize="' + (sheet.paperSize || 9) + '" orientation="' + (sheet.orientation === 'landscape' ? 'landscape' : 'portrait') + '"' + (fit ? ' fitToWidth="1" fitToHeight="0"' : '') + '/></worksheet>';
+  const name = String(sheet.name || 'Sheet1').replace(/[\\\/\?\*\[\]:]/g, ' ').slice(0, 31) || 'Sheet1';
+  const pt = sheet.printTitleRows ? String(sheet.printTitleRows).split(':') : null;
+  const dn = pt ? '<definedNames><definedName name="_xlnm.Print_Titles" localSheetId="0">\'' + _xlsxEsc(name.replace(/'/g, "''")) + '\'!$' + pt[0] + ':$' + (pt[1] || pt[0]) + '</definedName></definedNames>' : '';
+  const X = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+  const enc = new TextEncoder();
+  const files = [
+    ['[Content_Types].xml', X + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'],
+    ['_rels/.rels', X + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'],
+    ['xl/workbook.xml', X + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets><sheet name="' + _xlsxEsc(name) + '" sheetId="1" r:id="rId1"/></sheets>' + dn + '<calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>'],
+    ['xl/_rels/workbook.xml.rels', X + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'],
+    ['xl/worksheets/sheet1.xml', ws],
+    ['xl/styles.xml', st.xml()],
+  ];
+  return _xlsxZip(files.map(([n, s]) => ({ name: n, data: enc.encode(s) })));
+}
+// ดาวน์โหลดไฟล์ .xlsx
+function exportXLSX(filename, sheet){
+  const bytes = buildXLSX(sheet);
+  const blob = new Blob([bytes], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = /\.xlsx$/i.test(filename || '') ? filename : (filename || 'export') + '.xlsx'; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+  return bytes;
+}
+
 function Button(props){
   const { onClick, variant, size, disabled, children, type, className, title, block } = props;
   const variants = {
@@ -12349,7 +12498,7 @@ Object.assign(global.ERP, {
   // 🆕 UI-v2 เฟส 3 (TABLE_V2_CONTRACT §3)
   STATUS_MAPS, StatusBadge, DataTable, KPI_COLOR_TONE, RowActions, EmptyState, FilterBar, SearchInput, FilterChips, presetOf, BottomSheet, KpiStrip, PageHeader, Fab, TableBoundary, useTableV2, TABLE_V2_PAGES, useMediaQuery, useIsNarrow, canNavigate,
   LabelDock, PrinterStatusRow, LOT_LABEL_SIZES, lotLabelSizeOf,
-  code128Widths, code128SVG, inDateRange, exportCSV,
+  code128Widths, code128SVG, inDateRange, exportCSV, buildXLSX, exportXLSX,
   // Business helpers
   getPOReceiveStatus, genDocNumber, fmtDayDocNo,
   getExpiryAlerts, getLowStockAlerts, collectOperationalAlerts,
@@ -31652,6 +31801,7 @@ mod('settings',    'ตั้งค่า',    { icon:'⚙️', group:'admin', h
   pg('vatClaims', 'ทะเบียนใบกำกับซื้อ',        TX, { old:'🗂️ ทะเบียนใบกำกับซื้อ', perm:P('vatClaims', ['vat']), aliases:['ใบกำกับภาษี','รอใบกำกับ','ใบกำกับภาษีซื้อ','tax invoice','VAT รอใบกำกับ','เลื่อนเคลม','หมดสิทธิ์เคลม','ทะเบียนภาษีซื้อ'] });
   pg('vat',       'ภาษีซื้อสรุปเดือน (VAT)',    TX, { old:'📊 VAT สรุปเดือน', perm:P('vat'), aliases:['VAT','ภาษีซื้อ','ภพ.30','ภาษีมูลค่าเพิ่ม'] });
   pg('vatByInv',  'ภาษีซื้อตามใบแจ้งหนี้',      TX, { kind:'report', old:'📋 ภาษีซื้อตาม INV', perm:P('vatByInv'), aliases:['VAT ตาม INV','ภาษีซื้อตาม PI'] });
+  pg('vatRd',     'รายงานภาษีซื้อ (แบบยื่น)',   TX, { kind:'report', old:'🧾 รายงานภาษีซื้อ (แบบยื่น)', perm:P('vatRd', ['vat', 'vatByInv']), aliases:['รายงานภาษีซื้อ','แบบยื่นภาษีซื้อ','ภาษีซื้อ Excel','รายงานภาษีซื้อสรรพากร'] });   // 🆕 VAT-RD-FORM RD1
   pg('vatByPay',  'ภาษีซื้อตามวันจ่าย',        TX, { kind:'report', old:'💰 ภาษีซื้อตามวันจ่าย', perm:P('vatByPay'), aliases:['VAT ตามจ่าย'] });
   // ทรัพย์สิน
   const AS = 'ทรัพย์สิน';
@@ -71672,6 +71822,11 @@ const PO_STATUS = {
   completed: ['เสร็จสิ้น',     'bg-green-100 text-green-700'],
   cancelled: ['ยกเลิก',         'bg-red-100 text-red-700'],
 };
+// 🆕 PO-LINES RL2: PO ที่ "ใช้จริง" ในรายงานจัดซื้อ — ไม่ void · ไม่ใช่ ร่าง/รออนุมัติ/ถูกปฏิเสธ/ยกเลิก
+//   (เกณฑ์เดียวกับ 🧾 ประวัติสั่งซื้อรายสินค้า เดิม) · ทุกแท็บรายงานที่ดึงจาก PO ใช้ตัวนี้ตัวเดียว
+const PO_UNUSABLE_STATUS = ['draft','pending','rejected','cancelled'];
+function poIsUsable(p){ return !!p && !p.voided && !PO_UNUSABLE_STATUS.includes(p.status); }
+const PO_USABLE_NOTE = '(ไม่นับยกเลิก/ร่าง/รออนุมัติ)';
 const INV_STATUS = {
   unpaid:  ['ยังไม่จ่าย','bg-red-100 text-red-700'],
   partial: ['จ่ายบางส่วน','bg-amber-100 text-amber-800'],
@@ -87499,11 +87654,13 @@ function PurchaseReports({ state, user }){
   const [itemFilter, setItemFilter] = useState('');
 
   // Pre-filter by date — lazy: compute เฉพาะเมื่อ tab นั้น active ก็ได้ แต่ useMemo cache ให้แล้ว
-  const pos = useMemo(() => (state.pos||[]).filter(p =>
+  // 🆕 PO-LINES: allPos = ทุกสถานะ (แท็บ 📋 รายการสั่งซื้อ กรองสถานะเอง) · pos = เฉพาะ PO ใช้จริง (RL2 — แท็บอื่นทั้งหมด)
+  const allPos = useMemo(() => (state.pos||[]).filter(p =>
       inDateRange(p.poDate, dr.startDate, dr.endDate) &&
       (!supFilter || p.supplierId === supFilter) &&
       (!itemFilter || (p.lines||[]).some(l => l.itemId === itemFilter))),
     [state.pos, dr.startDate, dr.endDate, supFilter, itemFilter]);
+  const pos = useMemo(() => allPos.filter(poIsUsable), [allPos]);
   // UAT: ตัด PI ที่ void (VOID_INV ตั้งแค่ voided:true ไม่ล้าง netPayable) — ไม่งั้น ตั้งหนี้/จ่ายแล้ว/ค้างจ่าย ในรายงานนับใบที่ยกเลิกแล้ว
   const invs = useMemo(() => (state.invoices||[]).filter(i =>
       !i.voided &&
@@ -87528,6 +87685,8 @@ function PurchaseReports({ state, user }){
     [state.returns, dr.startDate, dr.endDate, supFilter]);
 
   const ctx = { state, pos, invs, grs, pays, rtvs, dr };
+  // แท็บที่ดึงจาก PO → บอกสั้น ๆ ว่าไม่นับ PO ยกเลิก/ร่าง/รออนุมัติ (RL2)
+  const _poBased = ['dashboard','price','byItem','bySupplier','performance','trend'].includes(sub);
 
   return h('div', null,
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 space-y-2' },
@@ -87555,7 +87714,8 @@ function PurchaseReports({ state, user }){
         { k:'dashboard',   label:'📊 Dashboard' },
         { k:'price',       label:'💰 เทียบราคา' },
         { k:'priceHist',   label:'🧾 ประวัติสั่งซื้อรายสินค้า' },
-        { k:'byItem',      label:'📦 สรุปยอดตามสินค้า' },
+        { k:'poLines',     label:'📋 รายการสั่งซื้อ (ทุก PO)' },
+        { k:'byItem',     label:'📦 สรุปยอดตามสินค้า' },
         { k:'bySupplier',  label:'🏭 ตาม Supplier' },
         { k:'performance', label:'⭐ Supplier Perf.' },
         { k:'aging',       label:'💸 AP Aging' },
@@ -87568,9 +87728,12 @@ function PurchaseReports({ state, user }){
       )
     ),
 
+    _poBased && h('div', { className:'text-[11px] text-gray-500 -mt-2 mb-2', 'data-testid':'po-usable-note' },
+      `ℹ️ ตัวเลขจาก PO ${PO_USABLE_NOTE}`),
     sub==='dashboard'   && h(ReportDashboard,   ctx),
     sub==='price'       && h(ReportPriceCompare, ctx),
     sub==='priceHist'   && h(ReportPriceHistory, ctx),
+    sub==='poLines'     && h(ReportPOLines, { state, allPos, dr, itemFilter, supFilter }),
     sub==='byItem'      && h(ReportByItem,       ctx),
     sub==='bySupplier'  && h(ReportBySupplier,   ctx),
     sub==='performance' && h(ReportSupplierPerformance, ctx),
@@ -87598,7 +87761,7 @@ function ReportDashboard({ state, pos, invs, grs, pays, rtvs, dr }){
 
   return h('div', { className:'space-y-4' },
     h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-3' },
-      h(KPI, { label:'ยอดซื้อรวม', value:fmtCur(totalPO), sub:`${pos.length} PO`, color:'blue', icon:'🛍️' }),
+      h(KPI, { label:'ยอดซื้อรวม', value:fmtCur(totalPO), sub:`${pos.length} PO ${PO_USABLE_NOTE}`, color:'blue', icon:'🛍️' }),
       h(KPI, { label:'ตั้งหนี้รวม', value:fmtCur(totalInv), sub:`${invs.length} INV`, color:'purple', icon:'💸' }),
       h(KPI, { label:'จ่ายแล้ว', value:fmtCur(totalPaid), sub:`${pays.length} ครั้ง`, color:'green', icon:'💰' }),
       h(KPI, { label:'ค้างจ่าย (ทั้งหมด)', value:fmtCur(totalUnpaid), sub:`${unpaidInvs.length} ใบ`, color:'red', icon:'⏰' }),
@@ -87792,8 +87955,7 @@ function ReportPriceCompare({ state, pos, dr }){
 //   เรียงใหม่→เก่า · Export CSV (ทั้งชุด ไม่ใช่แค่หน้าที่ดู) · แบ่งหน้า 50 แถว
 function ReportPriceHistory({ state, pos, dr }){
   // เฉพาะ PO ที่ใช้จริง (approved ขึ้นไป, ไม่ voided/draft/pending) — ราคาที่ตกลงกับ supplier
-  const usablePos = useMemo(() => (pos||[]).filter(p =>
-    !p.voided && !['draft','pending','rejected','cancelled'].includes(p.status)), [pos]);
+  const usablePos = useMemo(() => (pos||[]).filter(poIsUsable), [pos]);   // RL2: ตัวช่วยกลาง (เกณฑ์เดิม)
 
   // สินค้าที่เคยถูกซื้อในช่วงนี้ → itemId → [รอบสั่งซื้อ] (เรียงเก่า→ใหม่ เพื่อคิด %เทียบรอบก่อน)
   const itemRounds = useMemo(() => {
@@ -88005,6 +88167,264 @@ function ReportPriceHistory({ state, pos, dr }){
     h('div', { className:'text-xs text-gray-400 px-1' },
       '* อิงราคาจาก PO ที่อนุมัติแล้ว (ราคาที่ตกลงกับ supplier) · ไม่รวมของแถม · สถานะรับของอ่านจาก receivedQty ของบรรทัด PO')
   );
+}
+
+// ---------- 📋 รายการสั่งซื้อ (ทุก PO) — PO_LINES_REPORT_CONTRACT RL1 ----------
+//   ทุกบรรทัดของทุก PO ในช่วง · มุมมอง เรียงตามวันที่ / จัดกลุ่มตาม PO · ชิปสถานะ · ค้นหา · สรุปท้าย · CSV · พิมพ์ A4 แนวนอน
+const PO_LINE_CHIPS = [
+  { k:'active',    label:'ใช้งาน',        test:p => poIsUsable(p) },
+  { k:'pending',   label:'รออนุมัติ',     test:p => !p.voided && p.status === 'pending' },
+  { k:'draft',     label:'ร่าง',          test:p => !p.voided && p.status === 'draft' },
+  { k:'cancelled', label:'ยกเลิก/ปฏิเสธ', test:p => !!p.voided || p.status === 'cancelled' || p.status === 'rejected' },
+  { k:'all',       label:'ทั้งหมด',        test:() => true },
+];
+function poLineStatusLabel(p){
+  if(p.voided || p.status === 'cancelled') return 'ยกเลิก';
+  if(p.status === 'rejected') return 'ถูกปฏิเสธ';
+  return (PO_STATUS[p.status] || [])[0] || p.status || '';
+}
+// ยอดบรรทัด = ฟิลด์ที่ PO บันทึกไว้ (lineExVat/lineVat/lineTotal) · PO เก่าไม่มี lineExVat → lineTotal ?? จำนวน×ราคา (ตรรกะรายงานเดิม) VAT 0
+// verify 1: PO ประวัติ Ecount (po_ec69_*) = priceMode 'exclusive' · lineTotal = ยอดก่อน VAT ก่อนส่วนลดท้ายบิล + vatRate (ไม่มี lineExVat)
+//   → ก่อน VAT = lineTotal − billDiscAlloc · VAT = ก่อน VAT × vatRate% · รวม = ก่อน VAT + VAT (ให้ยอดรวมกลุ่มตรงกับ po.total)
+function poLineAmounts(l, po){
+  const qty = Number(l.qty) || 0, price = Number(l.unitPrice) || 0;
+  const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+  if(l.lineExVat == null && l.lineTotal != null && po && po.priceMode === 'exclusive' && l.vatRate != null && l.vatRate !== ''){
+    const exVat = r2((Number(l.lineTotal) || 0) - (l.isFreebie ? 0 : Number(l.billDiscAlloc) || 0));
+    const vat = r2(exVat * (Number(l.vatRate) || 0) / 100);
+    return { qty, price, exVat, vat, total:r2(exVat + vat) };
+  }
+  if(l.lineExVat == null){
+    const total = l.lineTotal != null ? Number(l.lineTotal) || 0 : (l.isFreebie ? 0 : qty * price);
+    return { qty, price, exVat:r2(total), vat:0, total:r2(total), vatUnknown:true };  // PO รุ่นเก่า ไม่แยก VAT → แสดง '-'
+  }
+  const exVat = Number(l.lineExVat) || 0;
+  const total = l.lineTotal != null ? Number(l.lineTotal) || 0 : exVat + (Number(l.lineVat) || 0);
+  const vat = l.lineVat != null ? Number(l.lineVat) || 0 : total - exVat;
+  return { qty, price, exVat:r2(exVat), vat:r2(vat), total:r2(total) };
+}
+function buildPOLineRows(state, posList, itemFilter){
+  const itemMap = new Map((state.items || []).map(i => [i.id, i]));
+  const supMap = new Map((state.suppliers || []).map(s => [s.id, s]));
+  const rows = [];
+  for(const po of posList){
+    const sup = supMap.get(po.supplierId);
+    const supName = (sup && (global.ERP.partyNameWithBranch ? global.ERP.partyNameWithBranch(sup, state.suppliers) : sup.name)) || po.supplierName || po.supplierId || '';
+    const br = getBranch(state, po.destinationBranch);
+    const loc = po.destLocId && br ? (br.locations || []).find(x => x.id === po.destLocId) : null;
+    const dest = ((br && br.name) || po.destinationBranch || '') + (loc ? ' / ' + loc.name : '');
+    const status = poLineStatusLabel(po);
+    const tags = global.ERP.docTagNames ? global.ERP.docTagNames(state, po) : '';
+    const openRecv = !po.voided && ['approved','partial'].includes(po.status);
+    (po.lines || []).forEach((l, idx) => {
+      if(itemFilter && l.itemId !== itemFilter) return;
+      const it = l.itemId ? itemMap.get(l.itemId) : null;
+      const a = poLineAmounts(l, po);
+      const recv = Number(l.receivedQty) || 0;
+      rows.push({ id:(po.id || po.poNumber) + '#' + idx, poId:po.id || po.poNumber, seq:idx,
+        poDate:po.poDate || '', poNumber:po.poNumber || '', supName, dest, status, statusKey:po.voided ? 'cancelled' : po.status,
+        createdBy:po.createdByName || po.createdBy || '', poTotal:Number(po.total) || 0, tags,
+        // verify 1: PO นำเข้า (ec69/po_mig) เก็บ itemName/itemCode ในบรรทัด (itemId ว่าง = ค่าบริการ/สินค้าที่จับคู่ไม่ได้)
+        code:(it && it.code) || l.itemCode || l.expenseItemCode || '', name:(it && it.name) || l.itemName || l.description || l.itemId || '',
+        spec:l.spec || (it && it.spec) || '', note:l.note || po.note || '', poDateTh:poLineThDate(po.poDate),
+        freebie:!!l.isFreebie, unit:l.unit || '', qty:a.qty, price:a.price,
+        discount:Math.round(((Number(l.discount) || 0) + (Number(l.billDiscAlloc) || 0)) * 100) / 100,
+        exVat:a.exVat, vat:a.vat, vatUnknown:!!a.vatUnknown, total:a.total, recv, remain:openRecv ? Math.max(0, a.qty - recv) : 0 });
+    });
+  }
+  return rows;
+}
+// UAT N4: คำอธิบายหัวคอลัมน์ ค้างรับ + ชิป ใช้งาน (tooltip)
+const PO_LINE_REMAIN_TIP = 'ค้างรับ = เฉพาะ PO ที่ยังเปิด · ช่วงวันที่ = วันที่เปิด PO';
+const PO_LINE_ACTIVE_TIP = 'ใช้งาน = PO ที่อนุมัติแล้ว (ไม่นับ ร่าง/รออนุมัติ/ยกเลิก/ปฏิเสธ) · ช่วงวันที่ = วันที่เปิด PO';
+// S4: ยอดทั้งหมดมาจาก PO — ไม่ใช่ยอดตั้งหนี้/ภาษีซื้อ (ของสดราคาเปลี่ยนตอนรับ/ตั้งหนี้)
+const PO_LINES_AMT_NOTE = 'ยอดตามใบสั่งซื้อ (PO) ไม่ใช่ยอดตั้งหนี้/ภาษีซื้อ — ใช้แท็บ 🧾 ใบกำกับภาษีซื้อ';
+const PO_LINES_VAT_NOTE = 'VAT "-" = PO รุ่นเก่า ไม่แยก VAT (ยอดทั้งก้อนอยู่ในช่องยอดก่อน VAT)';
+// RL3: วันที่แบบไทย "02 ก.ย. 2569" (ตามตัวอย่างรายงาน Ecount ของเจ้าของ)
+const _PO_TH_MON = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+function poLineThDate(iso){ const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || ''); return m ? `${m[3]} ${_PO_TH_MON[+m[2] - 1]} ${+m[1] + 543}` : (iso || ''); }
+// 🆕 เจ้าของ 15 ต.ค. "ราคา จำนวน เวลา export ให้มี , กับทศนิยม 2 ตำแหน่ง" — CSV รายงานนี้ใช้ 1,234.56 (exportCSV ใส่ "" ให้เอง · Excel อ่านเป็นตัวเลข)
+const _pf2 = (x) => (Number(x) || 0).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+// RL3: คอลัมน์หลักตามตัวอย่าง Ecount → คอลัมน์เพิ่ม (extra · สวิตช์ "คอลัมน์เพิ่ม" ค่าเริ่ม = แสดง)
+//   num = ชิดขวา · sum = ฟิลด์ยอดรวม · grpHide = มุมมองกลุ่มไม่ซ้ำในบรรทัด (อยู่ที่หัว PO แล้ว) · csv = ค่าในไฟล์ (csvCols = แตกหลายช่อง)
+const PO_LINE_COLDEFS = [
+  { k:'date', label:'วันที่', txt:r => r.poDateTh },
+  { k:'po', label:'เลขที่ใบสั่งซื้อ', txt:r => r.poNumber },
+  { k:'sup', label:'ผู้ขาย', grpHide:true, txt:r => r.supName },
+  { k:'name', label:'ชื่อสินค้า [ข้อมูลจำเพาะ]', txt:r => (r.freebie ? '🎁 ' : '') + r.name + (r.spec ? ' [' + r.spec + ']' : '') },
+  { k:'qty', label:'จำนวน', num:true, txt:r => fmtNum(r.qty) + (r.unit ? ' ' + r.unit : ''), csvCols:[['จำนวน', r => _pf2(r.qty)], ['หน่วย', r => r.unit]] },
+  { k:'price', label:'ราคาต่อหน่วย', num:true, txt:r => fmtCur(r.price), csv:r => _pf2(r.price) },
+  { k:'vat', label:'ภาษี', num:true, sum:'vat', txt:r => r.vatUnknown ? '-' : (r.vat ? fmtCur(r.vat) : ''), csv:r => r.vatUnknown || !r.vat ? '' : _pf2(r.vat) },
+  { k:'amt', label:'จำนวนเงิน (ก่อน VAT)', num:true, sum:'exVat', txt:r => fmtCur(r.exVat), csv:r => _pf2(r.exVat) },
+  { k:'note', label:'หมายเหตุ', txt:r => r.note },
+  { k:'total', label:'รวม VAT', extra:true, num:true, sum:'total', txt:r => fmtCur(r.total), csv:r => _pf2(r.total) },
+  { k:'dest', label:'ส่งที่', extra:true, grpHide:true, txt:r => r.dest },
+  { k:'recv', label:'รับแล้ว', extra:true, num:true, txt:r => fmtNum(r.recv), csv:r => _pf2(r.recv) },
+  { k:'remain', label:'ค้างรับ', extra:true, num:true, txt:r => r.remain > 0 ? fmtNum(r.remain) : '-', csv:r => _pf2(r.remain) },
+  { k:'status', label:'สถานะ PO', extra:true, txt:r => r.status },
+  { k:'tags', label:'แท็ก', extra:true, txt:r => r.tags },
+  { k:'code', label:'รหัสสินค้า', extra:true, txt:r => r.code },
+  { k:'disc', label:'ส่วนลด', extra:true, num:true, txt:r => r.discount ? fmtCur(r.discount) : '-', csv:r => _pf2(r.discount) },
+];
+const poLineCols = (extra) => PO_LINE_COLDEFS.filter(c => extra || !c.extra);
+const poLineCsvHead = (cols) => cols.flatMap(c => c.csvCols ? c.csvCols.map(x => x[0]) : [c.label]);
+const poLineCsvCells = (cols, r) => cols.flatMap(c => c.csvCols ? c.csvCols.map(x => x[1](r)) : [(c.csv || c.txt)(r)]);
+const poLineCsvSum = (cols, label, s) => { const o = cols.flatMap(c => c.csvCols ? c.csvCols.map(() => '') : [c.sum ? _pf2(s[c.sum]) : '']); o[0] = label; return o; };
+// จำนวนคอลัมน์ก่อนช่องยอดรวมแรก (ป้ายแถวรวม colSpan)
+const poLineSumStart = (cols) => cols.findIndex(c => c.sum);
+function ReportPOLines({ state, allPos, dr, itemFilter, supFilter }){
+  const [view, setView] = useState('date');        // date | po
+  const [desc, setDesc] = useState(true);           // ใหม่→เก่า (ค่าเริ่ม)
+  const [chip, setChip] = useState('active');
+  const [q, setQ] = useState('');
+  const [limit, setLimit] = useState(200);
+  const [extra, setExtra] = useState(true);         // RL3: คอลัมน์เพิ่ม (ค่าเริ่ม = แสดง)
+  const cols = poLineCols(extra), sumAt = poLineSumStart(cols);
+
+  const allRows = useMemo(() => {
+    const test = (PO_LINE_CHIPS.find(c => c.k === chip) || PO_LINE_CHIPS[0]).test;
+    return buildPOLineRows(state, (allPos || []).filter(test), itemFilter);
+  }, [state, allPos, chip, itemFilter]);
+  const rows = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const list = s ? allRows.filter(r => (r.poNumber + ' ' + r.supName + ' ' + r.code + ' ' + r.name + ' ' + r.spec + ' ' + r.dest + ' ' + r.tags + ' ' + r.note).toLowerCase().includes(s)) : allRows.slice();
+    const dir = desc ? -1 : 1;
+    list.sort((a, b) => (a.poDate.localeCompare(b.poDate) || a.poNumber.localeCompare(b.poNumber)) * dir || a.seq - b.seq);
+    return list;
+  }, [allRows, q, desc]);
+  // กลุ่มตาม PO (ลำดับตาม rows ที่เรียงแล้ว)
+  const groups = useMemo(() => {
+    const m = new Map();
+    for(const r of rows){ if(!m.has(r.poId)) m.set(r.poId, { head:r, lines:[] }); m.get(r.poId).lines.push(r); }
+    return [...m.values()].map(g => ({ ...g, exVat:g.lines.reduce((s, r) => s + r.exVat, 0),
+      vat:g.lines.reduce((s, r) => s + r.vat, 0), total:g.lines.reduce((s, r) => s + r.total, 0) }));
+  }, [rows]);
+  const sum = useMemo(() => ({ po:groups.length, lines:rows.length,
+    exVat:rows.reduce((s, r) => s + r.exVat, 0), vat:rows.reduce((s, r) => s + r.vat, 0), total:rows.reduce((s, r) => s + r.total, 0) }), [rows, groups]);
+  // ตัวกรอง/มุมมองเปลี่ยน → กลับไป 200 แถวแรก
+  useEffect(() => { setLimit(200); }, [chip, q, view, desc, dr.startDate, dr.endDate, itemFilter, supFilter]);
+
+  const chipLabel = (PO_LINE_CHIPS.find(c => c.k === chip) || {}).label || '';
+  // S2: มีค้นหา/กรองสินค้า → ยอดรวมใน PO = เฉพาะบรรทัดที่กรอง (ต่างจากยอดรวมทั้งใบได้)
+  const filtered = !!(q.trim() || itemFilter);
+  const subLabel = (g) => `รวม ${g.head.poNumber} (${g.lines.length} บรรทัด)` + (filtered ? ' (เฉพาะบรรทัดที่กรอง)' : '');
+  const hasVatUnknown = rows.some(r => r.vatUnknown);
+  const filterText = () => {
+    const sup = supFilter ? (state.suppliers || []).find(s => s.id === supFilter) : null;
+    const it = itemFilter ? (state.items || []).find(i => i.id === itemFilter) : null;
+    return [`ช่วง ${dr.startDate ? poLineThDate(dr.startDate) : '…'} ถึง ${dr.endDate ? poLineThDate(dr.endDate) : '…'}`, `สถานะ: ${chipLabel}`, sup && `ผู้ขาย: ${sup.name}`, it && `สินค้า: ${it.name}`, q.trim() && `ค้นหา: ${q.trim()}`].filter(Boolean).join(' · ');
+  };
+  const doCSV = () => {
+    const out = [[PO_LINES_AMT_NOTE], poLineCsvHead(cols)];
+    if(view === 'po'){
+      for(const g of groups){
+        // verify 1: หัว PO ใน CSV เหมือนจอ/พิมพ์ (ยอดรวมทั้งใบ · สถานะ · ผู้เปิด)
+        const hd = g.head;
+        out.push([hd.poDateTh, hd.poNumber, hd.supName, 'ส่งที่ ' + hd.dest, 'ยอดรวมทั้งใบ ' + _pf2(hd.poTotal), hd.status, hd.createdBy ? 'ผู้เปิด ' + hd.createdBy : '']);
+        for(const r of g.lines) out.push(poLineCsvCells(cols, r));
+        out.push(poLineCsvSum(cols, subLabel(g), g));
+      }
+    } else rows.forEach(r => out.push(poLineCsvCells(cols, r)));
+    out.push(poLineCsvSum(cols, `รวมทั้งหมด ${sum.po} PO / ${sum.lines} บรรทัด`, sum));
+    if(hasVatUnknown) out.push([PO_LINES_VAT_NOTE]);
+    exportCSV(`po-lines-${view}-${dr.startDate || 'all'}_${dr.endDate || 'all'}.csv`, out);
+  };
+  const doPrint = () => {
+    const e = (x) => String(x == null ? '' : x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const m = (x) => fmtCur(x);
+    const td = (x, r) => `<td style="padding:2px 4px;border:1px solid #ccc${r ? ';text-align:right' : ''}">${x}</td>`;
+    const line = (r, inGroup) => '<tr>' + cols.map(c => td(inGroup && c.grpHide ? '' : e(c.txt(r)), c.num)).join('') + '</tr>';
+    const tot = (label, s, bg) => `<tr style="background:${bg};font-weight:bold"><td colspan="${sumAt}" style="padding:2px 4px;border:1px solid #ccc">${e(label)}</td>`
+      + cols.slice(sumAt).map(c => c.sum ? td(m(s[c.sum]), 1) : td('')).join('') + '</tr>';
+    let body = '';
+    if(view === 'po'){
+      for(const g of groups){
+        const hd = g.head;
+        body += `<tr style="background:#eef2ff;font-weight:bold"><td colspan="${cols.length}" style="padding:3px 4px;border:1px solid #ccc">${e(hd.poDateTh)} · ${e(hd.poNumber)} · ${e(hd.supName)} · ส่งที่ ${e(hd.dest)} · ${e(hd.status)} · ผู้เปิด ${e(hd.createdBy)} · ยอดรวมทั้งใบ ${m(hd.poTotal)}</td></tr>`;
+        body += g.lines.map(r => line(r, true)).join('') + tot(subLabel(g), g, '#f8fafc');
+      }
+    } else body = rows.map(r => line(r, false)).join('');
+    body += tot(`รวมทั้งหมด ${sum.po} PO / ${sum.lines} บรรทัด`, sum, '#e5e7eb');
+    const html = `<style>@page{size:A4 landscape;margin:8mm}body{font-size:9pt}table{border-collapse:collapse;width:100%}th{background:#f3f4f6;border:1px solid #ccc;padding:2px 4px;font-size:8.5pt}</style>`
+      + `<h2 style="margin:0 0 2px">📋 รายการสั่งซื้อ (ทุก PO) — ${view === 'po' ? 'จัดกลุ่มตาม PO' : 'เรียงตามวันที่'}</h2>`
+      + `<div style="margin-bottom:2px;color:#555">${e(filterText())}</div>`
+      + `<div style="margin-bottom:6px;color:#b45309">⚠️ ${e(PO_LINES_AMT_NOTE)}</div>`
+      + `<table><thead><tr>${cols.map(c => `<th>${e(c.label)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`
+      + (hasVatUnknown ? `<div style="margin-top:4px;color:#555">* ${e(PO_LINES_VAT_NOTE)}</div>` : '');
+    openPrintWindow('รายการสั่งซื้อ (ทุก PO)', html);
+  };
+  // แสดงทีละ 200 แถว · มุมมองกลุ่ม = ไม่ตัดกลาง PO
+  let shownGroups = groups, shownCount = rows.length;
+  if(view === 'po'){
+    let c = 0; shownGroups = [];
+    for(const g of groups){ if(c >= limit) break; shownGroups.push(g); c += g.lines.length; }
+    shownCount = c;
+  } else shownCount = Math.min(rows.length, limit);
+  const btn = (on) => cls('px-2 py-1 rounded border text-xs', on ? 'bg-blue-600 text-white border-blue-700' : 'bg-white hover:bg-gray-50');
+  const R = 'px-2 py-1 text-right whitespace-nowrap', L = 'px-2 py-1 whitespace-nowrap';
+  // RL3: เซลล์บนจอ (ตาม PO_LINE_COLDEFS · บางคอลัมน์มีรูปแบบพิเศษ)
+  const cellEl = (c, r, inGroup) => {
+    if(inGroup && c.grpHide) return '';
+    if(c.k === 'name') return [r.freebie && h('span', { key:'f', className:'mr-1 px-1 rounded bg-pink-100 text-pink-700 text-[10px]' }, '🎁 ของแถม'),
+      r.name, r.spec && h('span', { key:'s', className:'text-gray-500' }, ' [' + r.spec + ']')];
+    if(c.k === 'status') return h('span', { className:cls('px-1.5 py-0.5 rounded text-[10px]', (PO_STATUS[r.statusKey] || [])[1] || 'bg-red-100 text-red-700') }, r.status);
+    return c.txt(r);
+  };
+  const cellCls = (c, r) => c.k === 'name' ? 'px-2 py-1 min-w-[160px]' : c.k === 'note' ? 'px-2 py-1 text-xs min-w-[100px]'
+    : (c.num ? R : L) + (c.k === 'po' || c.k === 'code' ? ' font-mono text-xs' : '') + (c.k === 'dest' || c.k === 'tags' ? ' text-xs' : '')
+      + (c.k === 'total' || c.k === 'amt' ? ' font-medium' : '') + (c.k === 'remain' && r.remain > 0 ? ' text-amber-700 font-medium' : '');
+  // verify 2: แท็บเล็ตเลื่อนข้าง → ตรึงคอลัมน์ วันที่ (+ เลขที่ PO ในมุมมองเรียงตามวันที่ · มุมมองกลุ่มหัว PO บอกเลขแล้ว) ไว้ซ้าย
+  const pinCls = (c, th) => c.k === 'date' ? cls('sticky left-0 min-w-[96px] w-[96px]', th ? 'bg-gray-100 z-20' : 'bg-white z-[1]', view === 'po' && 'border-r')
+    : (c.k === 'po' && view === 'date') ? cls('sticky left-[96px] border-r', th ? 'bg-gray-100 z-20' : 'bg-white z-[1]') : '';
+  const lineTr = (r, inGroup) => h('tr', { key:r.id, className:'hover:bg-blue-50', 'data-testid':'pol-row' },
+    cols.map(c => h('td', { key:c.k, className:cls(cellCls(c, r), pinCls(c, false)), 'data-col':c.k, title:c.k === 'vat' && r.vatUnknown ? 'PO รุ่นเก่า ไม่แยก VAT' : undefined }, cellEl(c, r, inGroup))));
+  const totTr = (key, label, s, extra) => h('tr', { key, className:extra, 'data-testid':key === 'grand' ? 'pol-grand' : 'pol-subtotal' },
+    h('td', { colSpan:sumAt, className:'px-2 py-1 font-bold' }, label),
+    cols.slice(sumAt).map(c => h('td', { key:c.k, 'data-col':c.k, className:c.sum ? R + ' font-bold' : undefined }, c.sum ? fmtCur(s[c.sum]) : null)));
+  const body = [];
+  if(view === 'po'){
+    for(const g of shownGroups){
+      const hd = g.head;
+      body.push(h('tr', { key:'h' + hd.poId, className:'bg-indigo-50', 'data-testid':'pol-head' },
+        h('td', { colSpan:cols.length, className:'px-2 py-1.5 text-sm' },
+          h('b', null, hd.poDateTh, ' · ', hd.poNumber), ' · ', hd.supName, ' · 📍 ', hd.dest, ' · ', hd.status,
+          hd.createdBy ? ' · ผู้เปิด ' + hd.createdBy : '', ' · ยอดรวมทั้งใบ ', h('b', null, fmtCur(hd.poTotal)))));
+      g.lines.forEach(r => body.push(lineTr(r, true)));
+      body.push(totTr('s' + hd.poId, subLabel(g), g, 'bg-gray-50'));
+    }
+  } else rows.slice(0, limit).forEach(r => body.push(lineTr(r, false)));
+  return h('div', { 'data-testid':'po-lines-report' },
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex flex-wrap gap-2 items-center text-xs' },
+      h('span', { className:'text-gray-500' }, 'มุมมอง:'),
+      h('button', { className:btn(view === 'date'), onClick:() => setView('date'), 'data-testid':'pol-view-date' }, '📅 เรียงตามวันที่'),
+      h('button', { className:btn(view === 'po'), onClick:() => setView('po'), 'data-testid':'pol-view-po' }, '🧾 จัดกลุ่มตาม PO'),
+      h('button', { className:btn(false), onClick:() => setDesc(d => !d), 'data-testid':'pol-sort' }, desc ? '⬇️ ใหม่→เก่า' : '⬆️ เก่า→ใหม่'),
+      h('span', { className:'ml-2 text-gray-500' }, 'สถานะ:'),
+      PO_LINE_CHIPS.map(c => h('button', { key:c.k, className:btn(chip === c.k), onClick:() => setChip(c.k), 'data-testid':'pol-chip-' + c.k, title:c.k === 'active' ? PO_LINE_ACTIVE_TIP : undefined }, c.label)),
+      h('input', { value:q, onChange:e => setQ(e.target.value), placeholder:'🔍 เลข PO / สินค้า / ผู้ขาย / สาขา / แท็ก',
+        className:'px-2 py-1 border rounded min-w-[200px] flex-1', 'data-testid':'pol-search' }),
+      h('button', { className:btn(extra), onClick:() => setExtra(x => !x), 'data-testid':'pol-extra', title:'รวม VAT · ส่งที่ · รับแล้ว · ค้างรับ · สถานะ · แท็ก · รหัสสินค้า · ส่วนลด' }, extra ? '☑️ คอลัมน์เพิ่ม' : '⬜ คอลัมน์เพิ่ม'),
+      h('button', { onClick:doCSV, className:'px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded font-medium', 'data-testid':'pol-csv' }, '⬇️ CSV'),
+      h('button', { onClick:doPrint, className:'px-3 py-1 bg-gray-700 hover:bg-gray-800 text-white rounded font-medium', 'data-testid':'pol-print' }, '🖨️ พิมพ์')),
+    h('div', { className:'text-[11px] text-amber-700 -mt-2 mb-2', 'data-testid':'pol-amt-note' }, '⚠️ ' + PO_LINES_AMT_NOTE),
+    rows.length === 0
+      ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' }, 'ไม่มีรายการสั่งซื้อตามตัวกรองนี้')
+      : h('div', { className:'bg-white rounded-lg shadow overflow-hidden' },
+          h('div', { className:'overflow-x-auto max-h-[70vh]' },
+            h('table', { className:'text-sm min-w-full' },
+              h('thead', { className:'bg-gray-100 sticky top-0 z-10' },
+                h('tr', null, cols.map(c => h('th', { key:c.k, title:c.k === 'remain' ? PO_LINE_REMAIN_TIP : undefined,
+                  'data-testid':c.k === 'remain' ? 'pol-th-remain' : 'pol-th-' + c.k,
+                  className:cls('px-2 py-2 font-medium whitespace-nowrap', c.num ? 'text-right' : 'text-left', pinCls(c, true)) }, c.label)))),
+              h('tbody', { className:'divide-y' }, body,
+                totTr('grand', `รวมทั้งหมด ${sum.po.toLocaleString()} PO · ${sum.lines.toLocaleString()} บรรทัด`, sum, 'bg-gray-200')))),
+          h('div', { className:'px-3 py-2 text-xs text-gray-600 border-t bg-gray-50 flex flex-wrap items-center gap-x-3 gap-y-1', 'data-testid':'pol-footer' },
+            `แสดง ${shownCount.toLocaleString()} จาก ${rows.length.toLocaleString()} บรรทัด · ${sum.po.toLocaleString()} PO`,
+            shownCount < rows.length && h('button', { onClick:() => setLimit(l => l + 200), className:'px-2 py-1 border rounded bg-white hover:bg-gray-50', 'data-testid':'pol-more' }, 'แสดงเพิ่ม 200'),
+            h('span', { className:'text-gray-400' }, '(CSV/พิมพ์ ได้ครบทุกบรรทัด)'),
+            hasVatUnknown && h('span', { className:'text-gray-500', 'data-testid':'pol-vat-note' }, '* ' + PO_LINES_VAT_NOTE),
+            // verify 2: แท็บเล็ตไม่มี hover → แสดงคำอธิบาย ค้างรับ/ใช้งาน เป็นตัวหนังสือด้วย (tooltip คงไว้สำหรับ PC)
+            h('span', { className:'text-gray-500', 'data-testid':'pol-tips' }, '* ' + PO_LINE_REMAIN_TIP + ' · ' + PO_LINE_ACTIVE_TIP))));
 }
 
 // ---------- By Item ----------
@@ -89136,7 +89556,8 @@ function AccountingModule({ state, dispatch }){
     || (subKey === 'paid' && hasPerm(user, 'accounting', 'payment', 'view'))     // 🆕 ACCT-V2: แท็บ ✅ รายการที่จ่ายแล้ว = alias payment.view (ไม่มี PERM_TREE key)
     || (subKey === 'supMemo' && hasPerm(user, 'accounting', 'payment', 'view'))
     || (subKey === 'whtVoided' && hasPerm(user, 'accounting', 'wht', 'view'))
-    || (subKey === 'vatClaims' && hasPerm(user, 'accounting', 'vat', 'view'));   // 🆕 VAT-CLAIM V6: คนดู VAT สรุปเดือนได้ = ดูทะเบียนได้ (ผู้ใช้เดิมที่ตั้งสิทธิ์รายตัวไว้ไม่หลุด)
+    || (subKey === 'vatClaims' && hasPerm(user, 'accounting', 'vat', 'view'))   // 🆕 VAT-CLAIM V6: คนดู VAT สรุปเดือนได้ = ดูทะเบียนได้ (ผู้ใช้เดิมที่ตั้งสิทธิ์รายตัวไว้ไม่หลุด)
+    || (subKey === 'vatRd' && (hasPerm(user, 'accounting', 'vat', 'view') || hasPerm(user, 'accounting', 'vatByInv', 'view')));   // 🆕 VAT-RD-FORM: ไม่มีคีย์สิทธิ์ใหม่ — ดู VAT สรุปเดือน/ภาษีซื้อตาม INV ได้ = ดูแบบยื่นได้
   const allTabs = [
     { k:'dashboard', label:'📊 Dashboard' },
   // 🆕 PV3-1: แท็บหลัก 💸 เจ้าหนี้ บอกจำนวนใบที่จัดซื้อแก้ราคาแล้วรอบัญชียืนยัน (GR+INV) เป็น "✏️ k" · สวิตช์ปิด = ไม่แสดง
@@ -89177,6 +89598,7 @@ function AccountingModule({ state, dispatch }){
         { k:'vatClaims', label:'🗂️ ทะเบียนใบกำกับซื้อ' + (vcActionN ? ' (' + vcActionN + ')' : '') },
         { k:'vat',      label:'📊 VAT สรุปเดือน' },
         { k:'vatByInv', label:'📋 ภาษีซื้อตาม INV' },
+        { k:'vatRd',    label:'🧾 รายงานภาษีซื้อ (แบบยื่น)' },   // 🆕 VAT-RD-FORM RD1
         { k:'vatByPay', label:'💰 ภาษีซื้อตามวันจ่าย' },
       ]},
     { k:'assets',    label:'💎 ทรัพย์สิน',
@@ -89311,6 +89733,7 @@ function AccountingModule({ state, dispatch }){
       vatClaims:  ()=>h(VatClaimRegisterTab, { state, dispatch, user }),   // 🆕 VAT-CLAIM V6
       vat:        ()=>h(VATReport,      { state, dispatch, user }),   // dispatch/user → คีย์ Tax INV จากกล่อง ⏳ รอใบกำกับ ได้เลย
       vatByInv:   ()=>h(VATByInvoiceReport, { state, dispatch, user }),
+      vatRd:      ()=>h(VATRdFormReport, { state, user }),   // 🆕 VAT-RD-FORM RD1
       vatByPay:   ()=>h(VATByPaymentReport, { state }),
       tb:         ()=>h(TrialBalance,   { state }),
       pl:         ()=>h(ProfitLoss,     { state }),
@@ -93031,6 +93454,164 @@ function VatClaimRegisterTab({ state, dispatch, user }){
     modal && modal.kind === 'hist' && h(VatClaimHistoryModal, { inv, onClose:close }));
 }
 
+// ================================================================
+// 🆕 VAT-RD-FORM RD1 (เจ้าของ 2026-10-15): รายงานภาษีซื้อ แบบฟอร์มยื่นสรรพากร — สัญญา memory/design/VAT_RD_FORM_CONTRACT.md
+//   แถว = purchaseVatForPeriod(state, ym).rows → ชุดเดียวกับ ภ.พ.30 / 📊 VAT สรุปเดือน ของงวดนั้น (ไม่มีสูตรใหม่ · ผลรวมตรงงวดพอดี)
+//   ใบกำกับหลายใบต่อ PI = แถวละใบ · CN = ติดลบ · DN = บวก · ต้องห้าม/เลื่อน/หมดสิทธิ์/ไม่มี VAT = ไม่อยู่ (ตัดใน _purchaseVatEach แล้ว)
+//   ชื่อ/เลขผู้เสียภาษี/สาขา = _vatPartyBranch (snapshot บนใบก่อน ไม่งั้นทะเบียน — ตัวเดียวกับรายงานภาษีซื้อเดิม)
+// ================================================================
+const _RD_TH_MON = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+function vatRdMonthTh(ym){ const m = /^(\d{4})-(\d{2})$/.exec(String(ym || '')); return m ? _RD_TH_MON[+m[2] - 1] + ' ' + (+m[1] + 543) : ''; }
+function vatRdDate(d){ const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || '')); return m ? m[3] + '/' + m[2] + '/' + String(+m[1] + 543).slice(-2) : ''; }
+const _rdR2 = n => Math.round((Number(n) || 0) * 100) / 100;
+function vatRdRows(state, ym){
+  const E = global.ERP;
+  if(!ym || typeof E.purchaseVatForPeriod !== 'function') return [];
+  const invById = new Map((state.invoices || []).map(i => [i.id, i]));
+  const memoById = new Map((state.supplierMemos || []).map(m => [m.id, m]));
+  const supMap = new Map((state.suppliers || []).map(s => [s.id, s]));
+  const out = [], P = E.purchaseVatForPeriod(state, ym);
+  for(const r of P.rows){
+    let doc, no, date;
+    if(r.t === 'memo'){
+      doc = memoById.get(r.id); if(!doc) continue;
+      no = doc.supMemoNumber; date = doc.supMemoDate;
+    } else {
+      const inv = invById.get(r.id); if(!inv) continue;
+      doc = E.invTaxInvViews(inv).find(v => (v._ti || '') === (r.ti || '')) || inv;
+      no = doc.supTaxInvNumber; date = doc.supTaxInvDate || inv.invDate;
+    }
+    const p = _vatPartyBranch(doc, supMap.get(doc.supplierId));
+    const base = _rdR2(r.sign * r.base), vat = _rdR2(r.sign * r.vat);
+    out.push({ key: r.t + ':' + r.id + ':' + (r.ti || ''), kind: r.t === 'memo' ? (r.sign < 0 ? 'CN' : 'DN') : 'PI',
+      docNo: (r.t === 'memo' ? doc.memoNumber : doc.invNumber) || '', date: String(date || '').slice(0, 10), taxNo: String(no || '').trim(),
+      supName: String(p.supName || '').trim(), taxId: p.taxId === '-' ? '' : String(p.taxId || '').trim(),
+      br: p.br5 === '00000' ? 'สำนักงานใหญ่' : (p.br5 || ''), base, vat, total: _rdR2(base + vat) });
+  }
+  // เรียง วันที่ใบกำกับ → เลขที่ใบกำกับ (ตามแบบ) · key กันลำดับแกว่ง
+  out.sort((a, b) => a.date.localeCompare(b.date) || a.taxNo.localeCompare(b.taxNo) || a.key.localeCompare(b.key));
+  // ภ.พ.30 รวมก่อนแล้วปัดครั้งเดียว · ที่นี่ปัดรายแถว → CN/DN คีย์ทศนิยม >2 ตำแหน่งอาจคลาด 0.01
+  //   เศษต่างใส่แถวสุดท้าย → ผลรวมแถว (และ SUM ใน Excel) = purchaseVatForPeriod().vat/base ตรงเป๊ะ
+  if(out.length && out.length === P.rows.length){
+    const sb = out.reduce((t, r) => t + r.base, 0), sv = out.reduce((t, r) => t + r.vat, 0);
+    const db = _rdR2(P.base - sb), dv = _rdR2(P.vat - sv), L = out[out.length - 1];
+    if(db || dv){ L.base = _rdR2(L.base + db); L.vat = _rdR2(L.vat + dv); L.total = _rdR2(L.base + L.vat); L.adj = true; }
+  }
+  return out;
+}
+function vatRdTotals(rows){
+  const t = rows.reduce((s, r) => ({ base: s.base + r.base, vat: s.vat + r.vat, total: s.total + r.total }), { base:0, vat:0, total:0 });
+  return { base:_rdR2(t.base), vat:_rdR2(t.vat), total:_rdR2(t.total) };
+}
+const VAT_RD_HEAD = ['ลำดับ','วันที่','เลขที่ใบกำกับภาษี','ชื่อผู้ขาย','เลขประจำตัวผู้เสียภาษี','สาขา','มูลค่าก่อนภาษี (บาท)','ภาษีมูลค่าเพิ่ม 7% (บาท)','จำนวนเงินรวม (บาท)'];
+function vatRdTitles(state, ym){
+  const c = state.company || {};
+  return ['รายงานภาษีซื้อ', String(c.name || '').trim() + (c.taxId ? '  เลขประจำตัวผู้เสียภาษี ' + c.taxId : ''), 'ประจำเดือน ' + vatRdMonthTh(ym)];
+}
+// แผ่นงาน Excel ตามแบบตัวอย่างเจ้าของ (A4 แนวตั้ง · หัว 3 บรรทัด + หัวตารางซ้ำทุกหน้า · เงิน #,##0.00 · ข้อความเก็บเลข 0 นำหน้า)
+function vatRdSheet(state, ym, rows){
+  const T = vatRdTitles(state, ym), tot = vatRdTotals(rows), n = rows.length, last = 4 + n;
+  const ttl = v => ({ v, bold:true, align:'center', valign:'center' });
+  const H = v => ({ v, bold:true, align:'center', valign:'center', border:true, wrap:true });
+  const S = (v, align) => ({ v, align, valign:'center', border:true });
+  const M = (v, extra) => ({ v, fmt:'#,##0.00', align:'right', valign:'center', border:true, ...(extra || {}) });
+  const sum = (col, v) => n ? M(v, { f:'SUM(' + col + '5:' + col + last + ')', bold:true }) : M(0, { bold:true });
+  const out = [[ttl(T[0])], [ttl(T[1])], [ttl(T[2])], VAT_RD_HEAD.map(H)];
+  rows.forEach((r, k) => out.push([S(k + 1, 'center'), S(vatRdDate(r.date), 'center'), S(r.taxNo, 'left'), S(r.supName, 'left'),
+    S(r.taxId, 'center'), S(r.br, 'center'), M(r.base), M(r.vat), M(r.total)]));
+  out.push([{ v:'รวมทั้งสิ้น', bold:true, align:'right', valign:'center', border:true }, S(null), S(null), S(null), S(null), S(null),
+    sum('G', tot.base), sum('H', tot.vat), sum('I', tot.total)]);
+  const heights = { 1:20.5, 2:20.5, 3:20.5, 4:37.25 };
+  for(let r = 5; r <= last + 1; r++) heights[r] = 20.5;   // แถวข้อมูล + แถวรวม สูง 20.5 ตามแบบเจ้าของ (ค่าเริ่ม 15 อักษรไทยเบียด)
+  return { name:'ภาษีซื้อ ' + ym.slice(5) + '-' + (+ym.slice(0, 4) + 543), rows:out, cols:[4.7, 9.5, 23.8, 41.8, 18.5, 12.2, 13, 13, 13.8],
+    merges:['A1:I1', 'A2:I2', 'A3:I3', 'A' + (last + 1) + ':F' + (last + 1)], orientation:'portrait', paperSize:9, printTitleRows:'1:4', fitToWidth:true,
+    font:{ name:'Arial', size:10 }, rowHeights:heights, margins:{ left:0.28, right:0.28, top:0.35, bottom:0.35 } };
+}
+// ความกว้างคอลัมน์ A–I ตามแบบเจ้าของ (%) · ให้ชื่อผู้ขาย (D) เป็นช่องเดียวที่ตัดบรรทัด
+const VAT_RD_PCT = [3.1, 6.3, 15.8, 27.8, 12.3, 8.1, 8.6, 8.6, 9.4];
+// 🖨️ พิมพ์ A4 แนวตั้ง หน้าตาเดียวกับฟอร์ม · thead (หัว 3 บรรทัด + หัวตาราง) ซ้ำทุกหน้า
+function vatRdPrint(state, ym, rows){
+  const w = window.open('', '_blank');
+  // iPad/Safari บล็อกป๊อปอัป → window.open คืน null · ต้องบอกผู้ใช้ ไม่งั้นนึกว่าปุ่มเสีย
+  if(!w){ _openDocToast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วกดใหม่ หรือใช้ปุ่ม ⬇️ Excel', 'warning'); return false; }
+  const e = v => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const T = vatRdTitles(state, ym), tot = vatRdTotals(rows);
+  const body = rows.map((r, k) => `<tr><td class="c">${k + 1}</td><td class="c w">${e(vatRdDate(r.date))}</td><td class="w">${e(r.taxNo)}</td><td>${e(r.supName)}</td>`
+    + `<td class="c w">${e(r.taxId)}</td><td class="c w">${e(r.br)}</td><td class="n">${fmtCur(r.base)}</td><td class="n">${fmtCur(r.vat)}</td><td class="n">${fmtCur(r.total)}</td></tr>`).join('');
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>รายงานภาษีซื้อ ${e(ym)}</title>
+<style>@page{size:A4 portrait;margin:8mm 7mm}body{font-family:Arial,'Sarabun',sans-serif;font-size:9pt;margin:0}
+table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{border:1px solid #000;padding:.8mm 1mm;vertical-align:middle}
+tbody td{overflow:hidden}.w{white-space:nowrap}
+thead .t th{border:none;font-size:10pt;padding:.6mm}thead .h th{text-align:center}.c{text-align:center}.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tot td{font-weight:bold}tr{page-break-inside:avoid}.noprint{margin:4mm}@media print{.noprint{display:none}}</style></head><body>
+<div class="noprint"><button onclick="window.print()">🖨️ พิมพ์</button> <button onclick="window.close()">ปิด</button></div>
+<table data-vat-rd-print>${VAT_RD_PCT.map(p => `<col style="width:${p}%">`).join('')}<thead>${T.map(t => `<tr class="t"><th colspan="9">${e(t)}</th></tr>`).join('')}
+<tr class="h">${VAT_RD_HEAD.map(x => `<th>${e(x)}</th>`).join('')}</tr></thead><tbody>${body}
+<tr class="tot"><td colspan="6" style="text-align:right">รวมทั้งสิ้น</td><td class="n">${fmtCur(tot.base)}</td><td class="n">${fmtCur(tot.vat)}</td><td class="n">${fmtCur(tot.total)}</td></tr></tbody></table>
+</body></html>`);
+  w.document.close();
+  return true;
+}
+function VATRdFormReport({ state, user }){
+  const E = global.ERP;
+  const [ym, setYm] = useState(() => { const t = ymOf(getToday()); const [y, m] = t.split('-').map(Number); return m === 1 ? (y - 1) + '-12' : y + '-' + String(m - 1).padStart(2, '0'); });   // ค่าเริ่ม = เดือนก่อน (งวดที่กำลังยื่น)
+  const rows = useMemo(() => vatRdRows(state, ym), [state.invoices, state.supplierMemos, state.suppliers, ym]);
+  const tot = vatRdTotals(rows);
+  const canExport = isSuperUser(user) || hasPerm(user, 'accounting', 'vat', 'export') || hasPerm(user, 'accounting', 'vatByInv', 'export');
+  const T = vatRdTitles(state, ym);
+  // ช่องเดือนพิมพ์เอง (Safari Mac ไม่มีตัวเลือกเดือน) → รับเฉพาะ YYYY-MM · พิมพ์ผิดรูปแบบ = คงงวดเดิม + บอกรูปแบบ
+  const [ymTxt, setYmTxt] = useState(ym);
+  const ymBad = ymTxt !== ym;
+  const onYm = v => { setYmTxt(v); if(/^\d{4}-(0[1-9]|1[0-2])$/.test(v)) setYm(v); };
+  // ใบที่ยังไม่ระบุสาขา/เลขผู้เสียภาษี → แบบยื่นไม่ครบ · อ่านอย่างเดียว ให้ไปแก้ที่ทะเบียนผู้ขาย
+  const miss = rows.filter(r => !r.br || !r.taxId).length;
+  const okMiss = what => !miss || confirm('มี ' + miss + ' ใบยังไม่ระบุสาขา / เลขผู้เสียภาษี — แบบที่' + what + 'จะมีช่องว่าง\n\nแก้ในทะเบียนผู้ขายก่อนดีกว่า · ' + what + 'ต่อเลย?');
+  const xlsx = () => { if(okMiss('ส่งออก')) E.exportXLSX('รายงานภาษีซื้อ-' + ym + '.xlsx', vatRdSheet(state, ym, rows)); };
+  const prn = () => { if(okMiss('พิมพ์')) vatRdPrint(state, ym, rows); };
+  // งวดที่ยื่น ภ.พ.30 แล้ว → บอกวันยื่น · ยอดตอนนี้ต่างจากที่ยื่น (เลื่อนเคลม/CN ย้อนวันเข้างวด) = แถบแดง
+  const filing = useMemo(() => E.vatClaimIndex(state).activeFilings.get(ym) || null, [state.vatFilings, ym]);
+  // งวดยื่นแบบเก่า (legacy) เก็บยอดที่ยื่นจริงไว้ที่ inputVatFiled · inputVat = ยอดระบบตอนยื่น → ใช้ยอดที่ยื่นจริงก่อน (เหมือนหน้าติดตามสิทธิ์)
+  const filedVat = filing ? (filing.inputVatFiled != null ? Number(filing.inputVatFiled) || 0 : Number(filing.inputVat) || 0) : 0;
+  const filedDiff = filing ? _rdR2(tot.vat - filedVat) : 0;
+  const th = 'px-2 py-1.5 border border-gray-300 text-center font-semibold bg-gray-50';
+  const td = 'px-2 py-1 border border-gray-200';
+  return h('div', { 'data-testid':'vat-rd-form', 'data-ym':ym },
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex flex-wrap items-end gap-2' },
+      h('label', { className:'text-sm' }, h('div', { className:'text-xs text-gray-500' }, 'ประจำเดือน (งวดที่เคลมภาษีซื้อ · ภ.พ.30)'),
+        h('input', { type:'month', value:ymTxt, placeholder:'2026-09', 'data-testid':'vat-rd-ym', onChange:e => onYm(e.target.value), className:'border rounded px-2 py-1' + (ymBad ? ' border-amber-500' : '') }),
+        ymBad && h('div', { className:'text-[11px] text-amber-700', 'data-vat-rd-ymhint':'' }, 'พิมพ์แบบ 2026-09 (ยังแสดงงวด ' + ym + ')')),
+      filing && h('div', { className:'text-xs text-green-700 font-semibold', 'data-vat-rd-filed':filing.filedDate || '' }, '✅ ยื่นแล้ว ' + (vatRdDate(filing.filedDate) || '-')),
+      h('div', { className:'flex-1' }),
+      canExport && h(Button, { onClick:xlsx, 'data-vat-rd-btn':'xlsx' }, '⬇️ Excel (.xlsx)'),
+      h(Button, { variant:'secondary', onClick:prn, 'data-vat-rd-btn':'print' }, '🖨️ พิมพ์')),
+    filing && Math.abs(filedDiff) > 0.005 && h('div', { className:'bg-red-50 border border-red-300 text-red-800 rounded-lg p-2 mb-3 text-sm', 'data-vat-rd-filed-diff':String(filedDiff) },
+      '⛔ ยอดภาษีซื้อตอนนี้ ' + fmtCur(tot.vat) + ' ต่างจากที่ยื่น ภ.พ.30 ไว้ ' + fmtCur(filedVat) + ' (ต่าง ' + (filedDiff > 0 ? '+' : '') + fmtCur(filedDiff) + ') — มีการเลื่อนเคลม/ใบลดหนี้ย้อนเข้างวดหลังยื่น · ตรวจที่แท็บติดตามสิทธิ์ภาษีซื้อก่อนใช้รายงานนี้'),
+    miss > 0 && h('div', { className:'bg-amber-50 border border-amber-300 text-amber-800 rounded-lg p-2 mb-3 text-sm', 'data-vat-rd-missing':String(miss) },
+      '⚠️ มี ' + miss + ' ใบยังไม่ระบุสาขา / เลขผู้เสียภาษี — แก้ในทะเบียนผู้ขาย (แถวที่ขาดมีพื้นเหลือง)'),
+    h('div', { className:'bg-white rounded-lg shadow p-3' },
+      h('div', { className:'text-center font-bold leading-relaxed mb-2' }, T.map((t, k) => h('div', { key:k }, t))),
+      h('div', { className:'overflow-x-auto' },
+        h('table', { className:'w-full text-xs border-collapse min-w-[1000px]', 'data-vat-rd-table':'' },
+          h('thead', null, h('tr', null, VAT_RD_HEAD.map((x, i) => h('th', { key:x, className:th + (i === 3 ? ' min-w-[220px]' : '') }, x)))),
+          h('tbody', null,
+            rows.length === 0 && h('tr', null, h('td', { colSpan:9, className:td + ' text-center text-gray-400 py-6' }, 'ไม่มีภาษีซื้อที่เคลมในงวดนี้')),
+            rows.map((r, k) => h('tr', { key:r.key, 'data-vat-rd-row':r.key, 'data-kind':r.kind, className: (r.base < 0 ? 'text-red-700' : '') + (!r.br || !r.taxId ? ' bg-amber-50' : '') },
+              h('td', { className:td + ' text-center' }, k + 1),
+              h('td', { className:td + ' text-center whitespace-nowrap' }, vatRdDate(r.date)),
+              h('td', { className:td + ' font-mono whitespace-nowrap', title:(r.kind === 'PI' ? 'ใบตั้งหนี้ ' : (r.kind === 'CN' ? 'ใบลดหนี้ ' : 'ใบเพิ่มหนี้ ')) + r.docNo }, r.taxNo),
+              h('td', { className:td + ' min-w-[220px]', 'data-vat-rd-name':'' }, r.supName),
+              h('td', { className:td + ' text-center font-mono whitespace-nowrap' + (r.taxId ? '' : ' text-amber-700') }, r.taxId || '⚠️ ไม่ระบุ'),
+              h('td', { className:td + ' text-center whitespace-nowrap' + (r.br ? '' : ' text-amber-700'), title: r.br ? undefined : 'ยังไม่ระบุสาขาผู้ขาย — แก้ในทะเบียนผู้ขาย' }, r.br || '⚠️ ไม่ระบุ'),
+              h('td', { className:td + ' text-right font-mono whitespace-nowrap' }, fmtCur(r.base)),
+              h('td', { className:td + ' text-right font-mono whitespace-nowrap' }, fmtCur(r.vat)),
+              h('td', { className:td + ' text-right font-mono whitespace-nowrap' }, fmtCur(r.total)))),
+            h('tr', { className:'font-bold bg-gray-50', 'data-vat-rd-total':'' },
+              h('td', { colSpan:6, className:td + ' text-right' }, 'รวมทั้งสิ้น'),
+              h('td', { className:td + ' text-right font-mono whitespace-nowrap' }, fmtCur(tot.base)),
+              h('td', { className:td + ' text-right font-mono whitespace-nowrap' }, fmtCur(tot.vat)),
+              h('td', { className:td + ' text-right font-mono whitespace-nowrap' }, fmtCur(tot.total)))))),
+      h('div', { className:'text-[11px] text-gray-500 mt-2' }, 'ชุดเดียวกับยอดภาษีซื้อ ภ.พ.30 / 📊 VAT สรุปเดือน ของงวดนี้ · ใบลดหนี้ = ติดลบ · ภาษีซื้อต้องห้าม/เลื่อนเคลม/ไม่มี VAT ไม่อยู่ในรายงาน')));
+}
 function VATReport({ state, dispatch, user }){
   const dr = useDateRange(90);
   // 🆕 TODO-DEEPLINK: scope acct.vat รับ focus.period ('YYYY-MM') → ตั้งช่วงวันเป็นเดือนนั้น + ไฮไลต์แถวงวด
@@ -93259,7 +93840,9 @@ function VATByInvoiceReport({ state, dispatch, user }){
   const fx = F.focus && F.focus.ids ? F.fr : null;
   const pendingTaxInvs = useMemo(() => pendingTaxInvList(state, dr.endDate).filter(i => !fx || fx.isHL(i.id)), [state.invoices, dr.endDate, fx]);
 
-  const rows = useMemo(() => {
+  // 🆕 VAT-BY-INV VB1: ค่าเริ่มแสดงเฉพาะแถวที่มี VAT · สวิตช์ "แสดงบิลไม่มี VAT ด้วย" ไว้กระทบยอด
+  const [showNoVat, setShowNoVat] = useState(false);
+  const allRows = useMemo(() => {
     // ⚖️ ม.82/10: แถวที่มี VAT ต้องมีใบกำกับแล้วเท่านั้น และจัดงวด/เรียงตามวันที่ในใบกำกับ (d)
     //   INV ไม่มี VAT (supplier ไม่จด/สินค้า 0%) ไม่กระทบยอดภาษีซื้อ → ยังแสดงตามวันที่ตั้งหนี้เหมือนเดิม (ครบรายการไว้ reconcile)
     const rowDate = (i) => (Number(i.vat)||0) > 0 ? invTaxPeriodDate(i) : (i.invDate||'');
@@ -93284,10 +93867,19 @@ function VATByInvoiceReport({ state, dispatch, user }){
       const vatableTotal = vatableBase + vatAmt;
       // 🆕 VAT-CLAIM V2 (§B5): d = งวดที่เคลม (จัดช่วง) · dShow = วันที่บนใบกำกับ (คอลัมน์แรก/เรียง) · ไม่มี VAT = วันตั้งหนี้เหมือนเดิม
       const hasVat = (Number(i.vat)||0) > 0, d = rowDate(i);
+      // 🆕 VAT-BY-INV VB2: ยอดทั้งบิล / ส่วนไม่มี VAT (amount − ฐาน VAT เต็ม) — แถวแรกของ PI เท่านั้น · บิลผสม = มี VAT และมีส่วน 0%
+      const wholeBill = _cont ? 0 : Number(((Number(i.amount)||0) + (Number(i.vat)||0)).toFixed(2));
+      const nonVat = _cont ? 0 : Number(Math.max(0, (Number(i.amount)||0) - (hasVat ? invVatBase(i) : 0)).toFixed(2));
+      // verify 1: ฐานลดเพราะบัญชีพิมพ์ VAT เอง (vatOverride ต่าง > 1 บาท → ฐาน = VAT ÷ อัตรา) ≠ บิลผสม 0%/7% — ใช้ถ้อยคำกลาง ไม่บอกว่ามีรายการ 0%
+      const _ovRate = Number(i.vatRate) || 7;
+      const baseByOverride = hasVat && !_cont && !!i.vatOverridden
+        && Math.abs(invVatBase(i) - Math.min(Number(i.amount)||0, (Number(i.vat)||0) * 100 / _ovRate)) <= 0.01;
       return {
         i, d, dShow: hasVat ? (i.supTaxInvDate || d) : (i.invDate||''), hasVat,
         ..._vatPartyBranch(i, sup),   // supName/taxId/br5 จากแหล่งเดียว
         total, vatableBase, vatAmt, vatableTotal, ndVat, _cont, _ownTotal,
+        wholeBill, nonVat, isVatRow: hasVat, mixed: hasVat && nonVat > 0.005 && !baseByOverride,
+        baseAdj: hasVat && nonVat > 0.005 && baseByOverride,
         wht: _cont ? 0 : (i.whtAmount || 0),
       };
     });
@@ -93318,6 +93910,7 @@ function VATByInvoiceReport({ state, dispatch, user }){
           ..._vatPartyBranch(m, sup),   // ใบลดหนี้/เพิ่มหนี้: snapshot ของ memo (ถ้ามี) ไม่งั้นทะเบียนสด
           total: -(amt + vat), vatableBase: -base, vatAmt: -vat,
           vatableTotal: -(base + vat), wht: 0,
+          wholeBill: -(amt + vat), nonVat: -(amt - base), isVatRow: vat > 0.005, mixed: false,   // 🆕 VB1: CN ไม่มี VAT = ซ่อนค่าเริ่ม
         };
       });
     // 🆕 ม.86/9: ใบเพิ่มหนี้ → แถวบวก นับตามวันที่ในใบเพิ่มหนี้ (เหมือน CN แต่กลับเครื่องหมาย)
@@ -93339,11 +93932,14 @@ function VATByInvoiceReport({ state, dispatch, user }){
           ..._vatPartyBranch(m, sup),   // ใบลดหนี้/เพิ่มหนี้: snapshot ของ memo (ถ้ามี) ไม่งั้นทะเบียนสด
           total: amt + vat, vatableBase: base, vatAmt: vat,
           vatableTotal: base + vat, wht: 0,
+          wholeBill: amt + vat, nonVat: amt - base, isVatRow: vat > 0.005, mixed: false,   // 🆕 VB1: DN ไม่มี VAT = ซ่อนค่าเริ่ม
         };
       });
     // 🆕 VAT-CLAIM V2: เรียงตามวันที่บนใบ (dShow) แล้วเลขเอกสาร — ไม่ใช่งวดเคลม
     return [...invRows, ...cnRows, ...dnRows].filter(r => !fx || fx.isHL(r.i.id)).sort((a,b) => (a.dShow||'').localeCompare(b.dShow||'') || String(a.i.invNumber||'').localeCompare(String(b.i.invNumber||'')));
   }, [state.invoices, state.suppliers, state.supplierMemos, state.returns, dr.startDate, dr.endDate, fx]);
+  const rows = useMemo(() => showNoVat ? allRows : allRows.filter(r => r.isVatRow), [allRows, showNoVat]);
+  const hiddenNoVat = allRows.length - allRows.filter(r => r.isVatRow).length;
   const pg = usePaged(rows, 50);
 
   const totals = rows.reduce((acc, r) => ({
@@ -93352,25 +93948,31 @@ function VATByInvoiceReport({ state, dispatch, user }){
     vatAmt: acc.vatAmt + r.vatAmt,
     vatableTotal: acc.vatableTotal + r.vatableTotal,
     wht: acc.wht + r.wht,
-  }), { total:0, vatableBase:0, vatAmt:0, vatableTotal:0, wht:0 });
+    wholeBill: acc.wholeBill + (r.wholeBill||0),
+    nonVat: acc.nonVat + (r.nonVat||0),
+  }), { total:0, vatableBase:0, vatAmt:0, vatableTotal:0, wht:0, wholeBill:0, nonVat:0 });
 
   const exportRows = () => {
     // 🆕 คอลัมน์ 'อ้างอิง Tax INV เดิม' = เฉพาะแถว CN/DN (ม.86/9-10 ต้องระบุใบกำกับที่ปรับ) · แถว INV เว้นว่าง
     // 🆕 ACCT-V2 (ม.82/5): คอลัมน์ 'VAT ไม่เคลม (ต้องห้าม)' = ส่วนที่โอนไป 5900 แล้ว (ไม่รวมในคอลัมน์ VAT) — ไว้ reconcile กับ GL 1150
     // 🆕 VAT-CLAIM V2 (§B5): คอลัมน์ 2 = วันที่บนใบกำกับ (dShow · ความหมายเปลี่ยนจาก "งวดภาษี") · งวดที่เคลม ต่อท้ายสุด (ไม่แทรกกลาง กันสคริปต์อ่านตามตำแหน่งพัง)
-    const csv = [['#','วันที่ใบกำกับ','วันที่ตั้งหนี้','เลข INV','เลข INV Sup','📄 Tax INV','วันที่ Tax INV','อ้างอิง Tax INV เดิม','Supplier','เลขผู้เสียภาษี','สนญ./สาขาที่','ยอดรวม','ฐาน VAT','VAT','รวม VATable','WHT','VAT ไม่เคลม (ต้องห้าม)','งวดที่เคลม (YYYY-MM)']];
+    const csv = [['#','วันที่ใบกำกับ','วันที่ตั้งหนี้','เลข INV','เลข INV Sup','📄 Tax INV','วันที่ Tax INV','อ้างอิง Tax INV เดิม','Supplier','เลขผู้เสียภาษี','สนญ./สาขาที่','ยอดทั้งบิล','มูลค่าที่มีภาษี','VAT','รวม','WHT','VAT ไม่เคลม (ต้องห้าม)','งวดที่เคลม (YYYY-MM)','ส่วนไม่มี VAT']];
+    // 🆕 VAT-BY-INV VB2 + UAT S1: ตำแหน่งคอลัมน์คงเดิมทุกช่อง (template Excel ที่อ่านตามตำแหน่งไม่พัง) — L = ยอดทั้งบิล (เดิมชื่อ 'ยอดรวม' ความหมายเดิม)
+    //   · M = มูลค่าที่มีภาษี (เดิม 'ฐาน VAT' ค่าเดิม) · O = รวม (เดิม 'รวม VATable') · 'ส่วนไม่มี VAT' ต่อท้ายสุด · แถวใบกำกับที่ 2+ ของ PI: L/ส่วนไม่มี VAT เว้นว่าง
     rows.forEach((r, idx) => {
       csv.push([idx+1, r.dShow || r.d, r.i.invDate, r.i.invNumber, r.i.supInvNumber||'',
         r.i.supTaxInvNumber||'', r.i.supTaxInvDate||'',
         (r.isCN || r.isDN) ? (r.i.refTaxInvNo||'') : '',
         r.supName, _xlText(r.taxId), _xlText(r.br5 || ''),   // เลข 5 หลัก (00000 / 00150) ห่อ ="…" กัน Excel ตัด 0 — ว่าง = ไม่ระบุ
-        r.total.toFixed(2), r.vatableBase.toFixed(2), r.vatAmt.toFixed(2), r.vatableTotal.toFixed(2), r.wht.toFixed(2),
+        r._cont ? '' : (r.wholeBill||0).toFixed(2),
+        r.vatableBase.toFixed(2), r.vatAmt.toFixed(2), r.vatableTotal.toFixed(2), r.wht.toFixed(2),
         (r.ndVat||0) > 0 ? r.ndVat.toFixed(2) : '',
-        (r.hasVat || r.isCN || r.isDN) ? String(r.d||'').slice(0,7) : '']);   // INV ไม่มี VAT = ไม่มีงวดเคลม
+        (r.hasVat || r.isCN || r.isDN) ? String(r.d||'').slice(0,7) : '',   // INV ไม่มี VAT = ไม่มีงวดเคลม
+        r._cont ? '' : (r.nonVat||0).toFixed(2)]);
     });
-    csv.push(['','','','','','','','','','','รวม', totals.total.toFixed(2), totals.vatableBase.toFixed(2),
+    csv.push(['','','','','','','','','','','รวม', totals.wholeBill.toFixed(2), totals.vatableBase.toFixed(2),
       totals.vatAmt.toFixed(2), totals.vatableTotal.toFixed(2), totals.wht.toFixed(2),
-      rows.reduce((s,r) => s + (r.ndVat||0), 0).toFixed(2), '']);
+      rows.reduce((s,r) => s + (r.ndVat||0), 0).toFixed(2), '', totals.nonVat.toFixed(2)]);
     exportCSV(`vat-by-invoice-${getToday()}.csv`, csv);
   };
 
@@ -93379,24 +93981,37 @@ function VATByInvoiceReport({ state, dispatch, user }){
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วง:' })
     ),
-    h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-3 mb-3 text-sm text-indigo-800' },
-      '📋 รายงานภาษีซื้อตามใบกำกับภาษี — ใช้ยื่น ภ.พ.30 · ',
-      h('b', null, 'นับเฉพาะ INV ที่มีใบกำกับแล้ว'), ' จัดงวดตาม', h('b', null, 'วันที่ในใบกำกับ'), ' (ม.82/10 — INV ที่ยังไม่มีใบกำกับอยู่กล่อง ⏳ ด้านล่าง) · ',
-      h('b', { className:'text-rose-700' }, '↩︎ แถวสีชมพู = ใบลดหนี้ (ยอดติดลบ)'),
-      ' · ',
-      h('b', { className:'text-emerald-700' }, '↪︎ แถวสีเขียว = ใบเพิ่มหนี้ (ยอดบวก)'),
-      ' นับตามวันที่ในใบลดหนี้/เพิ่มหนี้ (ถ้าเอกสารตกในเดือนที่ปิดงวด/ยื่นแล้ว จะเคลมในเดือนที่ได้รับ — แถวนั้นมีบรรทัด "เคลมงวด …") · ',
-      h('b', null, 'ฐาน VAT'), ' = เฉพาะส่วนที่มี VAT (บิลผสม 0%/7% ใช้ฐานราย line) — ถ้าใบกำกับไม่ตรงกับที่ตั้งหนี้ กด 🧾 ปรับ VAT ตามใบกำกับ ก่อนจ่าย · INV ไม่มี VAT แสดงตามวันที่ตั้งหนี้',
-      ' · ', h('b', { className:'text-red-700' }, '⛔ ไม่เคลม'), ' = VAT ของค่าใช้จ่ายต้องห้าม (จ่ายเงินสดย่อย) โอนไป 5900 แล้ว ไม่รวมในคอลัมน์ VAT (ม.82/5)'
+    // 🆕 VAT-BY-INV verify 2: หน้าแรกสะอาด — โชว์บรรทัดเดียว · คำอธิบายที่เหลือพับไว้ใน <details>
+    h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-3 mb-3 text-sm text-indigo-800', 'data-testid':'vbi-explain' },
+      h('div', { 'data-testid':'vbi-explain-line' }, '📋 ใช้ยื่น ภ.พ.30 · ', h('b', null, 'แสดงเฉพาะบิลที่มี VAT'), ' · ', h('b', null, 'มูลค่า'), ' = เฉพาะส่วนที่มีภาษี',
+        // ป้ายสีแถวต้องเห็นเสมอ (ไม่พับ) — ต่อท้ายบรรทัดเดียวกัน กล่องไม่สูงขึ้น
+        h('span', { className:'text-xs', 'data-testid':'vbi-legend' }, ' · ', h('b', { className:'text-rose-700' }, '↩︎ แถวสีชมพู = ใบลดหนี้ (−)'), ' · ', h('b', { className:'text-emerald-700' }, '↪︎ แถวสีเขียว = ใบเพิ่มหนี้ (+)'))),
+      h('details', { className:'mt-1' },
+        h('summary', { className:'cursor-pointer text-xs text-indigo-700 min-h-[28px]' }, 'คำอธิบายเพิ่ม'),
+        h('div', { className:'mt-1 text-xs' },
+          h('b', null, 'นับเฉพาะ INV ที่มีใบกำกับแล้ว'), ' จัดงวดตาม', h('b', null, 'วันที่ในใบกำกับ'), ' (ม.82/10 — INV ที่ยังไม่มีใบกำกับอยู่กล่อง ⏳ ด้านล่าง) · ',
+          'ใบลดหนี้/เพิ่มหนี้ นับตามวันที่ในใบลดหนี้/เพิ่มหนี้ (ถ้าเอกสารตกในเดือนที่ปิดงวด/ยื่นแล้ว จะเคลมในเดือนที่ได้รับ — แถวนั้นมีบรรทัด "เคลมงวด …") · ',
+          'บิลไม่มี VAT ซ่อนไว้ — ติ๊ก "แสดงบิลไม่มี VAT ด้วย" เพื่อกระทบยอด · ',
+          h('b', null, 'มูลค่าที่มีภาษี'), ' = เฉพาะส่วนที่มี VAT (บิลผสม 0%/7% ใช้ฐานราย line · ยอดทั้งบิล/ส่วนไม่มี VAT แสดงบรรทัดเล็กใต้แถว) — ถ้าใบกำกับไม่ตรงกับที่ตั้งหนี้ กด 🧾 ปรับ VAT ตามใบกำกับ ก่อนจ่าย · INV ไม่มี VAT แสดงตามวันที่ตั้งหนี้',
+          ' · ', h('b', { className:'text-red-700' }, '⛔ ไม่เคลม'), ' = VAT ของค่าใช้จ่ายต้องห้าม (จ่ายเงินสดย่อย) โอนไป 5900 แล้ว ไม่รวมในคอลัมน์ VAT (ม.82/5)'))
     ),
     h(PendingTaxInvBox, { pending: pendingTaxInvs, startDate: dr.startDate, endDate: dr.endDate, state, F: fx ? F : null,
       onEntry: (dispatch && user) ? setTaxInvEntry : null }),
     h('div', { className:'flex items-center justify-between mb-2 flex-wrap gap-2' },
       h('div', { className:'text-sm' },
-        h('b', null, rows.length), ' รายการ · ยอดรวม ',
-        h('b', { className:'text-blue-700' }, fmtCur(totals.total)), ' · VAT ซื้อ ',
-        h('b', { className:'text-green-700' }, fmtCur(totals.vatAmt)), ' · WHT ',
-        h('b', { className:'text-red-700' }, fmtCur(totals.wht))),
+        h('b', null, rows.length), ' รายการ · มูลค่าที่มีภาษี ',
+        h('b', { className:'text-blue-700' }, fmtCur(totals.vatableBase)), ' · VAT ซื้อ ',
+        h('b', { className:'text-green-700' }, fmtCur(totals.vatAmt)),
+        // 🆕 VAT-BY-INV UAT S3: WHT นับเฉพาะแถวที่แสดง — สวิตช์ปิด = บิลไม่มี VAT (เช่น ผู้รับเหมา ภ.ง.ด.3) ไม่อยู่ในยอดนี้ → บอกบนป้าย
+        h('span', { 'data-testid':'vbi-wht-label' }, showNoVat || !hiddenNoVat ? ' · WHT ' : ' · WHT (เฉพาะบิลที่แสดง) '),
+        h('b', { className:'text-red-700' }, fmtCur(totals.wht)),
+        // 🆕 VAT-BY-INV VB1: สวิตช์แสดงบิลไม่มี VAT (ไว้กระทบยอด) + ทางไปดูทุกบิล
+        h('label', { className:'ml-3 inline-flex items-center gap-1 text-xs text-gray-600 cursor-pointer min-h-[36px]' },
+          h('input', { type:'checkbox', checked:showNoVat, onChange:e => setShowNoVat(e.target.checked), 'data-testid':'vbi-show-novat' }),
+          'แสดงบิลไม่มี VAT ด้วย', hiddenNoVat > 0 && !showNoVat ? ` (ซ่อนอยู่ ${hiddenNoVat} ใบ)` : ''),
+        h('span', { className:'ml-2 text-xs text-gray-500 whitespace-nowrap', 'data-testid':'vbi-expinv-wrap' }, 'ดูทุกบิล → ',
+          h('button', { type:'button', className:'text-blue-700 underline', 'data-testid':'vbi-to-expinv',
+            onClick:() => global.ERP.navigateTo('accounting', { acct:'expByInv' }) }, '📋 รายจ่ายตาม INV'))),
       h('div', { className:'flex gap-2' },
         dispatch && user && h(Button, { variant:'secondary', size:'sm', onClick:() => setPf({ ym:vatPreFileDefaultYm(state, getToday()) }), 'data-testid':'pf-open' }, '🧾 ตรวจก่อนยื่น ภ.พ.30'),
         h(Button, { variant:'secondary', size:'sm', onClick:exportRows }, '📥 Export CSV'))),
@@ -93412,15 +94027,15 @@ function VATByInvoiceReport({ state, dispatch, user }){
             h('th', { className:'px-2 py-2 text-left text-xs' }, 'Supplier'),
             h('th', { className:'px-2 py-2 text-left text-xs' }, 'เลขผู้เสียภาษี'),
             h('th', { className:'px-2 py-2 text-left text-xs', title:'สถานประกอบการของผู้ขาย (สำนักงานใหญ่ 00000 / สาขาที่) ตามแบบรายงานภาษีซื้อ' }, 'สนญ./สาขาที่'),
-            h('th', { className:'px-2 py-2 text-right text-xs' }, 'ยอดรวม'),
-            h('th', { className:'px-2 py-2 text-right text-xs' }, 'ฐาน VAT'),
+            // 🆕 VAT-BY-INV VB2: คอลัมน์หลัก = เฉพาะส่วนที่มีภาษี (ยอดทั้งบิลย้ายเป็นบรรทัดเล็กใต้แถวบิลผสม)
+            h('th', { className:'px-2 py-2 text-right text-xs', title:'ฐานภาษีซื้อ — เฉพาะรายการที่มี VAT (บิลผสม 0%/7% ไม่รวมส่วน 0%)' }, 'มูลค่าที่มีภาษี'),
             h('th', { className:'px-2 py-2 text-right text-xs' }, 'VAT'),
-            h('th', { className:'px-2 py-2 text-right text-xs' }, 'รวม VATable'),
+            h('th', { className:'px-2 py-2 text-right text-xs', title:'มูลค่าที่มีภาษี + VAT (ไม่รวมส่วนไม่มี VAT)' }, 'รวมที่มีภาษี'),
             h('th', { className:'px-2 py-2 text-right text-xs' }, 'WHT')
           )),
         h('tbody', { className:'divide-y' },
           rows.length === 0
-            ? h('tr', null, h('td', { colSpan:13, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
+            ? h('tr', null, h('td', { colSpan:12, className:'px-3 py-6 text-center text-gray-500' }, showNoVat || !hiddenNoVat ? 'ไม่มีข้อมูล' : `ไม่มีบิลที่มี VAT ในช่วงนี้ (บิลไม่มี VAT ${hiddenNoVat} ใบ — ติ๊ก "แสดงบิลไม่มี VAT ด้วย")`))
             : pg.shown.map((r, idx) => h('tr', { key:r.i.id + (r.i._ti ? '#' + r.i._ti : ''), 'data-row-id':r.i.id, className: cls('hover:bg-gray-50', r.isCN && 'bg-rose-50/60', r.isDN && 'bg-emerald-50/60', F.rowCls(r.i.id)) },
                 h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, pg.from + idx),
                 h('td', { className:'px-2 py-1.5 text-xs' }, fmtDate(r.dShow || r.d),
@@ -93456,7 +94071,6 @@ function VATByInvoiceReport({ state, dispatch, user }){
                 h('td', { className:'px-2 py-1.5 text-xs' }, r.supName),
                 h('td', { className:'px-2 py-1.5 font-mono text-xs' }, r.taxId),
                 h('td', { className:'px-2 py-1.5' }, h(VatBranchCell, { r, onFix: (canFixBr && !r.isCN && !r.isDN) ? fixBranch : null })),
-                h('td', { className:'px-2 py-1.5 text-right font-mono text-xs' }, r._cont && !r._ownTotal ? h('span', { className:'text-gray-400', title:'ใบกำกับใบที่ ' + r.i._k + '/' + r.i._n + ' ของ PI เดียวกัน — ยอดรวมอยู่แถวแรก' }, '↳ PI เดียวกัน') : fmtCur(r.total)),
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs' },
                   r.vatableBase !== 0 ? fmtCur(r.vatableBase) : '-'),
                 h('td', { className: cls('px-2 py-1.5 text-right font-mono text-xs', r.vatAmt < 0 ? 'text-rose-700 font-semibold' : 'text-green-700') },
@@ -93465,13 +94079,23 @@ function VATByInvoiceReport({ state, dispatch, user }){
                   (r.ndVat||0) > 0 && h('div', { className:'text-[10px] text-red-700 font-normal whitespace-nowrap',
                     title:`ภาษีซื้อ ${fmtCur(r.ndVat)} ของใบนี้จ่ายจากเงินสดย่อยแบบค่าใช้จ่ายต้องห้าม → โอนไป 5900 แล้ว ไม่นำมาขอคืน (ม.82/5)` }, `⛔ ไม่เคลม ${fmtCur(r.ndVat)}`)),
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs' },
-                  r.vatableTotal !== 0 ? fmtCur(r.vatableTotal) : '-'),
+                  r.vatableTotal !== 0 ? fmtCur(r.vatableTotal) : '-',
+                  // 🆕 VAT-BY-INV VB2: บิลผสม → ยอดทั้งบิล/ส่วนไม่มี VAT (ไม่นับในยอดภาษีซื้อ) · บิลไม่มี VAT (สวิตช์เปิด) → ยอดทั้งบิล
+                  // verify 1: แตก 2 บรรทัด + font-sans (ไม่ nowrap/mono) กันคอลัมน์รวมกว้างจนตารางล้นที่ 1024px
+                  r.mixed && h('div', { className:'text-[11px] text-gray-500 font-normal font-sans leading-tight', 'data-testid':'vbi-mixed-note',
+                    title:'บิลผสม: มีทั้งรายการ VAT 7% และ 0% — คอลัมน์หลักนับเฉพาะส่วนที่มีภาษี' },
+                    h('div', null, 'ทั้งบิล ' + fmtCur(r.wholeBill)), h('div', null, 'ส่วนไม่มี VAT ' + fmtCur(r.nonVat))),
+                  r.baseAdj && h('div', { className:'text-[11px] text-gray-500 font-normal font-sans leading-tight', 'data-testid':'vbi-baseadj-note',
+                    title:'บัญชีปรับยอด VAT ตามใบกำกับ → ฐาน = VAT ÷ อัตรา · ส่วนที่เหลือไม่นับเป็นฐานภาษีซื้อ' },
+                    h('div', null, 'ฐานตามใบกำกับ'), h('div', null, 'ส่วนไม่นับฐาน ' + fmtCur(r.nonVat))),
+                  !r.isVatRow && !r._cont && h('div', { className:'text-[11px] text-gray-500 font-normal font-sans leading-tight', 'data-testid':'vbi-novat-note' },
+                    h('div', null, 'ไม่มี VAT'), h('div', null, 'ทั้งบิล ' + fmtCur(r.wholeBill))),
+                  r._cont && !r._ownTotal && h('div', { className:'text-[11px] text-gray-500 font-normal font-sans leading-tight', title:'ใบกำกับใบที่ ' + r.i._k + '/' + r.i._n + ' ของ PI เดียวกัน — ยอดทั้งบิลอยู่แถวแรก' }, '↳ PI เดียวกัน')),
                 h('td', { className:'px-2 py-1.5 text-right font-mono text-xs text-red-600' },
                   r.wht > 0 ? fmtCur(r.wht) : '-'))).concat([
               h('tr', { key:'tot', className:'bg-gray-100 font-bold border-t-2' },
-                h('td', { colSpan:8, className:'px-2 py-2 text-right text-xs' }, 'รวม:'),
-                h('td', { className:'px-2 py-2 text-right font-mono text-xs text-blue-700' }, fmtCur(totals.total)),
-                h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableBase)),
+                h('td', { colSpan:8, className:'px-2 py-2 text-right text-xs' }, 'รวม (เฉพาะส่วนที่มีภาษี):'),
+                h('td', { className:'px-2 py-2 text-right font-mono text-xs text-blue-700' }, fmtCur(totals.vatableBase)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-green-700' }, fmtCur(totals.vatAmt)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs' }, fmtCur(totals.vatableTotal)),
                 h('td', { className:'px-2 py-2 text-right font-mono text-xs text-red-700' }, fmtCur(totals.wht)))
@@ -93494,7 +94118,9 @@ function VATByInvoiceReport({ state, dispatch, user }){
 function VATByPaymentReport({ state }){
   const dr = useDateRange(31);
 
-  const rows = useMemo(() => {
+  // 🆕 VAT-BY-INV VB3: ค่าเริ่มแสดงเฉพาะบิลที่มี VAT (เหมือน 📋 ภาษีซื้อตาม INV) · สวิตช์เปิดดูบิลไม่มี VAT (กระทบยอดจ่าย)
+  const [showNoVat, setShowNoVat] = useState(false);
+  const allRows = useMemo(() => {
     // Payments ที่อนุมัติแล้ว + ไม่ reversed (ไม่รวม pending)
     const pays = (state.payments||[])
       .filter(p => !p.reversed && p.approvalStatus !== 'pending' && p.approvalStatus !== 'rejected')
@@ -93528,6 +94154,9 @@ function VATByPaymentReport({ state }){
       };
     })).filter(Boolean);
   }, [state.payments, state.invoices, state.suppliers, dr.startDate, dr.endDate]);
+  const _hasVat = r => (Number(r.inv && r.inv.vat) || 0) > 0.005;
+  const rows = useMemo(() => showNoVat ? allRows : allRows.filter(_hasVat), [allRows, showNoVat]);
+  const hiddenNoVat = allRows.length - allRows.filter(_hasVat).length;
   const pg = usePaged(rows, 50);
 
   const totals = rows.reduce((acc, r) => ({
@@ -93542,7 +94171,8 @@ function VATByPaymentReport({ state }){
 
   const exportRows = () => {
     // 🆕 ACCT-V2 (ม.82/5): คอลัมน์ 'VAT ไม่เคลม (ต้องห้าม)' = ส่วนที่ PV นี้โอนไป 5900 (ไม่รวมในคอลัมน์ VAT)
-    const csv = [['#','วันที่จ่าย','บัญชีที่ใช้โอน','เลขบัญชี','INV','Supplier','เลขผู้เสียภาษี','สนญ./สาขาที่','ยอดรวม','ฐาน VAT','VAT','รวม VATable','WHT','VAT ไม่เคลม (ต้องห้าม)','ยอดโอน']];
+    const csv = [['#','วันที่จ่าย','บัญชีที่ใช้โอน','เลขบัญชี','INV','Supplier','เลขผู้เสียภาษี','สนญ./สาขาที่','ยอดจ่าย (ทั้งบิล)','ฐาน VAT','VAT','รวม VATable','WHT','VAT ไม่เคลม (ต้องห้าม)','ยอดโอน']];
+    // 🆕 VAT-BY-INV UAT S2: คอลัมน์ I เปลี่ยนชื่อ 'ยอดรวม' → 'ยอดจ่าย (ทั้งบิล)' (ตำแหน่ง/ค่าเดิม = รวมส่วนไม่มี VAT ของบิลผสม · cash-basis)
     rows.forEach((r, idx) => {
       csv.push([idx+1, r.p.date, r.bank, r.bankAcc||'', r.inv.invNumber, r.supName, _xlText(r.taxId), _xlText(r.br5 || ''),
         r.total.toFixed(2), r.vatableBase.toFixed(2), r.vatAmt.toFixed(2), r.vatableTotal.toFixed(2), r.wht.toFixed(2),
@@ -93562,14 +94192,22 @@ function VATByPaymentReport({ state }){
       '💰 รายงานตามวันที่จ่ายเงิน (cash-basis) · ', h('b', { 'data-testid':'vatpay-stmt-hint' }, 'เทียบ bank statement ใช้หน้า ✅ จ่ายแล้ว (แยกตามบัญชี)'),
       ' · รายงานนี้เรียงตามวันที่ขอจ่ายและแตก PV รวมเป็นรายบิล · ',
       h('b', null, 'การจ่ายบางส่วน'), ' จะคำนวณ VAT ตามสัดส่วนของยอดจ่าย · เฉพาะ payment ที่อนุมัติแล้ว · ',
-      h('b', { className:'text-red-700' }, '⛔ ไม่เคลม'), ' = PV เงินสดย่อยแบบค่าใช้จ่ายต้องห้าม VAT โอนไป 5900 แล้ว ไม่รวมในคอลัมน์ VAT (ม.82/5)'
+      h('b', { className:'text-red-700' }, '⛔ ไม่เคลม'), ' = PV เงินสดย่อยแบบค่าใช้จ่ายต้องห้าม VAT โอนไป 5900 แล้ว ไม่รวมในคอลัมน์ VAT (ม.82/5) · ',
+      // 🆕 VAT-BY-INV UAT S2: บอกให้รู้ว่าซ่อนบิลไม่มี VAT + ยอดจ่าย (ทั้งบิล) รวมส่วน 0% ของบิลผสม
+      h('b', { 'data-testid':'vbp-hint-novat' }, showNoVat ? 'แสดงทุกบิล (รวมบิลไม่มี VAT)' : 'แสดงเฉพาะบิลที่มี VAT — ติ๊ก "แสดงบิลไม่มี VAT ด้วย" เพื่อดูทุกบิล'),
+      ' · ยอดจ่าย (ทั้งบิล) = เงินที่จ่ายจริงทั้งบิล (รวมส่วนไม่มี VAT ของบิลผสม) · มูลค่าที่มีภาษี = ฐาน VAT (ไม่รวมส่วน 0%)'
     ),
     h('div', { className:'flex items-center justify-between mb-2 flex-wrap gap-2' },
       h('div', { className:'text-sm' },
-        h('b', null, rows.length), ' รายการ · ยอดจ่ายรวม ',
-        h('b', { className:'text-blue-700' }, fmtCur(totals.total)), ' · VAT ',
-        h('b', { className:'text-green-700' }, fmtCur(totals.vatAmt)), ' · WHT ',
-        h('b', { className:'text-red-700' }, fmtCur(totals.wht))),
+        h('b', null, rows.length), ' รายการ · ยอดจ่าย (ทั้งบิล) ',
+        h('b', { className:'text-blue-700', 'data-testid':'vbp-kpi-total' }, fmtCur(totals.total)), ' · มูลค่าที่มีภาษี ',
+        h('b', { className:'text-blue-700', 'data-testid':'vbp-kpi-base' }, fmtCur(totals.vatableBase)), ' · VAT ',
+        h('b', { className:'text-green-700' }, fmtCur(totals.vatAmt)),
+        h('span', { 'data-testid':'vbp-wht-label' }, showNoVat || !hiddenNoVat ? ' · WHT ' : ' · WHT (เฉพาะบิลที่แสดง) '),   // UAT S3
+        h('b', { className:'text-red-700' }, fmtCur(totals.wht)),
+        h('label', { className:'ml-3 inline-flex items-center gap-1 text-xs text-gray-600 cursor-pointer min-h-[36px]' },
+          h('input', { type:'checkbox', checked:showNoVat, onChange:e => setShowNoVat(e.target.checked), 'data-testid':'vbp-show-novat' }),
+          'แสดงบิลไม่มี VAT ด้วย', hiddenNoVat > 0 && !showNoVat ? ` (ซ่อนอยู่ ${hiddenNoVat} รายการ)` : '')),
       h(Button, { variant:'secondary', size:'sm', onClick:exportRows }, '📥 Export CSV')),
     h('div', { className:'bg-white rounded-lg shadow overflow-x-auto' },
       h('table', { className:'w-full text-sm' },
@@ -93582,16 +94220,16 @@ function VATByPaymentReport({ state }){
             h('th', { className:'px-2 py-2 text-left text-xs' }, 'Supplier'),
             h('th', { className:'px-2 py-2 text-left text-xs' }, 'เลขผู้เสียภาษี'),
             h('th', { className:'px-2 py-2 text-left text-xs', title:'สถานประกอบการของผู้ขาย (สำนักงานใหญ่ 00000 / สาขาที่)' }, 'สนญ./สาขาที่'),
-            h('th', { className:'px-2 py-2 text-right text-xs' }, 'ยอดรวม VAT'),
-            h('th', { className:'px-2 py-2 text-right text-xs' }, 'ฐาน VAT'),
+            h('th', { className:'px-2 py-2 text-right text-xs', title:'ยอดจ่ายทั้งบิล (รวมส่วนไม่มี VAT ของบิลผสม) — cash-basis' }, 'ยอดจ่าย (ทั้งบิล)'),
+            h('th', { className:'px-2 py-2 text-right text-xs', title:'ฐานภาษีซื้อ — เฉพาะส่วนที่มี VAT (ชื่อเดียวกับ 📋 ภาษีซื้อตาม INV)' }, 'มูลค่าที่มีภาษี'),
             h('th', { className:'px-2 py-2 text-right text-xs' }, 'VAT'),
-            h('th', { className:'px-2 py-2 text-right text-xs' }, 'รวม VATable'),
+            h('th', { className:'px-2 py-2 text-right text-xs', title:'มูลค่าที่มีภาษี + VAT' }, 'รวม (ที่มีภาษี)'),
             h('th', { className:'px-2 py-2 text-right text-xs' }, 'WHT'),
             h('th', { className:'px-2 py-2 text-right text-xs', title:'ยอดโอนของบิลนี้ใน PV (ข้อมูลประกอบ)' }, 'ยอดโอน')
           )),
         h('tbody', { className:'divide-y' },
           rows.length === 0
-            ? h('tr', null, h('td', { colSpan:13, className:'px-3 py-6 text-center text-gray-500' }, 'ไม่มีข้อมูล'))
+            ? h('tr', null, h('td', { colSpan:13, className:'px-3 py-6 text-center text-gray-500', 'data-testid':'vbp-empty' }, showNoVat || !hiddenNoVat ? 'ไม่มีข้อมูล' : `ไม่มีบิลที่มี VAT ในช่วงนี้ (ไม่มี VAT ${hiddenNoVat} รายการ — ติ๊ก "แสดงบิลไม่มี VAT ด้วย")`))
             : pg.shown.map((r, idx) => h('tr', { key:r.p.id, className:'hover:bg-gray-50' },
                 h('td', { className:'px-2 py-1.5 text-center text-xs text-gray-500' }, pg.from + idx),
                 h('td', { className:'px-2 py-1.5 text-xs' }, fmtDate(r.p.date)),
@@ -121697,7 +122335,7 @@ C.registerGroup({
         return { count:detail.length, hard, detail, ym: _m ? _m[1] : prev };
       } },
 
-    // ref: src/mod-accounting.js:2528-2533 VATByInvoiceReport นับทุก PI vat>0 ไม่ดู sup.vatRegistered · taxId = sup?.taxId || '-' · :4417 export ภงด. เหมือนกัน
+    // ref: src/mod-accounting.js:~4480 VATByInvoiceReport (VAT-BY-INV: ค่าเริ่มแสดงเฉพาะแถวมี VAT · ฐาน = ส่วนที่มีภาษี) นับ PI vat>0 ไม่ดู sup.vatRegistered · taxId = sup?.taxId || '-' · :4417 export ภงด. เหมือนกัน
     //      migration/convert_parties.py:83 vatRegistered = มีเลข 13 หลักหรือไม่ → supplier ที่ไม่มีเลขถูกตั้ง "ไม่จด VAT" ทั้งหมด จึงหลุดจาก acct_sup_no_taxid_vat
     //      src/mod-purchase.js:4544-4547 PI ใหม่คิด VAT จากบรรทัด ไม่ขึ้นกับ vatRegistered · :10504 ค่าใช้จ่ายชื่ออิสระ supplierId '' ก็มี VAT ได้
     //   ไม่นับ PI migrate (ยื่นภาษีซื้อไป Ecount แล้ว) — เตือนเฉพาะ PI ที่ระบบนี้สร้าง
