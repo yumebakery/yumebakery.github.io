@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="617ba4541b63";window.__ERP_BUILT_AT__="2026-10-16T18:24:08";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="f56672b9b2e5";window.__ERP_BUILT_AT__="2026-10-19T10:54:49";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -7673,6 +7673,13 @@ function siPrintSelfReview(si, by){
   if(!si || !by) return false;
   return si.originalPrintedBy === by || (si.printLog || []).some(e => e && e.by === by) || (si.replacements || []).some(r => r && r.by === by);
 }
+// 🆕 SI_EDIT UAT ชุด 1 M1: ผู้กด ✔ งานค้างหลังแก้ใบ (goods/recall) เป็นคนแก้ใบครั้งนั้นเอง หรือเป็นผู้อนุมัติครั้งนั้น = ตรวจตัวเอง
+//   คืน true = ตรวจตัวเอง (reducer ปฏิเสธ ยกเว้น superuser ที่ไม่มีคนเหนือกว่า → ประทับ selfReview:true)
+function siEditAckSelf(si, rev, by){
+  if(!si || !by) return false;
+  const e = (si.editLog || []).find(x => x && Number(x.rev) === Number(rev));
+  return !!e && (e.by === by || (!!e.approvedBy && e.approvedBy === by));
+}
 // ภาษีขายของใบนำเข้า ยื่น ภ.พ.30 ใน Ecount แล้ว (ใบ มี.ค.–ก.ย.) → ไม่เข้ารายงานภาษีขาย/ภ.พ.30 ระบบนี้ · ใบลงวันที่ ต.ค. (vatFiledElsewhere:false) = ยื่นในระบบนี้
 // 🆕 UAT S2: ตัดสินจากวันที่ใบในระบบ (ใบก่อน 1 ต.ค. 2569 = ยื่นใน Ecount แล้ว) ไม่เชื่อธง vatFiledElsewhere ในไฟล์ — ไฟล์แก้มือ/ไม่มีธง ไม่ทำภาษีขาย ต.ค. หาย
 const SI_MIG_VAT_FROM = '2026-10-01';
@@ -7760,6 +7767,478 @@ function vatLockedWithoutFiling(state){
   let last = ymOf(lock); if(ymEnd(last) > lock.slice(0, 10)) last = ymAdd(last, -1);
   const out = [];
   for(let k = 11; k >= 0; k--){ const ym = ymAdd(last, -k); if(ym && !has.has(ym)) out.push(ym); }
+  return out;
+}
+// 🆕 SI_EDIT core move: ย้ายจาก src/mod-sales-full.js (เดิม :59-83) — ตัวเลขเท่าเดิมทุกตัว · pure
+//   siParseDisc: ข้อความส่วนลด → { discountPct, discount, bad } · siLineCalc: ยอดบรรทัด { gross, disc, ex, discEx, vat, inc, over, bad }
+function siParseDisc(raw){
+  let t = String(raw == null ? '' : raw).trim();
+  t = t.replace(/[๐-๙]/g, d => String(d.charCodeAt(0) - 0x0E50)).replace(/[,\s฿]/g, '').replace(/บาท/g, '');
+  if(t === '') return { discountPct:null, discount:undefined, bad:false };
+  const isPct = /%$/.test(t);
+  const num = isPct ? t.slice(0, -1) : t;
+  const ok = /^-?(\d+\.?\d*|\.\d+)$/.test(num) && Number.isFinite(Number(num));
+  if(!ok) return { discountPct:null, discount:undefined, bad:true };
+  return isPct ? { discountPct:Number(num), discount:undefined, bad:false } : { discountPct:null, discount:Number(num), bad:false };
+}
+
+function siLineCalc(l, priceMode){
+  const r = Number(l.vatRate) || 0;
+  const gross = (Number(l.unitPrice) || 0) * (Number(l.qty) || 0);
+  const pct = l.discountPct != null && l.discountPct !== '' ? Number(l.discountPct) : null;
+  const disc0 = pct != null && Number.isFinite(pct) ? Math.round(gross * pct) / 100 : (Number(l.discount) || 0);
+  const bad = !!l._discBad;   // UAT M1: พิมพ์ส่วนลดไม่ใช่ตัวเลข → ห้ามออกใบเหมือน over
+  const over = bad || disc0 < 0 || disc0 > gross + 0.0001;
+  const disc = Math.min(Math.max(0, disc0), Math.max(0, gross));
+  const inc0 = priceMode === 'inclusive';
+  const ex = inc0 ? (gross - disc) / (1 + r/100) : gross - disc;
+  const discEx = inc0 ? disc / (1 + r/100) : disc;
+  const vat = ex * r / 100;
+  return { gross, disc, ex, discEx, vat, inc: ex + vat, over, bad };
+}
+// 🆕 SI_EDIT: บรรทัด JE ขายของใบกำกับ (port จาก autoPostSalesInvoice เดิม · ลำดับ/ยอด/คำอธิบายเท่าเดิมทุกตัว) — pure
+//   ทุกบรรทัดมี role: 'ar'|'wht'|'rev'|'vat'|'cogs'|'inv' · คืน null เมื่อผังบัญชีไม่มี "ลูกหนี้" หรือ "รายได้" (ผู้เรียกแจ้งเอง)
+function siJeLines(state, si){
+  const accs = (state && state.chartOfAccounts) || [];
+  const x = si || {};
+  const find = (type, hint) => accs.find(a => a.type===type && (a.name||'').includes(hint))
+    || accs.find(a => a.type===type);
+  const arAcc = find('asset', 'ลูกหนี้การค้า') || find('asset', 'ลูกหนี้');
+  const revAcc = find('revenue', 'รายได้') || find('revenue', 'ขาย') || accs.find(a => a.type==='revenue');
+  const vatOut = find('liability', 'ภาษีขาย');
+  const whtOut = accs.find(a => a.code==='1155') || accs.find(a => a.type==='asset' && (a.name||'').includes('ถูกหัก ณ ที่จ่าย'));
+  if(!arAcc || !revAcc) return null;
+  const L = (role, acc, debit, credit, description) => ({ accountId:acc.id, accountCode:acc.code, accountName:acc.name, debit, credit, description, role });
+  const lines = [];
+  if((x.netTotal||0) > 0) lines.push(L('ar', arAcc, x.netTotal, 0, `ลูกหนี้ ${x.siNumber}`));
+  if(whtOut && (x.whtAmount||0) > 0) lines.push(L('wht', whtOut, x.whtAmount, 0, 'ภาษีหัก ณ ที่จ่าย (ลูกค้าหักเรา)'));
+  if((x.subtotal||0) > 0) lines.push(L('rev', revAcc, 0, x.subtotal, `รายได้ขาย ${x.siNumber}`));
+  if(vatOut && (x.vat||0) > 0) lines.push(L('vat', vatOut, 0, x.vat, 'ภาษีขาย'));
+  // ต้นทุนขาย (COGS) perpetual — DR ต้นทุนสินค้าขาย / CR สินค้าคงเหลือ
+  const cogsAcc = accs.find(a => a.type==='cogs');
+  const invAcc = find('asset', 'สินค้าคงเหลือ') || accs.find(a => a.id==='1300');
+  if(cogsAcc && invAcc && (x.cogsTotal||0) > 0){
+    lines.push(L('cogs', cogsAcc, x.cogsTotal, 0, `ต้นทุนขาย ${x.siNumber}`));
+    lines.push(L('inv', invAcc, 0, x.cogsTotal, `ตัดสินค้าคงเหลือ ${x.siNumber}`));
+  }
+  return lines;
+}
+// ==================== 🆕 SI_EDIT (SI_EDIT_CONTRACT §4-§11): แก้ใบกำกับภาษีขายในใบเดิม — helper pure ใช้ร่วมหน้าจอ/reducer ====================
+const SI_EDIT_REASONS = Object.freeze([
+  { code:'kit_breakdown', label:'แยกรายการในชุดตามที่ลูกค้าขอ' }, { code:'item_substitute', label:'ของไม่พอ/เปลี่ยนของตอนส่ง' },
+  { code:'qty_short', label:'ส่งได้น้อยกว่า/ลูกค้าลดจำนวน' }, { code:'qty_more', label:'ลูกค้าเพิ่มจำนวน' },
+  { code:'price_fix', label:'แก้ราคา' }, { code:'typo', label:'แก้คำพิมพ์ผิด' }, { code:'other', label:'อื่น ๆ' } ]);
+const _sieR2 = (v) => Number((Number(v) || 0).toFixed(2));
+// port ตรงตัวของ _buildSILines + _buildTextLines (mod-sales-full NewSIModal.save) — ผลรวมไม่ปัด (เหมือนตอนออกใบ)
+//   เพิ่มเฉพาะเมื่อแถวร่างมี: srcLineNo (เลขบรรทัดก่อนแก้) · qtUnits (จำนวนที่นับเข้าใบเสนอราคา) · qtLineNo (ชื่อในร่างแก้ใบ — ฟอร์มออกใบใช้ _qtLineNo)
+function siBuildLines(state, draftLines, priceMode){
+  const lines = Array.isArray(draftLines) ? draftLines : [];
+  const calc = lines.map(l => siLineCalc(l || {}, priceMode));
+  const valid = lines.filter(l => l && l.itemId && l.qty > 0 && l.lineKind !== 'text');
+  const nameOf = (id) => (((state && state.items) || []).find(x => x && x.id === id) || {});
+  const out = [];
+  valid.forEach(l => {
+    const c = calc[lines.indexOf(l)];
+    const it = nameOf(l.itemId);
+    const base = { itemId:l.itemId, itemName:it.name || '', itemCode:it.code || '',
+      qty:Number(l.qty), unit:l.unit, unitPrice:Number(l.unitPrice), vatRate:Number(l.vatRate) || 0,
+      lineEx:Number(c.ex.toFixed(2)), lineVat:Number(c.vat.toFixed(2)), lineTotal:Number(c.inc.toFixed(2)) };
+    if(c.disc > 0){ base.discount = Number(c.disc.toFixed(2)); base.discountEx = Number(c.discEx.toFixed(2)); }
+    { const _dn = String(l.displayName == null ? '' : l.displayName).trim(); if(_dn && _dn !== base.itemName) base.displayName = _dn; }
+    const qn = l._qtLineNo || l.qtLineNo;
+    if(qn) base.qtLineNo = qn;
+    if(l.qtUnits != null && l.qtUnits !== '') base.qtUnits = Number(l.qtUnits);
+    if(l.srcLineNo != null) base.srcLineNo = Number(l.srcLineNo);
+    if(l.lineKind !== 'kit'){ out.push({ ...base, lineNo:out.length + 1 }); return; }
+    out.push({ ...base, lineNo:out.length + 1, lineKind:'kit', isKit:true, kitId:l.kitId,
+      baseQty:0, kitPrintMode:l.kitPrintMode || (it.kit && it.kit.printMode) || 'single' });
+    (l.kitComponents || []).forEach(cp => {
+      if(!cp || !cp.itemId || !(Number(cp.qtyPerKit) > 0)) return;
+      const ci = nameOf(cp.itemId);
+      out.push({ lineNo:out.length + 1, lineKind:'kit_child', kitId:l.kitId,
+        itemId:cp.itemId, itemName:ci.name || '', itemCode:ci.code || '',
+        qtyPerKit:Number(cp.qtyPerKit), qty:Number(cp.qtyPerKit) * Number(l.qty), unit:cp.unit || ci.issueUnit || '',
+        unitPrice:0, vatRate:0, lineEx:0, lineVat:0, lineTotal:0 });
+    });
+  });
+  const textLines = []; let n = 0;
+  lines.forEach(l => {
+    if(l && l.lineKind === 'text'){ textLines.push({ afterIdx:n, text:String(l.text == null ? '' : l.text) }); return; }
+    if(valid.includes(l)) n++;
+  });
+  const subtotal = calc.reduce((t, c) => t + c.ex, 0), vat = calc.reduce((t, c) => t + c.vat, 0);
+  return { lines:out, textLines, subtotal, vat, total:subtotal + vat };
+}
+// ใบ → แถวร่างแบบ NewSIModal (แถวชุด + kitComponents จากแถวลูก · textLines ตาม afterIdx · ส่วนลดเป็นบาท · srcLineNo)
+function siDraftFromSi(si){
+  const L = (si && si.lines) || [], rows = [];
+  for(let i = 0; i < L.length; i++){
+    const l = L[i];
+    if(!l || l.lineKind === 'kit_child') continue;
+    const r = { srcLineNo:l.lineNo != null ? Number(l.lineNo) : i + 1, itemId:l.itemId, qty:Number(l.qty) || 0, unit:l.unit || '',
+      unitPrice:Number(l.unitPrice) || 0, vatRate:Number(l.vatRate) || 0 };
+    if(Number(l.discount) > 0) r.discount = Number(l.discount);
+    if(l.displayName) r.displayName = l.displayName;
+    if(l.qtLineNo) r.qtLineNo = l.qtLineNo;
+    if(l.qtUnits != null) r.qtUnits = Number(l.qtUnits);
+    if(l.lineKind === 'kit'){
+      r.lineKind = 'kit'; r.kitId = l.kitId; r.kitPrintMode = l.kitPrintMode || 'single'; r.kitComponents = [];
+      for(let j = i + 1; j < L.length && L[j] && L[j].lineKind === 'kit_child'; j++)
+        r.kitComponents.push({ itemId:L[j].itemId, qtyPerKit:Number(L[j].qtyPerKit) || ((Number(L[j].qty) || 0) / (Number(l.qty) || 1)), unit:L[j].unit || '' });
+    }
+    rows.push(r);
+  }
+  const tl = ((si && si.textLines) || []).filter(Boolean).slice().sort((a, b) => (Number(a.afterIdx) || 0) - (Number(b.afterIdx) || 0));
+  const out = []; let n = 0, k = 0;
+  const flush = () => { while(k < tl.length && (Number(tl[k].afterIdx) || 0) <= n){ out.push({ lineKind:'text', text:String(tl[k].text == null ? '' : tl[k].text) }); k++; } };
+  flush();
+  rows.forEach(r => { out.push(r); n++; flush(); });
+  while(k < tl.length){ out.push({ lineKind:'text', text:String(tl[k].text == null ? '' : tl[k].text) }); k++; }
+  return out;
+}
+// แตกชุดเป็นบรรทัดมีราคา (A2) — ปันยอดสุทธิของชุดเป็นสตางค์ตามน้ำหนักราคาขายส่วนประกอบ · เศษเข้าส่วนลดบรรทัดแรก
+//   Σ lineEx / Σ lineVat (ปัด 2 ตำแหน่งรายบรรทัด) = ของแถวชุด · บรรทัดแรกรับ qtLineNo + qtUnits = จำนวนชุด
+function siKitSplitPrices(state, kitLine, children, priceMode){
+  const k = kitLine || {}, kq = Number(k.qty) || 0, vr = Number(k.vatRate) || 0;
+  const comps = (children || k.kitComponents || []).filter(c => c && c.itemId && Number(c.qtyPerKit) > 0);
+  if(!comps.length || !(kq > 0)) return [];
+  const kc = siLineCalc(k, priceMode), net = Math.round((kc.gross - kc.disc) * 100);   // สตางค์ (ตามโหมดราคา)
+  const items = (state && state.items) || [];
+  const qs = comps.map(c => Number(c.qtyPerKit) * kq);
+  let w = comps.map((c, i) => { const it = items.find(x => x && x.id === c.itemId) || {}; return Math.max(0, Number(it.salePrice) || 0) * qs[i]; });
+  if(!(w.reduce((a, b) => a + b, 0) > 0)) w = qs.slice();
+  const tw = w.reduce((a, b) => a + b, 0);
+  const mk = (alloc) => {
+    const rows = comps.map((c, i) => ({ itemId:c.itemId, qty:qs[i], unit:c.unit || '', vatRate:vr,
+      unitPrice:qs[i] > 0 ? Math.ceil(alloc[i] / qs[i] - 1e-9) / 100 : 0 }));
+    const gross = rows.reduce((t, r) => t + Math.round(r.unitPrice * r.qty * 100), 0);
+    const res = gross - alloc.reduce((a, b) => a + b, 0);
+    if(res > 0) rows[0].discount = res / 100;
+    return rows;
+  };
+  const sumOk = (rows) => { const cs = rows.map(r => siLineCalc(r, priceMode));
+    return Math.abs(cs.reduce((t, c) => t + Number(c.ex.toFixed(2)), 0) - Number(kc.ex.toFixed(2))) < 0.005
+      && Math.abs(cs.reduce((t, c) => t + Number(c.vat.toFixed(2)), 0) - Number(kc.vat.toFixed(2))) < 0.005
+      && cs.every(c => !c.over); };
+  const base = w.map(x => Math.floor(net * x / tw));
+  base[0] += net - base.reduce((a, b) => a + b, 0);
+  let best = mk(base);
+  // ปัดรายบรรทัดแล้ว Σ ไม่ตรง → ขยับยอดระหว่างบรรทัดแรกกับบรรทัดอื่นทีละสตางค์ (ยอดรวมชุดเท่าเดิม)
+  if(!sumOk(best)){
+    outer: for(let d = 1; d <= 50; d++) for(let j = 1; j < base.length; j++) for(const sg of [1, -1]){
+      const a = base.slice(); a[0] += sg * d; a[j] -= sg * d;
+      if(a[0] < 0 || a[j] < 0) continue;
+      const r = mk(a); if(sumOk(r)){ best = r; break outer; }
+    }
+  }
+  if(k.qtLineNo || k._qtLineNo){ best[0].qtLineNo = k.qtLineNo || k._qtLineNo; best[0].qtUnits = kq; }
+  return best;
+}
+// E1: ลายเซ็นเงิน (ฐาน VAT/ยกเว้นแยก) · ลายเซ็นสต๊อก (Σ baseQty ต่อสินค้า ของบรรทัดที่ไม่ใช่แม่ชุด) · ลายเซ็นเอกสาร (ทุกช่องที่แก้ได้)
+function _siMoneySig(x){
+  let vb = 0, eb = 0;
+  ((x && x.lines) || []).forEach(l => { if(!l || l.lineKind === 'kit_child') return; if((Number(l.lineVat) || 0) > 0) vb += Number(l.lineEx) || 0; else eb += Number(l.lineEx) || 0; });
+  return { subtotal:Number(x.subtotal) || 0, vat:Number(x.vat) || 0, whtAmount:Number(x.whtAmount) || 0, netTotal:Number(x.netTotal) || 0, vatBase:vb, exemptBase:eb };
+}
+function _siMoneyDiff(a, b){ return Object.keys(a).some(k => { const d = Math.abs(a[k] - b[k]); return d >= 0.005 || (_sieR2(a[k]) !== _sieR2(b[k]) && d > 1e-6); }); }
+function _siStockSig(state, x){
+  const m = {}, items = (state && state.items) || [];
+  ((x && x.lines) || []).forEach(l => {
+    if(!l || l.lineKind === 'kit' || !l.itemId) return;
+    const it = items.find(i => i && i.id === l.itemId);
+    const q = (l.baseQty != null && Number.isFinite(Number(l.baseQty))) ? Number(l.baseQty) : toBaseQty(it, Number(l.qty) || 0, l.unit);
+    m[l.itemId] = (m[l.itemId] || 0) + q;
+  });
+  return m;
+}
+const _SI_DOC_F = ['itemId','qty','unit','unitPrice','vatRate','discount','displayName','lineKind','kitId','kitPrintMode','qtLineNo','qtUnits','itemName'];
+function _siDocSig(x){
+  return _apStable({ lines:((x && x.lines) || []).map(l => { const o = {}; _SI_DOC_F.forEach(f => { if(l && l[f] != null && l[f] !== '') o[f] = l[f]; }); return o; }),
+    textLines:(x && x.textLines) || [], note:(x && x.note) || '', dueDate:(x && x.dueDate) || '', ksc:x && x.kitShowChildren != null ? !!x.kitShowChildren : null,
+    whtRate:Number(x && x.whtRate) || 0 });
+}
+// E37: ช่องที่พิมพ์บนกระดาษ (ชื่อ/ชื่อที่แสดง/จำนวน/หน่วย/ราคา/ส่วนลด/ยอด · ข้อความ · โชว์ของในชุด · หมายเหตุ · ครบกำหนด · ยอดรวม)
+function _siPaperSig(x){
+  return _apStable({ lines:((x && x.lines) || []).map(l => [l.itemName || '', l.displayName || '', Number(l.qty) || 0, l.unit || '', Number(l.unitPrice) || 0, Number(l.discount) || 0, Number(l.lineTotal) || 0, l.lineKind || '']),
+    textLines:(x && x.textLines) || [], ksc:x && x.kitShowChildren != null ? !!x.kitShowChildren : null, note:(x && x.note) || '', dueDate:(x && x.dueDate) || '',
+    t:[_sieR2(x && x.subtotal), _sieR2(x && x.vat), _sieR2(x && x.total), _sieR2(x && x.whtAmount), _sieR2(x && x.netTotal)] });
+}
+// ใบใหม่จากร่าง (E21) — หัวใบมาจากใบเดิมเสมอ · ชื่อ/รหัสสินค้า: บรรทัดเดิม (srcLineNo + itemId ตรง) ใช้สำเนาเดิม · _src = index บรรทัดเดิม (ใช้โอนต้นทุน)
+function _siEditBuild(state, si, d){
+  const dr = d || {}, b = siBuildLines(state, dr.lines, si.priceMode), old = si.lines || [];
+  let par = -1;
+  b.lines.forEach(l => {
+    let j = -1;
+    if(l.lineKind === 'kit_child'){
+      if(par >= 0) for(let q = par + 1; q < old.length && old[q] && old[q].lineKind === 'kit_child'; q++){ if(old[q].itemId === l.itemId){ j = q; break; } }
+    } else {
+      j = l.srcLineNo != null ? old.findIndex(o => o && o.lineKind !== 'kit_child' && Number(o.lineNo) === Number(l.srcLineNo) && o.itemId === l.itemId) : -1;
+      par = l.lineKind === 'kit' ? j : -1;
+    }
+    if(j >= 0){ l.itemName = old[j].itemName; l.itemCode = old[j].itemCode; if(l.displayName === l.itemName) delete l.displayName; Object.defineProperty(l, '_src', { value:j, enumerable:false, writable:true }); }
+  });
+  const whtRate = dr.whtRate != null && dr.whtRate !== '' ? Number(dr.whtRate) || 0 : (Number(si.whtRate) || 0);
+  const wht = b.subtotal * whtRate / 100;
+  const n = { ...si, lines:b.lines, subtotal:b.subtotal, vat:b.vat, total:b.total, whtRate, whtAmount:wht, netTotal:b.total - wht,
+    note:dr.note != null ? dr.note : si.note, dueDate:dr.dueDate || si.dueDate };
+  if(b.textLines.length) n.textLines = b.textLines; else delete n.textLines;
+  if(dr.kitShowChildren === true || dr.kitShowChildren === false) n.kitShowChildren = dr.kitShowChildren;
+  else if(dr.kitShowChildren === null) delete n.kitShowChildren;
+  return n;
+}
+// planSiEdit(state, si, p) — p = payload แบบ EDIT_SALES_INV (draft, quoteShortfall, qcWarnedAdd/qcFailedAdd, at, by, reason) · pure
+//   คืน { cls, newSi, moneyBefore, moneyAfter, dStock, returns, cuts, quote, je, payment, blocks, warns, paperChanged, stock }
+function planSiEdit(state, si, p){
+  const P = p || {}, s = state || {}, blocks = [], warns = [];
+  const out = { cls:null, newSi:null, moneyBefore:null, moneyAfter:null, dStock:[], returns:[], cuts:[], quote:null, je:null, payment:null, blocks, warns, paperChanged:false, stock:null };
+  if(!si){ blocks.push('ไม่พบใบกำกับ'); return out; }
+  if(si.voided) blocks.push('ใบกำกับนี้ถูกยกเลิกแล้ว — แก้ไม่ได้');
+  if(siIsMigrated(si)) blocks.push('ใบ ' + (si.siNumber || '') + ' เป็นประวัติขายที่นำเข้าจาก Ecount — แก้ในระบบนี้ไม่ได้');
+  if(si.filedPeriodViolation) blocks.push('ใบนี้ติดธงออกในงวดที่ยื่นแล้ว — ให้ ผจก.บัญชีจัดการก่อน');
+  { const g = siDateGuard(s, si.invDate); if(g.block) blocks.push(g.block); }
+  if(blocks.length) return out;
+  const dr = P.draft || {}, rows = Array.isArray(dr.lines) ? dr.lines : [];
+  const items = s.items || [];
+  // E12 บรรทัดต้องถูกต้อง
+  const valid = rows.filter(l => l && l.itemId && l.qty > 0 && l.lineKind !== 'text');
+  if(!valid.length) blocks.push('ใส่สินค้าอย่างน้อย 1 รายการ');
+  valid.forEach(l => { const c = siLineCalc(l, si.priceMode); const nm = (items.find(x => x && x.id === l.itemId) || {}).name || l.itemId;
+    if(c.bad) blocks.push('ส่วนลดอ่านเป็นตัวเลขไม่ได้: ' + nm); else if(c.over) blocks.push('ส่วนลดเกินยอดของบรรทัด (หรือติดลบ): ' + nm);
+    if(!items.some(x => x && x.id === l.itemId)) blocks.push('ไม่พบสินค้า ' + l.itemId);
+    if(l.lineKind === 'kit'){
+      if(!(Number(l.qty) > 0) || !l.unit || !(l.kitComponents || []).some(c2 => c2 && c2.itemId && Number(c2.qtyPerKit) > 0)) blocks.push('🎁 ' + nm + ': ต้องระบุจำนวน หน่วย และของข้างในกล่องอย่างน้อย 1 อย่าง');
+      (l.kitComponents || []).forEach(c2 => { if(c2 && c2.itemId && !items.some(x => x && x.id === c2.itemId)) blocks.push('ไม่พบสินค้า ' + c2.itemId); });
+    } });
+  const due = dr.dueDate || si.dueDate;
+  if(due && si.invDate && String(due) < String(si.invDate)) blocks.push('วันครบกำหนดต้องไม่ก่อนวันที่ใบกำกับ');
+  if(blocks.length) return out;
+  return _planSiEdit2(s, si, P, out);
+}
+// ด่านก่อนเปิดฟอร์มแก้ใบ (E46: E4-E8, E10 + คำขอแก้/ยกเลิกค้าง) — '' = เปิดได้
+function siEditBlock(state, si, user){
+  const s = state || {};
+  if(!si) return 'ไม่พบใบกำกับ';
+  if(si.voided) return 'ใบกำกับนี้ถูกยกเลิกแล้ว — แก้ไม่ได้';
+  if(siIsMigrated(si)) return 'ใบนี้นำเข้าจาก Ecount — แก้ในระบบนี้ไม่ได้';
+  if(si.filedPeriodViolation) return 'ใบนี้ติดธงออกในงวดที่ยื่นแล้ว — ให้ ผจก.บัญชีจัดการก่อน';
+  { const g = siDateGuard(s, si.invDate); if(g.block) return g.block; }
+  { const lk = s.settings && s.settings.periodLockUntil; if(lk && String(si.invDate || '') <= String(lk)) return '📅 งวด ≤ ' + lk + ' ถูกปิดแล้ว — แก้ใบกำกับวันที่ ' + si.invDate + ' ไม่ได้ (ให้บัญชีปลดล็อกงวดก่อน)'; }
+  const u = user && user.username ? ((s.users || []).find(x => x && x.username === user.username) || user) : null;
+  if(!u || u.active === false || !(hasPerm(u, 'sales', 'si', 'edit') || isSuperUser(u))) return 'ไม่มีสิทธิ์แก้ใบกำกับขาย';
+  const pend = (s.approvalRequests || []).find(r => r && (r.action === 'edit_si' || r.action === 'delete_si') && r.entityId === si.id && (r.status || 'pending') === 'pending');
+  if(pend) return 'มีคำขอ' + (pend.action === 'edit_si' ? 'แก้' : 'ยกเลิก') + 'ใบนี้รออนุมัติอยู่ — รอผลก่อน';
+  return '';
+}
+// E39: ลายนิ้วมือของร่างแก้ใบ (คำขออนุมัติผูกกับร่างนี้ · หน้าจอกับ reducer ใช้ตัวเดียวกัน)
+const _SI_DRAFT_F = ['srcLineNo','itemId','qty','unit','unitPrice','vatRate','discount','discountPct','displayName','lineKind','text','kitId','kitPrintMode','qtLineNo','qtUnits'];
+function siEditDraftHash(d){
+  const x = d || {}, dr = x.draft || {};
+  const row = (l) => { const o = {}; _SI_DRAFT_F.forEach(f => { if(l && l[f] != null && l[f] !== '') o[f] = (['qty','unitPrice','vatRate','discount','discountPct','qtUnits','srcLineNo'].includes(f)) ? Number(l[f]) : l[f]; });
+    if(l && l._qtLineNo && o.qtLineNo == null) o.qtLineNo = l._qtLineNo;
+    if(l && Array.isArray(l.kitComponents)) o.kitComponents = l.kitComponents.filter(Boolean).map(c => ({ itemId:c.itemId, qtyPerKit:Number(c.qtyPerKit) || 0, unit:c.unit || '' }));
+    return o; };
+  return _apStable({ lines:(dr.lines || []).map(row), whtRate:Number(dr.whtRate) || 0, note:dr.note == null ? '' : String(dr.note), dueDate:dr.dueDate || '',
+    kitShowChildren:dr.kitShowChildren === true ? true : dr.kitShowChildren === false ? false : null,
+    reasonCode:x.reasonCode || '', reason:String(x.reason || '').trim(), quoteShortfall:x.quoteShortfall || '', sentBefore:!!x.sentBefore });
+}
+// 🆕 SI_EDIT E28a: lotGenealogy dispatch สุทธิต่อ (ref, สินค้า, ล็อต) — แก้ใบกำกับต่อท้ายเรคคอร์ดติดลบ (reversal) · ทิ้งล็อตที่สุทธิ ≤ 0
+//   คืนเรคคอร์ดแรกของแต่ละกลุ่ม (qty = ยอดสุทธิ) ตามลำดับที่พบ · เรคคอร์ดเก่าไม่มี qty นับเป็น 1 (มีอยู่จริง)
+function netDispatchRecs(gen){
+  const m = new Map();
+  for(const g of (gen || [])){
+    if(!g || g.kind !== 'dispatch') continue;
+    const k = (g.ref || '') + '|' + (g.fgItemId || '') + '|' + (g.fgLot || '');
+    const q = g.qty == null ? 1 : (Number(g.qty) || 0);
+    const e = m.get(k);
+    if(e) e.qty += q; else m.set(k, { ...g, qty:q });
+  }
+  return Array.from(m.values()).filter(e => e.qty > 1e-9);
+}
+function _siEditLast(si, f){ const L = (si && si.editLog) || []; for(let i = L.length - 1; i >= 0; i--) if(L[i] && f(L[i])) return L[i]; return null; }
+// งานค้าง/การพิมพ์ (E37 · E45)
+function siEditRecallNeeded(si){ return !!si && !si.voided && ((si.editLog || []).some(e => e && e.recall && e.recall.status === 'pending')); }
+function siEditOverpaid(si){
+  if(!si || si.voided || !((Number(si.overpaidAmount) || 0) > 0.01)) return false;
+  const e = _siEditLast(si, x => (Number(x.overpaid) || 0) > 0.01);
+  return !(e && e.overpaidAck);
+}
+// 🆕 SI_EDIT verify 1: ผลการจัดการงานค้างหลังแก้ใบ (โค้ด → คำไทย) — ใช้ทั้งหน้าจอ ACK/ประวัติ และ audit ใน reducer
+const SI_EDIT_ACK_OUT = {
+  recall:   [['returned','ได้ใบเดิมคืนแล้ว'], ['customer_letter','ลูกค้ามีหนังสือยืนยันทำลาย/ไม่ใช้ใบเดิม'], ['not_sent','ใบเดิมไม่ได้ถึงมือลูกค้า'], ['lost','ลูกค้าทำใบเดิมหาย (บันทึกไว้)'], ['other','อื่น ๆ (ระบุ)']],
+  overpaid: [['refunded','คืนเงินลูกค้าแล้ว'], ['credit_next','ตกลงกับลูกค้าใช้รอบหน้า'], ['other','อื่น ๆ (ระบุ)']],
+  goods:    [['ok','ตรวจต้นทุน/ของที่เปลี่ยนแล้ว ถูกต้อง'], ['other','อื่น ๆ (ระบุ)']],
+};
+function siEditAckLabel(kind, outcome){
+  if(outcome === 'other') return 'อื่น ๆ';
+  const r = (SI_EDIT_ACK_OUT[kind] || []).find(x => x[0] === outcome) || Object.keys(SI_EDIT_ACK_OUT).reduce((f, k) => f || SI_EDIT_ACK_OUT[k].find(x => x[0] === outcome), null);
+  return r ? r[1] : String(outcome || '-');
+}
+function siEditGoodsReview(si){ return (!si || si.voided) ? [] : ((si.editLog || []).filter(e => e && (e.cls === 'goods' || (e.priceChanged || []).length > 0) && !e.goodsAck).map(e => e.rev)); }   // verify 2: ราคาต่อหน่วยเปลี่ยน (ยอดเท่าเดิม) ผู้จัดการตรวจด้วย
+function siOriginalDue(si){
+  if(!si) return false;
+  if(!((Number(si.printCount) || 0) > 0)) return true;
+  const e = _siEditLast(si, x => x.paperChanged);
+  return !!e && (Number(si.editRev) || 0) > 0 && (Number(si.origPrintedRev) || 0) < (Number(e.rev) || 0);
+}
+// E33: ใบเสนอราคา — ต่อ qtLineNo: เท่าเดิม = ยกยอด (qtApplied ไว้บรรทัดแรกของกลุ่มเท่านั้น) · ลด + reopen = คืน usedQty · ลด + close = usedQty คงเดิม เก็บ qtClosedShort
+//   เพิ่ม = บวก usedQty (clamp ไม่เกินจำนวนในใบเสนอราคา) · ไม่แตะ siIds/สถานะใบเสนอราคา · mutate n.lines (qtApplied/qtClosedShort)
+function _siEditQuote(s, si, n, mode, blocks){
+  if(!si.quoteId || si.quoteRolledBack) return null;
+  const qt = (s.salesOrders || []).find(q => q && q.id === si.quoteId);
+  const grp = (ls, f) => { const m = {}; (ls || []).forEach(l => { if(!l || l.lineKind === 'kit_child' || !l.qtLineNo) return; m[l.qtLineNo] = (m[l.qtLineNo] || 0) + f(l); }); return m; };
+  const oReq = grp(si.lines, l => l.qtUnits != null ? Number(l.qtUnits) : Number(l.qty) || 0);
+  const oApp = grp(si.lines, l => (l.qtApplied !== undefined && l.qtApplied !== null) ? Number(l.qtApplied) : (Number(l.qty) || 0));
+  const oCls = grp(si.lines, l => Number(l.qtClosedShort) || 0);
+  const nReq = grp(n.lines, l => l.qtUnits != null ? Number(l.qtUnits) : Number(l.qty) || 0);
+  const keys = Array.from(new Set(Object.keys(oReq).concat(Object.keys(nReq)))).sort();
+  const rows = [];
+  let needMode = false;
+  keys.forEach(k => {
+    const from = oReq[k] || 0, to = nReq[k] || 0, app = oApp[k] || 0, cls = oCls[k] || 0;
+    let a = app, c = cls, used = 0, m = 'same';
+    if(to < from - 1e-9){
+      needMode = true; const dec = from - to; m = mode || '';
+      // ส่วนที่เกินจำนวนที่นับกับใบเสนอราคา (from > app เพราะ clamp ตอนออกใบ) ตัดออกก่อน แล้วค่อยคืน/ปิดส่วนที่นับจริง
+      const excess = Math.max(0, from - app);
+      const back = Math.min(app, Math.max(0, dec - excess));
+      if(mode === 'reopen'){ a = app - back; used = -back; }
+      else if(mode === 'close'){ a = app - back; c = cls + back; }
+    } else if(to > from + 1e-9){
+      m = 'more';
+      const ql = qt && (qt.lines || []).find(x => x && String(x.lineNo) === String(k));
+      if(ql){ const before = Number(ql.usedQty) || 0; used = Math.max(0, Math.min(Number(ql.qty) || 0, before + (to - from)) - before); a = app + used; }
+    }
+    let first = true;
+    n.lines.forEach(l => { if(!l || l.lineKind === 'kit_child' || String(l.qtLineNo || '') !== String(k)) return;
+      l.qtApplied = first ? a : 0; if(first && c > 1e-9) l.qtClosedShort = c; else delete l.qtClosedShort; first = false; });
+    rows.push({ qtLineNo:isNaN(Number(k)) ? k : Number(k), from, to, mode:m, usedDelta:used, applied:a, closedShort:c });
+  });
+  if(needMode && mode !== 'reopen' && mode !== 'close') blocks.push('จำนวนในใบเสนอราคาลดลง — เลือก "ส่งตามทีหลัง" หรือ "ลูกค้าไม่เอาแล้ว"');
+  return { qtId:si.quoteId, rows, needMode };
+}
+// 🆕 UAT ชุด 1 S1: ล็อตที่ตัดเพิ่ม (cuts) มีล็อตที่ออเดอร์ผลิตยังไม่ผ่าน QC ไหม — pure บน state ก่อนตัด · ใช้ layerId (ไม่มี = หาจากล็อต)
+function _siEditCutQc(s, si, cuts){
+  const res = { warned:false, failed:false, lots:[] }, seen = new Set();
+  let omap = null;
+  (cuts || []).forEach(c => {
+    if(!c || c.neg) return;
+    const it = (s.items || []).find(x => x && x.id === c.itemId);
+    if(!productRequiresQC(s, it)) return;
+    const L = (c.layerId && (s.fifoLayers || []).find(x => x && x.id === c.layerId))
+      || (s.fifoLayers || []).find(x => x && x.itemId === c.itemId && x.branch === si.branch && c.lot && x.lot === c.lot && !x.isNegative);
+    if(!L) return;
+    if(!omap){ omap = {}; (s.productionOrders || []).forEach(o => { if(o && o.orderNumber != null && omap[o.orderNumber] === undefined) omap[o.orderNumber] = o; }); }
+    const ref = fgLayerOrderRef(L, r => omap[r] !== undefined), o = ref ? omap[ref] : null;
+    if(!o || o.qcStatus === 'passed') return;
+    res.warned = true; if(o.qcStatus === 'failed') res.failed = true;
+    const k = c.itemId + '|' + ref;
+    if(!seen.has(k)){ seen.add(k); res.lots.push(((it && it.name) || c.itemId) + ' ล็อต ' + (c.lot || ref) + (o.qcStatus === 'failed' ? ' (❌ ไม่ผ่าน)' : ' (⏳ ยังไม่ตรวจ)')); }
+  });
+  return res;
+}
+// 🆕 UAT ชุด 1 S4: คำเตือนเรื่องวันที่ (สัญญา §17 ลงสต๊อก/ต้นทุนวันที่ใบเดิม) — ไม่เปลี่ยนพฤติกรรม แค่บอกในพรีวิว
+//   ① มีนับ/ปรับสต๊อกของสินค้าที่เปลี่ยน หลังวันที่ใบ ② ตัด FIFO ล็อตที่เข้าหลังวันที่ใบ ③ ใบอยู่เดือนก่อนที่ยังไม่ยื่น ภ.พ.30 แต่ VAT เปลี่ยน
+function _siEditTimingWarns(s, si, n, st, cls, at){
+  const w = [], d0 = String(si.invDate || '').slice(0, 10), br = si.branch;
+  if(!d0 || cls === 'text') return w;
+  const ids = new Set(((st && st.dStock) || []).map(x => x.itemId));
+  const nm = (id) => ((s.items || []).find(x => x && x.id === id) || {}).name || id;
+  if(ids.size){
+    const adj = new Set();
+    (s.movements || []).forEach(m => { if(m && ids.has(m.itemId) && m.branch === br && /^adjust/.test(String(m.type || '')) && String(m.date || '').slice(0, 10) > d0) adj.add(m.itemId); });
+    (s.stockCounts || []).forEach(c => { if(!c || c.branch !== br || !(String(c.date || '').slice(0, 10) > d0)) return;
+      (c.lines || []).forEach(l => { if(l && ids.has(l.itemId)) adj.add(l.itemId); }); });
+    if(adj.size) w.push('📋 มีการนับ/ปรับสต๊อกหลังวันที่ใบ (' + d0 + ') ของ ' + Array.from(adj).map(nm).join(', ') + ' — ยอดคืน/ตัดจะลงวันที่ใบเดิม ยอดนับที่บันทึกไว้อาจต้องตรวจซ้ำ');
+    const late = new Set();
+    ((st && st.cuts) || []).forEach(c => { if(!c || c.neg || !c.layerId) return; const L = (s.fifoLayers || []).find(x => x && x.id === c.layerId);
+      if(L && String(L.date || '').slice(0, 10) > d0) late.add(c.itemId); });
+    if(late.size) w.push('⏩ ตัดของล็อตที่เข้าคลังหลังวันที่ใบ (' + Array.from(late).map(nm).join(', ') + ') — ต้นทุนใช้ล็อตใหม่ แต่ลงวันที่ใบเดิม');
+  }
+  if(cls === 'money' && Math.abs((Number(n.vat) || 0) - (Number(si.vat) || 0)) >= 0.005 && Number(at) > 0){
+    const nowYm = ymOf(new Date(Number(at)).toISOString().slice(0, 10)), ym = ymOf(d0);
+    if(ym < nowYm) w.push('🧾 ใบลงวันที่เดือน ' + ym + ' (ยังไม่ยื่น ภ.พ.30) — ภาษีขายเดือนนั้นจะเปลี่ยน ' + (Number(si.vat) || 0).toFixed(2) + ' → ' + (Number(n.vat) || 0).toFixed(2) + ' ยื่นตามยอดใหม่');
+  }
+  return w;
+}
+function _planSiEdit2(s, si, P, out){
+  const blocks = out.blocks, warns = out.warns, E = global.ERP || {};
+  const n = _siEditBuild(s, si, P.draft);
+  if(P.qcWarnedAdd) n.qcWarned = true;
+  if(P.qcFailedAdd) n.qcFailed = true;
+  const mb = _siMoneySig(si), ma = _siMoneySig(n);
+  const so = _siStockSig(s, si), sn = _siStockSig(s, n);
+  const stockItems = Array.from(new Set(Object.keys(so).concat(Object.keys(sn)))).filter(id => Math.abs((so[id] || 0) - (sn[id] || 0)) > 1e-6).sort();
+  const money = _siMoneyDiff(mb, ma);
+  out.moneyBefore = mb; out.moneyAfter = ma;
+  out.cls = money ? 'money' : stockItems.length ? 'goods' : (_siDocSig(si) !== _siDocSig(n) ? 'text' : null);
+  if(!out.cls){ blocks.push('ไม่มีอะไรเปลี่ยน'); return out; }
+  // 🆕 verify 2 (P3): ราคาต่อหน่วย/ส่วนลดของบรรทัดเดิม (srcLineNo+itemId ตรง ไม่ใช่ลูกในชุด) เปลี่ยน แต่ยอดรวมเท่าเดิม
+  //   ระดับยังเป็น text/goods ตาม E1 (แตกชุด A2 = บรรทัดใหม่ ไม่นับ) แต่เตือนในพรีวิว + ขึ้นงานค้างให้ผู้จัดการตรวจ (siEditGoodsReview)
+  out.priceChanged = [];
+  if(out.cls !== 'money'){
+    const ol = si.lines || [];
+    n.lines.forEach(l => { if(!l || l.lineKind === 'kit_child' || l._src == null) return; const o = ol[l._src]; if(!o) return;
+      const op = _sieR2(Number(o.unitPrice) || 0), np = _sieR2(Number(l.unitPrice) || 0), od = _sieR2(Number(o.discount) || 0), nd = _sieR2(Number(l.discount) || 0);
+      if(op !== np || od !== nd) out.priceChanged.push({ lineNo:o.lineNo != null ? o.lineNo : l._src + 1, itemId:l.itemId, itemName:o.itemName || l.itemName || l.itemId,
+        unitPrice:[op, np], discount:[od, nd] }); });
+    if(out.priceChanged.length) warns.push('⚠️ ราคาต่อหน่วยบนใบกำกับเปลี่ยน (ยอดรวมเท่าเดิม): ' + out.priceChanged.map(c => c.itemName + ' '
+      + (c.unitPrice[0] !== c.unitPrice[1] ? c.unitPrice[0] + ' → ' + c.unitPrice[1] : 'ส่วนลด ' + c.discount[0] + ' → ' + c.discount[1])).join(', ') + ' — ผู้จัดการจะได้งานค้างให้ตรวจ');
+  }
+  const rev = (Number(si.editRev) || 0) + 1;
+  // สต๊อก/ต้นทุน (E22-E28a) — คำนวณบนสำเนา (ฟังก์ชันใน 01-state ที่ reducer ใช้ตัวเดียวกัน)
+  const st = typeof E.siEditStock === 'function' ? E.siEditStock(s, si, n, { at:Number(P.at) || 0, rev, by:P.by || '', stockItems }) : null;
+  if(st){ n.lines = st.lines; out.stock = st; out.dStock = st.dStock; out.returns = st.returns; out.cuts = st.cuts;
+    if(st.cuts.some(c => c.neg)) warns.push('สต๊อกไม่พอ — ส่วนที่ขาดจะติดลบ');
+    // 🆕 UAT ชุด 1 S1: QC ของล็อตที่ตัดจริง (คำนวณใหม่ทุกครั้ง รวมตอนอนุมัติทีหลัง — ล็อตอาจตก QC ระหว่างรออนุมัติ)
+    const qc = _siEditCutQc(s, si, st.cuts);
+    if(qc.warned){ n.qcWarned = true; if(qc.failed) n.qcFailed = true;
+      warns.push((qc.failed ? '⛔ ตัดล็อตที่ QC ตรวจไม่ผ่าน: ' : 'ตัดล็อตที่ยังไม่ผ่าน QC: ') + qc.lots.join(', ')); }
+    out.qc = qc;
+  }
+  out.timingWarns = P.noTiming ? [] : _siEditTimingWarns(s, si, n, st, out.cls, P.at);   // 🆕 UAT ชุด 1 S4: แค่เตือนในพรีวิว (ไม่บล็อก · ไม่ลง audit)
+  n.cogsTotal = out.cls === 'text' ? si.cogsTotal : _sieR2(n.lines.reduce((t, l) => t + (l && l.lineKind !== 'kit' ? Number(l.cogs) || 0 : 0), 0));
+  if(n.cogsTotal === undefined) delete n.cogsTotal;
+  // ใบเสนอราคา (E33/E17)
+  out.quote = _siEditQuote(s, si, n, P.quoteShortfall, blocks);
+  // JE ส่วนต่าง (E14-E16 · E29-E31)
+  if(out.cls !== 'text'){
+    const jes = (s.journalEntries || []).filter(j => j && j.source === 'sales_inv' && j.sourceId === si.id && j.status === 'posted' && !j.voidedReversal);
+    if(!jes.length && (Number(si.netTotal) || 0) > 0) blocks.push('ใบนี้ไม่มี JE ขาย — ให้ฝ่ายบัญชีตรวจก่อน');
+    const exp = siJeLines(s, n);
+    if(!exp) blocks.push('ผังบัญชีไม่มีบัญชีลูกหนี้/รายได้ — ให้ฝ่ายบัญชีตรวจ');
+    else {
+      const probe = new Set((siJeLines(s, { siNumber:'', netTotal:1, whtAmount:1, subtotal:1, vat:1, cogsTotal:1 }) || []).map(l => l.accountId));
+      const acc = {}, meta = {};
+      jes.forEach(j => (j.lines || []).forEach(l => { const id = l.accountId || l.account; if(!id) return;
+        acc[id] = (acc[id] || 0) + (Number(l.debit) || 0) - (Number(l.credit) || 0); if(!meta[id]) meta[id] = { accountCode:l.accountCode, accountName:l.accountName }; }));
+      if(Object.keys(acc).some(id => Math.abs(acc[id]) >= 0.005 && !probe.has(id))) blocks.push('ผังบัญชีเปลี่ยนจากตอนออกใบ — ให้ฝ่ายบัญชีตรวจ');
+      const want = {};
+      exp.forEach(l => { want[l.accountId] = (want[l.accountId] || 0) + l.debit - l.credit; meta[l.accountId] = { accountCode:l.accountCode, accountName:l.accountName, role:l.role }; });
+      const lines = [];
+      Array.from(new Set(Object.keys(acc).concat(Object.keys(want)))).forEach(id => {
+        const dlt = (want[id] || 0) - (acc[id] || 0);
+        if(Math.abs(dlt) < 0.005) return;
+        const m = meta[id] || {};
+        lines.push({ accountId:id, accountCode:m.accountCode, accountName:m.accountName, debit:dlt > 0 ? dlt : 0, credit:dlt < 0 ? -dlt : 0,
+          description:'ปรับ' + ({ ar:'ลูกหนี้', wht:'ภาษีถูกหัก ณ ที่จ่าย', rev:'รายได้ขาย', vat:'ภาษีขาย', cogs:'ต้นทุนขาย', inv:'สินค้าคงเหลือ' }[m.role] || 'บัญชี') + ' ' + (si.siNumber || '') + ' (แก้ใบครั้งที่ ' + rev + ')', role:m.role || '' });
+      });
+      const tD = lines.reduce((t, l) => t + l.debit, 0), tC = lines.reduce((t, l) => t + l.credit, 0);
+      if(Math.abs(tD - tC) > 0.009) blocks.push('JE ส่วนต่างไม่สมดุล (' + tD.toFixed(2) + ' / ' + tC.toFixed(2) + ')');
+      out.je = lines.length ? { lines, totalDebit:tD, totalCredit:tC } : null;
+    }
+  }
+  // การรับชำระ (E32)
+  const paid = Number(si.paidAmount) || 0, nt = Number(n.netTotal) || 0;
+  n.paymentStatus = paid >= nt - 0.01 ? 'paid' : paid > 0.009 ? 'partial' : 'unpaid';
+  if(paid - nt > 0.01) n.overpaidAmount = _sieR2(paid - nt); else delete n.overpaidAmount;
+  out.payment = { paid, netTotal:nt, status:n.paymentStatus, overpaid:n.overpaidAmount || 0, due:Math.max(0, _sieR2(nt - paid)) };
+  // คำเตือน: ราคา 0 ของบรรทัดที่เพิ่มเข้ามา · ใบอยู่ในใบวางบิล (text/goods ผ่าน · money บล็อก E13)
+  const zero = n.lines.filter(l => l && l.lineKind !== 'kit_child' && l._src == null && !(Number(l.unitPrice) > 0));
+  if(zero.length) warns.push('มีรายการราคา 0 บาท: ' + zero.map(l => l.itemName || l.itemId).join(', '));
+  const bn = (s.salesBillings || []).find(b => b && !b.voided && (b.id === si.billingId || (b.siIds || []).includes(si.id)));
+  if(bn){ if(out.cls === 'money') blocks.push('ใบกำกับนี้อยู่ในใบวางบิล ' + (bn.bnNumber || '') + ' แล้ว — ยกเลิกใบวางบิลก่อน จึงจะแก้ยอดได้'); else warns.push('ใบนี้อยู่ในใบวางบิล ' + (bn.bnNumber || '') + ' (ยอดไม่เปลี่ยน — ไม่ต้องแก้ใบวางบิล)'); }
+  out.paperChanged = _siPaperSig(si) !== _siPaperSig(n);
+  out.newSi = n;
   return out;
 }
 // 🆕 DOC-NUMBER N4: ด่านวันที่ใบกำกับขาย (SI) — เลข SI-YYYYMMDD-NNNN ออกตามวันที่ใบ → ย้อนวันที่ได้ แต่
@@ -8962,7 +9441,7 @@ Object.assign(_ACT_LABEL, {
   ADD_SALES_INV:'ออกใบกำกับขาย', UPDATE_SALES_INV:'แก้ใบกำกับขาย', VOID_SALES_INV:'ยกเลิกใบกำกับขาย',
   ADD_SALES_PAY:'รับชำระเงินลูกค้า', UPDATE_SALES_PAY:'แก้การรับชำระเงินลูกค้า', VOID_SALES_PAY:'ยกเลิกการรับชำระเงินลูกค้า',
   ADD_SALES_BILLING:'ออกใบวางบิล', UPDATE_SALES_BILLING:'แก้ใบวางบิล', VOID_SALES_BILLING:'ยกเลิกใบวางบิล',
-  ADD_SALES_LIGHT:'บันทึกขายหน้าร้าน', VOID_SALES_LIGHT:'ยกเลิกรายการขายหน้าร้าน', LINK_SALES_INV_CUSTOMER:'ผูกใบกำกับขายกับลูกค้า', SI_PRINT_MARK:'บันทึกการพิมพ์ใบกำกับขาย', ISSUE_SI_REPLACEMENT:'ออกใบแทนใบกำกับภาษี', ACK_SI_PRINT_REVIEW:'ผู้จัดการตรวจการพิมพ์ใบกำกับขาย', SET_SUPPLIER_WHT_PAYEE:'จำผู้ถูกหักประจำของผู้ขาย',
+  ADD_SALES_LIGHT:'บันทึกขายหน้าร้าน', VOID_SALES_LIGHT:'ยกเลิกรายการขายหน้าร้าน', LINK_SALES_INV_CUSTOMER:'ผูกใบกำกับขายกับลูกค้า', SI_PRINT_MARK:'บันทึกการพิมพ์ใบกำกับขาย', ISSUE_SI_REPLACEMENT:'ออกใบแทนใบกำกับภาษี', ACK_SI_PRINT_REVIEW:'ผู้จัดการตรวจการพิมพ์ใบกำกับขาย', EDIT_SALES_INV:'แก้ใบกำกับขาย (ใบเดิม)', ACK_SI_EDIT_FOLLOWUP:'ยืนยันงานค้างหลังแก้ใบกำกับขาย', SET_SUPPLIER_WHT_PAYEE:'จำผู้ถูกหักประจำของผู้ขาย',
   ADD_SO:'ออกใบเสนอราคา', UPDATE_SO:'แก้ใบเสนอราคา', SET_SALE_PRICES:'ตั้งราคาขาย', SET_PARTY_CREDIT:'ตั้งวงเงิน/เครดิตคู่ค้า',
   ADD_APPROVAL_RULE:'เพิ่มกฎอนุมัติ', UPDATE_APPROVAL_RULE:'แก้กฎอนุมัติ', DELETE_APPROVAL_RULE:'ลบกฎอนุมัติ', DELETE_APPROVAL_REQUEST:'ลบคำขออนุมัติ',
   // สินค้า กลุ่ม หน่วย
@@ -9365,6 +9844,7 @@ const APPROVAL_ACTIONS = {
   adjust_stock:     { label:'ปรับสต๊อก (manual)',      scopeDefault:'warehouse'  },
   reverse_adjust:   { label:'ยกเลิกการปรับสต๊อก',      scopeDefault:'warehouse'  },
   delete_si:        { label:'ลบใบกำกับภาษี',          scopeDefault:'sales'      },
+  edit_si:          { label:'แก้ใบกำกับภาษีขาย (ยอด/VAT เปลี่ยน)', scopeDefault:'sales' },   // 🆕 SI_EDIT E38
   cancel_deposit:   { label:'ยกเลิกมัดจำ/จ่ายล่วงหน้า',scopeDefault:'accounting' },
   cancel_petty_topup:{ label:'ยกเลิกเติมเงินสดย่อย',  scopeDefault:'accounting' },
   cancel_reimburse: { label:'ยกเลิกเบิกคืน',          scopeDefault:'accounting' },
@@ -9436,6 +9916,7 @@ const APPROVAL_BUILTIN_RULES = Object.freeze([
   { id:'r_transfer_loss', action:'transfer_loss', scope:'warehouse', active:true, label:'ตัดปิดของหายระหว่างย้าย (write-off)',
     steps:[ { order:1, anyOf:[ _AP_M('warehouse'), _AP_GM ] } ] },
   { id:'r_delete_si', action:'delete_si', scope:'any', active:true, label:'ยกเลิกใบกำกับภาษีขาย', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },
+  { id:'r_edit_si', action:'edit_si', scope:'any', active:true, label:'แก้ใบกำกับภาษีขาย (ยอด/VAT เปลี่ยน)', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },   // 🆕 SI_EDIT E38 (overlay ไม่ migrate)
   // 🆕 APPROVAL 1b-3: แก้ WHT ใบตั้งหนี้ · WHT ลด = ยอดที่ต้องโอนให้ผู้ขายเพิ่ม → 2 ขั้น
   { id:'r_adjust_inv_wht', action:'adjust_inv_wht', scope:'accounting', active:true, label:'แก้ WHT ใบตั้งหนี้', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },
   { id:'r_adjust_inv_wht_up', action:'adjust_inv_wht', scope:'accounting', active:true, label:'⚠️ แก้ WHT ลด (ยอดโอนเพิ่ม) — 2 ขั้น (ผจก.บัญชี + GM)', condition:{ amountGte:0.01, isIncrease:true },
@@ -9627,7 +10108,7 @@ function _saUserRow(state, ref){ return ref ? (((state && state.users) || []).fi
 // คำขอที่ไม่ปลดด้วยสิทธิ์นี้ (ต้อง GM/เจ้าของคนละคนกับผู้ขอ · ทาง 👑 GM-SELF เดิมยังใช้ได้) · UAT M1: + ปรับ VAT/WHT ใบตั้งหนี้
 //   S5: + คำขอสต๊อกทั้งหมด (ปรับ/ยกเลิกปรับ · ตัดของเสีย · ของหายระหว่างโอน · ยกเลิกเบิก/GR/TO) = ต้องมีอีกคนเสมอ
 const SELF_APPROVE_STOCK_ACTIONS = Object.freeze(['adjust_stock','reverse_adjust','scrap','transfer_loss','void_issue','void_gr','cancel_to','edit_gr_date']);   // GR-DATE-FIX: แก้วันที่รับของ = สต๊อก ต้องมีอีกคนเสมอ
-const SELF_APPROVE_NEVER = Object.freeze(['vat_unlock','vat_defer','vat_claim_in','approval_rule_change','adjust_inv_vat','adjust_inv_wht','adjust_inv_price','approve_contract','contract_amend','release_retention'].concat(SELF_APPROVE_STOCK_ACTIONS));
+const SELF_APPROVE_NEVER = Object.freeze(['vat_unlock','vat_defer','vat_claim_in','approval_rule_change','adjust_inv_vat','adjust_inv_wht','adjust_inv_price','approve_contract','contract_amend','release_retention','edit_si'].concat(SELF_APPROVE_STOCK_ACTIONS));   // 🆕 SI_EDIT E38: เงินบนใบกำกับต้องมีคนที่สองเสมอ (GM 👑 = direct)
 function selfApproveKind(action){
   if(!action || SELF_APPROVE_NEVER.includes(action)) return null;
   for(const k of Object.keys(SELF_APPROVE_GROUPS)) if(SELF_APPROVE_GROUPS[k].includes(action)) return k;
@@ -9905,6 +10386,27 @@ function approvalStaleReason(state, req){
     if(m.status === 'cancelled' || m.voided) return 'ใบ ' + (m.memoNumber || m.docNumber || '') + ' ถูกยกเลิกไปแล้ว — คำขอนี้ใช้ไม่ได้แล้ว';
     return null;
   }
+  // 🆕 SI_EDIT F1: คำขอยกเลิกใบกำกับขาย — เดือน VAT ยื่นแล้ว/งวดล็อกระหว่างรออนุมัติ = ล้าสมัย (reducer ปฏิเสธอยู่แล้ว)
+  if(A === 'delete_si'){
+    const si = (st.salesInvoices || []).find(x => x && x.id === req.entityId);
+    if(!si || si.voided) return null;   // ไม่พบ/ยกเลิกแล้ว = executor แจ้งเอง (ข้อความเดิม)
+    const g = siDateGuard(st, si.invDate);
+    return g.block ? g.block : null;
+  }
+  // 🆕 SI_EDIT E41: คำขอแก้ใบกำกับขาย — ใบหาย/ยกเลิก/นำเข้า · ถูกแก้ไปแล้ว (editRev ≠ baseRev) · เข้าใบวางบิล · เดือน VAT ปิด · รับเงินเปลี่ยนจากตอนขอ
+  if(A === 'edit_si'){
+    const si = (st.salesInvoices || []).find(x => x && x.id === req.entityId), no = (si && si.siNumber) || req.entityRef || '';
+    if(!si) return 'ไม่พบใบกำกับ ' + no + ' — คำขอนี้ใช้ไม่ได้แล้ว';
+    if(si.voided) return 'ใบกำกับ ' + no + ' ถูกยกเลิกไปแล้ว — คำขอนี้ใช้ไม่ได้แล้ว';
+    if(siIsMigrated(si)) return 'ใบ ' + no + ' นำเข้าจาก Ecount — แก้ในระบบนี้ไม่ได้';
+    if((Number(si.editRev) || 0) !== (Number(pl.baseRev) || 0)) return 'ใบกำกับ ' + no + ' ถูกแก้ไปแล้วระหว่างรออนุมัติ — ให้ผู้ขอส่งคำขอใหม่';
+    const bn = (st.salesBillings || []).find(b => b && !b.voided && (b.id === si.billingId || (b.siIds || []).includes(si.id)));
+    if(bn) return 'ใบกำกับ ' + no + ' อยู่ในใบวางบิล ' + (bn.bnNumber || '') + ' แล้ว — ยกเลิกใบวางบิลก่อน';
+    const g = siDateGuard(st, si.invDate);
+    if(g.block) return g.block;
+    if(pl.paidAmount != null && Math.abs((Number(si.paidAmount) || 0) - (Number(pl.paidAmount) || 0)) > 0.009) return 'ยอดรับชำระของใบ ' + no + ' เปลี่ยนไประหว่างรออนุมัติ — ให้ผู้ขอส่งคำขอใหม่';
+    return null;
+  }
   return null;
 }
 // JSON เรียงคีย์ (เทียบ spec/กฎแบบไม่สนลำดับคีย์) · ตัด builtin (ป้ายหน้าจอ ไม่ใช่เนื้อกฎ)
@@ -9951,7 +10453,8 @@ const APPROVAL_FAIL_CLOSED = Object.freeze(['delete_je','approve_payment','adjus
   'cancel_po','reopen_po','transfer_loss','approval_rule_change',
   'edit_gr_date',   // 🆕 GR-DATE-FIX
   'approve_contract','contract_amend','release_retention',   // 🆕 EXPENSE_PO P4
-  'change_po_paymode']);   // 🆕 PO-PAYMODE
+  'change_po_paymode',   // 🆕 PO-PAYMODE
+  'edit_si']);   // 🆕 SI_EDIT E38
 
 // 🆕 VAT-FIX helpers (ใช้ร่วมจัดซื้อ/บัญชี)
 //   invVatAdjusted(inv) = ใบนี้เคยปรับ VAT ให้ตรงใบกำกับ (ตอนตั้งหนี้หรือหลังตั้งหนี้)
@@ -12390,7 +12893,7 @@ Object.assign(global.ERP, {
   canAddPayTag, canSetDocTag, docTagOf, docTagIdsOf, docTagsOf, docTagFields, unionDocTags, DOC_TAG_MAX, commonDocTag, poTagDefault, InvTagField, DocTagChip, TagSelect, DocTagEdit, TagMultiSelect, promptNewPayTag, docHasTag, docTagNames, TagManagerButton,   // 🆕 MULTI-TAG MT4/MT5
     // 🆕 DOC-TAGS D1/D5
   invVatInEcount, invVatHereMoved, invVatHereAuto, MIG_VAT_HERE_FROM_YM,   // 🆕 MIG_VAT_HERE V1
-  siIsMigrated, SI_REPL_REASONS, siReplReasonLabel, siReplacementBlock, siPrintSig, siPrintNeedsReview, siPrintReviewer, siPrintSelfReview, siVatExcluded, siAwaitingDue, siOverdue, siArUnsettled,   // 🆕 SALES_HISTORY: ใบขายประวัติ Ecount
+  siIsMigrated, SI_REPL_REASONS, siReplReasonLabel, siReplacementBlock, siPrintSig, siPrintNeedsReview, siPrintReviewer, siPrintSelfReview, siEditAckSelf, siVatExcluded, siAwaitingDue, siOverdue, siArUnsettled,   // 🆕 SALES_HISTORY: ใบขายประวัติ Ecount
   // React bits
   R, h, useState, useEffect, useMemo, useCallback, useRef, useReducer, createContext, useContext, Fragment,
   isReplacementRTV, describeAction, describeActionFull, reapplyPermNeed, WRITE_BLOCKED_TAIL, WRITE_BLOCKED_MSG, FIELD_TH, fmtFieldTH, docFieldsTH, linesTH, diffTH,
@@ -12492,7 +12995,7 @@ Object.assign(global.ERP, {
   approvalIsProposer, PRICE_FIX_LIVE, priceFixLive, priceFixOpenForInv, invPriceApprovalPending, grPriceFixHold, priceFixList, invAmountVsGrDiff, invOverrideDeny,   // 🆕 PRICE-FIX ขั้น 3 (+ invOverrideDeny ขั้น 4)
   TAXINV_VAT_TOL, invTaxMultiOk, invTaxInvViews, invTaxInvViewOf, invTaxInvBlankView, invTaxUncoveredVat, invTaxPaperSum, invTaxInvProgress, invTaxInvLabel, invTaxInvNumbers, vatDocKey,   // 🆕 MULTI-TAXINV
   ymOf, ymAdd, ymDiff, ymEnd, vatDeferred, vatDeferUsed, VAT_DEFER_ONCE_MSG, vatClaimDateOf, vatClaimWindowEnd, vatPaperDateBase, vatPendingDeadlineYm, supMemoNettedInInv, pendingTaxInvIds,
-  purchaseVatForPeriod, purchaseVatByPeriod, vatFilingLockOf, vatClaimIndex, siDateGuard, purchaseVatDocs, purchaseVatClaimState, vatExpireJeLive, jeCr1150, vatNaturalClaimYm, vatFirstOpenYm, vatLockedWithoutFiling,
+  purchaseVatForPeriod, purchaseVatByPeriod, vatFilingLockOf, vatClaimIndex, siDateGuard, siParseDisc, siLineCalc, siJeLines, SI_EDIT_REASONS, siBuildLines, siDraftFromSi, siKitSplitPrices, planSiEdit, siEditBlock, siEditRecallNeeded, siEditOverpaid, SI_EDIT_ACK_OUT, siEditAckLabel, siEditGoodsReview, siOriginalDue, siEditDraftHash, netDispatchRecs, purchaseVatDocs, purchaseVatClaimState, vatExpireJeLive, jeCr1150, vatNaturalClaimYm, vatFirstOpenYm, vatLockedWithoutFiling,
   // Date range helpers
   useDateRange, DateRangeBar, usePaged, Pager, usePersistedTab, useReloadDraft, navigateTo, TAB_EVENT, TAB_CHANGED_EVENT, readPersistedTabs,
   OPEN_DOC_EVENT, requestOpenDoc, useOpenDoc, TOKENS,
@@ -15133,7 +15636,7 @@ Object.assign(global.ERP, {
   // เล่น entries บนฐาน · ref = ก้อนที่ผู้ใช้เห็นตอนแก้ (เช็ก replace / นับสต๊อก) · คืน {ok, state, renum} | {ok:false, reason}
   //   numMap0 = เลขที่เปลี่ยนไปแล้วในรอบก่อน (งานที่กดระหว่าง rebase อ้างเลขเดิม) · cmpBase = ก้อน cloud "ก่อนเล่นงานของเรา" ใช้เทียบว่าเครื่องอื่นแก้อะไร
   //   (verify คลื่น 2: รอบเล่นงานที่กดระหว่าง rebase เดิมเทียบกับก้อนในเครื่อง → เวลา/เลขที่ reducer ออกใหม่ต่างกัน = ฟ้อง "มีคนแก้" ผิด ๆ)
-  var _DROP_IF_REJECTED = { REVIEW_WEIGH_LOG:'weigh_review_lost', MARK_WEIGH_REPRINT:'weigh_reprint_lost', VOID_WEIGH_LOG_STOCK:'weigh_void_lost', SET_PAY_TAG:'pay_tag_lost', SET_DOC_TAG:'doc_tag_lost', SI_PRINT_MARK:'si_print_lost', ACK_SI_PRINT_REVIEW:'si_print_review_lost' };   // verify 1 (si-print-2): log การพิมพ์ใบกำกับที่แพ้ = ทิ้ง+แจ้ง ไม่ลาก batch ไปงานค้าง   // verify PAY-TAGS: แท็ก = ข้อมูลรายงาน แพ้แล้วทิ้ง+แจ้ง ไม่ลากงานอื่นไปงานค้าง
+  var _DROP_IF_REJECTED = { REVIEW_WEIGH_LOG:'weigh_review_lost', MARK_WEIGH_REPRINT:'weigh_reprint_lost', VOID_WEIGH_LOG_STOCK:'weigh_void_lost', SET_PAY_TAG:'pay_tag_lost', SET_DOC_TAG:'doc_tag_lost', SI_PRINT_MARK:'si_print_lost', ACK_SI_PRINT_REVIEW:'si_print_review_lost', ACK_SI_EDIT_FOLLOWUP:'si_edit_ack_lost' };   // 🆕 SI_EDIT §13: ack งานค้างหลังแก้ใบที่แพ้ = ทิ้ง+แจ้ง (EDIT_SALES_INV ห้ามใส่ — แพ้ต้องเข้า OPQ)   // verify 1 (si-print-2): log การพิมพ์ใบกำกับที่แพ้ = ทิ้ง+แจ้ง ไม่ลาก batch ไปงานค้าง   // verify PAY-TAGS: แท็ก = ข้อมูลรายงาน แพ้แล้วทิ้ง+แจ้ง ไม่ลากงานอื่นไปงานค้าง
   // 🆕 OPQ-READABLE B2.1: พังแล้วบอกด้วยว่า "ตัวไหน" (entry + idx ในรายการที่ส่งเข้า) — งานค้างชี้ใบที่ชนได้ ไม่ต้องเดา
   function _foldEntries(base, entries, ref, numMap0, cmpBase, sameBase){
     var pos = { i:-1 };
@@ -17415,7 +17918,7 @@ function _siKeepMigrated(old, nu){
 // 🆕 SP12/SP13 UAT M1: UPDATE_SALES_INV จากหน้าจอที่ถือใบเก่า (รับชำระ/ตั้งวันครบกำหนด/ส่งของ) ห้ามล้างประวัติพิมพ์
 //   printLog / replacements (ใบแทน ม.86/12) / originalPrinted* = ของใบปัจจุบันเสมอ · printCount ไม่ลดลง · lastPrinted* ตามใบที่นับมากกว่า
 //   แก้ประวัติพิมพ์ได้ทาง SI_PRINT_MARK / ISSUE_SI_REPLACEMENT เท่านั้น
-const _SI_PRINT_KEEP = ['printLog','replacements','originalPrintedAt','originalPrintedBy','printReview','printStats'];   // 🆕 SP14: printReview แก้ได้ทาง ACK_SI_PRINT_REVIEW เท่านั้น
+const _SI_PRINT_KEEP = ['printLog','replacements','originalPrintedAt','originalPrintedBy','printReview','printStats','origPrintedRev','origRevPrintedAt','origRevPrintedBy'];   // 🆕 SP14: printReview แก้ได้ทาง ACK_SI_PRINT_REVIEW เท่านั้น
 function _siKeepPrint(old, nu){
   if(!old || !nu) return nu;
   const out = { ...nu };
@@ -17427,6 +17930,28 @@ function _siKeepPrint(old, nu){
   }
   if(old.originalPrintedAt){ if(old.kitShowChildren !== undefined) out.kitShowChildren = old.kitShowChildren; else delete out.kitShowChildren; }
   return out;
+}
+// 🆕 SI_EDIT F4: ใบปกติ (ออกในระบบนี้) — UPDATE_SALES_INV แก้ได้เฉพาะ รับชำระ/วันครบกำหนด/หมายเหตุ/จัดของ/วางบิล
+//   ที่เหลือ (รายการ/ยอด/VAT/ลูกค้า/เลข/วันที่) ใช้ค่าจากใบที่เก็บไว้เสมอ → หน้าจอที่ถือใบเก่า (รับชำระ/วันครบกำหนด/จัดของ) ย้อนผลแก้ใบไม่ได้
+//   printCount/lastPrinted* ส่งต่อให้ _siKeepPrint ตัดสินตามกติกาเดิม (นับเพิ่มได้ ไม่ลด) · paidAmount เปลี่ยน → คิด paymentStatus ใหม่จาก netTotal ที่เก็บไว้ (E32)
+const _SI_NATIVE_FREE = ['paidAmount','paymentStatus','dueDate','needsDueDate','note','fulfillmentStatus','fulfilledAt','fulfilledBy','billingId','billingNumber'];
+// 🆕 SI_EDIT verify 1: ยอดรับแล้วเปลี่ยน (รับชำระ/กลับรายการ) → คิดสถานะ + ยอดจ่ายเกิน (overpaidAmount) ใหม่จาก paid − netTotal เสมอ (mutate si)
+function _siPayRecalc(si){
+  const paid = Number(si.paidAmount) || 0, net = Number(si.netTotal) || 0;
+  si.paymentStatus = paid >= net - 0.01 ? 'paid' : (paid > 0.009 ? 'partial' : 'unpaid');
+  if(paid - net > 0.01) si.overpaidAmount = Math.round((paid - net) * 100) / 100; else delete si.overpaidAmount;
+  return si;
+}
+function _siKeepNative(old, nu){
+  if(!old || !nu) return nu;
+  const out = { ...old };
+  _SI_NATIVE_FREE.forEach(k => { if(Object.prototype.hasOwnProperty.call(nu, k)) out[k] = nu[k]; });
+  ['printCount','lastPrintedAt','lastPrintedBy'].forEach(k => { if(nu[k] !== undefined) out[k] = nu[k]; else delete out[k]; });
+  if(old.voided){ if(old.paymentStatus !== undefined) out.paymentStatus = old.paymentStatus; else delete out.paymentStatus; }   // ใบยกเลิก: ป้ายสถานะคงเดิม
+  else if(Object.prototype.hasOwnProperty.call(nu, 'paidAmount') && (Number(nu.paidAmount) || 0) !== (Number(old.paidAmount) || 0)){
+    _siPayRecalc(out);   // out = { ...old } → netTotal ของใบเดิม (ฟิลด์ล็อก)
+  }
+  return _siKeepPrint(old, out);
 }
 function _invIsMigrated(inv){ return !!inv && (inv._migrated === true || inv.createdBy === 'migration'); }
 // 🆕 นำเข้า2569 UAT MF1: ใบรับประวัติจาก Ecount (ไม่เข้าสต๊อก) — คืน/ยกเลิกไม่ได้ (ไม่งั้นตัดสต๊อกนับจริง 1 ต.ค.)
@@ -19401,6 +19926,13 @@ function _siPrvMerged(si, d){
 const _dupTiView = (s, d) => { const i = d && (s.invoices || []).find(x => x && x.id === d.invId); return i && d.tiId ? global.ERP.invTaxInvViewOf(i, d.tiId) : i; };
 const _ADD_DUP = {
   // 🆕 SP12: log พิมพ์ at+by+kind เดิมอยู่บนใบแล้ว = ส่งซ้ำ · SP13: ใบแทน at เดิม = ซ้ำ
+  // 🆕 SI_EDIT §13: แก้ใบ at+by เดิมอยู่ใน editLog แล้ว = ส่งซ้ำ · ack ของ (rev, kind) at+by เดิม = ซ้ำ
+  EDIT_SALES_INV:       (s, d) => { const i = d && (s.salesInvoices || []).find(x => x && x.id === d.siId);
+                          return !!(i && (i.editLog || []).some(e => e && e.at === Number(d.at) && e.by === (d.by || ''))); },
+  ACK_SI_EDIT_FOLLOWUP: (s, d) => { const i = d && (s.salesInvoices || []).find(x => x && x.id === d.siId);
+                          const e = i && (i.editLog || []).find(x => x && Number(x.rev) === Number(d.rev));
+                          const v = e && (d.kind === 'recall' ? e.recall : d.kind === 'overpaid' ? e.overpaidAck : d.kind === 'goods' ? e.goodsAck : null);
+                          return !!(v && v.at === Number(d.at) && v.by === (d.by || '')); },
   SI_PRINT_MARK:        (s, d) => { const i = d && (s.salesInvoices || []).find(x => x && x.id === d.siId);
                           return !!(i && (i.printLog || []).some(e => e && e.at === Number(d.at) && e.by === (d.by || '') && e.kind === d.kind)); },
   ACK_SI_PRINT_REVIEW:  (s, d) => { const i = d && (s.salesInvoices || []).find(x => x && x.id === d.siId);   // 🆕 SP14 · verify 1: ตรวจครอบคลุมแล้ว (sig ไม่เพิ่ม) = ซ้ำ/ถูกแซง
@@ -29282,7 +29814,7 @@ function reducer(s, a){
     case 'UPDATE_SALES_INV': {
       // 🆕 SALES_HISTORY: ใบขายนำเข้า Ecount = ประวัติ → ฟิลด์เอกสาร/ยอด/ภาษี/ธง คงค่าเดิมเสมอ (รับชำระ/วางบิล/วันครบกำหนด/ผูกลูกค้า แก้ได้)
       const _old = (s.salesInvoices||[]).find(i => i.id === (a.data && a.data.id));
-      const _nu = (_old && global.ERP.siIsMigrated(_old)) ? _siKeepMigrated(_old, a.data) : _siKeepPrint(_old, a.data);
+      const _nu = (_old && global.ERP.siIsMigrated(_old)) ? _siKeepMigrated(_old, a.data) : _siKeepNative(_old, a.data);
       return { ...s, salesInvoices:(s.salesInvoices||[]).map(i => i.id===a.data.id ? _nu : i) };
     }
     // 🆕 UAT S1 (นำเข้าขาย2569): ผูกลูกค้าให้ใบขายนำเข้า Ecount ที่หาลูกค้าไม่เจอ — ครั้งเดียว (ใบที่มีลูกค้าแล้วเปลี่ยนไม่ได้)
@@ -29325,9 +29857,15 @@ function reducer(s, a){
       const pc = Number(si.printCount) || 0;
       const _ign = _voidNoPrint ? 'voided' : (_isRp && !_rp ? 'no_repl' : null);
       // 🆕 verify 1: ต้นฉบับ/ใบแทนซ้ำ — 2 หน้าต่างเปิดพร้อมกัน (ป้าย "ต้นฉบับ"/"ใบแทน" ทั้งคู่) → นับได้แต่ติดธงให้ ผจก. เห็น
-      const _dup = !_ign && ((d.kind === 'original' && pc > 0) || (d.kind === 'repl' && _rp && (Number(_rp.printCount) || 0) > 0));
-      const ent = { at, by:d.by || '', kind:d.kind, ...(_seq != null ? { seq:Number(_seq) } : {}),
-        ...(_isRp && d.replAt != null ? { replAt:Number(d.replAt) } : {}), ...(_ign ? { ignored:_ign } : {}), ...(_dup ? { dupOriginal:true } : {}) };
+      // 🆕 SI_EDIT E37: rev = ฉบับที่พิมพ์ (payload เก่าไม่มี rev = ไม่ตรวจ) · rev ≠ editRev = ฉบับเก่า → นับเป็นสำเนา ติด staleRev
+      //   ต้นฉบับของฉบับแก้ไข = kind original + rev === editRev + ฉบับล่าสุดที่เปลี่ยนกระดาษยังไม่ได้พิมพ์ต้นฉบับ → นับครั้งเดียว ไม่ติด dupOriginal
+      const _er = Number(si.editRev) || 0, _hasRev = d.rev != null && d.rev !== '';
+      const _stale = !_ign && _hasRev && Number(d.rev) !== _er;
+      const _revOrig = !_ign && !_stale && d.kind === 'original' && pc > 0 && _er > 0 && _hasRev && global.ERP.siOriginalDue(si);
+      const _dup = !_ign && !_stale && !_revOrig && ((d.kind === 'original' && pc > 0) || (d.kind === 'repl' && _rp && (Number(_rp.printCount) || 0) > 0));
+      const ent = { at, by:d.by || '', kind:d.kind, ...(_seq != null ? { seq:Number(_seq) } : {}), ...(_hasRev ? { rev:Number(d.rev) } : {}),
+        ...(_isRp && d.replAt != null ? { replAt:Number(d.replAt) } : {}), ...(_ign ? { ignored:_ign } : {}), ...(_dup ? { dupOriginal:true } : {}),
+        ...(_stale ? { staleRev:true } : {}), ...(_revOrig ? { revOriginal:true } : {}) };
       // 🆕 verify 1: ตัวนับสะสม (เพิ่มอย่างเดียว) — log ถูกตัดเหลือ 100 รายการ ตัวเลขพิมพ์ผิดปกติต้องไม่ลดลง · ใบเก่าเริ่มจากนับใน log
       const _ps0 = global.ERP.siPrintSig(si);
       const printStats = { cancel:_ps0.cancel + ((d.kind === 'cancel' || d.kind === 'repl_cancel') ? 1 : 0),
@@ -29339,6 +29877,8 @@ function reducer(s, a){
         nu.printCount = pc + 1; nu.lastPrintedAt = at; nu.lastPrintedBy = d.by || '';
         if(pc === 0){ nu.originalPrintedAt = at; nu.originalPrintedBy = d.by || ''; }
         if(pc === 0 && d.kitShowChildren != null) nu.kitShowChildren = !!d.kitShowChildren;
+        // 🆕 SI_EDIT E37: ใบที่พิมพ์ต้นฉบับหลังแก้ (ครั้งแรกก็นับว่าเป็นฉบับปัจจุบันด้วย) · printCount ไม่ลดลงเด็ดขาด
+        if(_revOrig || (pc === 0 && d.kind === 'original' && !_stale && _er > 0)){ nu.origPrintedRev = _er; nu.origRevPrintedAt = at; nu.origRevPrintedBy = d.by || ''; }
       } else if(d.kind === 'repl'){
         const seq = _rp.seq;
         nu.replacements = si.replacements.map(r => r && r.seq === seq ? { ...r, printCount:(Number(r.printCount)||0) + 1,
@@ -29378,7 +29918,13 @@ function reducer(s, a){
         summary:'✔ ตรวจการพิมพ์ใบกำกับ ' + (si.siNumber || si.id) + ' (ใบแทน ' + sig.repl + ' · ไม่ออก ' + sig.cancel + ' · ซ้ำ ' + sig.dup + ' · ไม่นับ ' + sig.ign + ')' + (_self ? ' · selfReview:true (ตรวจใบที่ตัวเองพิมพ์)' : ''), ...(_self ? { selfReview:true } : {}) };
       return { ...s, salesInvoices:(s.salesInvoices||[]).map(i => i.id === si.id ? nu : i), auditLog:[...(s.auditLog || []), _e] };
     }
-    case 'ADD_SALES_PAY':  return { ...s, salesPayments:[...(s.salesPayments||[]), a.data], seq:{ ...s.seq, sipay:(s.seq.sipay||1)+1 } };
+    case 'ADD_SALES_PAY': {
+      // 🆕 SI_EDIT F3: ห้ามรับชำระบนใบที่ไม่พบ/ยกเลิกแล้ว (เดิมต่อท้ายโดยไม่ตรวจ)
+      const _si = (s.salesInvoices||[]).find(i => i && i.id === (a.data && a.data.siId));
+      if(!_si){ alert('⛔ ไม่พบใบกำกับของรายการรับชำระนี้ — บันทึกไม่ได้'); return s; }
+      if(_si.voided){ alert('⛔ ใบกำกับ ' + (_si.siNumber || '') + ' ถูกยกเลิกแล้ว — รับชำระไม่ได้'); return s; }
+      return { ...s, salesPayments:[...(s.salesPayments||[]), a.data], seq:{ ...s.seq, sipay:(s.seq.sipay||1)+1 } };
+    }
     case 'UPDATE_SALES_PAY': return { ...s, salesPayments:(s.salesPayments||[]).map(p => p.id===a.data.id ? a.data : p) };
 
     // Sales-light (สำหรับสาขา) — ไม่มี SI/customer แค่ตัด stock + log
@@ -29401,11 +29947,12 @@ function reducer(s, a){
       const salesInvoices = (s.salesInvoices||[]).map(si => {
         if(si.id !== pay.siId) return si;
         const paid = Math.max(0, (Number(si.paidAmount)||0) - amt);
-        return { ...si, paidAmount: paid,
-          paymentStatus: si.voided ? si.paymentStatus : (paid <= 0.009 ? 'unpaid' : 'partial') };
+        if(si.voided) return { ...si, paidAmount: paid };
+        return _siPayRecalc({ ...si, paidAmount: paid });   // verify 1: หลังแก้ใบลดยอด กลับรายการแล้วอาจยัง 'paid' + ยอดจ่ายเกินคิดใหม่
       });
       // คืนเงินออกจากบัญชีธนาคาร (ถ้ารับเข้าบัญชี)
-      const bankAccounts = pay.bankId
+      //   🆕 SI_EDIT F2: ลดยอดเฉพาะเงินโอน (ฝั่งรับเงินบวกยอดเฉพาะ transfer · ใบเก่าที่เงินสด/เช็คติด bankId ค่าตั้งต้น ห้ามลด)
+      const bankAccounts = (pay.bankId && pay.method === 'transfer')
         ? (s.bankAccounts||[]).map(b => b.id === pay.bankId ? { ...b, balance:(Number(b.balance)||0) - amt } : b)
         : s.bankAccounts;
       // กลับ JE รับชำระ
@@ -29454,6 +30001,8 @@ function reducer(s, a){
           return s;
         }
       }
+      // 🆕 SI_EDIT F1: เดือนที่ยื่น ภ.พ.30 แล้ว / งวด VAT ล็อก → ห้ามยกเลิก (เดิมภาษีขายเดือนนั้นลดลงเงียบ ๆ)
+      { const _g = global.ERP.siDateGuard(s, si.invDate); if(_g.block){ alert('⛔ ยกเลิกไม่ได้ — ' + _g.block); return s; } }
       const locked = _checkDateLock(s, si.invDate, 'ยกเลิกใบกำกับขาย');
       if(locked) return locked;
       let items = s.items.slice();
@@ -29525,7 +30074,8 @@ function reducer(s, a){
         const back = {};
         (si.lines||[]).forEach(l => { if(l.lineKind === 'kit_child' || !l.qtLineNo) return;
           // qtApplied = จำนวนที่ถูกบวกเข้า usedQty จริงตอนออกใบ (ถูก clamp ไม่ให้เกินยอดในใบเสนอราคา)
-          const add = (l.qtApplied !== undefined && l.qtApplied !== null) ? Number(l.qtApplied) : (Number(l.qty)||0);
+          //   🆕 SI_EDIT E33: + qtClosedShort (แก้ใบลดจำนวนแบบ "ลูกค้าไม่เอาแล้ว" — usedQty ยังนับไว้ ยกเลิกใบต้องคืนด้วย)
+          const add = ((l.qtApplied !== undefined && l.qtApplied !== null) ? Number(l.qtApplied) : (Number(l.qty)||0)) + (Number(l.qtClosedShort) || 0);
           back[l.qtLineNo] = (back[l.qtLineNo] || 0) + add; });
         salesOrders = (s.salesOrders||[]).map(q => q.id !== si.quoteId ? q : ({
           ...q,
@@ -29547,6 +30097,73 @@ function reducer(s, a){
       };
     }
 
+    // 🆕 SI_EDIT (SI_EDIT_CONTRACT §5-§10): แก้ใบกำกับภาษีขายในใบเดิม (id/เลข/วันที่/ลูกค้าเดิม) — ลงผลเฉพาะส่วนต่าง · deterministic (id/เวลาจาก d.at)
+    //   ด่าน E4-E20 ปฏิเสธ = alert + คืน s ตัวเดิม · text/goods ไม่ต้องอนุมัติ · money ต้องผ่าน _approvalGate (edit_si) เว้น GM 👑 direct
+    case 'EDIT_SALES_INV': {
+      const d = a.data || {}, E = global.ERP;
+      const si = (s.salesInvoices || []).find(i => i && i.id === d.siId);
+      const fail = (m) => { alert('⛔ แก้ใบกำกับไม่ได้ — ' + m); return s; };
+      if(!si) return fail('ไม่พบใบกำกับ');
+      if(si.voided) return fail('ใบกำกับนี้ถูกยกเลิกแล้ว');
+      if(E.siIsMigrated(si)) return fail('ใบ ' + (si.siNumber || '') + ' เป็นประวัติขายที่นำเข้าจาก Ecount — แก้ในระบบนี้ไม่ได้');
+      const by = String(d.by || '');
+      const u = by ? (s.users || []).find(x => x && x.username === by && x.active !== false) : null;
+      if(!u || !(E.hasPerm(u, 'sales', 'si', 'edit') || E.isSuperUser(u))) return fail('ไม่มีสิทธิ์แก้ใบกำกับขาย (ผู้แก้: ' + (by || '-') + ')');
+      if(Number(d.baseRev) !== (Number(si.editRev) || 0)) return fail('ใบนี้ถูกแก้ไปแล้ว — เปิดใหม่');
+      const rc = String(d.reasonCode || ''), reason = String(d.reason || '').trim(), minLen = rc === 'other' ? 10 : 5;
+      if(!(E.SI_EDIT_REASONS || []).some(r => r.code === rc)) return fail('เลือกเหตุผลที่แก้');
+      if(reason.length < minLen) return fail('เหตุผลสั้นเกินไป (อย่างน้อย ' + minLen + ' ตัวอักษร)');
+      const at = Number(d.at) || 0;
+      if(!(at > 0)) return fail('ไม่มีเวลาที่แก้');
+      { const lk = _dateLockReason(s, si.invDate, 'แก้ใบกำกับขาย'); if(lk) return fail(lk); }
+      const P = E.planSiEdit(s, si, { draft:d.draft, quoteShortfall:d.quoteShortfall, qcWarnedAdd:d.qcWarnedAdd, qcFailedAdd:d.qcFailedAdd, at, by, noTiming:true });   // noTiming: คำเตือนวันที่ (S4) ใช้แค่พรีวิว
+      if(P.blocks.length) return fail(P.blocks.join('\n• '));
+      const ex = d.expect || {};
+      if(ex.cls !== P.cls || ['subtotal', 'vat', 'whtAmount', 'netTotal'].some(f => Math.abs((Number(ex[f]) || 0) - (Number(P.moneyAfter[f]) || 0)) > 0.01))
+        return fail('ยอดที่คำนวณได้ไม่ตรง — เปิดใหม่');
+      const gmDirect = d.direct === true && !!s.currentUser && s.currentUser.username === by && !!E.gmSelfUser(s, by);
+      const n = P.newSi, dNet = (Number(n.netTotal) || 0) - (Number(si.netTotal) || 0), amt = Number(Math.abs(dNet).toFixed(2));
+      let apBy = null;
+      if((P.cls === 'money' && !gmDirect) || d.approvalReqId){
+        const h0 = E.siEditDraftHash(d), base = Number(si.editRev) || 0;
+        const g = _approvalGate(s, d.approvalReqId, 'edit_si', { scope:'sales', amount:amt, isIncrease:dNet > 0 },
+          (q) => { const p = q.payload || {}; return q.entityId === si.id && Number(p.baseRev) === base && p.draftHash === h0 && Math.abs((Number(q.amount) || 0) - amt) < 0.01; },
+          si.usedApprovalIds);
+        if(g.deny) return fail((P.cls === 'money' && !d.approvalReqId ? 'ยอดเงิน/VAT เปลี่ยน — ' : '') + g.deny);
+        apBy = g.ap ? ((g.ap.steps || []).filter(x => x && x.decision === 'approved').map(x => x.decidedBy).pop() || null) : null;   // ผู้อนุมัติจริงจากคำขอ (ไม่เชื่อ payload)
+      }
+      return _siEditApply(s, si, d, P, { by, rc, reason, at, gmDirect, amt, apBy });
+    }
+    // 🆕 SI_EDIT E44: งานค้างหลังแก้ใบ — เก็บใบเดิมคืน (recall) / จ่ายเกิน (overpaid) / เปลี่ยนของ (goods) · ผู้กดตรวจแบบ fail-closed
+    case 'ACK_SI_EDIT_FOLLOWUP': {
+      const d = a.data || {}, E = global.ERP;
+      const si = (s.salesInvoices || []).find(i => i && i.id === d.siId);
+      if(!si) return s;
+      const F = { recall:'recall', overpaid:'overpaidAck', goods:'goodsAck' }[d.kind];
+      const OUT = ['returned', 'customer_letter', 'not_sent', 'lost', 'refunded', 'credit_next', 'ok', 'other'];
+      if(!F || !OUT.includes(d.outcome)){ alert('⛔ เลือกผลการจัดการ'); return s; }
+      const note = String(d.note || '').trim();
+      if(d.outcome === 'other' && note.length < 5){ alert('⛔ ผล "อื่น ๆ" ต้องระบุรายละเอียด'); return s; }
+      const at = Number(d.at) || 0, by = String(d.by || '');
+      const u = by ? (s.users || []).find(x => x && x.username === by && x.active !== false) : null;
+      const okU = !!u && (d.kind === 'overpaid'
+        ? (E.isSuperUser(u) || u.role === 'gm' || u.role === 'owner' || u.position === 'gm' || (u.position === 'manager' && (u.departmentIds || []).includes('accounting')))
+        : E.siPrintReviewer(u));
+      if(!okU || !(at > 0)){ alert('⛔ ไม่มีสิทธิ์ยืนยันงานค้างหลังแก้ใบนี้'); return s; }
+      const ei = (si.editLog || []).findIndex(e => e && Number(e.rev) === Number(d.rev));
+      const e = ei >= 0 ? si.editLog[ei] : null;
+      const open = e && (d.kind === 'recall' ? (e.recall && e.recall.status === 'pending') : d.kind === 'overpaid' ? ((Number(e.overpaid) || 0) > 0.01 && !e.overpaidAck) : ((e.cls === 'goods' || (e.priceChanged || []).length > 0) && !e.goodsAck));
+      if(!open) return s;
+      // 🆕 UAT ชุด 1 M1: เปลี่ยนของ/เก็บใบเดิมคืน ต้องเป็นคนที่สอง — ห้ามคนแก้ใบ/ผู้อนุมัติครั้งนั้นกดเอง (superuser = ได้ แต่ประทับ selfReview ให้เห็น)
+      const selfAck = d.kind !== 'overpaid' && E.siEditAckSelf(si, e.rev, by);
+      if(selfAck && !E.isSuperUser(u)){ alert('⛔ คนที่แก้ใบ/อนุมัติการแก้ครั้งนี้ กดยืนยันเองไม่ได้ — ให้ผู้จัดการคนอื่นตรวจ'); return s; }
+      const val = { outcome:d.outcome, note, by, at, ...(selfAck ? { selfReview:true } : {}) };
+      const ne = d.kind === 'recall' ? { ...e, recall:{ status:'done', ...val } } : { ...e, [F]:val };
+      const log = si.editLog.slice(); log[ei] = ne;
+      return { ...s, salesInvoices:(s.salesInvoices || []).map(i => i.id === si.id ? { ...i, editLog:log } : i),
+        auditLog:[...(s.auditLog || []), { id:'al_sieditack_' + si.id + '_' + e.rev + '_' + d.kind, ts:at, type:'sales_inv_edit_ack', by, entityType:'si', entityId:si.id, entityRef:si.siNumber,
+          summary:'ยืนยัน' + ({ recall:'เก็บใบเดิมคืน', overpaid:'จัดการเงินจ่ายเกิน', goods:'ตรวจการเปลี่ยนของ' }[d.kind]) + ' ' + (si.siNumber || '') + ' ครั้งที่ ' + e.rev + ' — ' + E.siEditAckLabel(d.kind, d.outcome) + (note ? ' (' + note + ')' : '') + (selfAck ? ' (ตรวจงานที่ตัวเองแก้/อนุมัติ — superuser)' : ''), outcome:d.outcome, ...(selfAck ? { selfReview:true } : {}) }] };   // verify 1: summary คำไทย · โค้ดดิบเก็บแยกใน outcome
+    }
     // 🆕 FIX-7 (SALES-C3): ยกเลิกบันทึกขายสาขา (sales-light) — คืน stock/FIFO + กลับ JE
     case 'VOID_SALES_LIGHT': {
       const { slId, id, reason, by } = a.data;
@@ -30064,6 +30681,246 @@ function ensureLocStock(stockByBranch, branchId){
 //   - simple branch (number)      → บวก/ลบเลขตรงๆ
 //   - multi branch ({_total,byLoc}) → อัพเดตทั้ง _total และ byLoc[locId]
 //   กัน bug object±number = NaN ที่ทำให้ยอดคงเหลือสาขา multi เพี้ยนตอนผลิต/ตัดวัตถุดิบ
+// 🆕 SI_EDIT: ลงผลการแก้ใบ (หลังผ่านด่านทุกข้อ) — JE ส่วนต่างใบเดียว (E29) · ใบเสนอราคา (E33) · ประวัติ/audit (E43) · ไม่มี Date.now/new Date/getToday/Math.random
+function _siEditApply(s, si, d, P, c){
+  const { by, rc, reason, at, gmDirect, amt, apBy } = c, atK = at.toString(36), rev = (Number(si.editRev) || 0) + 1, no = si.siNumber || '';
+  const n = P.newSi, st = P.stock || {}, f2 = (v) => (Number(v) || 0).toFixed(2);
+  let journalEntries = s.journalEntries, seq = s.seq, je = null;
+  if(P.je && P.cls !== 'text'){
+    const seqJe = ((s.seq && s.seq.je) || 0) + 1, jd = String(si.invDate || '');
+    je = { id:'je_siedit_' + si.id + '_' + atK, jeNumber:'JE-' + jd.slice(0, 4) + '-' + jd.slice(5, 7) + '-' + String(seqJe).padStart(4, '0'),
+      date:si.invDate, description:'แก้ใบกำกับ ' + no + ' ครั้งที่ ' + rev + ' — ' + reason,
+      source:'sales_inv', sourceId:si.id, sourceRef:no, refType:'si_edit', editRev:rev, branchId:si.branch, status:'posted',
+      createdBy:by, postedBy:by, createdAt:at, postedAt:at,
+      lines:P.je.lines.map(({ role, ...l }) => l), totalDebit:P.je.totalDebit, totalCredit:P.je.totalCredit };
+    journalEntries = [...(s.journalEntries || []), je];
+    seq = { ...(s.seq || {}), je:seqJe };
+  }
+  let salesOrders = s.salesOrders;
+  const qRows = (P.quote && P.quote.rows) || [];
+  if(qRows.some(r => Math.abs(r.usedDelta) > 1e-9)){
+    const dl = {}; qRows.forEach(r => { if(Math.abs(r.usedDelta) > 1e-9) dl[String(r.qtLineNo)] = r.usedDelta; });
+    salesOrders = (s.salesOrders || []).map(q => q && q.id === si.quoteId ? { ...q, lines:(q.lines || []).map(l => dl[String(l.lineNo)] !== undefined
+      ? { ...l, usedQty:Math.max(0, (Number(l.usedQty) || 0) + dl[String(l.lineNo)]) } : l) } : q);
+  }
+  const printedBefore = (Number(si.printCount) || 0) > 0 || !!si.originalPrintedAt || ((si.replacements || []).length > 0);
+  const paid = Number(si.paidAmount) || 0;
+  const entry = { rev, at, by, approvedBy:apBy || (gmDirect ? by : null), approvalReqId:d.approvalReqId || null, direct:gmDirect || undefined, cls:P.cls,
+    reasonCode:rc, reason, sentBefore:!!d.sentBefore, printedBefore, paperChanged:!!P.paperChanged, afterFulfilled:si.fulfillmentStatus === 'fulfilled',
+    before:{ lines:si.lines || [], textLines:si.textLines || [], subtotal:si.subtotal, vat:si.vat, total:si.total, whtRate:si.whtRate, whtAmount:si.whtAmount,
+      netTotal:si.netTotal, cogsTotal:si.cogsTotal, note:si.note, dueDate:si.dueDate, kitShowChildren:si.kitShowChildren == null ? null : si.kitShowChildren },
+    after:{ subtotal:n.subtotal, vat:n.vat, total:n.total, whtAmount:n.whtAmount, netTotal:n.netTotal, cogsTotal:n.cogsTotal },
+    dStock:P.dStock || [], quote:qRows.filter(r => r.mode !== 'same').map(r => ({ qtLineNo:r.qtLineNo, from:r.from, to:r.to, mode:r.mode })),
+    jeId:je ? je.id : null, jeNumber:je ? je.jeNumber : null, paidAmount:paid, overpaid:Number(n.overpaidAmount) || 0,
+    recall:(P.paperChanged && (printedBefore || d.sentBefore)) ? { status:'pending' } : null, overpaidAck:null, goodsAck:null,
+    ...((P.priceChanged || []).length ? { priceChanged:P.priceChanged } : {}) };   // verify 2: ราคาต่อหน่วยเปลี่ยน ยอดเท่าเดิม → งานค้างผู้จัดการตรวจ
+  const lines = (n.lines || []).map(l => ({ ...l }));
+  const newSi = { ...n, lines, editRev:rev, editedAt:at, editedBy:by, editLog:[...(si.editLog || []), entry],
+    ...(d.approvalReqId ? { usedApprovalIds:[...(si.usedApprovalIds || []), d.approvalReqId] } : {}) };
+  const CL = { text:'แก้รายละเอียด', goods:'เปลี่ยนของ ยอดเท่าเดิม', money:'ยอดเงินเปลี่ยน' };
+  const rq = (P.returns || []).reduce((t, x) => t + x.qty, 0), cq = (P.cuts || []).reduce((t, x) => t + x.qty, 0);
+  const summary = 'แก้ใบกำกับ ' + no + ' ครั้งที่ ' + rev + ' (' + CL[P.cls] + ') · สุทธิ ' + f2(si.netTotal) + ' → ' + f2(n.netTotal)
+    + ' · VAT ' + f2(si.vat) + ' → ' + f2(n.vat) + (rq || cq ? ' · สต๊อกคืน ' + rq + ' / ตัด ' + cq : '') + ' · เหตุผล: ' + reason
+    + (entry.approvedBy ? ' · ผู้อนุมัติ: ' + entry.approvedBy + (gmDirect ? ' (👑 ทำเอง)' : '') : '') + (P.warns.length ? ' · ' + P.warns.join(' · ') : '');
+  const out = { ...s, salesInvoices:(s.salesInvoices || []).map(i => i && i.id === si.id ? newSi : i), journalEntries, seq, salesOrders,
+    auditLog:[...(s.auditLog || []), { id:'al_siedit_' + si.id + '_' + at, ts:at, type:'sales_inv_edit', by, entityType:'si', entityId:si.id, entityRef:no,
+      approvalReqId:d.approvalReqId || null, amount:amt, editRev:rev, cls:P.cls, summary }] };
+  if(st.items) out.items = st.items;
+  if(st.fifoLayers) out.fifoLayers = st.fifoLayers;
+  if(st.movements) out.movements = st.movements;
+  if((st.lotAdds || []).length) out.lotGenealogy = [...(s.lotGenealogy || []), ...st.lotAdds];
+  if(seq === s.seq) out.seq = s.seq;
+  return out;
+}
+// 🆕 SI_EDIT E22-E28a: ผลต่อสต๊อก/FIFO/movement/ล็อต ของการแก้ใบกำกับ (pure · ทำบนสำเนา · id คงที่จาก at)
+//   สินค้าที่จำนวนรวมไม่เปลี่ยน = ไม่แตะ items/fifoLayers/movements/lotGenealogy (แค่โอนชิ้นต้นทุนเดิมให้บรรทัดใหม่)
+//   คืน { lines, items|null, fifoLayers|null, movements|null, lotAdds, dStock, returns, cuts }
+function _siEditStock(s, si, n, opt){
+  const E = global.ERP, o = opt || {}, at = Number(o.at) || 0, atK = at.toString(36), rev = Number(o.rev) || 1, no = si.siNumber || '', by = o.by || '';
+  const changed = new Set(o.stockItems || []);
+  const br = (s.branches || []).find(b => b && b.id === si.branch);
+  const multi = !!(br && br.warehouseMode !== 'simple' && (br.locations || []).length);
+  const itemOf = (id) => (s.items || []).find(i => i && i.id === id);
+  const bqOf = (l) => (l.baseQty != null && Number.isFinite(Number(l.baseQty))) ? Number(l.baseQty) : E.toBaseQty(itemOf(l.itemId), Number(l.qty) || 0, l.unit);
+  const old = si.lines || [];
+  // 🆕 UAT ชุด 1 S2: ใบเก่าไม่มีคลังในชิ้น/srcParts บนสาขาหลายคลัง → คืนเข้าคลังที่ใบส่งออก (fromLocId) → คลังส่งของตั้งต้น (กฎเดียวกับ _siEditCut) · ไม่ใช่ byLoc.default
+  const fbLoc = (itemId) => multi ? (si.fromLocId || ((E.defaultShipSourceLoc && E.defaultShipSourceLoc(s, si.branch, itemOf(itemId))) || {}).id || null) : null;
+  // E22 กองต้นทุนเดิม: pieces → srcParts (สัดส่วน · ต้นทุนแบบ VOID) → ชิ้นเดียว
+  const piecesOf = (l) => {
+    const bq = bqOf(l), cogs = Number(l.cogs) || 0;
+    if(Array.isArray(l.pieces) && l.pieces.length) return l.pieces.map(p => ({ ...p, qty:Number(p.qty) || 0, unitCost:Number(p.unitCost) || 0 }));
+    if(!(bq > 0)) return [];
+    const sp = (Array.isArray(l.srcParts) ? l.srcParts : []).filter(p => p && Number(p.qty) > 0), sum = sp.reduce((a, p) => a + Number(p.qty), 0);
+    if(sp.length && sum > 0){
+      const hasPc = sp.every(p => p.cost != null && Number.isFinite(Number(p.cost)));
+      return sp.map(p => { const q = bq * Number(p.qty) / sum, c = hasPc ? Number(p.cost) * bq / sum : cogs * q / bq;
+        return { layerId:null, lot:null, expiryDate:'', layerDate:null, locId:p.locId || fbLoc(l.itemId), qty:q, unitCost:q > 0 ? c / q : 0, neg:!!p.neg }; });
+    }
+    return [{ layerId:null, lot:null, expiryDate:'', layerDate:null, locId:fbLoc(l.itemId), qty:bq, unitCost:bq > 0 ? cogs / bq : 0, neg:false }];
+  };
+  const piles = {};
+  old.forEach(l => { if(!l || l.lineKind === 'kit' || !l.itemId) return; (piles[l.itemId] = piles[l.itemId] || []).push(...piecesOf(l)); });
+  // ล็อตของใบเก่า (dispatch ref = เลขใบ · ยอดสุทธิต่อล็อต · ใหม่ → เก่า)
+  const lotPool = (itemId) => {
+    const m = new Map();
+    (s.lotGenealogy || []).forEach((g, i) => { if(!g || g.kind !== 'dispatch' || g.ref !== no || g.fgItemId !== itemId || !g.fgLot || g.fgLot === '-' || g.fgLot === 'NEG') return;
+      const e = m.get(g.fgLot) || { lot:g.fgLot, qty:0, idx:-1 }; e.qty += Number(g.qty) || 0; if((Number(g.qty) || 0) > 0) e.idx = i; m.set(g.fgLot, e); });
+    return Array.from(m.values()).filter(e => e.qty > 1e-9).sort((a, b) => b.idx - a.idx);
+  };
+  const layerOf = (itemId, lot) => (s.fifoLayers || []).find(L => L && L.itemId === itemId && L.branch === si.branch && L.lot === lot && !L.isNegative);
+  const stockD = [], retLayers = [], lotAdds = [], returns = [], cuts = [], dStock = [];
+  let k = 0;
+  const pilesKept = {};
+  Array.from(changed).forEach(itemId => {
+    const pile = piles[itemId] || [], O = pile.reduce((a, p) => a + p.qty, 0);
+    const N = (n.lines || []).reduce((a, l) => a + (l && l.lineKind !== 'kit' && l.itemId === itemId ? E.toBaseQty(itemOf(itemId), Number(l.qty) || 0, l.unit) : 0), 0);
+    dStock.push({ itemId, from:O, to:N });
+    let dec = Math.max(0, O - N);
+    const take = pile.map(() => 0);
+    const order = pile.map((p, i) => i).reverse(), negFirst = order.filter(i => pile[i].neg).concat(order.filter(i => !pile[i].neg));
+    const pool = lotPool(itemId);
+    for(const i of negFirst){
+      if(dec <= 1e-9) break;
+      const q = Math.min(pile[i].qty, dec); take[i] = q; dec -= q;
+      const p = pile[i];
+      // ชิ้นมีล็อตของตัวเอง/ชิ้นติดลบ = ก้อนเดียว · ไม่มีล็อต = แตกตามล็อตที่จ่ายจริง (ใหม่ → เก่า)
+      const segs = [];
+      if(p.lot || p.neg) segs.push({ lot:p.neg ? 'EDITSI-' + no : p.lot, q, real:!p.neg && p.lot !== 'NEG' });
+      else { let r = q; for(const e of pool){ if(r <= 1e-9) break; const t = Math.min(e.qty, r); if(t <= 1e-9) continue; segs.push({ lot:e.lot, q:t, real:true }); e.qty -= t; r -= t; }
+        if(r > 1e-9) segs.push({ lot:'EDITSI-' + no, q:r, real:false }); }
+      segs.forEach(sg => {
+        const L0 = sg.real ? layerOf(itemId, sg.lot) : null, qq = Number(sg.q.toFixed(6));
+        const date = p.layerDate || (L0 && L0.date) || si.invDate;
+        // 🆕 UAT ชุด 1 S3: ล็อตไม่ทราบ (EDITSI-) ไม่มีวันหมดอายุ → ประมาณ = วันที่ใบ + อายุสินค้า (ถ้าตั้งไว้) · ติดธง lotUnknown ให้คนตรวจเอง
+        let exp = p.expiryDate || (L0 && L0.expiryDate) || '', expEst = false;
+        if(!sg.real && !exp){ exp = _siEditEstExpiry(si.invDate, itemOf(itemId)); expEst = !!exp; }
+        stockD.push({ itemId, locId:p.locId || null, q:qq });
+        retLayers.push({ id:'fl_siedit_' + si.id + '_' + atK + '_' + (k++), itemId, branch:si.branch, locId:p.locId || null, qty:qq, remaining:qq,
+          unitCost:p.unitCost, totalCost:qq * p.unitCost, date, lot:sg.lot, ...(exp ? { expiryDate:exp } : {}), ...(expEst ? { expiryEstimated:true } : {}),
+          // 🆕 UAT ชุด 2 S5: ผูกกลับใบรับของเดิม (grRef/grLineIdx/grLot จาก L0) → ADJUST_INV_PRICE ภายหลังปรับต้นทุนของที่คืนเข้าสต๊อก ไม่ตกไป COGS
+          ...(L0 && L0.grRef ? { grRef:L0.grRef } : {}), ...(L0 && L0.grLineIdx != null ? { grLineIdx:L0.grLineIdx } : {}), ...(L0 && L0.grLot ? { grLot:L0.grLot } : {}),
+          ...(!sg.real ? { lotUnknown:true } : {}), note:'คืนจากแก้ใบกำกับ ' + no + ' ครั้งที่ ' + rev + (!sg.real ? ' (ไม่ทราบล็อต — ตรวจวันหมดอายุเอง)' : '') });
+        returns.push({ itemId, locId:p.locId || null, qty:qq, unitCost:p.unitCost, lot:sg.lot, neg:!!p.neg, ...(!sg.real ? { lotUnknown:true, expiryDate:exp || '', expiryEstimated:expEst } : {}) });
+        if(sg.real) lotAdds.push({ kind:'dispatch', fgItemId:itemId, fgLot:sg.lot, qty:-qq, reversal:true, editRev:rev, ref:no, date:si.invDate, channel:'sale',
+          branch:si.branch, destination:si.customerName || 'ลูกค้าทั่วไป', by, at });
+      });
+    }
+    pilesKept[itemId] = pile.map((p, i) => ({ ...p, qty:p.qty - take[i] })).filter(p => p.qty > 1e-9);
+  });
+  return _siEditStock2(s, si, n, { E, at, atK, rev, no, by, changed, multi, itemOf, bqOf, old, piles, pilesKept, stockD, retLayers, lotAdds, returns, cuts, dStock, k });
+}
+function _siEditStock2(s, si, n, c){
+  const { E, at, atK, rev, no, by, changed, multi, itemOf, bqOf, old, piles, pilesKept, stockD, retLayers, lotAdds, returns, cuts, dStock } = c;
+  let k = c.k;
+  const r2 = (v) => Number((Number(v) || 0).toFixed(2)), r6 = (v) => Number((Number(v) || 0).toFixed(6));
+  let W = null;
+  if(changed.size){   // E24: คืนเข้า _netIncomingLayers ทุกประเภทสาขา (หักล้าง NEG) · วันที่ล้าง NEG = วันที่ใบ (ห้าม new Date ใน reducer)
+    const base = s.fifoLayers || [];
+    W = _netIncomingLayers(base, retLayers);
+    for(let i = 0; i < base.length; i++) if(base[i] && !base[i].nettedAt && W[i] && W[i].nettedAt) W[i].nettedAt = String(si.invDate || '').slice(0, 10);
+  }
+  const lines = (n.lines || []).map(l => { const x = { ...l }; if(l._src != null) Object.defineProperty(x, '_src', { value:l._src, enumerable:false, writable:true }); return x; });
+  // สินค้าที่ไม่เปลี่ยนและบรรทัดจับคู่ 1:1 กับบรรทัดเดิม (srcLineNo + จำนวนเท่าเดิม) = คงฟิลด์ต้นทุนเดิมทุกตัว
+  const byItem = {}, verb = new Set();
+  lines.forEach((l, i) => { if(l.lineKind === 'kit' || !l.itemId) return; (byItem[l.itemId] = byItem[l.itemId] || []).push(i); });
+  Object.keys(byItem).forEach(id => {
+    if(changed.has(id)) return;
+    const used = new Set();
+    const okAll = byItem[id].every(i => { const l = lines[i], j = l._src; if(j == null || used.has(j)) return false; const ol = old[j]; if(!ol || ol.itemId !== id) return false; used.add(j);
+      return Math.abs(bqOf(ol) - E.toBaseQty(itemOf(id), Number(l.qty) || 0, l.unit)) < 1e-9; });
+    if(okAll && used.size === old.filter(ol => ol && ol.lineKind !== 'kit' && ol.itemId === id).length) verb.add(id);
+  });
+  const COST_F = ['baseQty', 'cogs', 'srcParts', 'pieces'];
+  lines.forEach(l => {
+    COST_F.forEach(f => { delete l[f]; }); delete l.kitCogs;
+    if(l.lineKind === 'kit'){ l.baseQty = 0; return; }
+    if(!l.itemId) return;
+    const id = l.itemId;
+    if(verb.has(id)){ const ol = old[l._src]; COST_F.forEach(f => { if(ol[f] !== undefined) l[f] = ol[f]; }); return; }
+    const it = itemOf(id), b = E.toBaseQty(it, Number(l.qty) || 0, l.unit);
+    const kept = pilesKept[id] || (pilesKept[id] = (piles[id] || []).map(p => ({ ...p })));
+    const mine = []; let r = b;
+    while(r > 1e-9 && kept.length){ const p = kept[0], q = Math.min(p.qty, r); mine.push({ ...p, qty:q }); p.qty -= q; r -= q; if(p.qty <= 1e-9) kept.shift(); }
+    if(r > 1e-6 && W) k = _siEditCut(s, si, l, it, r6(r), W, mine, { E, at, atK, rev, no, by, multi, stockD, lotAdds, cuts, k });
+    l.pieces = mine.map(p => ({ layerId:p.layerId || null, lot:p.lot || null, expiryDate:p.expiryDate || '', layerDate:p.layerDate || null, locId:p.locId || null, qty:r6(p.qty), unitCost:Number(p.unitCost) || 0, neg:!!p.neg }));
+    l.baseQty = b;
+    l.cogs = r2(mine.reduce((t, p) => t + p.qty * (Number(p.unitCost) || 0), 0));
+    if(multi){ const g = new Map(); mine.forEach(p => { const key = (p.locId || '') + '|' + (p.neg ? 1 : 0); const e = g.get(key) || { locId:p.locId || null, qty:0, cost:0, neg:p.neg || undefined }; e.qty += p.qty; e.cost += p.qty * (Number(p.unitCost) || 0); g.set(key, e); });
+      l.srcParts = Array.from(g.values()).map(e => ({ locId:e.locId, qty:r6(e.qty), cost:Number(e.cost.toFixed(4)), neg:e.neg })); }
+  });
+  // E26 แถวแม่ชุด: kitCogs = cogs = Σ ลูก
+  lines.forEach((l, i) => { if(l.lineKind !== 'kit') return; let t = 0, any = false;
+    for(let j = i + 1; j < lines.length && lines[j].lineKind === 'kit_child'; j++){ any = true; t += Number(lines[j].cogs) || 0; }
+    if(any){ l.kitCogs = r2(t); l.cogs = l.kitCogs; } });
+  // E27 movement เฉพาะสินค้าที่เปลี่ยน: mark sale_out เดิม reversed + sale_void คู่ (วันที่/คลังเดิม) + sale_out ใหม่ตามคลัง
+  let movements = null;
+  if(changed.size){
+    const add = [];
+    movements = (s.movements || []).map(m => { if(m && m.type === 'sale_out' && m.ref === no && changed.has(m.itemId) && !m.reversed){
+      add.push({ id:'mv_sieditv_' + si.id + '_' + atK + '_' + (k++), type:'sale_void', itemId:m.itemId, qty:-(Number(m.qty) || 0), branch:m.branch, locId:m.locId || null,
+        date:m.date, ref:no, note:'แก้ใบกำกับ ' + no + ' ครั้งที่ ' + rev + ' — กลับรายการขายเดิม', by });
+      return { ...m, reversed:true }; } return m; });
+    lines.forEach(l => {
+      if(l.lineKind === 'kit' || !l.itemId || !changed.has(l.itemId)) return;
+      const note = 'ขาย ' + (si.customerName || '') + (l.lineKind === 'kit_child' ? ' (ในชุด ' + ((lines.find(x => x.lineKind === 'kit' && x.kitId === l.kitId) || {}).itemName || '') + ')' : '');
+      const parts = multi ? Array.from((l.srcParts || []).reduce((m, p) => m.set(p.locId || null, (m.get(p.locId || null) || 0) + p.qty), new Map()).entries()) : [[undefined, l.baseQty]];
+      parts.forEach(([loc, q]) => add.push({ id:'mv_siedit_' + si.id + '_' + atK + '_' + (k++), type:'sale_out', itemId:l.itemId, qty:-(parts.length === 1 ? l.baseQty : q),
+        branch:si.branch, ...(loc !== undefined ? { locId:loc || null } : {}), date:si.invDate, ref:no, note, by }));
+    });
+    movements = movements.concat(add);
+  }
+  let items = null;
+  if(stockD.length){
+    const g = {}; stockD.forEach(d => { (g[d.itemId] = g[d.itemId] || []).push(d); });
+    items = (s.items || []).map(it => it && g[it.id] ? { ...it, stockByBranch:g[it.id].reduce((sb, d) => adjustBranchStock(sb, si.branch, d.locId, d.q), it.stockByBranch) } : it);
+  }
+  return { lines, items, fifoLayers:W, movements, lotAdds, dStock, returns, cuts };
+}
+// 🆕 UAT ชุด 1 S3: วันหมดอายุประมาณของล็อตคืนที่ไม่ทราบล็อต = วันที่ใบ + item.shelfLife วัน (ไม่ตั้ง = '') · pure (UTC)
+function _siEditEstExpiry(invDate, item){
+  const sl = Number(item && item.shelfLife) || 0, d0 = String(invDate || '').slice(0, 10);
+  if(!(sl > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(d0)) return '';
+  const t = Date.UTC(+d0.slice(0, 4), +d0.slice(5, 7) - 1, +d0.slice(8, 10)) + Math.round(sl) * 86400000;
+  return new Date(t).toISOString().slice(0, 10);
+}
+// E25 ตัดเพิ่ม: สาขาหลายคลัง = planLocDeduct (แบบ planSrc ของฟอร์ม) · สาขาธรรมดา = deductFIFO · ขาด = NEG layer id คงที่ ลงวันที่ใบ
+function _siEditCut(s, si, l, it, q, W, mine, c){
+  const { E, at, atK, rev, no, by, multi, stockD, lotAdds, cuts } = c;
+  let k = c.k;
+  const id = l.itemId, parts = [];
+  if(multi){
+    const loc = si.fromLocId || ((E.defaultShipSourceLoc && E.defaultShipSourceLoc(s, si.branch, it)) || {}).id || null;
+    const pl = E.planLocDeduct(s, W, si.branch, loc, id, q, { spill:!si.fromLocId, sellOnly:!!(E.isSellOnlyItem && E.isSellOnlyItem(it)) });
+    pl.parts.forEach(pp => parts.push(pp.neg ? { neg:true, locId:pp.locId || null, qty:pp.qty, unitCost:pp.qty > 0 ? pp.cost / pp.qty : 0, estimated:pp.estimated }
+      : { breakdown:pp.breakdown || [], locId:pp.locId || null }));
+  } else {
+    const rr = deductFIFO(W, id, q, si.branch);
+    parts.push({ breakdown:rr.breakdown || [], locId:null });
+    if(rr.shortage > 1e-9){ const nc = (E.negUnitCost && E.negUnitCost(s, id, si.branch)) || {};
+      parts.push({ neg:true, locId:null, qty:Number(rr.shortage.toFixed(6)), unitCost:Number(nc.unitCost) || 0, estimated:nc.estimated }); }
+  }
+  parts.forEach(pp => {
+    if(pp.neg){
+      const nid = 'fl_negsie_' + si.id + '_' + atK + '_' + (k++);
+      W.push({ id:nid, itemId:id, branch:si.branch, locId:pp.locId, qty:-pp.qty, remaining:-pp.qty, unitCost:pp.unitCost, totalCost:-pp.qty * pp.unitCost,
+        ...(pp.estimated ? { estimated:true } : {}), date:si.invDate, lot:'NEG', isNegative:true, note:'ติดลบ: แก้ใบกำกับ ' + no + ' ครั้งที่ ' + rev });
+      mine.push({ layerId:nid, lot:'NEG', expiryDate:'', layerDate:si.invDate, locId:pp.locId, qty:pp.qty, unitCost:pp.unitCost, neg:true });
+      cuts.push({ itemId:id, locId:pp.locId, qty:pp.qty, unitCost:pp.unitCost, lot:'NEG', neg:true });
+      stockD.push({ itemId:id, locId:pp.locId, q:-pp.qty });
+      return;
+    }
+    pp.breakdown.forEach(bk => {
+      if(bk.neg) return;
+      const loc = multi ? (bk.locId || null) : null;
+      mine.push({ layerId:bk.layerId || null, lot:bk.lot, expiryDate:bk.expiryDate || '', layerDate:bk.layerDate || null, locId:loc, qty:bk.qty, unitCost:bk.unitCost, neg:false });
+      cuts.push({ itemId:id, locId:loc, qty:bk.qty, unitCost:bk.unitCost, lot:bk.lot, neg:false, layerId:bk.layerId || null });   // layerId: UAT ชุด 1 S1 ตรวจ QC ล็อตที่ตัดจริง
+      stockD.push({ itemId:id, locId:loc, q:-bk.qty });
+      lotAdds.push({ kind:'dispatch', fgItemId:id, fgLot:bk.lot || '-', qty:bk.qty, branch:si.branch, date:si.invDate, channel:'sale', ref:no,
+        destination:si.customerName || 'ลูกค้าทั่วไป', by, at, editRev:rev, ...(l.kitId ? { kitOf:l.kitId } : {}) });
+    });
+  });
+  return k;
+}
 function adjustBranchStock(stockByBranch, branch, locId, delta){
   const sb = stockByBranch?.[branch];
   if(sb && typeof sb === 'object'){
@@ -30194,7 +31051,8 @@ function deductFIFO(layers, itemId, qty, branch, locId, lot){
     l.remaining -= take;
     remaining   -= take;
     cost        += take * (l.unitCost||0);
-    const _bk = { lot:l.lot||l.id, qty:take, unitCost:l.unitCost||0, locId:l.locId||null, expiryDate:l.expiryDate||'', subtotal:take*(l.unitCost||0) };
+    const _bk = { lot:l.lot||l.id, qty:take, unitCost:l.unitCost||0, locId:l.locId||null, expiryDate:l.expiryDate||'', subtotal:take*(l.unitCost||0),
+      layerId:l.id, layerDate:l.date };   // 🆕 SI_EDIT E25: เพิ่มอย่างเดียว — แก้ใบกำกับเก็บชิ้นที่ตัด (คืนที่ layer/วันที่เดิมได้)
     // 🆕 เลขออเดอร์ผลิตติดไปกับก้อน (ใบย้ายภายใน/ส่งมอบ FG → layer ปลายทางยัง join QC ได้)
     const _pr = l.prodRef || (l.sourceProduction ? l.sourceRef : null);
     if(_pr) _bk.prodRef = _pr;
@@ -31097,7 +31955,7 @@ const ACTION_MERGE = Object.freeze({
   UPDATE_RTV: { kind:'replace', coll:'returns', id: d => d && d.id },
   UPDATE_SALES_BILLING: { kind:'replace', coll:'salesBillings', id: d => d && d.id },
   UPDATE_SALES_INV: { kind:'replace', coll:'salesInvoices', id: d => d && d.id,
-    cmpOmit:['printLog','replacements','printReview','printStats','printCount','lastPrintedAt','lastPrintedBy','originalPrintedAt','originalPrintedBy','kitShowChildren'] },   // verify 1 (si-print-2): พิมพ์/ใบแทนจากอีกเครื่องไม่ทำให้รับชำระชน (_siKeepPrint คงฟิลด์พิมพ์ปัจจุบันอยู่แล้ว)
+    cmpOmit:['printLog','replacements','printReview','printStats','printCount','lastPrintedAt','lastPrintedBy','originalPrintedAt','originalPrintedBy','kitShowChildren','origPrintedRev','origRevPrintedAt','origRevPrintedBy'] },   // verify 1 (si-print-2): พิมพ์/ใบแทนจากอีกเครื่องไม่ทำให้รับชำระชน (_siKeepPrint คงฟิลด์พิมพ์ปัจจุบันอยู่แล้ว)
   SI_PRINT_MARK: { kind:'delta' },   // 🆕 SP12: นับต้นฉบับ/สำเนาจากใบปัจจุบัน (ต่อท้าย printLog)
   ACK_SI_PRINT_REVIEW: { kind:'delta' },   // 🆕 SP14: ผู้จัดการตรวจการพิมพ์ (clamp sig กับใบปัจจุบัน)
   ISSUE_SI_REPLACEMENT: { kind:'delta' },   // 🆕 SP13: ใบแทนใบกำกับ ต่อท้าย replacements (seq จากใบปัจจุบัน)
@@ -31130,6 +31988,8 @@ const ACTION_MERGE = Object.freeze({
   VOID_QUICK_ISSUE: { kind:'delta' },
   VOID_SALES_BILLING: { kind:'delta' },
   VOID_SALES_INV: { kind:'delta' },
+  EDIT_SALES_INV: { kind:'delta' },         // 🆕 SI_EDIT §13: reducer คิดใหม่บนใบสด (baseRev/expect/อนุมัติ) — แพ้ = OPQ
+  ACK_SI_EDIT_FOLLOWUP: { kind:'delta' },   // 🆕 SI_EDIT E44
   VOID_SALES_LIGHT: { kind:'delta' },
   VOID_SALES_PAY: { kind:'delta' },
   VOID_SUP_MEMO: { kind:'delta' },
@@ -31194,13 +32054,15 @@ const ACTION_READS = Object.freeze({
   ADD_SALES_LIGHT: ['salesLight'],
   VOID_SALES_LIGHT: ['auditLog','fifoLayers','items','journalEntries','movements','salesLight'],
   ADD_SALES_INV: ['auditLog','salesInvoices','vatFilings'],   // 🆕 DOC-NUMBER UAT S1: ด่านงวด ภ.พ.30 (settings = หมวดคุม) · verify 1: ต่อท้าย si_filed_period
-  ADD_SALES_PAY: ['salesPayments'],
+  ADD_SALES_PAY: ['salesInvoices','salesPayments'],   // 🆕 SI_EDIT F3: ด่านใบยกเลิก/ไม่พบใบ (อ่านใบ)
   SI_PRINT_MARK: ['salesInvoices'],   // 🆕 SP12
   ACK_SI_PRINT_REVIEW: ['auditLog','salesInvoices'],   // 🆕 SP14 (ผู้ตรวจหาจาก users = หมวดคุม · audit id ตายตัว al_si_prv_<si>_<at>)
   ISSUE_SI_REPLACEMENT: ['salesInvoices'],   // 🆕 SP13 (สิทธิ์อ่าน users = หมวดคุมอยู่แล้ว)
   LINK_SALES_INV_CUSTOMER: ['auditLog','customers','salesInvoices'],   // 🆕 UAT S1
   UPDATE_SALES_INV: ['salesInvoices'],   // 🆕 SALES_HISTORY: ใบนำเข้า Ecount คงฟิลด์เอกสารเดิม (อ่านใบเดิม)
-  VOID_SALES_INV: ['auditLog','fifoLayers','items','journalEntries','movements','salesBillings','salesInvoices','salesOrders'],   // 🆕 SALES_HISTORY: แถวใหม่ (ด่านใบนำเข้า Ecount)
+  EDIT_SALES_INV: ['approvalRequests','auditLog','boms','fifoLayers','items','journalEntries','lotGenealogy','movements','productionOrders','qcTemplates','salesBillings','salesInvoices','salesOrders','vatFilings'],   // 🆕 SI_EDIT §13 (boms = negUnitCost ของส่วนที่ติดลบ) · UAT ชุด 1 S1: productionOrders/qcTemplates = QC ล็อตที่ตัดจริง
+  ACK_SI_EDIT_FOLLOWUP: ['auditLog','salesInvoices'],   // 🆕 SI_EDIT E44
+  VOID_SALES_INV: ['auditLog','fifoLayers','items','journalEntries','movements','salesBillings','salesInvoices','salesOrders','vatFilings'],   // 🆕 SI_EDIT F1: + vatFilings (siDateGuard)   // 🆕 SALES_HISTORY: แถวใหม่ (ด่านใบนำเข้า Ecount)
   ADD_SO: ['salesOrders'], UPDATE_SO: ['salesOrders'],
   ADD_PROD_ORDER: ['productionOrders'], UPDATE_PROD_ORDER: ['productionOrders'], ADD_QC_INSPECTION: ['productionOrders'],
   SPLIT_PROD_ORDER_BATCHES: ['auditLog','boms','fifoLayers','items','productionOrders','weighLogs'],   // 🆕 BATCH-SPLIT ขั้น C: สูตร + ต้นทุน FIFO ของยอดคาดการณ์ · UAT รอบ 2: ผลชั่งทั้งใบแล้ว = ไม่แบ่ง
@@ -31379,7 +32241,7 @@ function reducerTracked(s, a){
 // ==================== EXPORT ====================
 global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
-  INIT_STATE, reducer, svcPoDeny: _svcPoDeny, deductFIFO, deductFromStore, ADD_REPLAY_SAFE, ADD_DUP_TYPES: Object.freeze(Object.keys(_ADD_DUP)), isDupAdd: _isDupAdd, grVoidDeny: _grVoidDeny, payTagName: _payTagName, docTagSame: _docTagSame, ACTION_MERGE, DOC_NUMBERS, reducerTracked,
+  INIT_STATE, reducer, svcPoDeny: _svcPoDeny, deductFIFO, deductFromStore, siEditStock: _siEditStock, ADD_REPLAY_SAFE, ADD_DUP_TYPES: Object.freeze(Object.keys(_ADD_DUP)), isDupAdd: _isDupAdd, grVoidDeny: _grVoidDeny, payTagName: _payTagName, docTagSame: _docTagSame, ACTION_MERGE, DOC_NUMBERS, reducerTracked,
   ACTION_READS, MERGE_GUARD_KEYS, capLogsForSave: _capLogsForSave,   // 🆕 คลื่น 3 (WAVE3_CONTRACT §B4.1)
   APPEND_KEYS, SEQ_BUMP_KEYS, SEQ_BUMPS, APPEND_ONLY_READS, PATCH_READS, CAP_LIMITS: Object.freeze({ auditLog:AUDIT_LOG_CAP, weighLogs:WEIGH_LOG_CAP }),   // 🌊 คลื่น 4 (WAVE4_CONTRACT §B4.1)
   PUSH_LINE_REASONS,   // 🆕 TR_PUSH_FAV (A2)
@@ -33717,17 +34579,24 @@ function approvalEditDiff(state, req){
   if(p.newPo){ kind = 'po'; cur = po(req.entityId || p.newPo.id); nxt = p.newPo; defs = _APDIFF_PO_HDR; }
   else if(Array.isArray(p.newLines) && (req.entityType === 'po' || p.poId)){ kind = 'po'; cur = po(req.entityId || p.poId); nxt = cur ? { ...cur, lines:p.newLines, total:sumL(p.newLines) } : null; defs = []; }
   else if(p.fields && typeof p.fields === 'object' && (req.entityType === 'po' || req.action === 'edit_po_soft')){ kind = 'po'; cur = po(req.entityId || p.poId); nxt = cur ? { ...cur, ...p.fields } : null; defs = _APDIFF_PO_HDR; }
+  else if(req.action === 'edit_si' && p.edit && p.edit.draft){   // 🆕 SI_EDIT E42: แก้ใบกำกับขาย — ก่อน/หลัง รายบรรทัด + ยอดสุทธิ
+    kind = 'si'; cur = (s.salesInvoices || []).find(x => x && x.id === req.entityId) || null;
+    if(cur){ const b = global.ERP.siBuildLines(s, p.edit.draft.lines, cur.priceMode), wr = Number(p.edit.draft.whtRate != null ? p.edit.draft.whtRate : cur.whtRate) || 0;
+      nxt = { ...cur, lines:b.lines, subtotal:b.subtotal, vat:b.vat, total:b.total, netTotal:b.total - b.subtotal * wr / 100 }; }
+    defs = [];
+  }
   else if(p.updatedInv){ kind = 'pi'; cur = (s.invoices || []).find(x => x && x.id === (p.updatedInv.id || req.entityId)) || null; nxt = p.updatedInv; defs = _APDIFF_INV_HDR; }
   else return null;
   if(!cur) return { kind, missing:true, title:req.entityRef || '', header:[], lines:null, changed:false };
   const header = _apdiffHeader(s, cur, nxt, defs);
   if(kind === 'po' && (p.newPo || p.newLines)) lines = _apdiffLines(s, cur.lines, nxt.lines);
-  else if(kind === 'pi' && Array.isArray(nxt.lines)) lines = _apdiffLines(s, cur.lines, nxt.lines);   // 🆕 UAT N5: แก้ PI ก็เทียบรายบรรทัด
-  const tot = (d) => kind === 'pi' ? Number(d.netPayable) || 0 : (d.total != null ? Number(d.total) || 0 : sumL(d.lines));
+  else if(kind === 'pi' && Array.isArray(nxt.lines)) lines = _apdiffLines(s, cur.lines, nxt.lines);
+  else if(kind === 'si') lines = _apdiffLines(s, cur.lines, nxt.lines);   // 🆕 UAT N5: แก้ PI ก็เทียบรายบรรทัด
+  const tot = (d) => kind === 'si' ? Number(d.netTotal) || 0 : kind === 'pi' ? Number(d.netPayable) || 0 : (d.total != null ? Number(d.total) || 0 : sumL(d.lines));
   const totalFrom = tot(cur), totalTo = tot(nxt);
   const changed = header.length > 0 || (lines || []).some(l => l.status !== 'same') || Math.abs(totalFrom - totalTo) > 0.005;
-  return { kind, title:(kind === 'po' ? cur.poNumber : cur.invNumber) || req.entityRef || '', header, lines, totalFrom, totalTo,
-    totalLabel: kind === 'pi' ? 'ยอดสุทธิที่ต้องจ่าย' : 'ยอดรวม PO', changed };
+  return { kind, title:(kind === 'po' ? cur.poNumber : kind === 'si' ? cur.siNumber : cur.invNumber) || req.entityRef || '', header, lines, totalFrom, totalTo,
+    totalLabel: kind === 'si' ? 'ยอดสุทธิใบกำกับ' : kind === 'pi' ? 'ยอดสุทธิที่ต้องจ่าย' : 'ยอดรวม PO', changed };
 }
 function ApprovalEditDiffModal({ req, state, onClose }){
   const d = approvalEditDiff(state, req);
@@ -33766,7 +34635,8 @@ function ApprovalEditDiffModal({ req, state, onClose }){
 function approvalHasEditDiff(state, req){
   const p = (req && req.payload) || {};
   return !!(p.newPo || p.updatedInv || (Array.isArray(p.newLines) && (req.entityType === 'po' || p.poId))
-    || (p.fields && typeof p.fields === 'object' && (req.entityType === 'po' || req.action === 'edit_po_soft')));
+    || (p.fields && typeof p.fields === 'object' && (req.entityType === 'po' || req.action === 'edit_po_soft'))
+    || (req && req.action === 'edit_si' && p.edit && p.edit.draft));   // 🆕 SI_EDIT E42
 }
 // เลขเอกสาร (ลิงก์) + ปุ่ม 🔍 ดูสิ่งที่ขอแก้ — ใช้ทั้ง 🔔 กล่องแจ้งเตือน และแท็บคำขออนุมัติ
 //   onLeave = ปิดกล่องที่ครอบอยู่ก่อนพาไปหน้ารายการ (ชนิดที่ไม่มีหน้าต่างรายละเอียด)
@@ -34495,6 +35365,17 @@ function executeApprovedAction(req, state, dispatch, user){
     case 'delete_po': {
       dispatch({ type:'UPDATE_PO', data:{ ...(state.pos.find(x => x.id===req.entityId)||{}),
         status:'cancelled', deletedBy:user.username, deletedAt:Date.now() }});
+      break;
+    }
+    // 🆕 SI_EDIT E40: แก้ใบกำกับขาย (ยอด/VAT เปลี่ยน) หลังอนุมัติ — ผู้แก้ = ผู้ขอ · ผู้อนุมัติแยกเก็บ · reducer ตรวจด่านทั้งหมดซ้ำบนใบสด (_execGated dry-run ก่อน)
+    case 'edit_si': {
+      const si = (state.salesInvoices || []).find(x => x && x.id === req.entityId);
+      if(!si){ executeApprovedAction.lastDeny = 'ไม่พบใบกำกับ'; alert('⛔ ' + executeApprovedAction.lastDeny); return false; }
+      if(si.voided){ executeApprovedAction.lastDeny = 'ใบกำกับนี้ถูกยกเลิกไปแล้ว'; alert('⛔ ' + executeApprovedAction.lastDeny); return false; }
+      if(!p.edit || !p.edit.draft){ executeApprovedAction.lastDeny = 'คำขอแก้ใบกำกับไม่ครบ'; alert('⛔ ' + executeApprovedAction.lastDeny); return false; }
+      const _ed = { ...p.edit, siId:si.id, baseRev:p.baseRev, by:req.requestedBy || user.username, approvedBy:user.username, approvalReqId:req.id, at:Date.now() };
+      delete _ed.direct;
+      if(!_execGated(req, state, dispatch, user, { type:'EDIT_SALES_INV', data:_ed }, 'แก้ใบกำกับ')) return false;
       break;
     }
     case 'delete_si': {
@@ -37518,7 +38399,7 @@ function ExpiryDetailModal({ state, user, onClose, setTab }){
                     h('td', { className:'px-3 py-2' },
                       h('div', { className:'font-medium' }, l.item?.name || l.itemId),
                       h('div', { className:'text-[10px] text-gray-500 font-mono' }, l.item?.code||'')),
-                    h('td', { className:'px-3 py-2 font-mono text-xs' }, l.lot || l.id?.slice(-8)),
+                    h('td', { className:'px-3 py-2 font-mono text-xs' }, l.lot || l.id?.slice(-8), l.lotUnknown && h('span', { className:'ml-1 px-1 rounded bg-amber-100 text-amber-800 font-sans', 'data-testid':'lot-unknown-tag', title:'คืนจากแก้ใบกำกับ ไม่ทราบล็อตจริง — ตรวจวันหมดอายุของจริง' }, '⚠️ ไม่ทราบล็อต' + (l.expiryEstimated ? ' · หมดอายุโดยประมาณ' : ''))),   // 🆕 SI_EDIT UAT ชุด 1 S3
                     h('td', { className:'px-3 py-2 text-right font-medium' },
                       l.item ? formatQtyMulti(l.item, l.remaining, { maxLevels:2 }) : fmtNum(l.remaining)),
                     h('td', { className:'px-3 py-2 text-xs' }, l.branch?.name || l.branch),
@@ -39991,7 +40872,7 @@ function LotsTab({ state, dispatch, user }){
                     }
                     const fk = focusKeyOf.get(l.id);
                     return h('tr', { key:l.id, 'data-row-id': fk || undefined, 'data-layer-id': l.id, className: cls('hover:bg-gray-50', fk && 'bg-blue-50') },
-                      h('td', { className:'px-3 py-2 font-mono text-xs' }, l.lot||l.id, fk && _focusDoneMark(F, fk)),
+                      h('td', { className:'px-3 py-2 font-mono text-xs' }, l.lot||l.id, l.lotUnknown && h('span', { className:'ml-1 px-1 rounded bg-amber-100 text-amber-800 font-sans', 'data-testid':'lot-unknown-tag', title:'คืนจากแก้ใบกำกับ ไม่ทราบล็อตจริง — ตรวจวันหมดอายุของจริง' }, '⚠️ ไม่ทราบล็อต' + (l.expiryEstimated ? ' · หมดอายุโดยประมาณ' : '')), fk && _focusDoneMark(F, fk)),   // 🆕 SI_EDIT UAT ชุด 1 S3
                       h('td', { className:'px-3 py-2' }, item?.name || l.itemId),
                       h('td', { className:'px-3 py-2 text-xs' }, branch?.name || l.branch),
                       h('td', { className:'px-3 py-2 text-right text-gray-500' },
@@ -70647,7 +71528,7 @@ function LotGenealogyReport({ state, user, allowedBranches }){
 
   const gen = state.lotGenealogy || [];
   const consumeRecs = gen.filter(g => g.kind === 'consume');
-  const dispatchRecs = gen.filter(g => g.kind === 'dispatch');
+  const dispatchRecs = useMemo(() => global.ERP.netDispatchRecs(gen), [gen]);   // 🆕 SI_EDIT E28a: สุทธิต่อ (ref, สินค้า, ล็อต) — ล็อตที่คืนจากแก้ใบกำกับหายไป
   const orders = state.productionOrders || [];
   const items = state.items || [];
   const itemName = (id) => items.find(i => i.id === id)?.name || id;
@@ -104297,31 +105178,9 @@ function siBuyer(state, si){
 //   คืน { gross, disc, ex, discEx, vat, inc, over } — over = ส่วนลดเกินยอดบรรทัด/ติดลบ (ห้ามออกใบ)
 // 🆕 UAT M1: แปลงข้อความส่วนลดที่พิมพ์ → { discountPct, discount, bad }
 //   ตัด , ฿ บาท ช่องว่าง · เลขไทย ๐-๙ → อารบิก · "10%" = เปอร์เซ็นต์ · ไม่ใช่ตัวเลขจริง = bad (ห้ามออกใบ ไม่แอบเป็น 0)
-function siParseDisc(raw){
-  let t = String(raw == null ? '' : raw).trim();
-  t = t.replace(/[๐-๙]/g, d => String(d.charCodeAt(0) - 0x0E50)).replace(/[,\s฿]/g, '').replace(/บาท/g, '');
-  if(t === '') return { discountPct:null, discount:undefined, bad:false };
-  const isPct = /%$/.test(t);
-  const num = isPct ? t.slice(0, -1) : t;
-  const ok = /^-?(\d+\.?\d*|\.\d+)$/.test(num) && Number.isFinite(Number(num));
-  if(!ok) return { discountPct:null, discount:undefined, bad:true };
-  return isPct ? { discountPct:Number(num), discount:undefined, bad:false } : { discountPct:null, discount:Number(num), bad:false };
-}
-
-function siLineCalc(l, priceMode){
-  const r = Number(l.vatRate) || 0;
-  const gross = (Number(l.unitPrice) || 0) * (Number(l.qty) || 0);
-  const pct = l.discountPct != null && l.discountPct !== '' ? Number(l.discountPct) : null;
-  const disc0 = pct != null && Number.isFinite(pct) ? Math.round(gross * pct) / 100 : (Number(l.discount) || 0);
-  const bad = !!l._discBad;   // UAT M1: พิมพ์ส่วนลดไม่ใช่ตัวเลข → ห้ามออกใบเหมือน over
-  const over = bad || disc0 < 0 || disc0 > gross + 0.0001;
-  const disc = Math.min(Math.max(0, disc0), Math.max(0, gross));
-  const inc0 = priceMode === 'inclusive';
-  const ex = inc0 ? (gross - disc) / (1 + r/100) : gross - disc;
-  const discEx = inc0 ? disc / (1 + r/100) : disc;
-  const vat = ex * r / 100;
-  return { gross, disc, ex, discEx, vat, inc: ex + vat, over, bad };
-}
+// 🆕 SI_EDIT core move: ตัวคำนวณย้ายไป src/00-core.js (หน้าจอ + reducer แก้ใบใช้ตัวเดียวกัน) — ชื่อเดิมยังเรียกได้
+function siParseDisc(raw){ return global.ERP.siParseDisc(raw); }
+function siLineCalc(l, priceMode){ return global.ERP.siLineCalc(l, priceMode); }
 
 // 🆕 UAT S3/S4 (นำเข้าขาย2569): ป้ายใบนำเข้า — ไม่ยกลูกหนี้ (บัญชีคัด) · วันครบกำหนดรอตั้ง
 function SIMigArBadge({ si }){
@@ -104451,6 +105310,7 @@ const SI_STATUS = {
   unpaid:  ['ยังไม่รับชำระ', 'bg-red-100 text-red-700'],
   partial: ['รับบางส่วน',    'bg-amber-100 text-amber-800'],
   paid:    ['รับครบแล้ว',    'bg-green-100 text-green-700'],
+  voided:  ['ยกเลิกแล้ว',    'bg-gray-200 text-gray-600'],   // 🆕 SI_EDIT F3: ใบยกเลิก (paymentStatus 'voided')
 };
 
 function SIList({ state, dispatch, user }){
@@ -104572,7 +105432,10 @@ function SIList({ state, dispatch, user }){
                     global.ERP.siIsMigrated(i) && h('span', { className:'ml-1 px-1 rounded bg-slate-100 text-slate-600 text-[10px] font-sans', title:'ประวัติขายนำเข้าจาก Ecount' }, '📥 Ecount'),
                     // 🆕 DOC-NUMBER verify 1: ใบที่ระบบรับไว้แต่ลงงวดที่ยื่น ภ.พ.30/ปิดแล้ว (เครื่องอื่นยื่นระหว่างบันทึก) → ผจก.บัญชี ออก CN/ปรับงวดถัดไป
                     i.filedPeriodViolation && h('span', { className:'ml-1 px-1 rounded bg-red-100 text-red-700 text-[10px] font-sans', title: i.filedPeriodReason || 'ลงวันที่ในงวดที่ยื่น ภ.พ.30/ปิดแล้ว' }, '⚠️ งวดยื่นแล้ว'),
-                    h(SIMigArBadge, { si:i })),
+                    h(SIMigArBadge, { si:i }),
+                    // 🆕 SI_EDIT E54: ป้ายใบที่แก้แล้ว / ลูกค้าจ่ายเกินหลังแก้
+                    (Number(i.editRev) || 0) > 0 && h('span', { className:'ml-1 px-1 rounded bg-blue-100 text-blue-800 text-[10px] font-sans', 'data-testid':'si-list-edited', title:'แก้ไขในใบเดิมแล้ว ' + i.editRev + ' ครั้ง — ดูประวัติในหน้าใบ' }, '✏️ แก้ไข ' + i.editRev),
+                    global.ERP.siEditOverpaid(i) && h('span', { className:'ml-1 px-1 rounded bg-red-100 text-red-700 text-[10px] font-sans', 'data-testid':'si-list-overpaid', title:'ลูกค้าจ่ายเกิน ' + fmtCur(i.overpaidAmount || 0) }, '💸 จ่ายเกิน')),
                   h('td', { className:'px-3 py-2 text-xs' }, fmtDate(i.invDate)),
                   h('td', { className: cls('px-3 py-2 text-xs', overdue && 'text-red-600 font-bold') },
                     h(SIDueCell, { si:i, overdue })),
@@ -104586,13 +105449,13 @@ function SIList({ state, dispatch, user }){
                   h('td', { className:'px-3 py-2 text-center' },
                     h('div', { className:'flex gap-1 justify-center flex-wrap' },
                       h(Button, { variant:'secondary', size:'sm', onClick:()=>{ setHlId(null); openDetail(i); } }, 'ดู'),
-                      st !== 'paid' && h(Button, { variant:'success', size:'sm',
+                      st !== 'paid' && !i.voided && h(Button, { variant:'success', size:'sm',   // 🆕 SI_EDIT F3: ใบยกเลิกไม่มีปุ่มรับชำระ
                         onClick:()=>setReceivingSI(i) }, '💰 รับชำระ'),
                       // 🆕 UAT ชุด 2 S4: ใบยกเลิกที่ยังไม่เคยพิมพ์ → ไม่มีปุ่มพิมพ์
                       !(i.voided && !((Number(i.printCount)||0) > 0)) && h(Button, { variant:'ghost', size:'sm',
                         title: (Number(i.printCount)||0) > 0 ? 'พิมพ์ซ้ำ = สำเนา' : 'พิมพ์ต้นฉบับ',
                         onClick:()=>printSI(i, state, dispatch, user) },
-                        (Number(i.printCount)||0) > 0 ? '🖨️ สำเนา' : '🖨️')
+                        (Number(i.printCount)||0) > 0 ? (global.ERP.siOriginalDue(i) ? '🖨️ ฉบับแก้ไข' : '🖨️ สำเนา') : '🖨️')
                     )
                   )
                 );
@@ -104613,7 +105476,10 @@ function SIList({ state, dispatch, user }){
 
 // ---------- New SI Modal ----------
 // fromQuote = ใบเสนอราคาที่กำลังแปลงเป็นใบกำกับ (prefill + ผูกเอกสารกลับ)
-function NewSIModal({ state, dispatch, user, onClose, fromQuote }){
+function NewSIModal({ state, dispatch, user, onClose, fromQuote, fromSi, onSaveEdit }){
+  // 🆕 SI_EDIT E47: fromSi = โหมดแก้ใบเดิม (หัวใบอ่านอย่างเดียว · บันทึกผ่าน onSaveEdit/EDIT_SALES_INV) — save() ด้านล่างไม่แตะ
+  //   fromSi คงที่ตลอดอายุ component (เปิดคนละปุ่ม) → คืนก่อน hook ได้
+  if(fromSi) return h(SIEditModal, { state, dispatch, user, fromSi, onClose, onSaveEdit });
   const savingRef = useRef(false);  // 🆕 FIX-8: กันกดบันทึกซ้ำ (double-submit)
   const allowedBranchesForSI = (state.branches||[]).filter(b => {
     if(state.currentUser?.role === 'gm' || state.currentUser?.role === 'admin') return true;
@@ -105162,6 +106028,322 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote }){
   );
 }
 
+// ---------- ✏️ แก้ใบกำกับในใบเดิม (SI_EDIT_CONTRACT §12 E47-E51) ----------
+//   เลขที่/วันที่/ลูกค้า/สาขา/คลัง/โหมดราคา คงเดิม · แก้ได้: บรรทัด/ข้อความ/โชว์ของในชุด/หัก ณ ที่จ่าย/หมายเหตุ/ครบกำหนด
+//   ไม่แตะ NewSIModal.save() — บันทึกผ่าน EDIT_SALES_INV (text/goods ทำเลย · money ขอ ผจก.บัญชี/GM · GM 👑 ทำทันที)
+const SI_EDIT_CLS = {
+  text:  ['✏️ แก้รายละเอียด — ไม่กระทบสต๊อก/บัญชี', 'bg-blue-100 text-blue-800 border-blue-300'],
+  goods: ['🔄 เปลี่ยนของ ยอดเท่าเดิม — ไม่ต้องอนุมัติ', 'bg-amber-100 text-amber-900 border-amber-300'],
+  money: ['💰 ยอดเงินเปลี่ยน — ต้องให้ ผจก.บัญชี/GM อนุมัติ', 'bg-rose-100 text-rose-800 border-rose-300'],
+};
+const SI_EDIT_ACK_OUT = global.ERP.SI_EDIT_ACK_OUT;   // verify 1: ย้ายไป 00-core (reducer ใช้คำไทยเดียวกัน)
+const _siEditLive = (state) => (typeof global.ERP.__getState === 'function' && global.ERP.__getState()) || state;
+// ผู้กด ✔ จัดการเงินจ่ายเกินได้ (ตรงกับ reducer ACK_SI_EDIT_FOLLOWUP): ผจก.บัญชี / GM / superuser
+const _siOverpaidAcker = (u) => !!u && (global.ERP.isSuperUser(u) || u.role === 'gm' || u.role === 'owner' || u.position === 'gm'
+  || (u.position === 'manager' && (u.departmentIds || []).includes('accounting')));
+// 🆕 UAT ชุด 1 M1: ผู้กด ✔ เปลี่ยนของ/เก็บใบเดิมคืน = ผู้ตรวจ และไม่ใช่คนแก้/ผู้อนุมัติครั้งนั้น (superuser ได้ — ระบบประทับ selfReview)
+const _siEditAckOk = (si, rev, u) => !!u && global.ERP.siPrintReviewer(u) && (!global.ERP.siEditAckSelf(si, rev, u.username) || global.ERP.isSuperUser(u));
+// ก่อน/หลัง รายบรรทัด (ระดับบน · บรรทัดหลังจับคู่บรรทัดก่อนด้วย srcLineNo = lineNo เดิม + สินค้าเดียวกัน)
+//   คืน [{ st:'same'|'changed'|'added'|'removed', name, from, to }]
+function siEditLineDiff(before, after){
+  const kitTxt = (ls, l) => { if(!l || l.lineKind !== 'kit') return ''; const i = ls.indexOf(l), out = [];
+    for(let j = i + 1; j < ls.length && ls[j] && ls[j].lineKind === 'kit_child'; j++) out.push((ls[j].itemName || ls[j].itemId) + ' ' + fmtNum(ls[j].qty));
+    return out.length ? ' [ในชุด: ' + out.join(', ') + ']' : ''; };
+  const desc = (ls, l) => fmtNum(l.qty) + ' ' + (l.unit || '') + ' × ' + fmtCur(l.unitPrice || 0)
+    + (Number(l.discount) > 0 ? ' ลด ' + fmtCur(l.discount) : '') + ' = ' + fmtCur(l.lineTotal || 0) + kitTxt(ls, l);
+  const nm = (l) => l.displayName || l.itemName || l.itemId;
+  const B = before || [], A = after || [], used = new Set(), out = [];
+  A.filter(l => l && l.lineKind !== 'kit_child').forEach(a => {
+    const b = a.srcLineNo != null ? B.find(x => x && x.lineKind !== 'kit_child' && !used.has(x) && Number(x.lineNo) === Number(a.srcLineNo) && x.itemId === a.itemId) : null;
+    if(!b){ out.push({ st:'added', name:nm(a), from:'', to:desc(A, a) }); return; }
+    used.add(b);
+    const f = desc(B, b), t = desc(A, a);
+    out.push({ st:(f === t && nm(a) === nm(b)) ? 'same' : 'changed', name:nm(a) + (nm(a) !== nm(b) ? ' (เดิม: ' + nm(b) + ')' : ''), from:f, to:t });
+  });
+  B.filter(l => l && l.lineKind !== 'kit_child' && !used.has(l)).forEach(b => out.push({ st:'removed', name:nm(b), from:desc(B, b), to:'' }));
+  return out;
+}
+const SI_EDIT_DIFF_LBL = { same:['เท่าเดิม','text-gray-500'], changed:['เปลี่ยน','text-amber-800 font-semibold'], added:['เพิ่ม','text-green-700 font-semibold'], removed:['ลบ','text-red-700 font-semibold line-through'] };
+// แถวร่างที่ส่งเข้า reducer — ตัดช่องของหน้าจอ (_discRaw/_priceAuto …) · _qtLineNo → qtLineNo
+const _siEditCleanRow = (l) => { const o = {}; Object.keys(l || {}).forEach(k => { if(k[0] !== '_') o[k] = l[k]; });
+  if(l && l._qtLineNo && o.qtLineNo == null) o.qtLineNo = l._qtLineNo; return o; };
+// ใบเสนอราคา: จำนวนที่ผูกบรรทัดใบเสนอราคาลดลงไหม (ต้องเลือก ส่งตามทีหลัง/ลูกค้าไม่เอาแล้ว) — กลุ่มเดียวกับ core _siEditQuote
+function _siEditQuoteDrop(si, rows){
+  if(!si || !si.quoteId || si.quoteRolledBack) return false;
+  const g = (ls, isRow) => { const m = {}; (ls || []).forEach(l => { if(!l || l.lineKind === 'kit_child' || l.lineKind === 'text') return;
+    const k = l.qtLineNo || l._qtLineNo; if(!k || (isRow && !(l.itemId && Number(l.qty) > 0))) return;
+    m[k] = (m[k] || 0) + (l.qtUnits != null && l.qtUnits !== '' ? Number(l.qtUnits) : Number(l.qty) || 0); }); return m; };
+  const o = g(si.lines, false), n = g(rows, true);
+  return Object.keys(o).some(k => (n[k] || 0) < o[k] - 1e-9);
+}
+
+function SIEditModal({ state, dispatch, user, fromSi, onClose, onSaveEdit }){
+  const E = global.ERP;
+  const si = (state.salesInvoices || []).find(i => i && i.id === fromSi.id) || fromSi;
+  const baseRev = Number(fromSi.editRev) || 0;
+  const [lines, setLines] = useState(() => E.siDraftFromSi(fromSi));
+  const [whtRate, setWhtRate] = useState(Number(fromSi.whtRate) || 0);
+  const [note, setNote] = useState(fromSi.note || '');
+  const [dueDate, setDueDate] = useState(fromSi.dueDate || fromSi.invDate || '');
+  const [ksc, setKsc] = useState(fromSi.kitShowChildren == null ? null : !!fromSi.kitShowChildren);
+  const [reasonCode, setReasonCode] = useState('');
+  const [reason, setReason] = useState('');
+  const [sentBefore, setSentBefore] = useState(false);
+  const [qsf, setQsf] = useState('');
+  const [preview, setPreview] = useState(null);   // { d, P } — หน้าพรีวิวก่อนบันทึก (บังคับ)
+  const savingRef = useRef(false);
+  const by = (user && user.username) || '';
+  const printedBefore = (Number(si.printCount) || 0) > 0 || !!si.originalPrintedAt || ((si.replacements || []).length > 0);
+  const br = getBranch(state, si.branch);
+  const locName = (id) => { const l = ((br && br.locations) || []).find(x => x.id === id); return l ? l.name : (id || 'ทั้งสาขา'); };
+  const itName = (id) => ((state.items || []).find(x => x.id === id) || {}).name || id;
+  // ยอดสด (แบบเดียวกับตอนออกใบ) + ป้าย "ต้องอนุมัติ" ทันทีเมื่อยอด/VAT เปลี่ยน (E48)
+  const B = E.siBuildLines(state, lines, si.priceMode);
+  const wht = B.subtotal * (Number(whtRate) || 0) / 100, net = B.total - wht;
+  const moneyLive = [[B.subtotal, si.subtotal], [B.vat, si.vat], [wht, si.whtAmount], [net, si.netTotal]].some(([a, b]) => Math.abs((Number(a) || 0) - (Number(b) || 0)) >= 0.005);
+  const qDrop = _siEditQuoteDrop(si, lines);
+  const hasKit = lines.some(l => l && l.lineKind === 'kit');
+  const buildD = (at) => ({ siId:si.id, baseRev, at, by, reasonCode, reason:String(reason).trim(),
+    ...(sentBefore && !printedBefore ? { sentBefore:true } : {}), ...(qDrop && qsf ? { quoteShortfall:qsf } : {}),
+    draft:{ lines:lines.map(_siEditCleanRow), whtRate:Number(whtRate) || 0, note, dueDate, kitShowChildren:ksc } });
+  const withExpect = (d, P) => ({ ...d, expect:{ subtotal:P.moneyAfter.subtotal, vat:P.moneyAfter.vat, whtAmount:P.moneyAfter.whtAmount, netTotal:P.moneyAfter.netTotal, cls:P.cls } });
+  // ใบสด + ด่านก่อนเปิด (เครื่องอื่นอาจแก้/ยกเลิก/ยื่น ภ.พ.30 ระหว่างเปิดฟอร์ม)
+  const liveSi = () => { const live = _siEditLive(state); const cur = (live.salesInvoices || []).find(i => i && i.id === si.id);
+    const blk = E.siEditBlock(live, cur, user);
+    if(blk){ alert('⛔ แก้ใบกำกับไม่ได้ — ' + blk); return null; }
+    if((Number(cur.editRev) || 0) !== baseRev){ alert('⛔ ใบนี้ถูกแก้ไปแล้วจากเครื่องอื่น — ปิดหน้าต่างนี้แล้วเปิดใหม่'); return null; }
+    return { live, cur }; };
+  const openPreview = () => {
+    const L = liveSi(); if(!L) return;
+    const bad = lines.filter(l => l && l.lineKind !== 'text' && l.itemId && E.siLineCalc(l, si.priceMode).over);
+    if(bad.length) return alert('⛔ ส่วนลดอ่านไม่ได้/เกินยอดของบรรทัด:\n\n' + bad.map(l => '• ' + itName(l.itemId)).join('\n'));
+    if(!reasonCode) return alert('เลือกเหตุผลที่แก้ใบกำกับ');
+    const minLen = reasonCode === 'other' ? 10 : 5;
+    if(String(reason).trim().length < minLen) return alert('พิมพ์รายละเอียดเหตุผลอย่างน้อย ' + minLen + ' ตัวอักษร (ใช้เป็นหลักฐานทางภาษี)');
+    if(qDrop && !qsf) return alert('จำนวนที่ผูกใบเสนอราคาลดลง — เลือก "ส่งตามทีหลัง" หรือ "ลูกค้าไม่เอาแล้ว"');
+    const d = buildD(Date.now());
+    const P = E.planSiEdit(L.live, L.cur, d);
+    if(P.blocks.length) return alert('⛔ ' + P.blocks.join('\n• '));
+    setPreview({ d, P });
+  };
+  // E48: แยกชุดเป็นรายการมีราคา (ยอดรวมเท่าเดิมถึงสตางค์) — แก้ราคาทีหลังจนยอดเปลี่ยน = ต้องอนุมัติ
+  const splitKit = (i) => {
+    const l = lines[i];
+    const rows = E.siKitSplitPrices(state, l, l.kitComponents, si.priceMode);
+    if(!rows.length) return alert('ชุดนี้ไม่มีของข้างใน — แยกไม่ได้');
+    if(!confirm('🔓 แยก "' + itName(l.itemId) + '" เป็น ' + rows.length + ' รายการมีราคา?\n\nราคาแบ่งตามราคาขายของแต่ละอย่าง ยอดรวมเท่าเดิมถึงสตางค์ (เศษอยู่ในส่วนลดบรรทัดแรก)\nตรวจราคาก่อนบันทึก — ถ้าแก้ราคาจนยอดเปลี่ยน จะต้องให้ ผจก.บัญชี/GM อนุมัติ')) return;
+    setLines(ls => [...ls.slice(0, i), ...rows, ...ls.slice(i + 1)]);
+    if(!reasonCode) setReasonCode('kit_breakdown');
+  };
+  // E51: บันทึก — คิดใหม่กับใบสดทุกครั้ง · text/goods = ลอง reducer ก่อนแล้ว dispatch · money = ขออนุมัติ (GM 👑 ทำทันที)
+  const doSave = () => {
+    if(savingRef.current || !preview) return;
+    const L = liveSi(); if(!L) return;
+    let d = { ...preview.d, at:Date.now() };
+    const P = E.planSiEdit(L.live, L.cur, d);
+    if(P.blocks.length) return alert('⛔ ' + P.blocks.join('\n• '));
+    const M0 = preview.P.moneyAfter || {}, M1 = P.moneyAfter || {};
+    if(P.cls !== preview.P.cls || ['subtotal','vat','whtAmount','netTotal'].some(f => Math.abs((M0[f] || 0) - (M1[f] || 0)) > 0.01)){
+      alert('⚠️ ข้อมูลเปลี่ยนระหว่างดูพรีวิว — ตรวจพรีวิวใหม่อีกครั้ง'); setPreview({ d, P }); return; }
+    // ราคา 0 ของบรรทัดที่เพิ่ม: settings.siRequirePrice 'block' = ห้ามบันทึก (warn แสดงในพรีวิวแล้ว)
+    if((L.live.settings?.siRequirePrice || 'warn') === 'block' && P.warns.some(w => w.indexOf('ราคา 0') >= 0))
+      return alert('⛔ มีรายการราคา 0 บาท — ตั้งราคาก่อนบันทึก');
+    // QC soft-warn เฉพาะของที่ตัดเพิ่ม (เหมือนตอนออกใบ)
+    const qcL = (P.cuts || []).filter(c => !c.neg).map(c => ({ itemId:c.itemId, qty:c.qty }));
+    const qc = (qcL.length && E.collectUnQCdForLines) ? (E.collectUnQCdForLines(L.live, qcL, L.cur.branch) || []) : [];
+    if(qc.length){
+      const anyF = qc.some(w => w.hasFailed);
+      if(!confirm((anyF ? '⛔ มีล็อตที่ QC "ตรวจแล้วไม่ผ่าน" ในของที่ตัดเพิ่ม!\n\n' : '⚠️ ของที่ตัดเพิ่มยังไม่มีบันทึก QC ผ่าน:\n\n')
+        + qc.map(w => '• ' + w.itemName + ': ' + w.lotsText).join('\n') + '\n\nยืนยันแก้ใบต่อหรือไม่?')) return;
+      d = { ...d, qcWarnedAdd:true, ...(anyF ? { qcFailedAdd:true } : {}) };
+    }
+    d = withExpect(d, P);
+    const no = L.cur.siNumber || '', rev = baseRev + 1;
+    const recall = P.paperChanged && (printedBefore || d.sentBefore);
+    const tail = recall ? '\n\n📄 ใบเดิมพิมพ์/ส่งลูกค้าแล้ว — เก็บใบเดิมคืน แล้วพิมพ์ฉบับแก้ไขให้ลูกค้า (มีงานค้างเตือนจนกว่าจะยืนยัน)' : '';
+    const done = (msg) => { savingRef.current = true; setTimeout(() => { savingRef.current = false; }, 3000); alert(msg + tail); if(onSaveEdit) onSaveEdit(); onClose(); };
+    if(P.cls !== 'money'){
+      const act = { type:'EDIT_SALES_INV', data:d };
+      const cs = { ...L.live, currentUser:L.live.currentUser || user };
+      if(E.reducer(cs, act) === cs) return;   // reducer แจ้งเหตุแล้ว
+      dispatch(act);
+      return done('✅ แก้ใบกำกับ ' + no + ' แล้ว (ครั้งที่ ' + rev + ' · ' + (P.cls === 'goods' ? 'เปลี่ยนของ — ผู้จัดการจะเห็นในงานค้าง' : 'แก้รายละเอียด') + ')');
+    }
+    const dNet = (Number(P.newSi.netTotal) || 0) - (Number(L.cur.netTotal) || 0), amt = Number(Math.abs(dNet).toFixed(2));
+    const ctx = { entityType:'si', entityId:L.cur.id, entityRef:no, scope:'sales', amount:amt, isIncrease:dNet > 0, reason:d.reason,
+      payload:{ baseRev, draftHash:E.siEditDraftHash(d), paidAmount:Number(L.cur.paidAmount) || 0, edit:d } };
+    const act = { type:'EDIT_SALES_INV', data:{ ...d, direct:true } };
+    const r = E.requestApprovalIfNeeded({ direct:true, directAct:act, action:'edit_si', user, state:L.live, dispatch, silent:true, context:ctx });
+    if(r === 'blocked') return;
+    if(r){ return done('📤 ส่งคำขอแก้ใบกำกับ ' + no + ' ให้ ผจก.บัญชี/GM อนุมัติแล้ว — ใบยังเป็นแบบเดิมจนกว่าจะอนุมัติ (กด 🔔)'); }
+    if(!E.gmDirectApply(L.live, act, dispatch, user, 'ระบบไม่รับการแก้ใบกำกับ ' + no)) return;
+    done('👑 แก้ใบกำกับ ' + no + ' ทันทีแล้ว (ครั้งที่ ' + rev + ' · GM/เจ้าของ ทำเอง · บันทึกให้ตรวจย้อนหลัง)');
+  };
+  const title = '✏️ แก้ไขใบกำกับ ' + (si.siNumber || '') + (baseRev ? ' (แก้ไปแล้ว ' + baseRev + ' ครั้ง)' : '');
+  // ---------- E50 หน้าพรีวิว (บังคับก่อนบันทึก) ----------
+  if(preview){
+    const P = preview.P, d = preview.d, n = P.newSi, [cl0, cc] = SI_EDIT_CLS[P.cls] || ['', ''];
+    // verify 2 (P3): ราคาต่อหน่วยเปลี่ยนแต่ยอดเท่าเดิม — ห้ามบอกว่า "ไม่กระทบ" เฉย ๆ
+    const cl = (P.priceChanged || []).length && P.cls === 'text' ? '✏️ แก้รายละเอียด ยอดรวมเท่าเดิม — ⚠️ ราคาต่อหน่วยบนใบกำกับเปลี่ยน (ผู้จัดการจะตรวจ)' : cl0;
+    const diff = siEditLineDiff(si.lines, n.lines);
+    const T = [['ยอดก่อน VAT', 'subtotal'], ['VAT', 'vat'], ['รวม', 'total'], ['หัก ณ ที่จ่าย', 'whtAmount'], ['สุทธิ', 'netTotal']];
+    const recall = P.paperChanged && (printedBefore || d.sentBefore);
+    const qRows = ((P.quote && P.quote.rows) || []).filter(r => r.mode !== 'same');
+    const pay = P.payment || {};
+    const gmNow = P.cls === 'money' && !!(E.gmSelfWill && E.gmSelfWill(state, user, 'edit_si', { scope:'sales', entityId:si.id }));
+    const btn = P.cls !== 'money' ? '✅ ยืนยันแก้ไข' : gmNow ? '👑 แก้ทันที' : '📤 ส่งขออนุมัติ';
+    return h(Modal, { isOpen:true, title:title + ' — ตรวจก่อนบันทึก', onClose, size:'xl' },
+      h('div', { className:'space-y-3 text-sm', 'data-testid':'si-edit-preview' },
+        h('div', { 'data-testid':'si-edit-cls', 'data-cls':P.cls, className:cls('px-3 py-2 rounded border font-semibold', cc) }, cl),
+        h('table', { className:'w-full text-xs border', 'data-testid':'si-edit-diff' },
+          h('thead', { className:'bg-gray-50' }, h('tr', null, h('th', { className:'px-2 py-1 text-left' }, 'รายการ'),
+            h('th', { className:'px-2 py-1 text-left' }, 'ก่อนแก้'), h('th', { className:'px-2 py-1 text-left' }, 'หลังแก้'), h('th', { className:'px-2 py-1' }, ''))),
+          h('tbody', { className:'divide-y' }, diff.map((r, k) => h('tr', { key:k, 'data-st':r.st },
+            h('td', { className:'px-2 py-1' }, r.name), h('td', { className:'px-2 py-1' }, r.from || '—'), h('td', { className:'px-2 py-1' }, r.to || '—'),
+            h('td', { className:cls('px-2 py-1 whitespace-nowrap', SI_EDIT_DIFF_LBL[r.st][1]) }, SI_EDIT_DIFF_LBL[r.st][0]))))),
+        h('div', { className:'grid grid-cols-2 md:grid-cols-5 gap-1 text-xs', 'data-testid':'si-edit-totals' }, T.map(([lb, f]) => {
+          const a = Number(si[f]) || 0, b = Number(n[f]) || 0, ch = Math.abs(a - b) >= 0.005;
+          return h('div', { key:f, className:cls('border rounded p-1.5', ch && 'bg-amber-50 border-amber-300') },
+            h('div', { className:'text-gray-500' }, lb), h('div', null, fmtCur(a) + ' → ', h('b', null, fmtCur(b)))); })),
+        ((P.returns || []).length > 0 || (P.cuts || []).length > 0) && h('div', { className:'bg-gray-50 border rounded p-2 text-xs space-y-0.5', 'data-testid':'si-edit-stock' },
+          h('div', { className:'font-semibold' }, '📦 ผลต่อสต๊อก (ลงวันที่ใบกำกับเดิม ' + fmtDate(si.invDate) + ')'),
+          (P.returns || []).map((x, k) => h('div', { key:'r' + k, ...(x.lotUnknown ? { className:'text-amber-800', 'data-testid':'si-edit-lot-unknown' } : {}) },
+            '↩︎ คืน ' + itName(x.itemId) + ' ' + fmtNum(x.qty) + ' · ' + locName(x.locId) + (x.lot ? ' · ล็อต ' + x.lot : '')
+            // 🆕 UAT ชุด 1 S3: ล็อตไม่ทราบ — บอกวันหมดอายุที่ประมาณ/ไม่มี ให้คนตรวจของจริง
+            + (x.lotUnknown ? ' ⚠️ ไม่ทราบล็อต — ' + (x.expiryDate ? 'หมดอายุประมาณ ' + fmtDate(x.expiryDate) + ' (วันที่ใบ + อายุสินค้า)' : 'ไม่มีวันหมดอายุ (สินค้าไม่ได้ตั้งอายุ)') + ' · ตรวจของจริงก่อนขายต่อ' : ''))),
+          (P.cuts || []).map((x, k) => h('div', { key:'c' + k, className:x.neg ? 'text-red-700 font-semibold' : '' },
+            '➖ ตัดเพิ่ม ' + itName(x.itemId) + ' ' + fmtNum(x.qty) + ' · ' + locName(x.locId) + (x.neg ? ' (ของไม่พอ — ติดลบ)' : (x.lot ? ' · ล็อต ' + x.lot : ''))))),
+        qRows.length > 0 && h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-2 text-xs', 'data-testid':'si-edit-quote' },
+          '📝 ใบเสนอราคา ' + (si.quoteNumber || '') + ': ', qRows.map(r => 'บรรทัด ' + r.qtLineNo + ' ' + fmtNum(r.from) + ' → ' + fmtNum(r.to)
+            + ' (' + ({ reopen:'ส่งตามทีหลัง', close:'ลูกค้าไม่เอาแล้ว', more:'เพิ่ม' }[r.mode] || r.mode) + ')').join(' · ')),
+        (pay.overpaid > 0 || (pay.paid > 0 && pay.due > 0)) && h('div', { 'data-testid':'si-edit-pay',
+          className:cls('border rounded p-2 text-xs font-semibold', pay.overpaid > 0 ? 'bg-red-50 border-red-300 text-red-800' : 'bg-amber-50 border-amber-300 text-amber-900') },
+          pay.overpaid > 0 ? '💸 ลูกค้าจ่ายแล้ว ' + fmtCur(pay.paid) + ' เกินยอดใหม่ ' + fmtCur(pay.overpaid) + ' — ต้องคืนเงิน/ตกลงกับลูกค้า (ขึ้นงานค้างให้บัญชี)'
+            : '💰 รับเงินแล้ว ' + fmtCur(pay.paid) + ' · ค้างรับเพิ่ม ' + fmtCur(pay.due)),
+        P.je && h('div', { className:'text-xs text-gray-600', 'data-testid':'si-edit-je' }, '📒 ลง JE ปรับปรุงส่วนต่าง 1 ใบ วันที่ ' + fmtDate(si.invDate) + ' (Dr ' + fmtCur(P.je.totalDebit) + ' / Cr ' + fmtCur(P.je.totalCredit) + ')'),
+        P.warns.length > 0 && h('ul', { className:'list-disc pl-5 text-xs text-amber-800', 'data-testid':'si-edit-warns' }, P.warns.map((w, k) => h('li', { key:k }, w))),
+        (P.timingWarns || []).length > 0 && h('ul', { className:'list-disc pl-5 text-xs text-sky-800', 'data-testid':'si-edit-timing-warns' }, P.timingWarns.map((w, k) => h('li', { key:k }, w))),
+        recall && h('div', { className:'bg-yellow-50 border border-yellow-300 rounded p-2 text-xs font-semibold text-yellow-900', 'data-testid':'si-edit-recall-line' },
+          '📄 ใบเดิม' + (printedBefore ? 'พิมพ์' : 'ส่ง') + 'ให้ลูกค้าแล้ว — ต้องเก็บใบเดิมคืนจากลูกค้า แล้วพิมพ์ฉบับแก้ไขให้ใหม่ (ขึ้นงานค้างจนกว่าจะยืนยัน)'),
+        h('div', { className:'text-xs text-gray-600' }, 'เหตุผล: ' + (((E.SI_EDIT_REASONS || []).find(r => r.code === d.reasonCode) || {}).label || d.reasonCode) + ' — ' + d.reason),
+        h('div', { className:'flex gap-2 pt-3 border-t justify-end' },
+          h(Button, { variant:'secondary', 'data-testid':'si-edit-back', onClick:()=>setPreview(null) }, '← กลับไปแก้'),
+          h(Button, { variant:P.cls === 'money' && !gmNow ? 'warning' : 'primary', 'data-testid':'si-edit-confirm', onClick:doSave }, btn))));
+  }
+  // ---------- E47 ฟอร์มแก้ (หัวใบอ่านอย่างเดียว) ----------
+  const cust = siBuyer(state, si);
+  const RO = (lb, v) => h('div', null, h('span', { className:'text-gray-500' }, lb + ': '), h('b', null, v || '-'));
+  return h(Modal, { isOpen:true, title, onClose, size:'xl' },
+    h('div', { className:'space-y-3', 'data-testid':'si-edit-form' },
+      h('div', { className:'grid grid-cols-2 md:grid-cols-4 gap-2 bg-gray-50 border rounded p-2 text-xs', 'data-testid':'si-edit-head' },
+        RO('เลขที่', si.siNumber), RO('วันที่', fmtDate(si.invDate)), RO('ลูกค้า', cust && cust.name), RO('สาขา', br ? br.name : si.branch),
+        RO('ส่งจากคลัง', si.fromLocId ? locName(si.fromLocId) : 'อัตโนมัติ'), RO('ราคาที่คีย์', si.priceMode === 'inclusive' ? 'รวม VAT' : 'ไม่รวม VAT'),
+        si.quoteNumber && RO('ใบเสนอราคา', si.quoteNumber),
+        h('div', { className:'col-span-2 md:col-span-4 text-[11px] text-gray-500' }, 'เลขที่ วันที่ ลูกค้า สาขา คลัง และโหมดราคา แก้ไม่ได้ (ใบเดิม) — ถ้าต้องเปลี่ยน ให้ ผจก.บัญชีพิจารณายกเลิกใบ')),
+      h(SalesLineTable, { state, dispatch, user, branch:si.branch, customer:(state.customers || []).find(c => c.id === si.customerId),
+        lines, setLines, vatRate:7, priceMode:si.priceMode, testPrefix:'sie', showDiscount:true }),
+      hasKit && h('div', { className:'bg-pink-50 border border-pink-200 rounded p-2 text-xs space-y-1', 'data-testid':'si-edit-kit-actions' },
+        h('label', { className:'flex items-center gap-2 font-medium' },
+          h('input', { type:'checkbox', checked:!!ksc, 'data-testid':'si-edit-kit-show', onChange:e => setKsc(e.target.checked) }),
+          '📋 แสดงของในชุดบนใบกำกับ (ไม่มีราคา)'),
+        lines.map((l, i) => l && l.lineKind === 'kit' && h('div', { key:i, className:'flex items-center gap-2' },
+          h('span', null, '🎁 ' + itName(l.itemId) + ' × ' + fmtNum(l.qty)),
+          h('button', { type:'button', 'data-testid':'si-edit-kit-split-' + i, onClick:() => splitKit(i),
+            className:'px-2 py-1 rounded bg-white border border-pink-300 hover:bg-pink-100 font-medium' }, '🔓 แยกชุดเป็นรายการมีราคา')))),
+      h('div', { className:'bg-gray-50 rounded p-3 space-y-1 text-sm', 'data-testid':'si-edit-live-totals' },
+        h('div', { className:'flex justify-between' }, h('span', null, 'ยอดก่อน VAT:'), h('span', null, fmtCur(si.subtotal || 0) + ' → ' + fmtCur(B.subtotal))),
+        h('div', { className:'flex justify-between' }, h('span', null, 'VAT:'), h('span', null, fmtCur(si.vat || 0) + ' → ' + fmtCur(B.vat))),
+        h('div', { className:'flex justify-between items-center' }, h('span', null, 'หัก ณ ที่จ่าย (ลูกค้าหักเรา)'),
+          h('div', { className:'flex gap-1 items-center' }, h('input', { type:'number', value:whtRate, step:'0.1', 'data-testid':'si-edit-wht',
+            onChange:e => setWhtRate(Number(e.target.value) || 0), className:'w-20 px-2 py-2 min-h-[44px] border rounded text-sm text-right' }), h('span', null, '% = - ' + fmtCur(wht)))),
+        h('div', { className:'flex justify-between font-bold text-green-700 border-t pt-1' }, h('span', null, 'สุทธิ:'), h('span', null, fmtCur(si.netTotal || 0) + ' → ' + fmtCur(net))),
+        moneyLive && h('div', { className:'text-xs font-semibold text-rose-700', 'data-testid':'si-edit-need-approval' }, '💰 ยอดเงิน/VAT เปลี่ยน — ต้องให้ ผจก.บัญชี/GM อนุมัติ')),
+      h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-2' },
+        h('label', { className:'text-sm' }, 'ครบกำหนดรับชำระ', h(BEDateInput, { value:dueDate, onChange:setDueDate, className:'w-full px-2 py-1 border rounded text-sm' })),
+        h('label', { className:'text-sm' }, 'หมายเหตุ', h('textarea', { value:note, onChange:e => setNote(e.target.value), rows:1, className:'w-full px-2 py-1 border rounded text-sm' }))),
+      qDrop && h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-2 text-sm space-y-1', 'data-testid':'si-edit-quote-mode' },
+        h('div', { className:'font-medium' }, '📝 จำนวนในใบเสนอราคา ' + (si.quoteNumber || '') + ' ลดลง — ส่วนที่ขาด:'),
+        [['reopen','ส่งตามทีหลัง (ใบเสนอราคาเปิดค้างไว้)'], ['close','ลูกค้าไม่เอาแล้ว (ปิดไป)']].map(([v, lb]) => h('label', { key:v, className:'flex items-center gap-2 min-h-[44px] py-2 cursor-pointer' },   // verify 2: แท็บเล็ตแตะง่าย
+          h('input', { type:'radio', name:'si-edit-qsf', className:'w-5 h-5 shrink-0', value:v, checked:qsf === v, 'data-testid':'si-edit-qsf-' + v, onChange:() => setQsf(v) }), lb))),
+      h('div', { className:'bg-amber-50 border border-amber-200 rounded p-2 space-y-2 text-sm' },
+        h('div', { className:'flex flex-wrap gap-2' },
+          h('select', { value:reasonCode, onChange:e => setReasonCode(e.target.value), 'data-testid':'si-edit-reason-code', className:'border rounded px-2 py-2 text-sm min-h-[44px]' },
+            h('option', { value:'' }, '— เหตุผลที่แก้ (บังคับ) —'), (E.SI_EDIT_REASONS || []).map(r => h('option', { key:r.code, value:r.code }, r.label))),
+          h('input', { value:reason, onChange:e => setReason(e.target.value), 'data-testid':'si-edit-reason', placeholder:'รายละเอียด เช่น ลูกค้าขอให้แยกรายการในกล่อง / ของ X หมด เปลี่ยนเป็น Y',
+            className:'flex-1 min-w-[14rem] border rounded px-2 py-2 text-sm min-h-[44px]' })),
+        !printedBefore && h('label', { className:'flex items-center gap-2 text-sm min-h-[44px] py-2 cursor-pointer' },   // verify 2: แท็บเล็ตแตะง่าย (ตัดสินว่าต้องเก็บใบเดิมคืน)
+          h('input', { type:'checkbox', className:'w-5 h-5 shrink-0', checked:sentBefore, 'data-testid':'si-edit-sent-before', onChange:e => setSentBefore(e.target.checked) }),
+          'ส่ง PDF/รูปใบนี้ให้ลูกค้าไปแล้ว (ต้องเก็บใบเดิมคืน)'),
+        printedBefore && h('div', { className:'text-xs text-amber-900' }, '📄 ใบนี้พิมพ์แล้ว — ถ้าแก้สิ่งที่อยู่บนกระดาษ ต้องเก็บใบเดิมคืนจากลูกค้าแล้วพิมพ์ฉบับแก้ไข')),
+      h('div', { className:'flex gap-2 pt-3 border-t justify-end' },
+        h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
+        h(Button, { variant:'primary', 'data-testid':'si-edit-preview-btn', onClick:openPreview }, '👀 ดูผลก่อนบันทึก'))));
+}
+
+// E53: แบนเนอร์เหลืองงานค้างหลังแก้ใบ (เก็บใบเดิมคืน / จ่ายเกิน / เปลี่ยนของ) + ปุ่ม ✔ (ผู้มีสิทธิ์เท่านั้น · reducer ตรวจซ้ำ fail-closed)
+function SIEditFollowupBanner({ si, kind, rev, text, canAck, dispatch, user }){
+  const [open, setOpen] = useState(false);
+  const [outcome, setOutcome] = useState('');
+  const [note, setNote] = useState('');
+  const opts = SI_EDIT_ACK_OUT[kind] || [];
+  const btnLbl = { recall:'✔ เก็บใบเดิมคืนแล้ว', overpaid:'✔ จัดการแล้ว', goods:'✔ ตรวจแล้ว' }[kind];
+  const send = () => {
+    if(!outcome) return alert('เลือกผลการจัดการ');
+    if(outcome === 'other' && String(note).trim().length < 5) return alert('ผล "อื่น ๆ" ต้องระบุรายละเอียด (อย่างน้อย 5 ตัวอักษร)');
+    dispatch({ type:'ACK_SI_EDIT_FOLLOWUP', data:{ siId:si.id, rev, kind, outcome, note:String(note).trim(), by:(user && user.username) || '', at:Date.now() } });
+    setOpen(false);
+  };
+  return h('div', { 'data-testid':'si-edit-banner-' + kind, className:'bg-yellow-50 border border-yellow-300 text-yellow-900 rounded p-2 text-sm space-y-1' },
+    h('div', { className:'flex flex-wrap items-center gap-2 font-semibold' }, h('span', null, '⚠️ ' + text + ' (แก้ครั้งที่ ' + rev + ')'),
+      canAck && !open && h(Button, { size:'sm', variant:'secondary', 'data-testid':'si-edit-ack-' + kind, onClick:() => setOpen(true) }, btnLbl),
+      !canAck && h('span', { className:'font-normal text-xs' }, kind === 'overpaid' ? '(ให้ ผจก.บัญชี/GM กดยืนยัน)'
+        : (user && global.ERP.siEditAckSelf(si, rev, user.username)) ? '(คุณแก้/อนุมัติครั้งนี้เอง — ให้ผู้จัดการคนอื่นกดยืนยัน)' : '(ให้ผู้จัดการขาย/บัญชี หรือ GM กดยืนยัน)')),
+    open && h('div', { className:'flex flex-wrap gap-2 items-center' },
+      h('select', { value:outcome, onChange:e => setOutcome(e.target.value), 'data-testid':'si-edit-ack-outcome-' + kind, className:'border rounded px-2 py-1 text-sm min-h-[40px]' },
+        h('option', { value:'' }, '— ผลการจัดการ —'), opts.map(([v, lb]) => h('option', { key:v, value:v }, lb))),
+      h('input', { value:note, onChange:e => setNote(e.target.value), placeholder:'บันทึกเพิ่ม (ไม่บังคับ ยกเว้น "อื่น ๆ")', 'data-testid':'si-edit-ack-note-' + kind,
+        className:'flex-1 min-w-[10rem] border rounded px-2 py-1 text-sm min-h-[40px]' }),
+      h(Button, { size:'sm', variant:'primary', 'data-testid':'si-edit-ack-ok-' + kind, onClick:send }, 'บันทึก'),
+      h(Button, { size:'sm', variant:'secondary', onClick:() => setOpen(false) }, 'ยกเลิก')));
+}
+// E52: แผงประวัติการแก้ไข — ผู้แก้/ผู้อนุมัติ/เหตุผล/ระดับ/ยอดก่อน→หลัง/diff บรรทัด/JE/สถานะเรียกคืน-จ่ายเกิน · ดูฉบับก่อนแก้ (อ่านอย่างเดียว)
+function SIEditHistory({ si }){
+  const [showRev, setShowRev] = useState(null);
+  const log = si.editLog || [];
+  if(!log.length) return null;
+  const CL = { text:'✏️ แก้รายละเอียด', goods:'🔄 เปลี่ยนของ', money:'💰 ยอดเงินเปลี่ยน' };
+  const RS = (c) => ((global.ERP.SI_EDIT_REASONS || []).find(r => r.code === c) || {}).label || c;
+  const ACK = (x, kind) => x ? ' ✔ ' + global.ERP.siEditAckLabel(kind, x.outcome) + (x.note ? ' (' + x.note + ')' : '') + ' โดย ' + (x.by || '-') + (x.selfReview ? ' (ตรวจงานที่ตัวเองแก้/อนุมัติ — superuser)' : '') : '';
+  return h('details', { 'data-testid':'si-edit-history', className:'text-xs bg-white border rounded p-2' },
+    h('summary', { className:'cursor-pointer font-semibold text-sm' }, '🕘 ประวัติการแก้ไข (' + log.length + ' ครั้ง)'),
+    h('div', { className:'space-y-2 mt-2' }, log.map((e, k) => {
+      const after = k + 1 < log.length ? (log[k + 1].before || {}).lines : si.lines;
+      const diff = siEditLineDiff((e.before || {}).lines, after).filter(r => r.st !== 'same');
+      return h('div', { key:e.rev, className:'border rounded p-2 space-y-0.5', 'data-testid':'si-edit-hist-' + e.rev },
+        h('div', { className:'font-semibold' }, 'ครั้งที่ ' + e.rev + ' · ' + new Date(e.at).toLocaleString('th-TH') + ' · ' + (CL[e.cls] || e.cls)),
+        h('div', null, 'ผู้แก้: ' + (e.by || '-') + (e.approvedBy ? ' · ผู้อนุมัติ: ' + e.approvedBy + (e.direct ? ' (👑 ทำเอง)' : '') : '') + ' · เหตุผล: ' + RS(e.reasonCode) + ' — ' + (e.reason || '')),
+        h('div', null, 'สุทธิ ' + fmtCur((e.before || {}).netTotal || 0) + ' → ' + fmtCur((e.after || {}).netTotal || 0)
+          + ' · VAT ' + fmtCur((e.before || {}).vat || 0) + ' → ' + fmtCur((e.after || {}).vat || 0) + (e.jeNumber ? ' · JE ' + e.jeNumber : '')),
+        diff.length > 0 && h('ul', { className:'pl-4 list-disc' }, diff.map((r, j) => h('li', { key:j, className:SI_EDIT_DIFF_LBL[r.st][1] },
+          SI_EDIT_DIFF_LBL[r.st][0] + ': ' + r.name + (r.from ? ' · ก่อน ' + r.from : '') + (r.to ? ' · หลัง ' + r.to : '')))),
+        e.recall && h('div', { className:e.recall.status === 'pending' ? 'text-amber-800 font-semibold' : 'text-green-700' },
+          e.recall.status === 'pending' ? '📄 รอเก็บใบเดิมคืน' : '📄 เก็บใบเดิมแล้ว' + ACK(e.recall, 'recall')),
+        (Number(e.overpaid) || 0) > 0.01 && h('div', { className:e.overpaidAck ? 'text-green-700' : 'text-red-700 font-semibold' },
+          '💸 จ่ายเกิน ' + fmtCur(e.overpaid) + (e.overpaidAck ? ACK(e.overpaidAck, 'overpaid') : ' — รอบัญชีจัดการ')),
+        (e.priceChanged || []).length > 0 && h('div', { className:'text-amber-800', 'data-testid':'si-edit-hist-price' }, '⚠️ ราคาต่อหน่วยเปลี่ยน (ยอดรวมเท่าเดิม): '
+          + e.priceChanged.map(c => c.itemName + ' ' + c.unitPrice[0] + ' → ' + c.unitPrice[1] + (c.discount[0] !== c.discount[1] ? ' (ส่วนลด ' + c.discount[0] + ' → ' + c.discount[1] + ')' : '')).join(', ')),
+        (e.cls === 'goods' || (e.priceChanged || []).length > 0) && h('div', { className:e.goodsAck ? 'text-green-700' : 'text-amber-800' }, e.goodsAck ? '🔄 ผู้จัดการตรวจแล้ว' + ACK(e.goodsAck, 'goods') : (e.cls === 'goods' ? '🔄 รอผู้จัดการตรวจต้นทุน' : '🔄 รอผู้จัดการตรวจราคาที่เปลี่ยน')),
+        h('button', { type:'button', className:'text-blue-700 underline', 'data-testid':'si-edit-hist-before-' + e.rev,
+          onClick:() => setShowRev(showRev === e.rev ? null : e.rev) }, showRev === e.rev ? 'ซ่อนฉบับก่อนแก้' : 'ดูฉบับก่อนแก้'),
+        showRev === e.rev && h('table', { className:'w-full border mt-1', 'data-testid':'si-edit-hist-before-table' },
+          h('tbody', { className:'divide-y' }, ((e.before || {}).lines || []).map((l, j) => h('tr', { key:j, className:l.lineKind === 'kit_child' ? 'text-gray-500' : '' },
+            h('td', { className:cls('px-1', l.lineKind === 'kit_child' && 'pl-4') }, (l.lineKind === 'kit_child' ? '• ' : '') + (l.displayName || l.itemName || l.itemId)),
+            h('td', { className:'px-1 text-right' }, fmtNum(l.qty) + ' ' + (l.unit || '')),
+            h('td', { className:'px-1 text-right' }, l.lineKind === 'kit_child' ? '—' : fmtCur(l.lineTotal || 0)))),
+            h('tr', null, h('td', { colSpan:2, className:'px-1 font-semibold' }, 'สุทธิ'), h('td', { className:'px-1 text-right font-semibold' }, fmtCur((e.before || {}).netTotal || 0))))));
+    })));
+}
+
 // ---------- SI Detail ----------
 // 🖨️ พิมพ์ใบกำกับ "เส้นเดียว" ของทั้งโมดูล — ต้นฉบับได้ครั้งเดียว ที่เหลือเป็นสำเนา (ม.86/5) + เก็บ log ว่าใครพิมพ์
 //   ทุกปุ่มพิมพ์ใบกำกับต้องเรียกตัวนี้ ห้ามเรียก printSalesInvoice ตรง ๆ จาก UI
@@ -105175,7 +106357,9 @@ function printSI(si, state, dispatch, user, opts){
   // 🆕 UAT ชุด 2 S4: ใบยกเลิกแล้วที่ยังไม่เคยพิมพ์ → ไม่มีต้นฉบับให้พิมพ์ (ภาษีขายกลับไปแล้ว)
   if(si.voided && !((Number(si.printCount) || 0) > 0)){ alert('🚫 ใบกำกับ ' + (si.siNumber || '') + ' ถูกยกเลิกแล้วและยังไม่เคยพิมพ์ — พิมพ์ต้นฉบับไม่ได้'); return; }
   const by = (user && user.username) || '';
-  const mark = (kind, extra) => { if(dispatch) dispatch({ type:'SI_PRINT_MARK', data:{ siId:si.id, kind, by, at:Date.now(), ...(extra || {}) } }); };
+  // 🆕 SI_EDIT E37: ทุก mark แนบ rev (ฉบับที่พิมพ์) — reducer นับต้นฉบับของฉบับแก้ไข / rev เก่า = สำเนา (staleRev)
+  const rev = Number(si.editRev) || 0;
+  const mark = (kind, extra) => { if(dispatch) dispatch({ type:'SI_PRINT_MARK', data:{ siId:si.id, kind, by, at:Date.now(), rev, ...(extra || {}) } }); };
   // 🆕 verify 1: ใบนี้ยังรอคำตอบ "พิมพ์ออกไหม?" อยู่ → ห้ามเปิดหน้าต่างต้นฉบับ/ใบแทนซ้ำ (กดเบิ้ล = กระดาษป้ายต้นฉบับ 2 ใบ)
   if(_siPrintPending.has(si.id)){ alert('⏳ ใบกำกับ ' + (si.siNumber || '') + ' กำลังรอตอบว่า "พิมพ์ออกไหม?" — ตอบคำถามเดิมก่อน แล้วค่อยกดพิมพ์ใหม่'); return; }
   const ask = (w, q, sub, onAns, hint) => { _siPrintPending.add(si.id);
@@ -105193,10 +106377,13 @@ function printSI(si, state, dispatch, user, opts){
     return;
   }
   const hasKit = (si.lines||[]).some(l => l.lineKind === 'kit');
-  const first = !((Number(si.printCount) || 0) > 0);
-  // ครั้งแรกเลือกว่าจะโชว์ของข้างในไหม แล้วจำไว้บนใบ (ตอนยืนยันว่าพิมพ์ออก) — พิมพ์ซ้ำต้องได้เนื้อหาเดียวกับต้นฉบับ
+  const never = !((Number(si.printCount) || 0) > 0);
+  // 🆕 SI_EDIT E37: ต้นฉบับ = ยังไม่เคยพิมพ์ หรือ ฉบับแก้ไขล่าสุด (เปลี่ยนกระดาษ) ยังไม่ได้พิมพ์ต้นฉบับ (siOriginalDue)
+  const first = global.ERP.siOriginalDue ? global.ERP.siOriginalDue(si) : never;
+  const revOrig = first && !never;
+  // ครั้งแรกเลือกว่าจะโชว์ของข้างในไหม แล้วจำไว้บนใบ (ตอนยืนยันว่าพิมพ์ออก) — พิมพ์ซ้ำต้องได้เนื้อหาเดียวกับต้นฉบับ · ฉบับแก้ไขใช้ค่าบนใบ (ไม่ถามซ้ำ)
   let showChildren = !!si.kitShowChildren;
-  if(hasKit && first){
+  if(hasKit && never){
     showChildren = confirm('ใบนี้มีชุดสินค้า (Snack Box)\n\n'
       + 'กด "ตกลง" = แสดงรายการของข้างในบนใบกำกับ (ไม่มีราคา)\n'
       + 'กด "ยกเลิก" = พิมพ์เป็นบรรทัดเดียว (ค่าตั้งต้น)');
@@ -105204,8 +106391,8 @@ function printSI(si, state, dispatch, user, opts){
   const w = printSalesInvoice(si, state, { showChildren, copy: !first });
   if(!w){ alert(SI_POPUP_BLOCKED); return; }   // 🆕 UAT M2: ป๊อปอัปถูกบล็อก → ไม่ถาม ไม่นับต้นฉบับ/สำเนา
   if(!first){ mark('copy'); return; }
-  ask(w, 'พิมพ์ต้นฉบับออกมาเรียบร้อยไหม?', si.siNumber,
-    ok => ok ? mark('original', hasKit ? { kitShowChildren:showChildren } : null) : mark('cancel'));
+  ask(w, revOrig ? 'พิมพ์ต้นฉบับ (ฉบับแก้ไขครั้งที่ ' + rev + ') ออกมาเรียบร้อยไหม?' : 'พิมพ์ต้นฉบับออกมาเรียบร้อยไหม?', si.siNumber,
+    ok => ok ? mark('original', (hasKit && never) ? { kitShowChildren:showChildren } : null) : mark('cancel'));
 }
 
 // 🆕 SP12: กล่องถามในหน้า (ไม่ใช้ window.confirm) — รอหน้าต่างพิมพ์ปิด หรือผู้ใช้กลับมาที่หน้านี้ แล้วค่อยถาม
@@ -106379,7 +107566,7 @@ function SalesLineTable({ state, dispatch, user, branch, customer, lines, setLin
                       className:'px-1.5 py-0.5 rounded bg-pink-100 hover:bg-pink-200 text-pink-800 font-medium' },
                       '🎁 จัดกล่อง'))),
                 h('td', { className:'px-2 py-1' },
-                  h('input', { type:'number', value:l.qty, step:'any', min:0,
+                  h('input', { type:'number', value:l.qty, step:'any', min:0, 'data-testid':tp + '-qty-' + i,
                     onChange:e=>updateLine(i,'qty',Number(e.target.value)||0),
                     className:'w-full px-1 py-1 border rounded text-xs text-right' })),
                 h('td', { className:'px-2 py-1' },
@@ -106388,7 +107575,7 @@ function SalesLineTable({ state, dispatch, user, branch, customer, lines, setLin
                     (units.length>0 ? units : [{ name:it?.issueUnit||'' }]).map(u =>
                       h('option', { key:u.name, value:u.name }, u.name)))),
                 h('td', { className:'px-2 py-1' },
-                  h('input', { type:'number', value:l.unitPrice, step:'0.01',
+                  h('input', { type:'number', value:l.unitPrice, step:'0.01', 'data-testid':tp + '-price-' + i,
                     onChange:e=>updateLine(i,'unitPrice',Number(e.target.value)||0),
                     onWheel:e=>e.currentTarget.blur(),
                     title: !(Number(l.unitPrice) > 0) ? 'ยังไม่ได้ตั้งราคาขายของสินค้านี้' : '',
@@ -106742,6 +107929,21 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
     && (hasPerm(user,'sales','si','create') || hasPerm(user,'sales','si','edit'));
   // 🆕 UAT S2: ใบแทนล่าสุดที่ยังไม่ได้พิมพ์ออก (ตอบ "ไม่ออก") — พิมพ์ใบนั้นแทนการออกใบใหม่
   const replPending = (si.replacements||[]).slice().reverse().find(r => r && !((Number(r.printCount) || 0) > 0)) || null;
+  // 🆕 SI_EDIT E46: ✏️ แก้ไขใบกำกับ (ใบเดิม) — ปุ่มตามสิทธิ์ · ด่าน siEditBlock ตรวจกับ state สดก่อนเปิดฟอร์ม · อยู่ในใบวางบิล = เตือน (แก้ยอดไม่ได้)
+  const [editOpen, setEditOpen] = useState(false);
+  const canEdit = !si.voided && !isMig && hasPerm(user,'sales','si','edit');
+  const openEdit = () => {
+    const live = _siEditLive(state), cur = (live.salesInvoices || []).find(i => i && i.id === si.id);
+    const blk = global.ERP.siEditBlock(live, cur, user);
+    if(blk){ alert('⛔ แก้ใบกำกับไม่ได้ — ' + blk); return; }
+    const bn = (live.salesBillings || []).find(b => b && !b.voided && (b.id === cur.billingId || (b.siIds || []).includes(cur.id)));
+    if(bn && !confirm('ℹ️ ใบนี้อยู่ในใบวางบิล ' + (bn.bnNumber || '') + '\n\nแก้รายละเอียด/เปลี่ยนของที่ยอดเท่าเดิมได้ · ถ้ายอดเงินเปลี่ยน ต้องยกเลิกใบวางบิลก่อน\n\nเปิดฟอร์มแก้ต่อ?')) return;
+    setEditOpen(true);
+  };
+  const _eLast = (f) => (si.editLog || []).slice().reverse().find(f) || null;
+  const _recallE = global.ERP.siEditRecallNeeded(si) ? _eLast(e => e && e.recall && e.recall.status === 'pending') : null;
+  const _overE = global.ERP.siEditOverpaid(si) ? _eLast(e => e && (Number(e.overpaid) || 0) > 0.01) : null;
+  const _goodsRevs = global.ERP.siEditGoodsReview(si);
   const issueRepl = () => {
     const d = { siId:si.id, reason:replReason, note:replNote.trim(), by:(user && user.username) || '', at:Date.now() };
     const blk = global.ERP.siReplacementBlock(si, d, state);
@@ -106882,6 +108084,14 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
           `PO ลูกค้า: ${si.customerPoRef}`)),
       si.voided && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-sm text-red-800' },
         '🚫 ใบกำกับนี้ถูกยกเลิกแล้ว', si.voidReason && ` — ${si.voidReason}`),
+      // 🆕 SI_EDIT E53: งานค้างหลังแก้ใบ (ไม่บล็อกอะไร)
+      _recallE && h(SIEditFollowupBanner, { key:'rc' + _recallE.rev, si, kind:'recall', rev:_recallE.rev, dispatch, user,
+        text:'ใบกำกับแก้หลังพิมพ์/ส่งแล้ว — เก็บใบเดิมคืนจากลูกค้า แล้วพิมพ์ใบใหม่', canAck:_siEditAckOk(si, _recallE.rev, user) }),
+      _overE && h(SIEditFollowupBanner, { key:'op' + _overE.rev, si, kind:'overpaid', rev:_overE.rev, dispatch, user,
+        text:'ลูกค้าจ่ายเกิน ' + fmtCur(si.overpaidAmount || 0) + ' หลังแก้ใบกำกับ — คืนเงิน/ตกลงกับลูกค้า', canAck:_siOverpaidAcker(user) }),
+      _goodsRevs.map(r => h(SIEditFollowupBanner, { key:'gd' + r, si, kind:'goods', rev:r, dispatch, user,
+        text:'แก้ใบเปลี่ยนของ ยอดเท่าเดิม — ผู้จัดการตรวจต้นทุน', canAck:_siEditAckOk(si, r, user) })),
+      h(SIEditHistory, { si }),
       // 🆕 SP12/SP13: ประวัติการพิมพ์ต้นฉบับ + ใบแทน (ผู้จัดการ/บัญชีเห็น)
       !isMig && (si.originalPrintedAt || (si.printLog||[]).length > 0 || (si.replacements||[]).length > 0) && h('div', {
         'data-testid':'si-print-history', className:'text-xs text-gray-600 bg-gray-50 border rounded p-2 space-y-1' },
@@ -106960,7 +108170,7 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
         // 🆕 UAT ชุด 2 S4: ใบยกเลิกที่ยังไม่เคยพิมพ์ → ไม่มีปุ่มพิมพ์ (เคยพิมพ์แล้ว = พิมพ์สำเนาได้ตามเดิม)
         !isMig && !(si.voided && !((Number(si.printCount) || 0) > 0)) && h(Button, { variant:'primary', 'data-testid':'si-print', onClick:()=>{
           printSI(si, state, dispatch, user); } },
-          (Number(si.printCount) || 0) > 0 ? '🖨️ พิมพ์ซ้ำ (สำเนา)' : '🖨️ พิมพ์ใบกำกับ'),
+          (Number(si.printCount) || 0) > 0 ? (global.ERP.siOriginalDue(si) ? '🖨️ พิมพ์ต้นฉบับ (ฉบับแก้ไข)' : '🖨️ พิมพ์ซ้ำ (สำเนา)') : '🖨️ พิมพ์ใบกำกับ'),   // 🆕 SI_EDIT E37
         // 🆕 UAT S2: มีใบแทนที่ยังไม่ได้พิมพ์ออก → ปุ่มหลัก = พิมพ์ใบนั้น (กันออกใบแทนครั้งถัดไปโดยไม่ตั้งใจ)
         canRepl && !replOpen && replPending && h(Button, { variant:'secondary', 'data-testid':'si-repl-pending',
           onClick:()=>printSI(si, state, dispatch, user, { replacementSeq:replPending.seq }) }, `🖨️ พิมพ์ใบแทนครั้งที่ ${replPending.seq}`),
@@ -106968,6 +108178,8 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
           title:'ต้นฉบับชำรุด/เปียกน้ำ/หาย — ออกใบแทนตามมาตรา 86/12 (เลขที่เดิม)' }, '🧾 ออกใบแทนใบกำกับภาษี'),
         (si.lines||[]).some(l => l.lineKind === 'kit') && h(Button, { variant:'secondary',
           'data-testid':'si-print-packing', onClick:()=>printPackingList(si, state) }, '📦 ใบจัดของ'),
+        canEdit && h(Button, { variant:'secondary', 'data-testid':'si-edit-open', onClick:openEdit,
+          title:'แก้ในใบเดิม (เลขที่/วันที่/ลูกค้าเดิม) — แยกรายการในชุด เปลี่ยนของ ลด/เพิ่มจำนวน · ยอดเงินเปลี่ยนต้องอนุมัติ' }, '✏️ แก้ไขใบกำกับ'),
         // 🆕 FIX-7: ยกเลิกใบกำกับ (เฉพาะที่ยังไม่รับชำระ + ยังไม่ถูกยกเลิก)
         !si.voided && !isMig && st === 'unpaid' && hasPerm(user,'sales','si','void') && h(Button, { variant:'danger', onClick:()=>{
           // 📨 อยู่ในใบวางบิลที่ยังไม่ยกเลิก → บอกตั้งแต่ตรงนี้ (reducer ก็กันอีกชั้น) ไม่ให้ขึ้น "ยกเลิกแล้ว" ทั้งที่ไม่ได้ยกเลิก
@@ -106977,6 +108189,9 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
             alert(`⚠️ ใบกำกับนี้อยู่ในใบวางบิล ${_bnLive.bnNumber} แล้ว\n\nไปที่ ขาย → 📨 ใบวางบิล แล้วยกเลิกใบวางบิลนั้นก่อน จึงจะยกเลิกใบกำกับได้`);
             return;
           }
+          // 🆕 SI_EDIT F1: เดือน VAT ยื่นแล้ว/งวดล็อก → ยกเลิกไม่ได้ (ตรวจกับ state สดก่อนส่งคำขออนุมัติ · reducer ตรวจซ้ำ)
+          { const _g = global.ERP.siDateGuard((global.ERP.__getState && global.ERP.__getState()) || state, si.invDate);
+            if(_g.block){ alert('⛔ ยกเลิกไม่ได้ — ' + _g.block); return; } }
           // 🆕 APPROVAL 1b-2 (S-1): ยกเลิกใบกำกับขาย ต้องให้ ผจก.บัญชี/GM อนุมัติ (กฎตั้งต้น r_delete_si · executor delete_si → VOID_SALES_INV)
           if((state.approvalRequests||[]).some(r => r && r.action === 'delete_si' && r.entityId === si.id && (r.status || 'pending') === 'pending')){
             alert('📋 ใบนี้มีคำขอยกเลิกรออนุมัติอยู่แล้ว — รอผู้อนุมัติกดคำขอเดิม'); return; }
@@ -107003,7 +108218,8 @@ function SIDetailModal({ si:siProp, state, dispatch, user, onClose, onReceive })
           dispatch(voidAct);
           alert('🚫 ยกเลิกใบกำกับ ' + si.siNumber + ' แล้ว' + (global.ERP.gmDirectLast && global.ERP.gmDirectLast() ? ' (👑 GM/เจ้าของ ทำเอง · คืนสต๊อก + กลับ JE · บันทึกให้ตรวจย้อนหลัง)' : '')); onClose();
         }}, '🚫 ยกเลิกใบกำกับ'),
-        h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'))
+        h(Button, { variant:'secondary', onClick:onClose }, 'ปิด')),
+      editOpen && h(NewSIModal, { state, dispatch, user, fromSi:si, onClose:()=>setEditOpen(false) })
     )
   );
 }
@@ -107030,13 +108246,22 @@ function ReceivePaymentModal({ si, state, dispatch, user, onClose }){
     if(amount <= 0) return alert('ใส่จำนวน');
     if(amount > remain + 0.01) return alert(`รับเกินคงเหลือ (${fmtCur(remain)})`);
     if(method === 'transfer' && !bankId) return alert('เลือกบัญชีที่รับโอน');
-    const bank = banks.find(b => b.id === bankId);
+    // 🆕 SI_EDIT F3: ตรวจใบสดก่อนบันทึก — ใบถูกยกเลิก/หายไประหว่างเปิดหน้าต่าง = ห้ามรับ
+    const _st = (global.ERP.__getState && global.ERP.__getState()) || state;
+    const _live = ((_st && _st.salesInvoices) || []).find(x => x && x.id === si.id);
+    if(!_live) return alert('⛔ ไม่พบใบกำกับนี้แล้ว — รับชำระไม่ได้');
+    if(_live.voided) return alert('⛔ ใบกำกับ ' + (_live.siNumber || '') + ' ถูกยกเลิกแล้ว — รับชำระไม่ได้');
+    // 🆕 SI_EDIT verify 1: ใบถูกแก้ลดยอดระหว่างเปิดหน้าต่าง → คงเหลือคิดจากใบสด
+    { const _rem = (Number(_live.netTotal) || 0) - (Number(_live.paidAmount) || 0);
+      if(Number(amount) > _rem + 0.01) return alert('⛔ ยอดใบกำกับเปลี่ยน — คงเหลือ ' + fmtCur(Math.max(0, _rem))); }
+    // 🆕 SI_EDIT F2: เก็บบัญชีธนาคารเฉพาะเงินโอน (เงินสด/เช็ค/บัตร ไม่ผูกบัญชี — กลับรายการจะไม่ลดยอดธนาคารผิด)
+    const bank = method === 'transfer' ? banks.find(b => b.id === bankId) : null;
 
     const pay = {
       id: genId('spay'),
       siId: si.id, customerId: si.customerId,
       date, amount: Number(amount), method, ref, note,
-      bankId: bankId||null, bankName: bank?.name||'', bankNumber: bank?.accountNumber||'',
+      bankId: (method === 'transfer' && bankId) || null, bankName: bank?.name||'', bankNumber: bank?.accountNumber||'',
       slip,
       by: user.username, createdAt: Date.now(),
     };
@@ -107047,7 +108272,7 @@ function ReceivePaymentModal({ si, state, dispatch, user, onClose }){
     }
 
     // 🆕 UAT M1: อ่านใบสดจาก state ก่อนส่ง — prop si เป็นภาพตอนกดเปิดรายละเอียด (ก่อนพิมพ์/ออกใบแทน) ห้ามทับประวัติพิมพ์
-    const siNow = (state.salesInvoices||[]).find(x => x && x.id === si.id) || si;
+    const siNow = _live;   // verify 1: ใบสด (ไม่ใช่ state prop)
     const newPaid = (siNow.paidAmount||0) + Number(amount);
     const newStatus = newPaid >= (siNow.netTotal||0) - 0.01 ? 'paid' : 'partial';
     dispatch({ type:'UPDATE_SALES_INV', data:{ ...siNow, paidAmount: newPaid, paymentStatus: newStatus }});
@@ -107491,46 +108716,14 @@ function CustomersMiniList({ state, dispatch, user }){
 
 // ==================== AUTO-POST JE ====================
 function autoPostSalesInvoice(si, state, dispatch, user){
-  const accs = state.chartOfAccounts || [];
-  const find = (type, hint) => accs.find(a => a.type===type && (a.name||'').includes(hint))
-    || accs.find(a => a.type===type);
-  const arAcc = find('asset', 'ลูกหนี้การค้า') || find('asset', 'ลูกหนี้');
-  const revAcc = find('revenue', 'รายได้') || find('revenue', 'ขาย') || accs.find(a => a.type==='revenue');
-  const vatOut = find('liability', 'ภาษีขาย');
-  // 🆕 WHT-ขาย (council): debit asset 1155 (ภาษีถูกหัก ณ ที่จ่าย) — เลิก fallback ไป asset แรก (เดิม debit เงินสดผิด)
-  const whtOut = accs.find(a => a.code==='1155') || accs.find(a => a.type==='asset' && (a.name||'').includes('ถูกหัก ณ ที่จ่าย'));
-  if(!arAcc || !revAcc){
+  // 🆕 SI_EDIT: บรรทัด JE มาจาก global.ERP.siJeLines (core · ใช้ร่วมกับ reducer แก้ใบ) — ตัด role ออก → JE เท่าเดิมทุก field
+  const _jl = global.ERP.siJeLines(state, si);
+  if(!_jl){
     console.warn('[autoPostSalesInvoice] ขาด COA');
     alert('⚠️ COA ขาด "ลูกหนี้" หรือ "รายได้" — JE ขายยังไม่ post\nเพิ่มใน บัญชี → 💼 ผังบัญชี');
     return;
   }
-
-  const lines = [];
-  if((si.netTotal||0) > 0){
-    lines.push({ accountId:arAcc.id, accountCode:arAcc.code, accountName:arAcc.name,
-      debit: si.netTotal, credit:0, description:`ลูกหนี้ ${si.siNumber}` });
-  }
-  if(whtOut && (si.whtAmount||0) > 0){
-    lines.push({ accountId:whtOut.id, accountCode:whtOut.code, accountName:whtOut.name,
-      debit: si.whtAmount, credit:0, description:'ภาษีหัก ณ ที่จ่าย (ลูกค้าหักเรา)' });
-  }
-  if((si.subtotal||0) > 0){
-    lines.push({ accountId:revAcc.id, accountCode:revAcc.code, accountName:revAcc.name,
-      debit:0, credit: si.subtotal, description:`รายได้ขาย ${si.siNumber}` });
-  }
-  if(vatOut && (si.vat||0) > 0){
-    lines.push({ accountId:vatOut.id, accountCode:vatOut.code, accountName:vatOut.name,
-      debit:0, credit: si.vat, description:'ภาษีขาย' });
-  }
-  // 🆕 FIX-5 (SALES-C1): ต้นทุนขาย (COGS) perpetual — DR ต้นทุนสินค้าขาย / CR สินค้าคงเหลือ
-  const cogsAcc = accs.find(a => a.type==='cogs');
-  const invAcc = find('asset', 'สินค้าคงเหลือ') || accs.find(a => a.id==='1300');
-  if(cogsAcc && invAcc && (si.cogsTotal||0) > 0){
-    lines.push({ accountId:cogsAcc.id, accountCode:cogsAcc.code, accountName:cogsAcc.name,
-      debit: si.cogsTotal, credit:0, description:`ต้นทุนขาย ${si.siNumber}` });
-    lines.push({ accountId:invAcc.id, accountCode:invAcc.code, accountName:invAcc.name,
-      debit:0, credit: si.cogsTotal, description:`ตัดสินค้าคงเหลือ ${si.siNumber}` });
-  }
+  const lines = _jl.map(({ role, ...l }) => l);
   const td = lines.reduce((s,l) => s + l.debit, 0);
   const tc = lines.reduce((s,l) => s + l.credit, 0);
   const seq = (state.journalEntries||[]).length + 1;
@@ -107594,6 +108787,11 @@ function printSalesInvoice(si, state, opts){
   // 🆕 SP13: opts.replacement = รายการใน si.replacements → ป้าย "ใบแทน" (พิมพ์ซ้ำ opts.copy = "สำเนาใบแทน") · เลขที่/วันที่/ยอดเดิมทุกอย่าง
   const _repl = opts.replacement || null;
   const _replDate = _repl ? (() => { const dd = new Date(Number(_repl.at) || 0); return dd.getDate() + '/' + (dd.getMonth() + 1) + '/' + (dd.getFullYear() + 543); })() : '';
+  // 🆕 SI_EDIT E37: ใบที่แก้แล้ว (มีการแก้ที่เปลี่ยนกระดาษ) → บรรทัดเล็กท้ายใบ "ฉบับแก้ไขครั้งที่ n (วันที่แก้)" · ปิดได้ที่ settings.siEditPrintRevNote
+  const _revE = ((Number(si.editRev) || 0) > 0 && (state.settings?.siEditPrintRevNote ?? true))
+    ? ((si.editLog || []).filter(e => e && e.paperChanged).slice(-1)[0] || null) : null;
+  const _revNote = _revE ? (() => { const dd = new Date(Number(_revE.at) || 0);
+    return 'ฉบับแก้ไขครั้งที่ ' + _revE.rev + ' (' + dd.getDate() + '/' + (dd.getMonth() + 1) + '/' + (dd.getFullYear() + 543) + ')'; })() : '';
   const c = siBuyer(state, si);   // 🆕 พิมพ์ใบกำกับด้วยข้อมูล ณ วันออกใบ (แก้/ลบลูกค้าทีหลังไม่กระทบใบเก่า)
   const company = state.company || {};
   // ⭐ ใช้ข้อมูลของสาขาที่ขายเป็นหัวบิล (ไม่ใช่ company HQ ทุกครั้ง)
@@ -107709,6 +108907,7 @@ function printSalesInvoice(si, state, opts){
   .badge.repl { border-width: 3px; }
   .repl-note { border: 1px solid #000; padding: 2mm 3mm; margin-bottom: 3mm; font-size: 10pt; font-weight: bold; }
   .footer.f3 { grid-template-columns: 1fr 1fr 1fr; }
+  .rev-note { margin-top: 2mm; font-size: 8pt; text-align: right; color: #333; }
   .remark { border: 1px solid #000; padding: 2mm 3mm; margin-top: 4mm; min-height: 16mm; font-size: 10pt; }
   .remark .label { font-weight: bold; font-size: 9pt; margin-bottom: 1mm; }
   /* SP6: บรรทัดใบเสร็จสมบูรณ์เมื่อได้รับชำระ — พิมพ์ทุกใบ (ไม่ใส่คำป้ายในคอมเมนต์ เทสหาคำในใบ) */
@@ -107784,6 +108983,7 @@ function printSalesInvoice(si, state, opts){
     <div class="sig">ผู้อนุมัติ / Authorized<div class="sdate">วันที่ ........./........./.........</div></div>
     ${_repl ? `<div class="sig" data-testid="si-repl-sign">ผู้ออกใบแทน / Issued by<div class="sdate">วันที่ ${_replDate}</div></div>` : ''}
   </div>
+  ${_revNote ? `<div class="rev-note" data-testid="si-rev-note">${_esc(_revNote)}</div>` : ''}
   </div>
 </div>
 </body></html>`;
@@ -107859,7 +109059,7 @@ function printPackingList(si, state){
   w.document.open(); w.document.write(html); w.document.close();
 }
 
-global.ERP.registerModule('sales-full', { main: SalesFullModule, printSalesInvoice, siLineCalc, siParseDisc, printPackingList, printQuote, printBilling });
+global.ERP.registerModule('sales-full', { main: SalesFullModule, printSalesInvoice, siLineCalc: global.ERP.siLineCalc, siParseDisc: global.ERP.siParseDisc, printPackingList, printQuote, printBilling });
 // helper ที่โมดูลอื่นต้องใช้ (คลัง: คิวจัดของจากใบเสนอราคาที่ตอบรับแล้ว)
 global.ERP.quoteStatus = quoteStatus;
 global.ERP.billingStatus = billingStatus;
@@ -123188,6 +124388,38 @@ C.registerGroup({
           docs:mkDocs(l, x => ({ kind:'si', id:x.i.id, ref:x.i.siNumber || x.i.id, why:x.why.join(' · ') })) };
       } },
 
+    // ref: SI_EDIT_CONTRACT E45 · 00-core siEditRecallNeeded · 01-state EDIT_SALES_INV (entry.recall) / ACK_SI_EDIT_FOLLOWUP kind 'recall'
+    //   ใบกำกับที่แก้หลังพิมพ์/ส่งลูกค้าแล้ว (เปลี่ยนสิ่งที่อยู่บนกระดาษ) — เก็บใบเดิมคืน · ไม่บล็อก · canonical (store.sl_si_edit_recall alias มาที่นี่)
+    { key:'acct_si_edit_recall', label:'ใบกำกับแก้หลังพิมพ์/ส่งแล้ว — เก็บใบเดิมคืนจากลูกค้า แล้วพิมพ์ใบใหม่', severity:'warn',
+      show: (ctx) => !!global.ERP.siPrintReviewer(ctx.user),
+      nav: (ctx) => (ctx.can('sales-full') && ctx.H.isHQ(ctx.state, ctx.state.currentBranch)) ? { tab:'sales-full', subs:{ sales:'invoices' } } : null,
+      todo: (ctx, res) => (ctx.can('sales-full') ? '' : 'บัญชีนี้เข้าเมนูขายไม่ได้ — แจ้งผู้มีสิทธิ์เปิดใบ · ')
+        + tdo(d => `${d.ref}: ${d.why} — เก็บใบเดิมคืนจากลูกค้า พิมพ์ฉบับแก้ไขให้ แล้วกด «✔ เก็บใบเดิมคืนแล้ว»`,
+          n => `ใบกำกับ ${n} ใบแก้หลังพิมพ์/ส่งแล้ว — เก็บใบเดิมคืน พิมพ์ฉบับแก้ไข แล้วกด «✔ เก็บใบเดิมคืนแล้ว»`)(ctx, res),
+      btn: 'เก็บใบเดิมคืน',
+      hint: (ctx) => (ctx.H.isHQ(ctx.state, ctx.state.currentBranch) ? '' : 'สลับสาขาเป็น HQ (มุมบนซ้าย) แล้ว ')
+        + 'ขาย → 🧾 ใบกำกับ → เปิดใบ → แถบเหลือง «✔ เก็บใบเดิมคืนแล้ว» · ไม่บล็อกการพิมพ์/รับชำระ',
+      run: (ctx) => {
+        const l = (ctx.state.salesInvoices||[]).filter(i => i && !isMig(i) && global.ERP.siEditRecallNeeded(i));
+        const why = (i) => 'แก้ครั้งที่ ' + (i.editLog||[]).filter(e => e && e.recall && e.recall.status === 'pending').map(e => e.rev).join(', ');
+        return { count:l.length, detail:l.map(i => `${i.siNumber || i.id}: ${why(i)}`),
+          docs:mkDocs(l, i => ({ kind:'si', id:i.id, ref:i.siNumber || i.id, why:why(i) })) };
+      } },
+    // ref: SI_EDIT_CONTRACT E45 · 00-core siEditOverpaid · ACK_SI_EDIT_FOLLOWUP kind 'overpaid' (ผจก.บัญชี/GM/superuser) — ลดยอดใบหลังลูกค้าจ่ายแล้ว
+    { key:'acct_si_overpaid', label:'ลูกค้าจ่ายเกินหลังแก้ใบกำกับ — คืนเงิน/ตกลงกับลูกค้า', severity:'warn',
+      show: (ctx) => { const u = ctx.user; return !!u && (global.ERP.isSuperUser(u) || u.role === 'gm' || u.role === 'owner' || u.position === 'gm'
+        || (u.position === 'manager' && (u.departmentIds || []).includes('accounting'))); },
+      nav: (ctx) => (ctx.can('sales-full') && ctx.H.isHQ(ctx.state, ctx.state.currentBranch)) ? { tab:'sales-full', subs:{ sales:'invoices' } } : null,
+      todo: (ctx, res) => tdo(d => `${d.ref}: จ่ายเกิน ${d.why} — คืนเงิน (ลง JE คืนเงิน/หักธนาคารเอง) หรือตกลงใช้รอบหน้า แล้วกด «✔ จัดการแล้ว»`,
+          n => `ใบกำกับ ${n} ใบลูกค้าจ่ายเกินหลังแก้ใบ — คืนเงิน/ตกลงกับลูกค้า แล้วกด «✔ จัดการแล้ว»`)(ctx, res),
+      btn: 'จัดการเงินจ่ายเกิน',
+      hint: (ctx) => 'ขาย → 🧾 ใบกำกับ → ป้าย 💸 จ่ายเกิน → เปิดใบ → แถบเหลือง «✔ จัดการแล้ว» · ระบบไม่คืนเงินเอง',
+      run: (ctx) => {
+        const l = (ctx.state.salesInvoices||[]).filter(i => i && !isMig(i) && global.ERP.siEditOverpaid(i));
+        return { count:l.length, amount:l.reduce((t, i) => t + (Number(i.overpaidAmount) || 0), 0), detail:l.map(i => `${i.siNumber || i.id}: ${fmtCur(i.overpaidAmount || 0)}`),
+          docs:mkDocs(l, i => ({ kind:'si', id:i.id, ref:i.siNumber || i.id, why:fmtCur(i.overpaidAmount || 0) })) };
+      } },
+
     // ref: src/mod-settings.js PartyEditModal save — กฎเจ้าของ 2026-09-28 "เลขผู้เสียภาษีถ้ามีไม่ครบ 13 หลัก ให้กดเซฟไม่ได้"
     //      ใช้ทุกการบันทึก (รายเดิมที่ไม่ได้แตะช่องเลขภาษีก็บล็อก) → รายเก่าที่เลขผิดจะแก้อะไรอื่นไม่ได้เลยจนกว่าจะแก้เลข
     //      เงื่อนไข = global.ERP.partyTaxBad (ไม่ว่าง · ไม่ใช่ 🌐 ต่างประเทศ · ตัดช่องว่าง/ขีดแล้วไม่ใช่เลข 13 หลัก → 'len' · หลักตรวจสอบ mod-11 ไม่ตรง → 'checksum' กฎ 2026-09-28) · ต่างจาก acct_pi_vat_sup_no_taxid (ดูเฉพาะผู้ขายที่มี PI VAT รวมเลขว่าง)
@@ -123377,8 +124609,9 @@ function ordersByNumber(ctx){
 function dispatchLotsByRef(ctx){
   return ctx.memo('prod_dispatchLotsByRef', () => {
     const m = new Map();
-    for(const g of (ctx.state.lotGenealogy||[])){
-      if(!g || g.kind !== 'dispatch' || !g.ref || !g.fgLot) continue;
+    // 🆕 SI_EDIT E28a: นับสุทธิต่อ (ref, สินค้า, ล็อต) — ล็อตที่คืนจากการแก้ใบกำกับจนสุทธิ ≤ 0 ไม่แสดง
+    for(const g of global.ERP.netDispatchRecs(ctx.state.lotGenealogy||[])){
+      if(!g || !g.ref || !g.fgLot) continue;
       if(!m.has(g.ref)) m.set(g.ref, []);
       m.get(g.ref).push(g.fgLot);
     }
@@ -125445,6 +126678,33 @@ C.registerGroup({
         const l = (ctx.state.salesInvoices||[]).map(i => ({ i, why:(i && !(i._migrated === true || i.createdBy === 'migration')) ? global.ERP.siPrintNeedsReview(i) : [] })).filter(x => x.why.length);
         return { count:l.length, detail:l.map(x => `${x.i.siNumber || x.i.id}: ${x.why.join(' · ')}`),
           docs:C.mkDocs(l, x => ({ kind:'si', id:x.i.id, ref:x.i.siNumber || x.i.id, why:x.why.join(' · ') })) };
+      } },
+    // ref: SI_EDIT_CONTRACT E45 — ใบกำกับแก้หลังพิมพ์/ส่งแล้ว ให้ผู้จัดการฝ่ายขายเห็น · alias ซ่อนเมื่อเห็น accounting.acct_si_edit_recall แล้ว
+    { key:'sl_si_edit_recall', label:'ใบกำกับแก้หลังพิมพ์/ส่งแล้ว — เก็บใบเดิมคืนจากลูกค้า แล้วพิมพ์ใบใหม่', alias:'accounting.acct_si_edit_recall', severity:'warn',
+      todo: (ctx, res) => (ctx.can('sales-full') ? '' : 'บัญชีนี้เข้าเมนูขายไม่ได้ — แจ้งผู้มีสิทธิ์เปิดใบ · ')
+        + tdo(d => `${d.ref}: ${d.why} — เก็บใบเดิมคืนจากลูกค้า พิมพ์ฉบับแก้ไขให้ แล้วกด «✔ เก็บใบเดิมคืนแล้ว»`,
+          n => `ใบกำกับ ${n} ใบแก้หลังพิมพ์/ส่งแล้ว — เก็บใบเดิมคืน พิมพ์ฉบับแก้ไข แล้วกด «✔ เก็บใบเดิมคืนแล้ว»`)(ctx, res),
+      btn: 'เก็บใบเดิมคืน',
+      show: (ctx) => !!global.ERP.siPrintReviewer(ctx.user),
+      nav: (ctx) => (ctx.can('sales-full') && atHQ(ctx)) ? { tab:'sales-full', subs:{ sales:'invoices' } } : null,
+      hint: (ctx) => hqPrefix(ctx) + 'ขาย → 🧾 ใบกำกับ → เปิดใบ → แถบเหลือง «✔ เก็บใบเดิมคืนแล้ว» · ไม่บล็อกการพิมพ์/รับชำระ',
+      run: (ctx) => {
+        const l = (ctx.state.salesInvoices||[]).filter(i => i && !(i._migrated === true || i.createdBy === 'migration') && global.ERP.siEditRecallNeeded(i));
+        const why = (i) => 'แก้ครั้งที่ ' + (i.editLog||[]).filter(e => e && e.recall && e.recall.status === 'pending').map(e => e.rev).join(', ');
+        return { count:l.length, detail:l.map(i => `${i.siNumber || i.id}: ${why(i)}`), docs:C.mkDocs(l, i => ({ kind:'si', id:i.id, ref:i.siNumber || i.id, why:why(i) })) };
+      } },
+    // ref: SI_EDIT_CONTRACT E45 · 00-core siEditGoodsReview · ACK_SI_EDIT_FOLLOWUP kind 'goods' — เปลี่ยนของ ยอดเท่าเดิม (ไม่ต้องอนุมัติ) ผู้จัดการตรวจต้นทุน
+    { key:'sl_si_edit_goods', label:'แก้ใบเปลี่ยนของ/ราคาต่อหน่วย ยอดเท่าเดิม — ผู้จัดการตรวจ', severity:'warn',
+      todo: (ctx, res) => tdo(d => `${d.ref}: ${d.why} — เปิดใบ ดูประวัติการแก้ไข ตรวจของ/ต้นทุนที่เปลี่ยน แล้วกด «✔ ตรวจแล้ว»`,
+          n => `ใบกำกับ ${n} ใบเปลี่ยนของ — ตรวจของ/ต้นทุนที่เปลี่ยน แล้วกด «✔ ตรวจแล้ว»`)(ctx, res),
+      btn: 'ตรวจการเปลี่ยนของ',
+      show: (ctx) => !!global.ERP.siPrintReviewer(ctx.user),
+      nav: (ctx) => (ctx.can('sales-full') && atHQ(ctx)) ? { tab:'sales-full', subs:{ sales:'invoices' } } : null,
+      hint: (ctx) => hqPrefix(ctx) + 'ขาย → 🧾 ใบกำกับ → เปิดใบ → 🕘 ประวัติการแก้ไข → แถบเหลือง «✔ ตรวจแล้ว» · ไม่บล็อกอะไร',
+      run: (ctx) => {
+        const l = (ctx.state.salesInvoices||[]).filter(i => i && !(i._migrated === true || i.createdBy === 'migration') && global.ERP.siEditGoodsReview(i).length);
+        const why = (i) => 'แก้ครั้งที่ ' + global.ERP.siEditGoodsReview(i).join(', ');
+        return { count:l.length, detail:l.map(i => `${i.siNumber || i.id}: ${why(i)}`), docs:C.mkDocs(l, i => ({ kind:'si', id:i.id, ref:i.siNumber || i.id, why:why(i) })) };
       } },
 
     // ref: 01-state.js:274-275 (customers[].taxId/credit/priceTier — c2 taxId:'' ตัวอย่างในข้อมูลตั้งต้น) · mod-sales-full.js:312-317 (regex 13 หลัก soft-warn ตอนออก SI)
