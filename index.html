@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="4a102d018da3";window.__ERP_BUILT_AT__="2026-10-20T14:22:10";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="734cc14fe60e";window.__ERP_BUILT_AT__="2026-10-20T15:28:48";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -10964,10 +10964,45 @@ function invUsedDepositOrCredit(state, inv){
 //   verify บัญชี: วันที่หัก = วันจ่ายจริงแรก → certDate (ใบเพิ่มย้อนหลัง AddWHTRetroModal) → invDate (ใบแบบเก่า legacy) — กติกาเดียวกับ whtCertPayeeEditWarn
 //   (WHTReport นับใบที่มี certDate เข้าเดือนนั้นแล้ว ไม่ pending) · ใบร่างที่สร้างพร้อมใบตั้งหนี้ (ไม่มี certDate ยังไม่จ่าย) ไม่นับ — VOID_INV ยกเลิกใบร่างให้เอง
 //   ตัดช่อง printedAt/issued/filed/payId ทิ้ง — ไม่มีโค้ดไหนเขียนลงใบ 50 ทวิ (ทดสอบผ่านช่องที่ไม่มีจริง = พิสูจน์อะไรไม่ได้)
+// 🆕 UNDO_FIELD_GUARD (UAT บัญชี): วันที่ใบแรกสุดที่ใบเคยมี = ค่าปัจจุบัน + 'invDate: A → B' ใน revisionHistory (UPDATE_INV ลงทุกครั้งที่แก้วันที่ · เพิ่มได้ลบไม่ได้)
+//   ด่านย้อนที่อ่านวันที่ใบ (50 ทวิ แบบเก่า · วันเคลมสำรองของใบกำกับไม่มีวันที่) ใช้วันแรกสุด — กันเลื่อนวันที่ใบไปเดือนหน้า (เดือนนี้ด่านยังไม่ติด)
+//   แล้วรอข้ามเดือนค่อย ↩️ ทางตรง · แก้วันที่พิมพ์ผิดยังทำได้ตามปกติ (ด่านดูวันเดิมให้ ไม่ต้องติดตาข่าย)
+function invEarliestDate(inv){
+  if(!inv) return '';
+  //   UAT ตรวจสอบ รอบ 2: อ่านช่องโครงสร้าง invDateFrom/To (reducer ลงจากค่าจริงของใบเดิม/ใหม่) + ทุก 'invDate:' ในข้อความ (ไม่ใช่แค่ตัวแรก — ข้อความปลอมแทรกก่อนบังวันจริงไม่ได้)
+  //   ทุกแหล่งเพิ่มวันได้อย่างเดียว → วันแรกสุดมีแต่เก่าลง (เข้มขึ้น)
+  const ds = [inv.invDate];
+  for(const r of (inv.revisionHistory || [])){
+    if(!r) continue;
+    ds.push(r.invDateFrom, r.invDateTo);
+    const re = /(?:^|· )invDate: (\S+) → (\S+)/g; let m; const tx = String(r.changes || '');
+    while((m = re.exec(tx))) ds.push(m[1], m[2]);
+  }
+  return ds.map(d => String(d || '').slice(0, 10)).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort()[0] || String(inv.invDate || '');
+}
+// ใบกำกับ (view) ที่ไม่มีวันที่ของตัวเอง → vatClaimDateOf ใช้วันที่ใบแทน
+function _vatViewNoOwnDate(v){ return !!v && !vatDeferred(v) && !String(v.supVatClaimDate || '').trim() && !String(v.supTaxInvDate || '').trim(); }
+// 'YYYY-MM' → 'ก.ย. 2569'
+function ymThShort(ym){ const m = /^(\d{4})-(\d{2})/.exec(String(ym || '')); return m ? _TH_MON_SHORT[Number(m[2]) - 1] + ' ' + (Number(m[1]) + 543) : String(ym || ''); }
+// แก้วันที่ใบข้ามเดือน แล้วเดือนภาษีของใบย้ายตาม → { from, to, why:[...] } | null (หน้าแก้ใบเตือน + คำขออนุมัติบอกผู้อนุมัติ)
+function invTaxMonthMove(oldInv, newInv){
+  if(!oldInv || !newInv) return null;
+  const a = ymOf(oldInv.invDate), b = ymOf(newInv.invDate);
+  if(!a || !b || a === b) return null;
+  //   UAT บัญชี รอบ 2: 50 ทวิ ของใบยังไม่จ่าย = รอหัก (WHTReport ไม่นับเข้างวด) → วันที่ใบไม่ย้ายเดือน ภ.ง.ด. — เตือนเฉพาะภาษีซื้อ (ด่านย้อนยังนับ 50 ทวิ แบบเก่าตามเดิม)
+  const why = [];
+  if((Number(oldInv.vat) || 0) > 0 && invTaxInvViews(oldInv).some(_vatViewNoOwnDate)) why.push('ใบกำกับภาษีไม่มีวันที่ ระบบใช้วันที่ใบเป็นวันเคลมภาษีซื้อ (ภ.พ.30)');
+  return why.length ? { from:a, to:b, why } : null;
+}
+// ชื่อฟิลด์ภาษาคนทำงาน (บันทึกตรวจย้อนหลัง/คำขออนุมัติ)
+const _INV_FIELD_TH = Object.freeze({ invDate:'วันที่ใบ', dueDate:'ครบกำหนด', amount:'มูลค่า', vat:'VAT', vatRate:'อัตรา VAT', vatableBase:'ฐาน VAT', exemptBase:'มูลค่ายกเว้น VAT',
+  whtAmount:'หัก ณ ที่จ่าย', whtLines:'บรรทัดหัก ณ ที่จ่าย', whtCertificates:'ใบ 50 ทวิ', netPayable:'ยอดสุทธิ', roundingAdjustment:'ปัดเศษ', offInvDiscount:'ส่วนลดนอกใบกำกับ',
+  supInvNumber:'เลขใบแจ้งหนี้', supInvDate:'วันที่ใบแจ้งหนี้', supplierId:'ผู้ขาย', hasMixedVat:'VAT ราย line' });
+function invFieldTh(k){ return _INV_FIELD_TH[k] || k; }
 function whtCertIssued(c, inv, state, today){
   if(!c || c.voided) return false;
   if(c.mergedInto) return true;
-  const d = String((inv && whtFirstPayDate(state, inv.id)) || c.certDate || (c.legacy && inv ? inv.invDate : '') || '');
+  const d = String((inv && whtFirstPayDate(state, inv.id)) || c.certDate || (c.legacy && inv ? invEarliestDate(inv) : '') || '');
   const ym = ymOf(d), cur = ymOf(today || getToday());
   return !!(ym && cur && ym < cur);
 }
@@ -10984,6 +11019,7 @@ function invVatEarlierMonth(inv, today, state){
     for(const v of invTaxInvViews(inv)){
       if(v.vatExpiredAt || !(v._claimVat > 0.005)) continue;
       take(ymOf(vatClaimDateOf(v)));
+      if(_vatViewNoOwnDate(v)) take(ymOf(invEarliestDate(inv)));   // 🆕 UNDO_FIELD_GUARD: วันเคลมสำรอง = วันที่ใบแรกสุด (กันเลื่อนวันที่ใบ)
     }
   }
   // verify รอบ 2: แก้ VAT เป็น 0 (UPDATE_INV · revisionHistory 'vat: x → 0') หลังเคลมเดือนก่อนแล้ว ↩️ — ใบกำกับยังอยู่ = งวดเดิมอาจยื่นแล้ว
@@ -10992,7 +11028,7 @@ function invVatEarlierMonth(inv, today, state){
   //   = ภาษีซื้อเคยเข้าบัญชีแล้ว → นับเดือนเคลมของใบกำกับทุกใบ (ขยายด่านอย่างเดียว)
   else if(_invHasTaxNo(inv) && ((inv.revisionHistory || []).some(r => r && /(^|· )vat: /.test(String(r.changes || '')))
     || (inv.vatAdjustHistory || []).length || (inv.priceAdjustHistory || []).length || _invJeHadVat(state, inv))){
-    for(const v of invTaxInvViews(inv)) if(!v.vatExpiredAt) take(ymOf(vatClaimDateOf(v)));
+    for(const v of invTaxInvViews(inv)) if(!v.vatExpiredAt){ take(ymOf(vatClaimDateOf(v))); if(_vatViewNoOwnDate(v)) take(ymOf(invEarliestDate(inv))); }
   }
   // verify บัญชี: ลบใบกำกับ (CLEAR_TAX_INV ไม่ต้องอนุมัติเมื่อยังไม่ตั้งล็อก) แล้วค่อย ↩️ = หลบด่านนี้ได้ → ดูประวัติ 'clear' ด้วย
   //   ใบกำกับที่เคยเคลมเดือนก่อนแล้วถูกลบ = ภาษีซื้ออาจอยู่ใน ภ.พ.30 ที่ยื่นแล้ว → ยังต้องขออนุมัติ (ช่อง #1 + ใบที่ 2+ ใน supTaxInvMore รวมที่ลบแล้ว)
@@ -11041,25 +11077,45 @@ function invRtvLinked(state, inv){
   const grIds = invUndoGrIds(state, inv);   // verify รอบ 2: รวม GR ที่ชี้กลับมา (ใบจ่ายล่วงหน้า)
   return ((state && state.returns) || []).some(r => r && r.rtvStatus !== 'cancelled' && (r.linkedINV === inv.id || (!!r.grId && grIds.includes(r.grId))));
 }
+// 🆕 UNDO_FIELD_GUARD G6: เหตุผลด่านย้อนที่มาจากข้อมูลของใบ (ตรรกะเดิมของ invUndoFacts ทุกบรรทัด) · null = ไม่ติด
+//   แยกออกมาให้ reducer UPDATE_INV ใช้เทียบใบเดิม/ใบใหม่ (invUndoGateFlip · G5) — ไม่อ่าน state.invoices (ใบส่งเข้ามาตรง ๆ)
+function invUndoExcluded(state, inv, ctxToday){
+  const st = state || {};
+  if(!inv) return null;
+  const grIds = invUndoGrIds(st, inv);   // verify รอบ 2: รวม GR ที่ชี้กลับมา (ใบจ่ายล่วงหน้า po_advance)
+  const grs = (st.grs || []).filter(g => g && grIds.includes(g.id));
+  if(_undoInvMigrated(inv) || inv.migLate) return 'ใบนำเข้า/ยกมาจาก Ecount';
+  if(inv.type === 'deposit_pi') return 'ใบมัดจำ/ใช้มัดจำแล้ว';
+  if(invUsedDepositOrCredit(st, inv)) return 'ใบนี้ใช้มัดจำ/เครดิตผู้ขาย — ต้องให้ ผจก.บัญชีตรวจ';   // UAT บัญชี F1
+  if(invRtvLinked(st, inv)) return 'มีใบคืนของ (RTV) ผูกกับใบนี้/ใบรับของของใบนี้ — ต้องให้ ผจก.บัญชีตรวจ (ยกเลิกแล้วตั้งใหม่ เจ้าหนี้จะไม่ตรงกับใบคืน)';   // verify รอบ 1 H1
+  if(inv.source === 'retention_release' || inv.contractId) return 'ใบผูกสัญญางานจ้าง/เงินประกัน';
+  if((inv.whtCertificates || []).some(c => whtCertIssued(c, inv, st, ctxToday))) return 'มีหนังสือรับรองหัก ณ ที่จ่าย (50 ทวิ) ที่ผูกการจ่าย/อยู่งวด ภ.ง.ด. เดือนก่อน (อาจยื่นแล้ว) — ให้ ผจก.บัญชีตรวจ';   // UAT บัญชี F3 + verify: ใบร่างเดือนปัจจุบันไม่นับ
+  if(grs.some(g => grRegisteredAssets(st, g).length) || (st.assets || []).some(a => a && !a.deleted && a.acquireFromInvId === inv.id))
+    return 'มีทรัพย์สินลงทะเบียนจากใบนี้แล้ว';
+  // verify รอบ 2: VAT หมดสิทธิ์ที่โอนเป็นค่าใช้จ่ายแล้ว (MARK_VAT_EXPIRED · JE แยก ไม่ใช่ source 'inv') — VOID_INV ไม่กลับ JE นั้น → 1150 ติดลบ/ค่าใช้จ่ายซ้ำเมื่อตั้งใหม่
+  if([inv].concat(invTaxInvViews(inv)).some(v => v && v.vatExpiredAt && (!v.vatExpiredAt.jeId || vatExpireJeLive(st, v.vatExpiredAt.jeId))))
+    return 'โอน VAT หมดสิทธิ์เป็นค่าใช้จ่ายแล้ว (JE แยก) — ให้ ผจก.บัญชีตรวจ';
+  const vm = invVatEarlierMonth(inv, ctxToday, st);   // UAT บัญชี F2 · UNDO_FIELD_GUARD UAT พนักงานบัญชี: เดือนแบบไทย
+  return vm ? 'ภาษีซื้อของใบนี้อยู่เดือน ' + ymThShort(vm) + ' ซึ่งอาจยื่น ภ.พ.30 แล้ว — ให้ ผจก.บัญชีตรวจ' : null;
+}
+// 🆕 UNDO_FIELD_GUARD G5/G6: แถวตาข่ายใน revisionHistory (แก้ใบทางหน้าแก้ใบแล้วด่านย้อนหลุด) — เพิ่มได้ลบไม่ได้ (_INV_APPEND_ONLY) → ย้อนต้องขออนุมัติตลอด
+function invUndoGateRow(inv){ return ((inv && inv.revisionHistory) || []).find(r => r && r.undoGate) || null; }
+// เทียบใบเดิม/ใบใหม่ของการแก้ใบทั่วไป: ใบเดิมติดด่าน แต่ใบใหม่ไม่ติด → คืนเหตุผลเดิม (ให้ reducer ลงแถวตาข่าย + หน้าจอเตือน) · ไม่งั้น null
+//   UAT ตรวจสอบ: ไม่ข้ามเมื่อใบมีแถวตาข่ายอยู่แล้ว — ลงทุกครั้งที่ด่านหลุด (แถวปลอมจาก payload ถูกตัดใน _invKeepAppendOnly อยู่แล้ว)
+function invUndoGateFlip(state, oldInv, newInv, ctxToday){
+  if(!oldInv || !newInv || oldInv.voided || newInv.voided) return null;
+  const before = invUndoExcluded(state, oldInv, ctxToday);
+  if(!before) return null;
+  return invUndoExcluded(state, newInv, ctxToday) ? null : before;
+}
 function invUndoFacts(state, inv, ctxToday){
   const st = state || {}, out = { everPaid:invEverPaid(st, inv), pendingPays:[], linkedApprovals:[], unknownApprovalIds:[], excluded:null };
   if(!inv) return out;
   out.pendingPays = (st.payments || []).filter(p => payRefsInv(p, inv.id) && !p.reversed && !p.voided
     && (p.status || 'posted') !== 'cancelled' && (p.approvalStatus || 'approved') === 'pending');
-  const grIds = invUndoGrIds(st, inv);   // verify รอบ 2: รวม GR ที่ชี้กลับมา (ใบจ่ายล่วงหน้า po_advance)
-  const grs = (st.grs || []).filter(g => g && grIds.includes(g.id));
-  if(_undoInvMigrated(inv) || inv.migLate) out.excluded = 'ใบนำเข้า/ยกมาจาก Ecount';
-  else if(inv.type === 'deposit_pi') out.excluded = 'ใบมัดจำ/ใช้มัดจำแล้ว';
-  else if(invUsedDepositOrCredit(st, inv)) out.excluded = 'ใบนี้ใช้มัดจำ/เครดิตผู้ขาย — ต้องให้ ผจก.บัญชีตรวจ';   // UAT บัญชี F1
-  else if(invRtvLinked(st, inv)) out.excluded = 'มีใบคืนของ (RTV) ผูกกับใบนี้/ใบรับของของใบนี้ — ต้องให้ ผจก.บัญชีตรวจ (ยกเลิกแล้วตั้งใหม่ เจ้าหนี้จะไม่ตรงกับใบคืน)';   // verify รอบ 1 H1
-  else if(inv.source === 'retention_release' || inv.contractId) out.excluded = 'ใบผูกสัญญางานจ้าง/เงินประกัน';
-  else if((inv.whtCertificates || []).some(c => whtCertIssued(c, inv, st, ctxToday))) out.excluded = 'มีหนังสือรับรองหัก ณ ที่จ่าย (50 ทวิ) ที่ผูกการจ่าย/อยู่งวด ภ.ง.ด. เดือนก่อน (อาจยื่นแล้ว) — ให้ ผจก.บัญชีตรวจ';   // UAT บัญชี F3 + verify: ใบร่างเดือนปัจจุบันไม่นับ
-  else if(grs.some(g => grRegisteredAssets(st, g).length) || (st.assets || []).some(a => a && !a.deleted && a.acquireFromInvId === inv.id))
-    out.excluded = 'มีทรัพย์สินลงทะเบียนจากใบนี้แล้ว';
-  // verify รอบ 2: VAT หมดสิทธิ์ที่โอนเป็นค่าใช้จ่ายแล้ว (MARK_VAT_EXPIRED · JE แยก ไม่ใช่ source 'inv') — VOID_INV ไม่กลับ JE นั้น → 1150 ติดลบ/ค่าใช้จ่ายซ้ำเมื่อตั้งใหม่
-  else if([inv].concat(invTaxInvViews(inv)).some(v => v && v.vatExpiredAt && (!v.vatExpiredAt.jeId || vatExpireJeLive(st, v.vatExpiredAt.jeId))))
-    out.excluded = 'โอน VAT หมดสิทธิ์เป็นค่าใช้จ่ายแล้ว (JE แยก) — ให้ ผจก.บัญชีตรวจ';
-  if(!out.excluded){ const vm = invVatEarlierMonth(inv, ctxToday, st); if(vm) out.excluded = 'ภาษีซื้อของใบนี้อยู่เดือน ' + vm + ' ซึ่งอาจยื่น ภ.พ.30 แล้ว — ให้ ผจก.บัญชีตรวจ'; }   // UAT บัญชี F2
+  out.excluded = invUndoExcluded(st, inv, ctxToday);
+  if(!out.excluded){ const g = invUndoGateRow(inv);   // UNDO_FIELD_GUARD G6 · UAT พนักงานบัญชี: ภาษาคนทำงาน
+    if(g) out.excluded = 'ใบนี้เคยแก้ที่ ✏️ แก้ไข INV — เหตุเดิมที่ต้องขออนุมัติ: ' + String(g.undoGate).split(' — ')[0] + ' → ย้อนต้องให้ ผจก.บัญชีอนุมัติ'; }
   const used = inv.usedApprovalIds || [], reqs = st.approvalRequests || [];
   out.linkedApprovals = reqs.filter(r => r && r.action !== 'delete_inv' && (r.entityId === inv.id || used.includes(r.id))
     && ['executed', 'approved'].includes(r.status));
@@ -13576,6 +13632,7 @@ Object.assign(global.ERP, {
   countPendingForUser, buildApprovalRequest,
   invVatAdjusted, pendingInvChangeReq,
   APPROVAL_BUILTIN_RULES, APPROVAL_FAIL_CLOSED, effectiveApprovalRules, approvalBuiltinRule, approvalRuleLoosening, approvalSeedRule, UNDO_POLICY_ACTIONS, payRefsInv, invEverPaid, invUndoFacts, undoPolicy, invUsedDepositOrCredit, invRtvLinked, whtCertIssued, invVatEarlierMonth, invUndoGrIds,   // 🆕 UNDO_PRINCIPLE
+  invUndoExcluded, invUndoGateRow, invUndoGateFlip, invEarliestDate, invTaxMonthMove, invFieldTh, ymThShort,   // 🆕 UNDO_FIELD_GUARD G5/G6 + UAT
    approvalStableJson:_apStable, poApproveDeny, poSelfApproved, poSelfBy, SELF_APPROVE_PERM, SELF_APPROVE_GROUPS, SELF_APPROVE_PO_CAP, SELF_APPROVE_PO_CAP_MSG, selfApprovePoCapOf, selfApprovePoCapMsg, selfCapSelfEditOk, selfApproveCapMsgFor, selfApprovePoCapped, poCapAmount, selfApproveReqPoTotal, selfApproveReqCapped, selfApproveDenyTail, SELF_APPROVE_STOCK_ACTIONS, SELF_APPROVE_NEVER, selfApproveKind, selfApproveUser, selfApproveReqUser, selfApproveHint, SELF_APPROVE_LABEL, PERM_NO_WILDCARD, gmSelfPolicyOn, isTopAuthority, gmSelfUser, invNeedsTwoEye, gmSelfBlockReason, approvalStaleReason, grDateEditTargets, grDateEditJeBlock, grDateEditFixedDeny, grDateEditDeny, grDateEditWarn, grDateEditWarnList, pendingGrDateReq, PO_PAYMODE_LABEL, poPaymodeOf, poPaymodeDeny, pendingPoPaymodeReq, APPROVAL_EXTRA_PERM, approvalExtraPermOk, approvalAdminBlocked, APPROVAL_NO_ADMIN_HI, approvalCanDecide, approvalStuckStep, approvalPredeployCheck, approvalMergeSteps, approvalUserCanDecide,   // 🆕 APPROVAL ขั้น 1
 });
 
@@ -18551,12 +18608,17 @@ const _INV_PROTECTED = Object.freeze(['depositApplications','depositUsed','depos
   // 🆕 EXPENSE_PO P10.2: ลิงก์สัญญา/PO + เงินประกัน + เหตุผลด่าน — ตั้งตอน ADD_INV เท่านั้น (ยกเลิกแล้วตั้งใหม่)
   'contractId','contractInstIds','retention','acceptBypass','overSchedule','contractSkipReason','taxInvNotRequired','fromPO','poConfirmIds','overPO',
   'migLate',
+  // 🆕 UNDO_FIELD_GUARD G1: ฟิลด์ที่ด่านย้อน (undoPolicy/invUndoExcluded) + ด่าน DP ใน VOID_INV อ่าน — ตั้งตอน ADD_INV/ADD_COMBINED_INV (type/มัดจำ/creditUsed/rtvDeductIds)
+  //   หรือ action ของมัน (CN: ADD_SUP_MEMO/APPLY_CN_* → creditApplied/memoApplied · VOID_INV → depositOffsetIds) · ไม่มีผู้เรียกจริงตั้งผ่านแก้ใบทั่วไป
+  //   (ปลอม type → 'normal' / creditUsed → 0 / memoApplied → [] = ↩️ ทางตรงหลบด่าน + เครดิตผู้ขาย/มัดจำหาย)
+  'type','depositId','depositKind','creditUsed','creditApplied','memoApplied','depositOffsetIds','rtvDeductIds',
   'priceAdjustHistory','priceFixRequest']);   // 🆕 PRICE-FIX verify 2: แก้ได้เฉพาะ ADJUST_INV_PRICE + *_INV_PRICE_FIX (สำเนาเก่าทับ = ปลดด่าน VOID/ปลด hold จ่าย) · 🆕 MIG_LATE_INV verify 1: ตั้งได้เฉพาะ ADD_MIG_LATE_INV (กัน PATCH_INV ตั้งธงให้ใบ ③ แล้วยกเลิกข้ามด่าน)
   //   // 🆕 MIG_VAT_HERE V2: ธงย้ายมาเคลมในระบบนี้ — แก้ได้เฉพาะ MIG_VAT_HERE/_UNDO (ไฟล์นำเข้าใบใหม่ตั้งมาได้)   // 🆕 VAT-CLAIM verify (B3.1): เลื่อนเคลม/ประวัติเคลม/หมดสิทธิ์ — แก้ได้เฉพาะ action ของมัน (V5+)
 // 🆕 UNDO_PRINCIPLE รอบ 3: ประวัติแก้ใบ = หลักฐานของด่านย้อน (invVatEarlierMonth อ่าน 'vat:' ใน revisionHistory) — เพิ่มได้ ลบ/ทับไม่ได้
 //   UPDATE_INV / PATCH_INV.fields / MERGE_IMPORT: ผล = ของเดิมในใบ state ทุกแถว + แถวใหม่ที่ส่งมา (EditINV ต่อท้าย editHistory ได้ตามเดิม)
 //   สำเนาเก่า/ปลอม revisionHistory:[] ลบประวัติ 'vat: 70 → 0' ไม่ได้ (กันหลบด่านภาษีซื้อเดือนก่อนแล้ว ↩️ ทางตรง)
-const _INV_APPEND_ONLY = Object.freeze(['revisionHistory','editHistory','vatAdjustHistory']);
+//   🆕 UNDO_FIELD_GUARD G2: + usedApprovalIds (คำขออนุมัติที่ผูกใบ = ด่าน linkedApprovals/unknownApprovalIds — ล้างได้ = ↩️ ทางตรงหลบการอนุมัติขาไป)
+const _INV_APPEND_ONLY = Object.freeze(['revisionHistory','editHistory','vatAdjustHistory','usedApprovalIds']);
 function _invKeepAppendOnly(old, out, allow, dropped){
   for(const k of _INV_APPEND_ONLY){
     if(allow && allow.includes(k)) continue;
@@ -18566,8 +18628,72 @@ function _invKeepAppendOnly(old, out, allow, dropped){
     const js = x => { try { return JSON.stringify(x); } catch(_e){ return String(x); } };
     const seen = new Set(o.map(js)), nSeen = new Set(n.map(js));
     if(o.some(x => !nSeen.has(js(x)))) dropped.push(k);
-    out[k] = o.concat(n.filter(x => !seen.has(js(x))));
+    out[k] = o.concat(n.filter(x => !seen.has(js(x)) && !(k === 'revisionHistory' && x && x.undoGate)));
   }
+  // 🆕 UNDO_FIELD_GUARD (UAT ตรวจสอบ): แถวตาข่าย (undoGate) ลงได้เฉพาะ reducer UPDATE_INV เอง — แถวปลอมจาก payload ตัดทิ้ง (ไม่ให้ใส่เหตุผลเอง/ปิดเสียงตาข่าย)
+  if(!(allow && allow.includes('revisionHistory')) && Array.isArray(out.revisionHistory)){
+    const _oj = new Set((Array.isArray(old.revisionHistory) ? old.revisionHistory : []).map(x => { try { return JSON.stringify(x); } catch(_e){ return String(x); } }));
+    const _n0 = out.revisionHistory.length;
+    out.revisionHistory = out.revisionHistory.filter(x => !(x && x.undoGate) || _oj.has(JSON.stringify(x)));
+    if(out.revisionHistory.length !== _n0 && !dropped.includes('revisionHistory')) dropped.push('revisionHistory');
+  }
+}
+// 🆕 UNDO_FIELD_GUARD G2: ใบ 50 ทวิ — ใบเดิม (จับคู่ certNumber) = ค่าใน state ทุกช่อง (voided/mergedInto/certDate/legacy = ด่าน whtCertIssued · ผู้ถูกหัก)
+//   ต่อท้ายใบ certNumber ใหม่ได้ (🧾 เพิ่ม WHT ย้อนหลัง ส่ง [...ใบเดิม, ...ใบใหม่] ทาง UPDATE_INV) · แก้/void/ลบใบเดิม = action ของมัน
+//   (ADJUST_INV_WHT · UPDATE_WHT_CERT_INFO · แก้ผู้ถูกหัก · WHT_MERGE/UNMERGE · VOID_INV) · ใบเดิมว่าง = ตั้งได้ตามเดิม
+//   UAT สถาปนิก: ใบใหม่เลขชนใบเดิมไม่ถูกทิ้ง · สำเนาเก่าของใบที่ถูกเปลี่ยนเลข (UPDATE_WHT_CERT_INFO) / ไม่มีเลข ไม่กลายเป็นใบซ้ำ (กติกาในฟังก์ชัน)
+function _invKeepWhtCerts(old, out, dropped){
+  const o = Array.isArray(old.whtCertificates) ? old.whtCertificates : [];
+  if(!o.length) return;
+  const n = Array.isArray(out.whtCertificates) ? out.whtCertificates : [];
+  const js = x => { try { return JSON.stringify(x); } catch(_e){ return String(x); } };
+  const key = c => (c && c.certNumber) ? 'n:' + c.certNumber : 'j:' + js(c);
+  // UAT สถาปนิก รอบ 2: จับคู่ 2 รอบ (ตรงทั้งใบก่อน แล้วค่อยตามเลข) · ใบที่เหลือ: เลขเดิมของใบที่ถูกเปลี่ยนเลข (editHistory.before) = สำเนาเก่า ทิ้ง
+  //   เลขใหม่ = ใบใหม่ ต่อท้าย (รวมกรณีเครื่องอื่นเพิ่มใบระหว่างนั้น) · เลขซ้ำกับใบเดิมที่จับคู่แล้ว = ใบใหม่เลขชน ต่อท้าย · ไม่มีเลข = ต่อท้ายไม่เกินจำนวนที่ส่งมาเพิ่ม
+  const used = n.map(() => false), oHit = o.map(() => false);
+  o.forEach((c, k) => { const j = n.findIndex((x, i) => !used[i] && js(x) === js(c)); if(j >= 0){ used[j] = true; oHit[k] = true; } });
+  let bad = false;
+  o.forEach((c, k) => { if(oHit[k]) return; const j = n.findIndex((x, i) => !used[i] && key(x) === key(c)); if(j >= 0){ used[j] = true; oHit[k] = true; } bad = true; });
+  //   รอบ 3: เลขที่ถูกเปลี่ยนไปแล้วถูกออกซ้ำให้ใบใหม่ (addedAt หลังเวลาเปลี่ยนเลข) = ใบใหม่ · ไม่มีเลข = เอาตัวท้ายสุด (ใบใหม่อยู่ท้าย payload)
+  const renamed = new Map(); for(const c of o) for(const h of ((c && c.editHistory) || [])) if(h && h.before && h.before.certNumber && h.before.certNumber !== c.certNumber)
+    renamed.set(h.before.certNumber, Math.max(renamed.get(h.before.certNumber) || 0, Number(h.at) || 0));
+  const cur = new Set(o.map(c => c && c.certNumber).filter(Boolean));
+  const app = [], nn = [];
+  n.forEach((x, i) => { if(used[i] || !x) return;
+    if(x.certNumber){ if(renamed.has(x.certNumber) && !cur.has(x.certNumber) && !((Number(x.addedAt) || 0) > renamed.get(x.certNumber))){ bad = true; return; } app.push(x); }
+    else nn.push(x); });
+  const noNum = Math.max(0, n.length - o.length);
+  if(nn.length > noNum) bad = true;
+  if(noNum) app.push(...nn.slice(-noNum));
+  if(bad) dropped.push('whtCertificates');
+  out.whtCertificates = o.concat(app);
+}
+// 🆕 UNDO_FIELD_GUARD G3/G4: ทางแก้ใบทั่วไป (UPDATE_INV / PATCH_INV — ไม่ใช้กับ MERGE_IMPORT) แก้ out ตรง ๆ · คืนชื่อฟิลด์ที่ถูกดึงกลับ
+//   G4: ลิงก์ใบรับของ/แหล่งที่มา (ด่าน RTV/ทรัพย์สิน/เงินประกัน) + สถานะยกเลิก (ยกเลิกได้ทาง VOID_INV เท่านั้น · สำเนาเก่าไม่ชุบใบที่ยกเลิกแล้ว)
+//       PATCH_INV + invDate (วันที่หัก 50 ทวิ legacy / วันเคลมสำรอง — ไม่มีผู้เรียกจริง · หน้าแก้ใบใช้ UPDATE_INV ซึ่งมีตาข่าย G5)
+//   G3: เครดิตค้าง/ยอดคืน (ด่าน invRtvLinked) เพิ่มได้ ลดไม่ได้ — ลดทาง CONSUME_SUPPLIER_CREDIT/DECIDE_RTV/CN เท่านั้น
+const _INV_GENERIC_LOCK = Object.freeze(['grIds','grId','source','voided','voidedAt','voidedBy','voidReason']);
+const _INV_NO_DECREASE = Object.freeze(['creditDue','returnedAmount']);
+function _invGenericEditKeep(old, out, via){
+  const back = [];
+  if(!old || !out) return back;
+  const keep = (k) => { if(k in old) out[k] = old[k]; else delete out[k]; };
+  for(const k of _INV_GENERIC_LOCK.concat(via === 'PATCH_INV' ? ['invDate'] : [])){
+    const same = k === 'voided' ? !!old[k] === !!out[k] : _protSame(old[k], out[k]);
+    if(!same && k in out) back.push(k);
+    keep(k);
+  }
+  // UAT ตรวจสอบ รอบ 3: UPDATE_INV ไม่ส่งช่อง invDate = คงวันเดิม (เดิมแทนทั้งใบ = วันที่ใบหายเงียบ ไม่ลงประวัติ → วันแรกสุดหาย)
+  if(via === 'UPDATE_INV' && 'invDate' in old && (!('invDate' in out) || out.invDate == null || out.invDate === '')){ if('invDate' in out) back.push('invDate'); out.invDate = old.invDate; }
+  if(old.voided) for(const k of ['paymentStatus','status', ..._INV_NO_DECREASE]){ if(k in out && !_protSame(old[k], out[k])) back.push(k); keep(k); }   // ใบยกเลิก: เครดิต/ยอดคืนไม่ขยับ (UAT ตรวจสอบ รอบ 3)
+  else for(const k of ['paymentStatus','status']) if(out[k] === 'voided' && old[k] !== 'voided'){ back.push(k); keep(k); }   // ซ่อนใบจากคิวจ่ายด้วยสถานะ 'voided' ไม่ได้
+  for(const k of _INV_NO_DECREASE){   // UPDATE_INV แทนทั้งใบ — ไม่ส่งฟิลด์มา = ลดเป็น 0 ด้วย
+    if((Number(k in out ? out[k] : 0) || 0) >= (Number(old[k]) || 0) - 0.005) continue;
+    if(k in out) back.push(k);
+    keep(k);
+  }
+  if(back.length){ try { console.warn('⛔ ' + via + ' ' + (old.invNumber || old.id) + ' แก้ฟิลด์ที่ด่านย้อน/สถานะยกเลิกอ่านไม่ได้ — คงค่าเดิม: ' + back.join(', ')); } catch(_w){} }
+  return back;
 }
 // PATCH_INV.add ที่สายจ่ายเงินใช้ (บวกเท่านั้น — ค่าลบ/ฟิลด์ควบคุมอื่นถูกตัดทิ้ง)
 const _INV_PROTECTED_ADD_OK = Object.freeze(['paidAmount','nonDeductibleVat','nonDeductibleVatBase']);
@@ -18605,6 +18731,7 @@ function _ctInvMoneyDeny(old, nu){
 }
 function _invKeepProtected(old, nu, allow){
   const out = { ...nu }, dropped = [];
+  if(old && 'id' in old && out.id !== old.id){ dropped.push('id'); out.id = old.id; }   // 🆕 UNDO_FIELD_GUARD (UAT ตรวจสอบ 🔴): PATCH_INV.fields id ใหม่ = ตัดลิงก์ทุกอย่าง (จ่าย/RTV/CN/ทรัพย์สิน/JE)
   _invKeepLineLinks(old, out);
   for(const k of _INV_PROTECTED){
     if(allow && allow.includes(k)) continue;
@@ -18613,6 +18740,7 @@ function _invKeepProtected(old, nu, allow){
     if(k in old) out[k] = old[k]; else delete out[k];
   }
   _invKeepAppendOnly(old, out, allow, dropped);   // 🆕 UNDO_PRINCIPLE รอบ 3
+  if(!(allow && allow.includes('whtCertificates'))) _invKeepWhtCerts(old, out, dropped);   // 🆕 UNDO_FIELD_GUARD G2
   // 🆕 DEPOSIT-VAT UAT: ใบ migrate (Ecount ยื่นภาษีแล้ว) ห้ามลดสถานะเป็นใบปกติ (ด่าน R2 ตัดสินจาก _migrated/createdBy)
   for(const k of _invMigratedDowngrade(old, out)) dropped.push(k);
   // 🆕 MIG_AP_CLOSE: ใบที่ ✂️ ปิดยอดค้างแล้ว — ยอดสุทธิ/สถานะจ่ายคงค่าเดิม (แก้ได้ทาง ↩️ ยกเลิกการปิดยอด เท่านั้น)
@@ -23635,8 +23763,22 @@ function reducer(s, a){
           alert('⛔ ใบ ' + (_om.memoNumber || _om.id) + ' อยู่ในงวดที่ยื่น ภ.พ.30 แล้ว — แก้ประเภท/สถานะ/ยอด/เลข/วันที่ไม่ได้ ต้องขอปลดล็อกงวดก่อน');
           return s; }
       }
+      // 🆕 UNDO_FIELD_GUARD (UAT ตรวจสอบ): ลิงก์ใบลด/เพิ่มหนี้ → ใบตั้งหนี้ที่ยังใช้งาน (refInvId/appliedToInvId = ด่านย้อน invUsedDepositOrCredit) ล้าง/ย้ายทางนี้ไม่ได้
+      //   ผูกได้เฉพาะ ว่าง → ใบจริง · ใช้/ยกเลิก CN = APPLY_CN_* / VOID_SUP_MEMO (ไม่มีหน้าจอเรียก UPDATE_SUP_MEMO ตอนนี้)
+      let _nm2 = _nm;
+      if(_om){
+        const _liveI = (id) => !!id && (s.invoices || []).some(i => i && i.id === id && !i.voided && i.paymentStatus !== 'voided' && i.status !== 'voided');
+        const _bk = ['refInvId','appliedToInvId'].filter(k => _liveI(_om[k]) && _nm[k] !== _om[k]);
+        //   UAT ตรวจสอบ รอบ 2: ยกเลิกใบลด/เพิ่มหนี้ทางนี้ไม่ได้ (ไม่กลับ JE · ไม่มี audit) — ใช้ VOID_SUP_MEMO
+        const _VOIDST = ['void','voided','cancelled'];
+        //   UAT ตรวจสอบ รอบ 3: ใบที่ยกเลิกแล้วชุบกลับทางนี้ไม่ได้ (JE กลับรายการไปแล้ว · DN ชุบ = VAT กลับเข้า ภ.พ.30) → ปฏิเสธทั้ง action
+        if(_VOIDST.includes(_om.status)){ try { console.warn('⛔ UPDATE_SUP_MEMO ' + (_om.memoNumber || _om.id) + ' ถูกยกเลิกแล้ว — แก้ทางนี้ไม่ได้'); } catch(_w){} return s; }
+        if(_VOIDST.includes(_nm.status) && !_VOIDST.includes(_om.status)) _bk.push('status');
+        if(_bk.length){ _nm2 = { ..._nm }; for(const k of _bk) _nm2[k] = _om[k];
+          try { console.warn('⛔ UPDATE_SUP_MEMO ' + (_om.memoNumber || _om.id) + ' ลิงก์ใบตั้งหนี้ที่ยังใช้งาน แก้ทางนี้ไม่ได้ — คงเดิม: ' + _bk.join(', ')); } catch(_w){} }
+      }
       return { ...s, supplierMemos: (s.supplierMemos||[]).map(m =>
-        m.id === _nm.id ? _nm : m) };
+        m.id === _nm2.id ? _nm2 : m) };
     }
 
     // 🆕 F3-2: ADD_SUP_MEMO_RAW — เพิ่ม memo ตรงๆ ไม่ต้อง post JE
@@ -24722,6 +24864,23 @@ function reducer(s, a){
             return n;
           });
         }
+        // 🆕 UNDO_FIELD_GUARD G7 (UAT คลัง): ลิงก์ GR → ใบตั้งหนี้ที่ยังใช้งาน แก้/ล้างทาง UPDATE_GR ไม่ได้ (ด่านย้อน invUndoGrIds + ด่าน "ตั้งหนี้แล้ว" ของ VOID_GR อ่านลิงก์นี้)
+        //   ผูกได้เฉพาะ ว่าง → ใบจริง (ผู้เรียกทุกตัวทำแบบนี้) · ปลด/ย้ายลิงก์ = VOID_INV (reducer ตั้ง invoiceId/prevInvoiceId เอง)
+        //   UAT จัดซื้อ รอบ 2: ปฏิเสธทั้ง action (ไม่ใช้ส่วนอื่นของ payload ที่ชี้ใบใหม่ เช่น piBillDiscount) + แจ้ง — สองเครื่องตั้งหนี้ GR เดียวกันจะเห็นทันที
+        //   UAT ตรวจสอบ รอบ 2: prevInvoiceId (grRegisteredAssets อ่าน) คงตามใบใน state
+        { const _liveI = (id) => !!id && (s.invoices || []).some(i => i && i.id === id && !i.voided && i.paymentStatus !== 'voided' && i.status !== 'voided');
+          const _ns = Array.isArray(_ng.splitInvoiceIds) ? _ng.splitInvoiceIds : [];
+          const _bad = (_liveI(_og.invoiceId) && _ng.invoiceId !== _og.invoiceId) || (_og.splitInvoiceIds || []).filter(_liveI).some(id => !_ns.includes(id));
+          if(_bad){
+            const _iv = (s.invoices || []).find(i => i && i.id === _og.invoiceId);
+            //   UAT จัดซื้อ รอบ 3: ถ้า payload ผูกใบตั้งหนี้ใบใหม่ (เพิ่งบันทึก) → บอกเลขใบนั้นให้ยกเลิก (ไม่งั้นเป็นหนี้ซ้ำไม่ผูก GR)
+            const _nv = _ng.invoiceId && _ng.invoiceId !== _og.invoiceId ? (s.invoices || []).find(i => i && i.id === _ng.invoiceId) : null;
+            alert('⛔ ใบรับของ ' + (_og.grNumber || _og.id) + ' ผูกกับใบตั้งหนี้ ' + ((_iv && _iv.invNumber) || _og.invoiceId || '-') + ' อยู่แล้ว — ย้าย/ล้างลิงก์ทางนี้ไม่ได้'
+              + (_nv ? '\n⚠️ ใบตั้งหนี้ที่เพิ่งบันทึก ' + (_nv.invNumber || _nv.id) + ' ไม่ได้ผูกใบรับของนี้ — ให้ ↩️ ยกเลิกใบนั้น (กันตั้งหนี้ซ้ำ)' : '')
+              + '\n→ ถ้าต้องตั้งหนี้ใหม่ ให้ ↩️ ย้อน/ยกเลิกใบเดิมก่อน');
+            return s; }
+          //   UAT ตรวจสอบ/สถาปนิก รอบ 3: + prevSplitInvoiceIds / _migrated (grMigApHeld อ่าน — ปลอมแล้ว GR ประวัติ Ecount เข้าคิวรอตั้งหนี้ = ตั้งหนี้/จ่ายซ้ำ)
+          for(const k of ['prevInvoiceId','prevSplitInvoiceIds','_migrated']){ if(k in _og) _ng[k] = _og[k]; else delete _ng[k]; } }
         // 🆕 VOID-GR UAT S1: GR ยกเลิกแล้ว = สถานะยกเลิกคงตามใบใน state เสมอ (สำเนาเก่าก่อนยกเลิก replay มาทับไม่ได้ → ไม่กลับเข้าคิวตั้งหนี้)
         if(global.ERP.grIsVoid && global.ERP.grIsVoid(_og)){
           for(const k of ['voided','voidedAt','voidedBy','voidReason','status']){ if(k in _og) _ng[k] = _og[k]; else delete _ng[k]; }
@@ -25080,6 +25239,7 @@ function reducer(s, a){
       const _oldInv = s.invoices.find(i => i.id === a.data.id);
       // 🆕 DEPOSIT-VAT E-5 R4: ฟิลด์ควบคุม (ยอดจ่าย/ใบกำกับ/มัดจำ/ต้องห้าม) คงค่าเดิมจากใบใน state — ผู้เรียกมักส่งสำเนาเก่าทั้งใบ
       let _newInv = _oldInv ? _invKeepProtected(_oldInv, a.data).inv : a.data;
+      if(_oldInv) _invGenericEditKeep(_oldInv, _newInv, 'UPDATE_INV');   // 🆕 UNDO_FIELD_GUARD G3/G4
       // 🆕 DOC-TAGS D3: แท็กของ PI แก้ได้ทาง SET_DOC_TAG เท่านั้น — UPDATE_INV (มักส่งสำเนาเก่าทั้งใบ) คงแท็กจากใบใน state เสมอ
       if(_oldInv) _newInv = _docTagKeep(s, _oldInv, _newInv, null);
       // 🆕 DEPOSIT-VAT E-5 R2: ใบ migrate (ยื่นภาษีซื้อใน Ecount แล้ว) ห้ามตั้ง/เปลี่ยนเลขใบกำกับ
@@ -25102,32 +25262,53 @@ function reducer(s, a){
         alert('⛔ ปรับยอด/ปัดเศษเกิน ±1 ฿ — ถ้าราคาไม่ตรงใบกำกับ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา'); return s; }
       // 🆕 WHT-MERGE: แก้ยอดหัก ณ ที่จ่าย ของใบที่รวมอยู่ใน 50 ทวิ ของ PV (เช่น 🧾 เพิ่ม WHT ย้อนหลัง) → ปฏิเสธ
       if(_oldInv && _invWhtMergedInto(_oldInv) && a.data.whtAmount !== undefined && !_protSame(_oldInv.whtAmount, a.data.whtAmount)){ alert(_whtMergedDenyMsg(_oldInv)); return s; }
+      const _auds = [];
       if(_oldInv){
-        const _finF = ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId','offInvDiscount','retention'];
+        // 🆕 UNDO_FIELD_GUARD (UAT บัญชี): + invDate — ลงประวัติทุกครั้ง (ด่านย้อนอ่านวันที่ใบแรกสุดจากประวัตินี้ · invEarliestDate)
+        const _finF = ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId','offInvDiscount','retention','invDate'];
         // 🎟️ OFF-INV-DISC: offInvDiscount เป็น object → เทียบด้วย _protSame (object ใหม่ !== เสมอ) · ฟิลด์อื่นเทียบแบบเดิม
         const _chg = _finF.filter(f => a.data[f] !== undefined && ((f === 'offInvDiscount' || f === 'retention') ? !_protSame(_oldInv[f], a.data[f]) : _oldInv[f] !== a.data[f]));
         const _odTxt = v => (v && Number(v.amount) > 0) ? (Number(v.amount) + ' (' + (v.kind || '-') + ')') : '0';
         if(_chg.length > 0){
           const _wasPaid = (_oldInv.paidAmount||0) > 0 || _oldInv.paymentStatus === 'paid' || _oldInv.paymentStatus === 'partial';
+          // 🆕 UNDO_FIELD_GUARD UAT รอบ 2: ผู้แก้ = _editedBy → ผู้ล็อกอิน (หน้าแก้ใบไม่ส่ง _editedBy = เดิมลง 'system') · วันที่ใบเก็บแบบโครงสร้าง (ด่านย้อนอ่านช่องนี้ ไม่พึ่งข้อความ)
           const _rev = { rev: ((_oldInv.revisionHistory||[]).length)+1, ts: Date.now(),
-            by: a.data._editedBy || 'system', wasPaid: _wasPaid,
+            by: (s.currentUser && s.currentUser.username) || a.data._editedBy || 'system', ...(a.data._editedBy && s.currentUser && a.data._editedBy !== s.currentUser.username ? { editedBy:a.data._editedBy } : {}), wasPaid: _wasPaid,
+            ...(_chg.includes('invDate') ? { invDateFrom: _oldInv.invDate || null, invDateTo: _newInv.invDate || null } : {}),
             changes: _chg.map(f => f === 'offInvDiscount' ? (f + ': ' + _odTxt(_oldInv[f]) + ' → ' + _odTxt(a.data[f])) : (f + ': ' + _oldInv[f] + ' → ' + a.data[f])).join(' · ').slice(0,500) };
           _newInv = { ..._newInv, revisionHistory: [...(_oldInv.revisionHistory||[]), _rev] };
           if(_wasPaid){
             try { console.warn('⚠️ แก้ field การเงินของ PI ที่จ่ายแล้ว:', _oldInv.invNumber||_oldInv.id, _rev.changes); } catch(_w){}
-            const _al = { id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), ts:Date.now(),
-              type:'paid_pi_edit', by:a.data._editedBy||'system', entityId:_oldInv.id, entityRef:_oldInv.invNumber||_oldInv.id,
-              note:'แก้ field การเงินของ PI ที่จ่ายแล้ว: '+_rev.changes };
-            return { ...s, invoices: s.invoices.map(i => i.id===a.data.id ? _newInv : i), auditLog:[...(s.auditLog||[]), _al] };
+            _auds.push({ id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), ts:Date.now(),
+              type:'paid_pi_edit', by:_rev.by, entityId:_oldInv.id, entityRef:_oldInv.invNumber||_oldInv.id,
+              note:'แก้ field การเงินของ PI ที่จ่ายแล้ว: '+_rev.changes });
+          } else {
+            // 🆕 DEPOSIT-VAT review: ใบที่ยังไม่จ่ายก็ลง audit ด้วย (เดิมมีแค่ revisionHistory บนใบ — G-6 มองไม่เห็น)
+            _auds.push({ id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), ts:Date.now(),
+              type:'inv_fin_edit', by:_rev.by, entityId:_oldInv.id, entityRef:_oldInv.invNumber||_oldInv.id,
+              note:'แก้ field การเงินของ PI: '+_rev.changes });
           }
-          // 🆕 DEPOSIT-VAT review: ใบที่ยังไม่จ่ายก็ลง audit ด้วย (เดิมมีแค่ revisionHistory บนใบ — G-6 มองไม่เห็น)
-          const _al2 = { id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), ts:Date.now(),
-            type:'inv_fin_edit', by:a.data._editedBy||'system', entityId:_oldInv.id, entityRef:_oldInv.invNumber||_oldInv.id,
-            note:'แก้ field การเงินของ PI: '+_rev.changes };
-          return { ...s, invoices: s.invoices.map(i => i.id===a.data.id ? _newInv : i), auditLog:[...(s.auditLog||[]), _al2] };
+        }
+        // 🆕 UNDO_FIELD_GUARD G5 (ตาข่าย): ใบเดิมติดด่านย้อน แต่ใบหลังแก้ไม่ติด (เช่นแก้ invDate ของใบ 50 ทวิ legacy/วันเคลมสำรอง จากเดือนก่อน → เดือนนี้)
+        //   การแก้ยังบันทึกได้ (แก้พิมพ์ผิด) — ต่อท้าย revisionHistory.undoGate (เพิ่มได้ลบไม่ได้) + audit → undoPolicy ส่งอนุมัติตลอด (invUndoFacts G6)
+        //   UAT สถาปนิก: คิดพลาด (throw) ไม่ทำให้การแก้ใบล้ม · id audit ตายตัว · UAT สาขา: ลงทั้งผู้แก้ (editedBy) และผู้บันทึก/อนุมัติ (by = ผู้ล็อกอิน)
+        //   UAT ตรวจสอบ รอบ 2: คิดพลาด = ลงแถวตาข่าย "ตรวจไม่ได้" (ปลอดภัยไว้ก่อน → ↩️ ต้องขออนุมัติ) ไม่ใช่ข้ามเงียบ
+        let _ug = null, _ugErr = false; try { _ug = global.ERP.invUndoGateFlip(s, _oldInv, _newInv); } catch(_e){ _ug = 'ระบบตรวจเงื่อนไขย้อนของการแก้นี้ไม่ได้'; _ugErr = true; try { console.warn('invUndoGateFlip', _e); } catch(_w){} }
+        if(_ug){
+          const _ts = Date.now(), _by = (s.currentUser && s.currentUser.username) || a.data._editedBy || 'system';
+          const _ed = a.data._editedBy || _newInv.editedBy || _by;
+          const _fl = Object.keys({ ..._oldInv, ..._newInv }).filter(k => !['revisionHistory','editHistory','editedAt','editedBy','note','prints','_editedBy'].includes(k) && !_protSame(_oldInv[k], _newInv[k])).slice(0, 20);
+          const _fd = d => d ? ((global.ERP.fmtDate && global.ERP.fmtDate(d)) || d) : '-';
+          const _flTh = _fl.map(k => global.ERP.invFieldTh(k) + (k === 'invDate' ? ' ' + _fd(_oldInv.invDate) + ' → ' + _fd(_newInv.invDate) : '')).join(', ') || '-';
+          const _rh = _newInv.revisionHistory || [];
+          _newInv = { ..._newInv, revisionHistory:[..._rh, { rev:_rh.length + 1, ts:_ts, by:_by, editedBy:_ed, via:'UPDATE_INV', undoGate:_ug, fields:_fl,
+            changes:((_ugErr ? 'ตรวจเงื่อนไขย้อนไม่ได้ → ต้องขออนุมัติ' : 'ด่านย้อน: ' + _ug + ' → ไม่ติดแล้ว') + ' (แก้ที่ ✏️ แก้ไข INV: ' + _flTh + ')').slice(0, 500) }] };
+          _auds.push({ id:'al_ug_' + _oldInv.id + '_' + _ts.toString(36), ts:_ts, type:'inv_undo_gate_edit', by:_by, editedBy:_ed,
+            entityType:'inv', entityId:_oldInv.id, entityRef:_oldInv.invNumber || _oldInv.id, amount:Number(_oldInv.netPayable) || 0, fields:_fl, undoGate:_ug,
+            note:'แก้ ' + _flTh + ' (ผู้แก้ ' + _ed + (_ed !== _by ? ' · อนุมัติ/บันทึกโดย ' + _by : '') + ') — ' + (_ugErr ? _ug : 'ก่อนแก้: ' + String(_ug).split(' — ')[0]) + ' · ต่อจากนี้ ↩️ ย้อนไปตั้งหนี้ใบนี้ต้องขออนุมัติ' });
         }
       }
-      return { ...s, invoices:s.invoices.map(i => i.id===a.data.id ? _newInv : i) };
+      return { ...s, invoices:s.invoices.map(i => i.id===a.data.id ? _newInv : i), ...(_auds.length ? { auditLog:[...(s.auditLog||[]), ..._auds] } : {}) };
     }
 
     // 🆕 PATCH_INV: รวม field ลงใบที่อยู่ใน state ตอนนี้ (ไม่แทนทั้ง record เหมือน UPDATE_INV)
@@ -25156,6 +25337,9 @@ function reducer(s, a){
         if(_cur.voided || _cur.status === 'voided' || _cur.paymentStatus === 'voided'){ try { console.warn('PATCH_INV: ใบถูกยกเลิก — ไม่บวกยอดจ่าย', _pid); } catch(_w){} return s; }
         if(_inc > 0 && (Number(_cur.paidAmount) || 0) + _inc > (Number(_cur.netPayable) || 0) + 0.01){ try { console.warn('PATCH_INV: จ่ายเกินยอดค้าง — ไม่บวก', _pid); } catch(_w){} return s; }
       }
+      // 🆕 UNDO_FIELD_GUARD UAT สถาปนิก รอบ 2: บวกยอด (เครดิตค้าง/ยอดคืน/ต้องห้าม ฯลฯ) ใส่ใบที่ยกเลิกแล้วไม่ได้ — delta เล่นซ้ำหลังอีกเครื่องยกเลิกใบ = เครดิตลอยบนใบยกเลิก
+      if((_cur.voided || _cur.paymentStatus === 'voided' || _cur.status === 'voided') && Object.keys(_add).some(k => Number(_add[k]) !== 0)){
+        try { console.warn('PATCH_INV: ใบถูกยกเลิก — ไม่บวกยอด', _pid, Object.keys(_add)); } catch(_w){} return s; }
       // 🆕 DEPOSIT-VAT review (R1): ใบกำกับยื่นแล้ว → fields ห้ามเปลี่ยนยอด/อัตรา/ฐาน VAT/วันที่/ผู้ขาย
       { const _fx = _invFiledFinChange(s, _cur, _pf); if(_fx) return _fx; }
       { const _cm = _ctInvMoneyDeny(_cur, _pf); if(_cm){ alert('⛔ ' + _cm); return s; } }   // 🆕 EXPENSE_PO P10.2
@@ -25163,13 +25347,14 @@ function reducer(s, a){
       //   — ลบข้อยกเว้นนี้เมื่อ S4 ย้ายการหักมัดจำเข้า APPLY_DEPOSIT_TO_INV
       const _allowF = (_cur.depositUsed == null && !(_cur.depositApplications||[]).length) ? ['depositUsed'] : null;
       const _next = _invKeepProtected(_cur, { ..._cur, ..._pf }, _allowF).inv;
+      _invGenericEditKeep(_cur, _next, 'PATCH_INV');   // 🆕 UNDO_FIELD_GUARD G3/G4 (ไม่อ่านหมวดอื่น — ACTION_READS เดิม)
       // 🆕 UNDO_PRINCIPLE รอบ 3: fields เปลี่ยนฟิลด์การเงิน → ลง revisionHistory แบบ UPDATE_INV (เดิมไม่ลง = แก้ vat เป็น 0 เงียบ ๆ แล้ว ↩️ ทางตรงหลบด่านภาษีซื้อเดือนก่อน)
       { const _pfF = ['amount','netPayable','vat','vatTotal','vatRate','whtAmount','supplierId','partyId','offInvDiscount','retention'];
         const _pChg = _pfF.filter(f => f in _pf && !_protSame(_cur[f], _next[f]));
         if(_pChg.length){
           const _tx = v => (v && typeof v === 'object') ? String(v.amount != null ? v.amount : '-') : String(v);
           _next.revisionHistory = [...(_next.revisionHistory || []), { rev:(_next.revisionHistory || []).length + 1, ts: Number(a.data.ts) || Date.now(),
-            by: a.data._editedBy || a.data.by || 'system', via:'PATCH_INV',
+            by: (s.currentUser && s.currentUser.username) || a.data._editedBy || a.data.by || 'system', via:'PATCH_INV',
             wasPaid: (Number(_cur.paidAmount) || 0) > 0 || _cur.paymentStatus === 'paid' || _cur.paymentStatus === 'partial',
             changes: _pChg.map(f => f + ': ' + _tx(_cur[f]) + ' → ' + _tx(_next[f])).join(' · ').slice(0, 500) }];
         } }
@@ -25182,6 +25367,10 @@ function reducer(s, a){
         // add ของฟิลด์ควบคุม: เฉพาะสายจ่ายเงิน (ยอดจ่าย/ภาษีซื้อต้องห้าม) และบวกเท่านั้น
         if(_INV_PROTECTED.includes(k) && (!_INV_PROTECTED_ADD_OK.includes(k) || inc < 0)){
           try { console.warn('⛔ PATCH_INV.add ' + k + ' (' + inc + ') ของ PI ' + (_cur.invNumber || _pid) + ' ไม่อนุญาต — ข้าม'); } catch(_w){}
+          continue; }
+        // 🆕 UNDO_FIELD_GUARD G3: เครดิตค้าง/ยอดคืน บวกได้อย่างเดียว (ลดทาง CONSUME_SUPPLIER_CREDIT/DECIDE_RTV/CN)
+        if(_INV_NO_DECREASE.includes(k) && inc < 0){
+          try { console.warn('⛔ PATCH_INV.add ' + k + ' (' + inc + ') ของ PI ' + (_cur.invNumber || _pid) + ' ลดไม่ได้ทางนี้ — ข้าม'); } catch(_w){}
           continue; }
         if(!inc){ if(_next[k] == null) _next[k] = 0; continue; }   // บวก 0 = ให้ฟิลด์มีค่า 0 (เหมือนเขียนทับแบบเดิม — รายงานบางตัวเช็ก != null)
         _next[k] = Number(((Number(_next[k]) || 0) + inc).toFixed(2));
@@ -25526,8 +25715,15 @@ function reducer(s, a){
       const oldCert = certs[certIdx];
       if(oldCert.voided){ alert('cert ใบนี้ voided ไปแล้ว — แก้ไม่ได้'); return s; }
       if(oldCert.mergedInto){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบนี้รวมอยู่ในใบรวมของ PV — แก้เลข/ผู้ถูกหักต้องแยกก่อน
+      // 🆕 UNDO_FIELD_GUARD (UAT ตรวจสอบ 🔴): แก้ได้เฉพาะ 5 ช่องข้อมูลบนใบ (หน้าจอส่งแค่นี้) — เดิมรับทุกช่อง = ตั้ง voided/certDate/legacy/mergedInto
+      //   ผ่าน action นี้แล้ว ↩️ ทางตรงหลบด่าน whtCertIssued (ย้ายช่องโหว่จาก UPDATE_INV มาที่นี่)
+      const _WCI = ['certNumber','supName','supAddress','supTaxId','form'];
+      const _wf = {}, _wx = Object.keys(fields || {}).filter(k => !_WCI.includes(k));
+      for(const k of _WCI) if(fields && k in fields) _wf[k] = fields[k];
+      if(_wx.length){ try { console.warn('⛔ UPDATE_WHT_CERT_INFO แก้ได้เฉพาะ ' + _WCI.join('/') + ' — ข้าม: ' + _wx.join(', ')); } catch(_w){} }
+      if(!Object.keys(_wf).length){ alert('⛔ แก้ได้เฉพาะ เลขที่/ชื่อ/ที่อยู่/เลขผู้เสียภาษี/แบบ ภ.ง.ด. ของใบ 50 ทวิ — ยังไม่ได้บันทึก'); return s; }
       // เก็บ history เดิมไว้ใน editHistory[]
-      const newCert = { ...oldCert, ...fields,
+      const newCert = { ...oldCert, ..._wf,
         editedAt: Date.now(), editedBy: by, editReason: reason||'',
         editHistory: [...(oldCert.editHistory||[]), {
           at: Date.now(), by, reason: reason||'',
@@ -29553,6 +29749,8 @@ function reducer(s, a){
           return s;
         }
         const _nd = { ...a.data };
+        // 🆕 UNDO_FIELD_GUARD (UAT ตรวจสอบ): deleted คงตามใบใน state (ลบทะเบียน = DELETE_ASSET) — กันซ่อนทรัพย์สินจากด่านย้อน/ด่าน VOID_INV
+        if('deleted' in _oldAs) _nd.deleted = _oldAs.deleted; else delete _nd.deleted;
         ['components','lifeRevisions','openingAccumDep','openingAsOf','depreciationHistory',
          'disposedAt','disposedReason','disposeMethod','salvageProceeds','disposeVat','disposeGainLoss','disposeJeId'].forEach(k => {
           if(_oldAs[k] !== undefined) _nd[k] = _oldAs[k]; else delete _nd[k]; });
@@ -29567,6 +29765,10 @@ function reducer(s, a){
         if((Number(_oldAs.rate)||0) !== (Number(a.data.rate)||0)) _ch.push(`อัตรา ${_oldAs.rate}→${a.data.rate}`);
         if((Number(_oldAs.usefulLifeYears)||0) !== (Number(a.data.usefulLifeYears)||0)) _ch.push(`อายุ ${_oldAs.usefulLifeYears}→${a.data.usefulLifeYears} ปี`);
         if(_oldAs.status !== a.data.status) _ch.push(`สถานะ ${_oldAs.status}→${a.data.status}`);
+        // 🆕 UNDO_FIELD_GUARD (UAT ตรวจสอบ): เปลี่ยนบิลที่ผูก = ด่านย้อนของบิลเดิมเปลี่ยน → ต้องเห็นในบันทึกตรวจ
+        if(String(_oldAs.acquireFromInvId || '') !== String(a.data.acquireFromInvId || '')) _ch.push(`บิลที่ผูก ${_oldAs.acquireFromInvId || '-'}→${a.data.acquireFromInvId || '-'}`);
+        if(String(_oldAs.acquireFromGrId || '') !== String(a.data.acquireFromGrId || '') || String(_oldAs.acquireFromGrLine ?? '') !== String(a.data.acquireFromGrLine ?? ''))
+          _ch.push(`ใบรับของที่ผูก ${_oldAs.acquireFromGrId || '-'}${_oldAs.acquireFromGrLine != null ? '#' + _oldAs.acquireFromGrLine : ''}→${a.data.acquireFromGrId || '-'}${a.data.acquireFromGrLine != null ? '#' + a.data.acquireFromGrLine : ''}`);
       }
       return { ...s,
         assets:(s.assets||[]).map(x => x.id===a.data.id ? a.data : x),
@@ -32857,7 +33059,7 @@ const ACTION_READS = Object.freeze({
   ADD_INV: ['approvalRequests','assetCategories','assets','auditLog','contracts','expenseItems','filedTaxInvKeys','grs','invoices','payments','pos','returns','suppliers'],   // 📦 OVER_RECEIVE O1/O5: + returns (คืนส่วนเกิน RTV)   // 🔧 EXPENSE_PO D12: + expenseItems (ค่าเริ่มต้นบัญชี/💎)   // 🆕 EXPENSE_PO P3.8: + assets/assetCategories/contracts (contractCapAccount · ด่านสัญญา)   // VAT-DEFER verify: + approvalRequests (_taxInvDenyReason → vatApPendingLive)   // DEPOSIT-VAT UAT: + grs (ชุดแยกใบเก่า splitInvoiceIds)   // DEPOSIT-VAT review: ใบกำกับที่มากับใบใหม่ → ด่านซ้ำ (findDupTaxInv)
   ADD_MIG_LATE_INV: ['auditLog','filedTaxInvKeys','grs','invoices','pos','suppliers'],   // 🆕 MIG_LATE_INV: ด่านเลข Ecount/ผู้ขาย+เลขใบ (findDupSupInv/findDupTaxInv) · users/settings = หมวดคุม
   ADD_COMBINED_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','returns','suppliers'],   // 📦 OVER_RECEIVE O1/O5: + returns (คืนส่วนเกิน RTV)   // VAT-DEFER verify: + approvalRequests
-  UPDATE_INV: ['auditLog','invoices'],
+  UPDATE_INV: ['assets','auditLog','deposits','grs','invoices','journalEntries','payments','returns','supplierMemos'],   // 🆕 UNDO_FIELD_GUARD G5: ตาข่ายด่านย้อน (invUndoGateFlip → invUndoExcluded) อ่านชุดเดียวกับ VOID_INV ทางตรง
   PATCH_INV: ['invoices'],
   ADD_PAY: ['approvalRequests','invoices','payTags','payments','returns'],   // 🆕 PRICE-FIX UAT S3: คำขออนุมัติ adjust_inv_price ค้าง = ห้ามขอจ่าย
   // UAT M1 (PAY-TAGS): tagId ไม่อยู่ในทะเบียน → โยงด้วยชื่อ (อ่าน payTags)
@@ -84343,6 +84545,36 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
     // 🆕 DEPOSIT-VAT UAT: ด่านเดียวกับ reducer UPDATE_INV (ทุกฟิลด์ที่กระทบภาษีซื้อของงวดที่ยื่นแล้ว) — ก่อนส่งคำขอ/ลง JE-VOID
     { const _ud = global.ERP.invUpdateDeny ? global.ERP.invUpdateDeny(state, inv, updated) : null;
       if(_ud) return alert(_ud + '\n\nยังไม่ได้บันทึกอะไร'); }
+    // 🆕 UNDO_FIELD_GUARD (UAT บัญชี/พนักงาน/สาขา): เตือนก่อนบันทึก 2 กรณี — (ก) เดือนภาษีย้าย (แก้วันที่ใบข้ามเดือน · 50 ทวิ แบบเก่า/ใบกำกับไม่มีวันที่)
+    //   (ข) ตาข่าย: แก้แล้วไม่ติดเงื่อนไขย้อนเดิม → ต่อจากนี้ ↩️ ต้องขออนุมัติ · จำลองแถวประวัติแบบ reducer (invDate/vat) ให้ผลตรงกัน
+    const _live = (state.invoices || []).find(i => i && i.id === inv.id) || inv;
+    const _simChg = ['invDate','vat'].filter(f => updated[f] !== undefined && updated[f] !== _live[f]);
+    const _sim = _simChg.length ? { ...updated, revisionHistory:[...(_live.revisionHistory || []), { changes:_simChg.map(f => f + ': ' + _live[f] + ' → ' + updated[f]).join(' · ') }] } : updated;
+    const _ugFlip = global.ERP.invUndoGateFlip ? global.ERP.invUndoGateFlip(state, _live, _sim) : null;
+    const _tmv = global.ERP.invTaxMonthMove ? global.ERP.invTaxMonthMove(_live, updated) : null;
+    const _ymT = global.ERP.ymThShort || (x => x);
+    if(_tmv || _ugFlip){
+      // UAT รอบ 2: ถามทั้งเดือนเดิมและเดือนใหม่ (ย้อนเดือนก็ตกงวดที่ยื่นแล้วได้) · วันที่ใบกำกับจริง = คีย์ที่ 🧾 แทนการแก้วันที่ใบ · ไม่แน่ใจ = ยกเลิก
+      const _ln = [];
+      const _ear = global.ERP.invEarliestDate ? global.ERP.invEarliestDate(_sim) : updated.invDate;
+      if(_tmv) _ln.push('⚠️ แก้วันที่ใบ ' + fmtDate(_live.invDate) + ' → ' + fmtDate(updated.invDate) + ' — เดือนภาษีของใบนี้ย้ายจาก ' + _ymT(_tmv.from) + ' เป็น ' + _ymT(_tmv.to),
+        '(' + _tmv.why.join(' · ') + ')',
+        '• ยื่น ภ.พ.30 เดือน ' + _ymT(_tmv.from) + ' หรือ ' + _ymT(_tmv.to) + ' ไปแล้ว หรือไม่แน่ใจ → กดยกเลิก แล้วถาม ผจก.บัญชี',
+        '• วันที่ที่ถูกคือวันที่บนใบกำกับภาษี → กดยกเลิก แล้วกดเลขใบกำกับในตารางใบตั้งหนี้ ใส่วันที่ใบกำกับแทน',
+        '• แค่แก้วันที่ที่พิมพ์ผิด และยังไม่ได้ยื่น → กดตกลง',
+        'ระบบดูวันที่ใบที่เก่าที่สุดที่เคยมี (' + fmtDate(_ear) + ') เพื่อตัดสินว่า ↩️ ย้อนใบนี้ต้องขออนุมัติหรือไม่');
+      if(_ugFlip){
+        // UAT รอบ 3: เทียบแบบหลวมเหมือน reducer (ว่าง/'-'/undefined เท่ากัน · ตัวเลขต่าง < 0.005 เท่ากัน) — ไม่นับช่องที่ไม่ได้แตะ
+        const _emp = v => v == null || v === '' || v === '-' || (Array.isArray(v) && !v.length);
+        const _sm = (a, b) => a === b || (_emp(a) && _emp(b)) || ((typeof a === 'number' || typeof b === 'number') ? Math.abs((Number(a) || 0) - (Number(b) || 0)) < 0.005 : JSON.stringify(a) === JSON.stringify(b));
+        const _cf = Object.keys({ ..._live, ...updated }).filter(k => !['revisionHistory','editHistory','editedAt','editedBy','note','prints'].includes(k) && !_sm(_live[k], updated[k])).slice(0, 8);
+        const _fth = global.ERP.invFieldTh || (x => x);
+        _ln.push((_tmv ? '\n' : '') + '⚠️ แก้ ' + (_cf.map(_fth).join(', ') || '-') + ' แล้วใบนี้ไม่ติดเงื่อนไขเดิม (ก่อนแก้: ' + String(_ugFlip).split(' — ')[0] + ')',
+          '• ไม่แน่ใจ → กดยกเลิก แล้วถาม ผจก.บัญชี',
+          'หลังแก้ ↩️ ย้อนไปตั้งหนี้/ยกเลิกใบนี้ ต้องขออนุมัติทุกครั้ง (ระบบบันทึกให้ ผจก.บัญชี/GM ตรวจย้อนหลัง)');
+      }
+      if(!confirm(_ln.join('\n') + '\n\nยืนยันแก้?')) return;
+    }
 
     // ตรวจ approval rule — ถ้าต้องอนุมัติ ส่งคำขอ (ยังไม่ execute)
     const diff = (netPayable - (inv.netPayable||0));  // signed: + = increase, - = decrease
@@ -84384,7 +84616,9 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
         reason:`แก้ INV: ${inv.invNumber} · ยอดเดิม ${fmtCur(inv.netPayable||0)} → ใหม่ ${fmtCur(netPayable)}` +
           (isIncrease ? ` (⬆️ เพิ่ม ${fmtCur(Math.abs(diff))})` : ` (⬇️ ลด ${fmtCur(Math.abs(diff))})`) +
           (offChanged ? ` · ส่วนลดนอกใบกำกับ ฿${offOld.toFixed(2)} → ฿${offAmt.toFixed(2)}` : '') +   // 🎟️ R12
-          (wasPaid ? ' · ⚠️ INV นี้เคยจ่ายแล้ว' : ''),
+          (wasPaid ? ' · ⚠️ INV นี้เคยจ่ายแล้ว' : '') +
+          (_tmv ? ' · 📅 วันที่ใบ ' + fmtDate(_live.invDate) + ' → ' + fmtDate(updated.invDate) + ' เดือนภาษีย้าย ' + _ymT(_tmv.from) + ' → ' + _ymT(_tmv.to) + ' (' + _tmv.why.join(' · ') + ')' : '') +
+          (_ugFlip ? ' · 🔒 หลังแก้ ↩️ ย้อนใบนี้ต้องขออนุมัติทุกครั้ง (ก่อนแก้: ' + String(_ugFlip).split(' — ')[0] + ')' : ''),   // UNDO_FIELD_GUARD G5: ผู้อนุมัติเห็นก่อนกด
         payload:{ updatedInv: updated, oldNetPayable: inv.netPayable, jeNetPayable: jeNet, jeNetExRet: true }   // jeNetExRet: jeNet หักเงินประกันแล้ว (คำขอเก่าไม่มีธง → executor หักให้)
       }
     });
@@ -84394,7 +84628,9 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
 
     autoPostINV({ ...updated, netPayable: jeNet }, state, dispatch, user);   // 🎟️ R1/R7: JE ลงยอดก่อนหัก CN/RTV memo (มี JE ของตัวเอง)
 
-    alert(`✅ แก้ไข INV แล้ว\n${inv.invNumber}\nสุทธิใหม่: ${fmtCur(netPayable)}\n✓ Reverse JE เก่า + post JE ใหม่ (เก็บ audit trail)`);
+    alert(`✅ แก้ไข INV แล้ว\n${inv.invNumber}\nสุทธิใหม่: ${fmtCur(netPayable)}\n✓ Reverse JE เก่า + post JE ใหม่ (เก็บ audit trail)` +
+      (_tmv ? '\n📅 เดือนภาษีของใบนี้ย้ายจาก ' + _ymT(_tmv.from) + ' เป็น ' + _ymT(_tmv.to) + ' — แจ้ง ผจก.บัญชีด้วย' : '') +
+      (_ugFlip ? '\n🔒 ต่อจากนี้ ↩️ ย้อนไปตั้งหนี้ใบนี้ต้องขออนุมัติ' : ''));
     onClose();
     onDone && onDone();
   };
@@ -85450,7 +85686,7 @@ function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
     const invPatch = { ...inv, paidAmount:cappedPaid, paymentStatus:newStatus };
     if(excess > 0.01){
       if(overMode === 'credit'){
-        invPatch.creditDue = (inv.creditDue||0) + excess;
+        // 🆕 UNDO_FIELD_GUARD G3 (UAT คลัง/QC): เครดิตโอนเกินบวกผ่าน PATCH_INV.add ด้านล่าง (สำเนา inv เก่า + ลดไม่ได้ = เครดิตหายเงียบ)
         invPatch.creditSource = 'overpay';
       } else {
         invPatch.refundDue = (inv.refundDue||0) + excess;
@@ -85464,7 +85700,8 @@ function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
     // คลื่น 2 (UAT): จ่ายปกติ (ไม่เกินยอด) → บวกยอดแบบ delta รวมกับเครื่องอื่นได้ · โอนเกิน (แก้หลายฟิลด์+ต่อท้ายโน้ต) คงเขียนทั้งใบ (ถ้าชนจะหยุดให้คนตัดสิน)
     //   DEPOSIT-VAT E-5 R4: paidAmount เป็นฟิลด์ควบคุม (UPDATE_INV คงค่าเดิม) → ยอดจ่ายบวกผ่าน PATCH_INV.add เสมอ
     if(excess > 0.01) dispatch({ type:'UPDATE_INV', data: invPatch });
-    dispatch({ type:'PATCH_INV', data:{ id: inv.id, add:{ paidAmount: Number((cappedPaid - (inv.paidAmount||0)).toFixed(2)) }, recalcStatus:true, guardOverpay:true } });
+    dispatch({ type:'PATCH_INV', data:{ id: inv.id, add:{ paidAmount: Number((cappedPaid - (inv.paidAmount||0)).toFixed(2)),
+      ...(excess > 0.01 && overMode === 'credit' ? { creditDue: Number(excess.toFixed(2)) } : {}) }, recalcStatus:true, guardOverpay:true } });
     autoPostPayment(paymentData, inv, bank, state, dispatch, user);
 
     alert(`✅ จ่ายแล้ว ${fmtCur(amount)}\nสถานะ: ${INV_STATUS[newStatus][0]}` +
@@ -94362,7 +94599,8 @@ function DisposeAssetModal({ asset, state, dispatch, user, onClose }){
 // 🆕 GM-SELF (เจ้าของ 2026-09-29): รายการที่ GM/เจ้าของ ทำโดยไม่ผ่านอนุมัติ — ให้ผู้ตรวจสอบดูย้อนหลัง (auditLog type gm_self_approved · รวม PO ที่อนุมัติของตัวเอง)
 // SELF-APPROVE UAT S1: kind = 'gm' (👑 ค่าเดิม) · 'perm' (✋ self_approved_perm: PO/จ่าย/คำขอ) · 'all' (ทั้งสองแบบ)
 // 🆕 UNDO_PRINCIPLE §2.8: undo = ↩️ ย้อนเอง (ไม่ต้องอนุมัติ) — undo_direct (ย้อนใบตั้งหนี้) + pay_request_cancel (ยกเลิกคำขอจ่าย)
-const _SELF_AUDIT_TYPES = { gm:['gm_self_approved'], perm:['self_approved_perm'], undo:['undo_direct', 'pay_request_cancel'], all:['gm_self_approved', 'self_approved_perm', 'undo_direct', 'pay_request_cancel'] };
+// 🆕 UNDO_FIELD_GUARD G6: + inv_undo_gate_edit (แก้ใบทางหน้าแก้ใบจนด่านย้อนหลุด → ต่อจากนี้ ↩️ ต้องขออนุมัติ) ให้ GM/บัญชีตรวจย้อนหลังในตัวกรองเดียวกัน
+const _SELF_AUDIT_TYPES = { gm:['gm_self_approved'], perm:['self_approved_perm'], undo:['undo_direct', 'pay_request_cancel', 'inv_undo_gate_edit'], all:['gm_self_approved', 'self_approved_perm', 'undo_direct', 'pay_request_cancel'] };
 function gmSelfAuditRows(state, startDate, endDate, kind){
   const _ty = _SELF_AUDIT_TYPES[kind] || _SELF_AUDIT_TYPES.gm;
   return (state.auditLog || []).filter(e => {
@@ -94425,11 +94663,13 @@ function SelfUndoReviewList({ rows, nm }){
       h('tbody', null, rows.map(e => h('tr', { key:e.id, className:'border-t', 'data-self-undo-row':e.type },
         h('td', { className:'px-2 py-1.5 whitespace-nowrap' }, e.ts ? new Date(e.ts).toLocaleString('th-TH') : '-'),
         h('td', { className:'px-2 py-1.5' }, nm(e.by)),
-        h('td', { className:'px-2 py-1.5' }, e.type === 'pay_request_cancel' ? '✖ ยกเลิกคำขอจ่าย' : '↩️ ย้อนไปตั้งหนี้'),
+        h('td', { className:'px-2 py-1.5' }, e.type === 'pay_request_cancel' ? '✖ ยกเลิกคำขอจ่าย' : e.type === 'inv_undo_gate_edit' ? '✏️ แก้ใบแล้ว — ย้อนต้องขออนุมัติ' : '↩️ ย้อนไปตั้งหนี้'),
         h('td', { className:'px-2 py-1.5 font-mono text-xs' }, e.entityRef || e.entityId || '-'),
         h('td', { className:'px-2 py-1.5 text-right' }, (Number(e.amount) || 0) > 0 ? fmtCur(e.amount) : '-'),
         h('td', { className:'px-2 py-1.5 text-xs', 'data-undo-basis':e.basis || '' }, e.type === 'pay_request_cancel'
-          ? 'ขั้นปกติ' + (e.partiallyApproved ? ' (มีผู้อนุมัติขั้นแรกแล้ว)' : '') : (_UNDO_BASIS_LABEL[e.basis] || e.basis || '-')),
+          ? 'ขั้นปกติ' + (e.partiallyApproved ? ' (มีผู้อนุมัติขั้นแรกแล้ว)' : '')
+          : e.type === 'inv_undo_gate_edit' ? h('span', { className:'text-amber-700 font-medium' }, '🔒 ต่อจากนี้ ↩️ ต้องขออนุมัติ')   // UNDO_FIELD_GUARD G6
+          : (_UNDO_BASIS_LABEL[e.basis] || e.basis || '-')),
         h('td', { className:'px-2 py-1.5 text-xs text-gray-600' }, e.note || '-'))))));
 }
 // 🆕 UAT S1: ผลของคำขอที่ผูกกับแถว 👑 — บันทึกลงก่อนสั่งงาน → ต้องดูสถานะคำขอจริง (ทำแล้ว/ทำไม่ได้) · ไม่มีคำขอ (อนุมัติ PO/จ่ายของตัวเองตรง) = ทำแล้ว
@@ -102274,18 +102514,21 @@ function RTVManageTab({ state, dispatch, user }){
     if(remainBase <= 0.01) return alert('ไม่มีส่วนที่ค้าง — supplier ส่งครบแล้ว');
     const inv = r.linkedINV ? state.invoices.find(i => i.id === r.linkedINV) : null;
     if(!inv) return alert('RTV นี้ยังไม่มี INV อ้างอิง — แปลงเป็นเครดิตไม่ได้\n(จัดการตอนตั้งหนี้แทน)');
+    // 🆕 UNDO_FIELD_GUARD UAT สถาปนิก รอบ 2: ใบตั้งหนี้ที่ผูกถูกยกเลิกแล้ว → เครดิตลอยบนใบยกเลิก (reducer PATCH_INV ปฏิเสธด้วย)
+    if(inv.voided || inv.paymentStatus === 'voided' || inv.status === 'voided') return alert('⛔ ใบตั้งหนี้ ' + (inv.invNumber || inv.id) + ' ที่ผูกกับ RTV นี้ถูกยกเลิกแล้ว — แปลงเป็นเครดิตบนใบนี้ไม่ได้ (ยังไม่ได้บันทึกอะไร)\n→ แจ้ง ผจก.บัญชี พร้อมเลข RTV ' + (r.rtvNumber || r.id));
     const vatPortion = inv.amount > 0 ? (inv.vat||0) * remainBase / inv.amount : 0;
     const creditAmt = remainBase + vatPortion;
     if(!confirm(`supplier ไม่ส่งของส่วนที่เหลือ — แปลงเป็นเครดิต ${fmtCur(creditAmt)} (รวม VAT) หักบิลรอบหน้าของ ${(state.suppliers.find(s=>s.id===r.supplierId)?.name)||''}?` +
       (r.decideJeId ? '\n\n(ยอดนี้ลงบัญชีไว้ตั้งแต่ตอนตัดสินใจแล้ว — ไม่ลง JE ซ้ำ)'
                     : '\n\nระบบจะลง JE (DR ลูกหนี้อื่น / CR สินค้า+ภาษีซื้อ) เฉพาะส่วนนี้'))) return;
     // เพิ่ม creditDue บน INV ที่อ้างอิง
-    dispatch({ type:'UPDATE_INV', data:{ ...inv,
-      creditDue: (inv.creditDue||0) + creditAmt,
-      returnedAmount: (inv.returnedAmount||0) + creditAmt,
+    // 🆕 UNDO_FIELD_GUARD G3 (UAT คลัง/QC): บวกเครดิต/ยอดคืนแบบ delta (PATCH_INV.add) — เดิม UPDATE_INV ทั้งใบจากสำเนาในหน้าจอ
+    //   (สำเนาเก่า + ลดไม่ได้ = เครดิตรอบนี้หายเงียบ · ก่อนหน้านี้ทับเครดิตของเครื่องอื่น)
+    dispatch({ type:'PATCH_INV', data:{ id: inv.id,
       // 🆕 FIX(P1): เคสจบแล้ว (ไม่รอของแล้ว) ต้องปลด hold ด้วย ไม่งั้นบิลหายจากคิวจ่ายถาวร
       //    เดิม spread ค่าเดิมกลับไป rtvHoldPayment จึงยังเป็น true ตลอด
-      rtvHoldPayment: false } });
+      fields:{ rtvHoldPayment: false },
+      add:{ creditDue: Number(creditAmt.toFixed(2)), returnedAmount: Number(creditAmt.toFixed(2)) } } });
     // ลง JE เฉพาะ remainder (ไม่ทับ rtv record — persist:false)
     // 🆕 FIX(risk): ถ้า DECIDE_RTV ลง JE เต็มมูลค่าไปแล้ว (decideJeId) ยอดนี้ถูก "พัก" ที่ 1311 อยู่แล้ว
     //    เรียก autoPostRTV ซ้ำจะ CR 1300 อีกรอบ = สินค้าคงเหลือลดสองเท่า → ตรงนี้ไม่ต้องลง JE เพิ่ม
