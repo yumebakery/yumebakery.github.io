@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="c5ad8732b42c";window.__ERP_BUILT_AT__="2026-10-20T10:32:26";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="916ba127e22a";window.__ERP_BUILT_AT__="2026-10-20T11:18:53";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -3653,6 +3653,34 @@ function grRegisteredAssets(state, gr){
   return ((state && state.assets) || []).filter(a => a && !a.deleted && (a.acquireFromGrId === gr.id
     || (a.acquireFromGrId == null && a.acquireFromInvId && invIds.includes(a.acquireFromInvId))));
 }
+// 🆕 UNDO_PRINCIPLE C1: บรรทัดทรัพย์สิน (💎 noStock) แก้ราคาที่ GR ก่อนตั้งหนี้ได้ไหม → null = ได้ · { code, msg } = ไม่ได้
+//   ใช้ร่วม planner (planInvPriceAdjust) + reducer REQUEST_INV_PRICE_FIX + หน้าจอ · เรียกเฉพาะบรรทัดที่ grLineIsCapex เป็นจริง
+function grCapexPriceFixDeny(state, gr, idx){
+  const S = state || {}, l = gr && (gr.lines || [])[idx];
+  if(!l) return { code:'no_line', msg:'ไม่พบบรรทัดที่ ' + (Number(idx) + 1) };
+  const it = (S.items || []).find(x => x && x.id === l.itemId), nm = (it && it.name) || l.itemId || '';
+  if(l.noStock !== true) return { code:'legacy_stock', msg:nm + ': บรรทัดทรัพย์สินแบบเก่ายังอยู่ในสต๊อก — ล้างสต๊อกทรัพย์สินก่อน หรือใช้ใบลดหนี้/เพิ่มหนี้ (CN/DN)' };
+  const invIds = [gr.invoiceId, gr.prevInvoiceId].filter(Boolean);
+  const reg = (S.assets || []).filter(a => a && !a.deleted && ((a.acquireFromGrId === gr.id && (a.acquireFromGrLine == null || Number(a.acquireFromGrLine) === Number(idx)))
+    || (a.acquireFromInvId && invIds.includes(a.acquireFromInvId))));
+  if(reg.length) return { code:'registered', msg:nm + ': ลงทะเบียนทรัพย์สิน ' + reg.map(a => a.code || a.name || a.id).join(', ') + ' แล้ว — ลบทะเบียนก่อน (ถ้ายังไม่ลงค่าเสื่อม) แล้วค่อยแก้ราคา · ลงค่าเสื่อมแล้ว = ขอ CN/DN + JE ปรับปรุง' };
+  const one = (gr.lines || []).filter(x => x && x.itemId === l.itemId && !x.isFreebie).length === 1;
+  const rtv = (S.returns || []).some(r => r && r.grId === gr.id && r.rtvStatus !== 'cancelled'
+    && (r.lines || []).some(rl => rl && (rl.grLineIdx != null ? Number(rl.grLineIdx) === Number(idx) : (one && rl.itemId === l.itemId))));
+  if(rtv) return { code:'rtv', msg:nm + ': บรรทัดนี้มีใบคืนของ (RTV) — ใช้ CN/DN' };
+  return null;
+}
+// C11: ป้ายบรรทัดทรัพย์สินที่แก้ราคาได้ (ฟอร์มจัดซื้อ/บัญชี/ปุ่ม)
+const CAPEX_PF_BADGE = '💎 ทรัพย์สิน — แก้ราคาได้ ไม่กระทบสต๊อก (บัญชีลงทะเบียนตอนตั้งหนี้)'   // 🆕 UNDO_PRINCIPLE UAT N2: ภาษาคนทำงาน ไม่ใช้ศัพท์บัญชี;
+// C11: สรุปบรรทัดทรัพย์สินของ GR สำหรับหน้าจอ → null = ไม่มีบรรทัดทรัพย์สิน · { lines:{ idx: denyObj|null }, deny:'<เหตุ>' เมื่อทุกบรรทัดเป็นทรัพย์สินและแก้ไม่ได้เลย }
+function grCapexFixInfo(state, gr){
+  const ls = (gr && gr.lines) || [], lines = {};
+  let n = 0;
+  ls.forEach((l, i) => { if(l && grLineIsCapex(state, gr, l)){ n++; lines[i] = grCapexPriceFixDeny(state, gr, i); } });
+  if(!n) return null;
+  const all = n === ls.length && ls.every((l, i) => lines[i]);
+  return { lines, deny:all ? Array.from(new Set(Object.values(lines).map(x => x.msg))).join(' · ') : null };
+}
 // 💎 FA-S3: GR 💎 เก่า (ก่อน S2 · ไม่มี noStock · ติ๊ก 💎 = ทรัพย์สินตามกฎเดิม) แต่เข้าสต๊อกไปแล้ว → ให้คลัง/บัญชีล้างด้วย CLEAR_ASSET_STOCK
 //   clearable = ล็อตของบรรทัดนี้ยังเหลือเต็ม (ไม่ถูกเบิก/โอน/ใช้ล้างติดลบ) · ไม่เต็ม = ต้องปรับสต๊อก + JE ด้วยมือ
 // verify: GR ก่อน 2026-09-09 เก็บ line.lot = '' แต่ชั้น FIFO ได้ล็อตอัตโนมัติ `${grNumber}-NN` → ใช้ล็อตจริงแบบเดียวกันทั้งแผง/reducer
@@ -4427,7 +4455,7 @@ function fmtDateBE(iso, opts){
   return `${parseInt(d)} ${TH_MONTHS_SHORT[parseInt(mo)-1]} ${beYear}`;
 }
 
-function BEDateInput({ value, onChange, className, placeholder, disabled }){
+function BEDateInput({ value, onChange, className, placeholder, disabled, min }){   // 🆕 TR_DATE verify: min = วันแรกที่เลือกได้ (ISO) — วันก่อนหน้าเป็นสีเทากดไม่ได้
   const [open, setOpen] = useState(false);
   const [viewYM, setViewYM] = useState(() => {
     if(value){ return { y: parseInt(value.slice(0,4)), m: parseInt(value.slice(5,7))-1 }; }
@@ -4480,8 +4508,7 @@ function BEDateInput({ value, onChange, className, placeholder, disabled }){
   for(let i = 0; i < startWeek; i++) cells.push(null);
   for(let d = 1; d <= daysInMonth; d++) cells.push(d);
 
-  const today = new Date();
-  const todayISO = today.toISOString().slice(0,10);
+  const todayISO = getToday();   // 🆕 TR_DATE verify: วันที่ท้องถิ่น (เดิม toISOString = UTC → 00:00-06:59 ไทยได้เมื่อวาน)
 
   const pick = (d) => {
     const iso = `${viewYM.y}-${String(viewYM.m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
@@ -4534,9 +4561,11 @@ function BEDateInput({ value, onChange, className, placeholder, disabled }){
           const iso = `${viewYM.y}-${String(viewYM.m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
           const isSelected = iso === value;
           const isToday = iso === todayISO;
-          return h('button', { key:i, type:'button', onClick:()=>pick(d),
-            className: cls('aspect-square text-xs rounded hover:bg-blue-100 transition flex items-center justify-center',
-              isSelected ? 'bg-blue-600 text-white font-bold' :
+          const isOff = !!(min && iso < min);   // 🆕 TR_DATE verify: ก่อน min = กดไม่ได้
+          return h('button', { key:i, type:'button', onClick:()=>pick(d), disabled:isOff, 'data-be-off': isOff ? '1' : undefined,
+            className: cls('aspect-square text-xs rounded transition flex items-center justify-center',
+              isOff ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-blue-100',
+              isOff ? '' : isSelected ? 'bg-blue-600 text-white font-bold' :
               isToday ? 'bg-blue-50 text-blue-700 font-bold ring-1 ring-blue-300' : 'text-gray-700')
           }, d);
         })
@@ -6572,10 +6601,10 @@ function partyLocation(address){
   if(parts.length) return parts.join(' · ');
   return a.length > 35 ? a.slice(0, 35) + '…' : a;
 }
-// ข้อความสั้นสำหรับ <option> ธรรมดา (select) — ชื่อ · สาขา (โชว์สาขาเฉพาะเมื่อระบุ)
+// ข้อความสั้นสำหรับ <option> ธรรมดา (select) — ชื่อ (สาขา) (โชว์สาขาเฉพาะเมื่อระบุ)
 function partyOptionText(p){
   if(!p) return '';
-  return (p.name || '') + (_partyBranchKind(p) === 'none' ? '' : ' · ' + partyBranchLabel(p));
+  return (p.name || '') + (_partyBranchKind(p) === 'none' ? '' : partyBranchParen(partyBranchLabel(p), p.name));
 }
 // 🆕 PARTY-BRANCH (UAT): เลขสาขา 5 หลักสำหรับรายงานภาษี/CSV (ภ.พ.30 / ภ.ง.ด.53) — HQ → 00000 · ตัวเลข → เติม 0 ให้ครบ 5 · ว่าง → ''
 function normalizeBranchCode(v){
@@ -6595,6 +6624,16 @@ function _partyNoTaxBranch(p){
 }
 function partyBranchCode5(p){ return _partyNoTaxBranch(p) ? '' : normalizeBranchCode(p && p.branchCode); }
 // ข้อความสาขาบนเอกสารพิมพ์ (แบบเดียวกับใบกำกับ): "สำนักงานใหญ่" / "สาขาที่ 00150" · ไม่ระบุ → '' (ไม่พิมพ์)
+// 🆕 PARTY_BRANCH_PAREN (เจ้าของ 2026-10-19): ต่อสาขาท้ายชื่อ/เลขภาษีแบบวงเล็บ "ชื่อ (สำนักงานใหญ่)" — ไม่ใช้ " · " แล้ว
+//   ว่าง → '' · มีค่า → ' (' + text + ')' · escape HTML ผู้เรียกทำเหมือนเดิม
+//   🆕 (verify 1): ส่ง name มาด้วย → ชื่อลงท้ายด้วยสาขาอยู่แล้ว ("… จำกัด (สนญ.)" / "(สำนักงานใหญ่)" / "สาขาที่ 3") → ไม่ต่อซ้ำ
+const _PARTY_NAME_BR_TAIL = /\(?\s*(สำนักงานใหญ่|สํานักงานใหญ่|สนญ\.?|head\s*office|สาขา(ที่)?\s*\d{1,5})\s*\)?\s*$/i;
+function partyBranchParen(text, name){
+  const t = String(text == null ? '' : text).trim();
+  if(!t) return '';
+  if(name != null && _PARTY_NAME_BR_TAIL.test(String(name))) return '';
+  return ' (' + t + ')';
+}
 function partyTaxBranchText(p){
   if(_partyNoTaxBranch(p)) return '';
   const k = _partyBranchKind(p);
@@ -6624,10 +6663,10 @@ function partyIsDup(p, list){
 }
 // โชว์สาขาในตาราง/รายการเมื่อ "ระบุสาขา" หรือ "ชื่อ/เลขภาษีซ้ำหลายระเบียน" (ไม่ระบุ + ไม่ซ้ำ → ไม่รก)
 function partyShowBranch(p, list){ return !!p && (_partyBranchKind(p) !== 'none' || partyIsDup(p, list)); }
-// ข้อความ "ชื่อ · สาขา 00150" สำหรับข้อความล้วน (toast / ค้นหา / CSV ทั่วไป)
+// ข้อความ "ชื่อ (สาขา 00150)" สำหรับข้อความล้วน (toast / ค้นหา / CSV ทั่วไป)
 function partyNameWithBranch(p, list){
   if(!p) return '';
-  return (p.name || '') + (partyShowBranch(p, list) ? ' · ' + partyBranchLabel(p) : '');
+  return (p.name || '') + (partyShowBranch(p, list) ? partyBranchParen(partyBranchLabel(p), p.name) : '');
 }
 // ชิปสาขาเล็กต่อท้ายชื่อในตาราง/การ์ด — ใช้สีเดียวกับ picker (🏢 สนญ. ฟ้า · สาขา เหลือง · ไม่ระบุ เทา)
 function PartyBranchChip({ party, parties, className }){
@@ -6689,14 +6728,15 @@ function partyComboProps(kind, { parties, suppliers, customers, allLabel, extra 
   return {
     options: list,
     getKey: p => p.id,
-    // ช่องที่เลือกแล้ว: ชื่อ · สาขา · รหัส (สาขาไม่ระบุ + ชื่อไม่ซ้ำ → ไม่ต้องโชว์สาขาให้รก)
+    // ช่องที่เลือกแล้ว: ชื่อ (สาขา) · รหัส (สาขาไม่ระบุ + ชื่อไม่ซ้ำ → ไม่ต้องโชว์สาขาให้รก)
     getLabel: p => {
       if(!p.id) return p.name;
-      const bits = [p.name];
-      if(_partyBranchKind(p) !== 'none' || isDup(p)) bits.push(partyBranchLabel(p));
+      // 🆕 PARTY_BRANCH_PAREN: "ชื่อ (สาขา 00150) — รหัส"
+      const bits = [p.name + ((_partyBranchKind(p) !== 'none' || isDup(p)) ? partyBranchParen(partyBranchLabel(p), p.name) : '')];
       const ref = p.code || p.extCode || p.taxId;
       if(ref) bits.push(ref);
-      return bits.join(' · ');
+      // UAT S1: คั่นรหัสด้วย " — " (ไม่ใช่ " · " ที่อ่านเหมือนจุดหลัง "จำกัด")
+      return bits.join(' — ');
     },
     getSearchText: p => p.id ? partySearchText(p) : (p.name || ''),
     renderOption: p => {
@@ -7349,7 +7389,7 @@ function planInvPriceAdjust(state, opts){
   const o = opts || {}, S = state || {}, blocks = [];
   const push = (m) => { if(m && !blocks.includes(m)) blocks.push(m); };
   const mode = o.mode === 'at_gr' || o.mode === 'post_pi' ? o.mode : null;
-  const out = { mode, lines:[], costPlan:[], rtvPlan:[], rtvDocs:[], dRet:0, dGoods:0, dVat:0, dNet:0, dInv:0, dVar:0, blocks, inv:null, grIds:[], cumGoods:0, cumBase:0, needsApproval:false, isIncrease:false, warnLines:[] };
+  const out = { mode, lines:[], costPlan:[], rtvPlan:[], rtvDocs:[], dRet:0, dGoods:0, dVat:0, dNet:0, dInv:0, dVar:0, blocks, inv:null, grIds:[], cumGoods:0, cumBase:0, needsApproval:false, isIncrease:false, warnLines:[], notes:[], dCapex:0 };   // notes/dCapex: UNDO_PRINCIPLE C9/C2
   if(!mode){ push('โหมดปรับราคาไม่ถูกต้อง'); return out; }
   let inv = null, grIds = [];
   if(mode === 'post_pi'){
@@ -7395,7 +7435,10 @@ function planInvPriceAdjust(state, opts){
     const nu = Number(w.newUnitPrice), it = (S.items || []).find(x => x && x.id === l.itemId), nm = (it && it.name) || l.itemId || '';
     if(!(isFinite(nu) && nu > 0)){ push('ราคาใหม่ของ ' + nm + ' ต้องมากกว่า 0'); continue; }
     if(l.isFreebie){ push(nm + ' เป็นของแถม — ปรับราคาไม่ได้'); continue; }
-    if(grLineIsCapex(S, g, l)){ push(nm + ' เป็นรายการทรัพย์สิน (ไม่มีล็อตสต๊อก) — ใช้ ↩️ ย้อนไปตั้งหนี้ หรือ JE ปรับปรุง' + (mode === 'at_gr' ? ' · ถ้าผิดแค่อัตรา VAT (ราคาก่อน VAT ถูกแล้ว): บัญชีแก้ VAT รายบรรทัดตอนตั้งหนี้ได้เลย' : '')); continue; }   // UAT S3: บอกทางให้บรรทัดทรัพย์สิน
+    // 🆕 UNDO_PRINCIPLE C2/C3: บรรทัดทรัพย์สิน — at_gr แก้ได้ (ไม่มีล็อต/JE · ลง 16xx ตอนตั้งหนี้) ถ้า grCapexPriceFixDeny ผ่าน · post_pi ยังบล็อก
+    const _cap = grLineIsCapex(S, g, l);
+    if(_cap && mode === 'post_pi'){ push(nm + ' เป็นทรัพย์สิน และตั้งหนี้แล้ว — ให้บัญชี: ↩️ ย้อนไปตั้งหนี้ → จัดซื้อแก้ราคาที่ใบรับของ (ถ้าจ่ายแล้ว: บัญชีออกใบลดหนี้/เพิ่มหนี้)'); continue; }
+    if(_cap){ const _cd = grCapexPriceFixDeny(S, g, idx); if(_cd){ push(_cd.msg + ' · ถ้าผิดแค่อัตรา VAT (ราคาก่อน VAT ถูกแล้ว): บัญชีแก้ VAT รายบรรทัดตอนตั้งหนี้ได้เลย'); continue; } }   // UAT S3: บอกทางให้บรรทัดทรัพย์สิน
     const qty = Number(l.qty) || 0, baseQty = Number(l.baseQty) || qty, ou = Number(l.unitPrice) || 0, olt = Number(l.lineTotal) || 0;
     const first = l.priceAdjustedFrom != null ? Number(l.priceAdjustedFrom) || 0 : ou;
     if(first > 0 && Math.abs(nu - first) / first * 100 > blockPct + 1e-9){ push(nm + ': ราคาใหม่ต่างจากราคาเดิมเกิน ' + blockPct + '% — น่าจะคีย์ผิดหน่วย'); continue; }
@@ -7406,9 +7449,11 @@ function planInvPriceAdjust(state, opts){
     const disc = (Number(l.discAmt) || 0) + (Number(l.piDiscAlloc) || 0);
     const c1 = Math.max(0, nu * qty - disc) / baseQty;
     // R2.4 ข้อ 1: ล็อตของบรรทัด — grLineIdx → (grLot||lot) → itemId ที่มีบรรทัดเดียวในใบ (รวมล็อตลูกจาก split · ข้าม NEG/ของแถม)
-    const pool = (S.fifoLayers || []).filter(f => f && f.grRef === g.grNumber && f.itemId === l.itemId && !f.isNegative && !f.isFreebie);
-    let L = pool.filter(f => f.grLineIdx === idx);
     const sameItem = (g.lines || []).filter(x => x && x.itemId === l.itemId && !x.isFreebie);
+    let L = [], R = 0, dInv = 0;
+    if(!_cap){   // C2: ทรัพย์สิน noStock ไม่มีล็อต → ข้ามการหาล็อต/ต้นทุน (dInv 0)
+    const pool = (S.fifoLayers || []).filter(f => f && f.grRef === g.grNumber && f.itemId === l.itemId && !f.isNegative && !f.isFreebie);
+    L = pool.filter(f => f.grLineIdx === idx);
     if(!L.length && String(l.lot || '')){
       const sameLot = sameItem.filter(x => String(x.lot || '') === String(l.lot));
       if(sameLot.length === 1) L = pool.filter(f => f.grLineIdx == null && String(f.grLot || f.lot || '') === String(l.lot));
@@ -7416,15 +7461,15 @@ function planInvPriceAdjust(state, opts){
     if(!L.length && sameItem.length === 1) L = pool.filter(f => f.grLineIdx == null);
     if(!L.length){ push(nm + ' (' + gn + '): หาล็อตสต๊อกของบรรทัดนี้ไม่เจอ / ใบมีสินค้าซ้ำหลายบรรทัด แยกล็อตไม่ได้ — ใช้ CN/DN'); continue; }
     if(L.some(f => f.allocatedCost)){ push(nm + ' (' + gn + '): ล็อตนี้เฉลี่ยต้นทุนกับของแถม — ปรับราคาทางนี้ไม่ได้ ใช้ CN/DN'); continue; }
-    const R = L.reduce((t, f) => t + (Number(f.remaining) || 0), 0);
+    R = L.reduce((t, f) => t + (Number(f.remaining) || 0), 0);
     if(L.some(f => (Number(f.remaining) || 0) < -0.0001) || R > baseQty + 0.001){ push(nm + ' (' + gn + '): จำนวนคงเหลือในล็อตไม่ตรงกับใบรับของ — ตรวจล็อตก่อน'); continue; }
-    let dInv = 0;
     for(const f of L){
       const rem = Number(f.remaining) || 0, c0 = Number(f.unitCost) || 0;
       dInv += rem * (c1 - c0);
       out.costPlan.push({ layerId:f.id, grId:g.id, lineIdx:idx, itemId:l.itemId, from:c0, to:c1, remaining:rem });
     }
     dInv = _pvR2(dInv);
+    }   // จบ if(!_cap) — C2
     // 🆕 PV4-2: คืนของ (RTV) ที่ปรับได้ของบรรทัดนี้ — จับคู่ grLineIdx → ไม่มีก็ itemId ที่มีบรรทัดเดียว · dRet = (nlt − olt) × retBase / baseQty
     let retBase = 0, dRet = 0, ambig = false;
     const rplan = [];
@@ -7457,7 +7502,15 @@ function planInvPriceAdjust(state, opts){
     if(nRate !== rate) newRate[key] = nRate;
     out.lines.push({ grId:g.id, grNumber:g.grNumber, lineIdx:idx, itemId:l.itemId, qty, baseQty, unit:l.unit, oldUnitPrice:ou, newUnitPrice:nu, firstUnitPrice:first,
       oldLineTotal:olt, newLineTotal:nlt, dAmt, vatRate:nRate, oldVatRate:rate, newVatRate:nRate, vatChanged:nRate !== rate,
-      c1, remaining:R, returned:retBase, used:Math.max(0, baseQty - R - retBase), dInv, dRet, dVar:_pvR2(dAmt - dInv - dRet) });
+      c1, remaining:R, returned:retBase, used:_cap ? 0 : Math.max(0, baseQty - R - retBase), dInv, dRet,
+      // C2: ทรัพย์สิน = ไม่มีผลต่างราคา 5391 (dVar 0) · ส่วนต่างทั้งหมดไปอยู่ที่ราคาบรรทัด (ลง 16xx ตอนตั้งหนี้)
+      dVar:_cap ? 0 : _pvR2(dAmt - dInv - dRet), ...(_cap ? { capex:true, dCapex:dAmt } : {}) });
+    // C9: ราคาใหม่ต่ำกว่าเกณฑ์ทรัพย์สิน — เตือน ไม่บล็อก (ประเภท freeze ตอนรับของ)
+    if(_cap && capexThreshold(S) > 0){
+      const _nl = { ...l, unitPrice:nu, lineTotal:nlt, ...(l.lineExVat != null ? { lineExVat:_pvR2((Number(l.lineExVat) || 0) + dAmt) } : {}) };
+      const _uv = l.capMode === 'add_to' ? capexLineExVat(g, _nl) : capexUnitExVat(g, _nl);
+      if(_uv < capexThreshold(S) - 0.005) out.notes.push(nm + ': ราคาใหม่ต่ำกว่าเกณฑ์ทรัพย์สิน — ยังลงเป็นทรัพย์สินตามตอนรับของ · ถ้าจะเปลี่ยนเป็นสินค้า: บัญชี/จัดซื้อตัดสินก่อน แล้วแจ้งคลังให้ยกเลิก GR และรับใหม่');
+    }
   }
   let vOld = 0, vNew = 0, sumLt = 0, cum = 0, cumV = 0, cumVs = 0, cumBase = 0, dvb = 0, deb = 0, volatile = false;
   for(const g of grs) (g.lines || []).forEach((l, idx) => {
@@ -7483,6 +7536,7 @@ function planInvPriceAdjust(state, opts){
   out.dInv = _pvR2(out.lines.reduce((t, x) => t + x.dInv, 0));
   out.dVar = _pvR2(out.lines.reduce((t, x) => t + x.dVar, 0));
   out.dRet = _pvR2(out.lines.reduce((t, x) => t + (x.dRet || 0), 0));
+  out.dCapex = _pvR2(out.lines.reduce((t, x) => t + (x.dCapex || 0), 0));   // C2: ส่วนต่างบรรทัดทรัพย์สิน (ไม่ลง JE ตอนนี้)
   // 🆕 PV4-6: สรุปรายใบคืนของ — มูลค่าเดิม → ใหม่ (พรีวิว/แผงยืนยัน)
   for(const rp of out.rtvPlan){
     let e = out.rtvDocs.find(x => x.rtvId === rp.rtvId);
@@ -7525,6 +7579,39 @@ function planInvPriceAdjust(state, opts){
   if(Math.abs(out.dVat) >= 0.005 && (inv || grs[0]) && priceFixNonVatAfter(S, inv ? 'inv' : 'gr', inv || grs[0], out.lines)) push(priceFixNonVatVatMsg(S, inv ? 'inv' : 'gr', inv || grs[0]));   // 🆕 UAT M1
   return out;
 }
+// 🆕 PF-NOREAPPROVE N1 (เจ้าของ 2026-10-19): ตัวตัดสิน "ต้องขออนุมัติปรับราคาไหม" — ใช้ร่วม reducer ADJUST_INV_PRICE + หน้าจอ (pure)
+//   P = planInvPriceAdjust(...) · req = priceFixRequest (หรือ null) · lines = บรรทัดที่บัญชียืนยัน [{grId,lineIdx,newUnitPrice,newVatRate?}]
+//   confirmer = ผู้ยืนยัน (reducer ส่ง s.currentUser เท่านั้น) · opts.gmDirect = GM 👑 ทำเอง
+//   ทางสองคน = จัดซื้อคีย์ (proposal.by) + บัญชีอีกคนยืนยันตรงข้อเสนอทุกบรรทัด → ไม่ต้องอนุมัติไม่ว่าส่วนต่างเท่าไร (ด่านอนุมัติจ่ายยังอยู่ปลายทาง)
+//   คืน { needAp, twoPerson, overProp, exact, why } · why = เหตุผลภาษาไทยที่ต้องอนุมัติ ('' = ไม่ต้อง)
+function priceFixApprovalNeed(state, P, req, lines, confirmer, opts){
+  const o = opts || {}, pl = (P && P.lines) || [], ls = lines || [];
+  const prop = (req && req.proposal && Array.isArray(req.proposal.lines)) ? req.proposal.lines : [];
+  const proposalBy = req && req.proposal ? String(req.proposal.by || '') : '';
+  const vr = (x) => (x && x.newVatRate != null && x.newVatRate !== '') ? Number(x.newVatRate) : null;
+  const eff = (x) => { const y = pl.find(z => z.grId === x.grId && z.lineIdx === Number(x.lineIdx)); return y && y.vatChanged ? y.newVatRate : null; };
+  const pOf = (x) => prop.find(y => y.grId === x.grId && Number(y.lineIdx) === Number(x.lineIdx));
+  // overProp (กติกาเดิม R2.6/PV5-4): บรรทัดนอกข้อเสนอ · ราคาสูงกว่าข้อเสนอ · VAT ต่างจากข้อเสนอ = บัญชีคีย์เอง
+  const overProp = !!req && ls.some(x => { const p = pOf(x); return !p || Number(x.newUnitPrice) > Number(p.newUnitPrice) + 1e-9 || eff(x) !== vr(p); });
+  // exact: ตรงข้อเสนอทุกบรรทัด (ราคาต่ำกว่าข้อเสนอ / ทิ้งบรรทัดที่จัดซื้อแก้ = บัญชีแก้ตัวเลขเอง)
+  const grLine = (p) => { const g = ((state && state.grs) || []).find(z => z && z.id === p.grId); return g && (g.lines || [])[Number(p.lineIdx)]; };
+  const exact = !!req && prop.length > 0 && !overProp
+    && ls.every(x => { const p = pOf(x); return p && Math.abs(Number(x.newUnitPrice) - Number(p.newUnitPrice)) <= 1e-6; })
+    && prop.every(p => ls.some(x => x.grId === p.grId && Number(x.lineIdx) === Number(p.lineIdx))
+      || (() => { const l = grLine(p); return !!l && Math.abs((Number(l.unitPrice) || 0) - Number(p.newUnitPrice)) <= 1e-6 && vr(p) == null; })());
+  const cf = String(confirmer || '');
+  const twoPerson = !o.gmDirect && !!req && req.status === 'submitted' && !!proposalBy && !!cf && cf !== proposalBy && exact;
+  const needAp = !o.gmDirect && !twoPerson && !!P && (!!P.needsApproval || ((!req || overProp) && !!P.isIncrease));
+  let why = '';
+  if(needAp){
+    if(req && proposalBy && cf && cf === proposalBy) why = 'ผู้คีย์ราคาและผู้ยืนยันเป็นคนเดียวกัน';
+    else if(req && (overProp || !exact)) why = 'บัญชีแก้ตัวเลขต่างจากที่จัดซื้อเสนอ';
+    else if(!req && P.isIncrease) why = 'บัญชีคีย์ราคาเองและราคาขึ้น';
+    else why = 'ส่วนต่างราคาเกินเกณฑ์ (บัญชีคีย์เอง)';
+  }
+  return { needAp, twoPerson, overProp, exact, why };
+}
+const PRICE_FIX_TWO_PERSON_NOTE = 'สองคน (จัดซื้อคีย์ · บัญชียืนยัน) — ไม่ต้องอนุมัติ';
 // 🆕 PRICE-FIX ขั้น 3 (R2.1/R2.2/R2.8): คำขอแก้ราคา P3 — open = รอจัดซื้อคีย์ · submitted = รอบัญชียืนยัน (2 สถานะนี้ = "เปิดอยู่" กันขอจ่าย/ตั้งหนี้)
 const PRICE_FIX_LIVE = Object.freeze(['open', 'submitted']);
 function _pfDocLive(doc){ return !!doc && !grIsVoid(doc) && doc.paymentStatus !== 'voided'; }   // 🆕 VOID-GR VG2 + UAT S2: ใช้ grIsVoid ตัวเดียว (voided/cancelled/canceled)
@@ -7542,13 +7629,17 @@ function invPriceApprovalPending(state, invId){
   return ((state && state.approvalRequests) || []).find(r => r && r.action === 'adjust_inv_price' && (r.status || 'pending') === 'pending'
     && (r.entityId === invId || (r.payload && r.payload.invId === invId))) || null;
 }
+// 🆕 PF-NOREAPPROVE UAT S1: คำขออนุมัติ adjust_inv_price ค้างผูก GR (ตัวตัดสินเดียวของ grPriceFixHold + หน้าสร้าง INV)
+function grPriceApprovalPending(state, grId){
+  return ((state && state.approvalRequests) || []).find(r => r && r.action === 'adjust_inv_price' && (r.status || 'pending') === 'pending'
+    && (r.entityId === grId || ((r.payload && r.payload.grIds) || []).includes(grId) || ((r.payload && r.payload.lines) || []).some(l => l && l.grId === grId))) || null;
+}
 // GR นี้ห้ามตั้งหนี้ไหม: มีคำขอเปิด หรือมีคำขออนุมัติ adjust_inv_price ค้างผูก GR → คืนเหตุผล (null = ผ่าน)
 function grPriceFixHold(state, grId){
   const g = ((state && state.grs) || []).find(x => x && x.id === grId); if(!g) return null;
   const gn = g.grNumber || grId;
   if(_pfSwOn(state) && priceFixLive(g)) return 'ใบรับของ ' + gn + (g.priceFixRequest.status === 'open' ? ' รอจัดซื้อแก้ราคา' : ' รอบัญชียืนยันราคา') + ' — ยืนยันหรือยกเลิกคำขอก่อนตั้งหนี้';
-  const ap = ((state && state.approvalRequests) || []).find(r => r && r.action === 'adjust_inv_price' && (r.status || 'pending') === 'pending'
-    && (r.entityId === grId || ((r.payload && r.payload.grIds) || []).includes(grId) || ((r.payload && r.payload.lines) || []).some(l => l && l.grId === grId)));
+  const ap = grPriceApprovalPending(state, grId);
   return ap ? 'ใบรับของ ' + gn + ' มีคำขออนุมัติปรับราคาค้างอยู่ — รอผลอนุมัติก่อนตั้งหนี้' : null;
 }
 // รายการคำขอทั้งระบบ (GR + INV) ตามสถานะ — แหล่งเดียวของแท็บจัดซื้อ/ป้ายบัญชี/งานค้าง (นับตรงกัน)
@@ -10323,6 +10414,7 @@ function approvalStaleReason(state, req){
     return null;
   }
   const _inv = (id) => (st.invoices || []).find(i => i && i.id === id);
+  // UNDO_PRINCIPLE §2.5: delete_inv อยู่ในชุดนี้แล้ว — คำขอค้างหลังมีคนย้อนตรงไปก่อน = ล้าสมัย (กัน void ซ้ำ)
   const INV_ACTS = { edit_inv:(pl.updatedInv && pl.updatedInv.id), adjust_inv_vat:pl.invId, adjust_inv_wht:pl.invId, delete_inv:pl.invId, vat_defer:pl.invId || req.entityId, vat_claim_in:pl.invId || req.entityId };
   if(Object.prototype.hasOwnProperty.call(INV_ACTS, A)){
     const id = INV_ACTS[A] || req.entityId, iv = id ? _inv(id) : null;
@@ -10415,6 +10507,13 @@ function _apStable(x){
   if(x && typeof x === 'object') return '{' + Object.keys(x).filter(k => k !== 'builtin' && x[k] !== undefined).sort().map(k => JSON.stringify(k) + ':' + _apStable(x[k])).join(',') + '}';
   return JSON.stringify(x === undefined ? null : x);
 }
+// 🆕 UNDO_PRINCIPLE §2.7: กฎตั้งต้นตาม id — กฎในโค้ด (APPROVAL_BUILTIN_RULES) หรือกฎ seed ใน INIT (เช่น r_delete_inv) · ไม่พบ = null
+function approvalSeedRule(id){
+  const b = APPROVAL_BUILTIN_RULES.find(r => r && r.id === id);
+  if(b) return b;
+  const seed = (global.ERP && global.ERP.INIT_STATE && global.ERP.INIT_STATE.approvalRules) || [];
+  return seed.find(r => r && r.id === id) || null;
+}
 // 🆕 APPROVAL 1a (เจ้าของ 2026-09-29 §B15 ข้อ 6): การแก้กฎนี้ "ผ่อนลง" ไหม → คืนรายการเหตุผล (ว่าง = เข้มขึ้น/เท่าเดิม บันทึกได้เลย)
 //   before/after = กฎก่อน/หลังแก้ (null = ไม่มี · ลบกฎตั้งต้นที่บันทึกแล้ว → after = กฎตั้งต้น) · ตรวจแบบระวังไว้ก่อน: เปลี่ยนที่ตีความไม่ได้ = ผ่อน
 function approvalRuleLoosening(state, before, after){
@@ -10422,8 +10521,15 @@ function approvalRuleLoosening(state, before, after){
   const stepsOf = (r) => ((r && r.steps) || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
   if(!on(after)){ if(on(before)) why.push(after ? 'ปิดกฎ' : 'ลบกฎ'); return why; }
   if(!on(before)){
+    // 🆕 UNDO_PRINCIPLE §2.7: เปิดกฎตั้งต้นที่ถูกปิดคืน (ต่างแค่ active · เนื้อกฎตรง seed เป๊ะ) = กลับสู่ค่าตั้งต้น ไม่ใช่ผ่อนกฎ
     // กฎใหม่/เปิดกฎ: ผู้อนุมัติที่เพิ่มเข้าขั้นลำดับเดียวกับกฎอื่นของ action เดียวกัน (buildApprovalRequest รวม anyOf) = คนอนุมัติได้มากขึ้น
-    const others = effectiveApprovalRules(state).filter(r => on(r) && r.action === after.action && r.id !== after.id);
+    let others = effectiveApprovalRules(state).filter(r => on(r) && r.action === after.action && r.id !== after.id);
+    const _bare = (r) => { const o = { ...r }; delete o.active; delete o.label; return _apStable(o); };
+    if(before && after.id === before.id){
+      const seed = approvalSeedRule(after.id);
+      // ยกเว้นเฉพาะการเทียบกับกฎตั้งต้นที่ไม่ถูกแก้ · กฎที่ผู้ใช้สร้าง/แก้ (เช่นกฎ GM อย่างเดียว) ยังต้องเทียบ — ไม่งั้น ผจก.บัญชี เปิดกฎ seed คืนแล้วอนุมัติแทน GM ได้เงียบ ๆ
+      if(seed && _bare(before) === _bare(after) && _bare(after) === _bare(seed)) others = others.filter(r => { const sd = approvalSeedRule(r.id); return !(sd && _bare(r) === _bare(sd)); });
+    }
     for(const st of stepsOf(after)){
       const same = others.flatMap(r => stepsOf(r).filter(x => (x.order || 0) === (st.order || 0)).flatMap(specs));
       if(same.length && specs(st).some(k => !same.includes(k))){ why.push('เพิ่มผู้อนุมัติในขั้น ' + (st.order || '?') + ' ของกฎอื่น'); break; }
@@ -10551,6 +10657,177 @@ function findApprovalRules(state, action, context){
 // ต้องอนุมัติไหม? คืน rules ที่เข้าเงื่อนไข (ถ้าไม่มี = ไม่ต้องอนุมัติ)
 function needsApproval(state, action, context){
   return findApprovalRules(state, action, context);
+}
+
+// 🆕 UNDO_PRINCIPLE §2.1 (เจ้าของ 2026-10-19): หลักการย้อนขั้นตอน — ขาไปไม่ต้องอนุมัติ = ย้อนเองได้ · ขาไป/ขั้นต่อมาผ่านอนุมัติ = ขออนุมัติ (ยกเว้นผู้อนุมัติเอง)
+//   ฟังก์ชันบริสุทธิ์ (ไม่เรียก Date.now/alert) · หน้าจอ (voidInvViaApproval) + reducer VOID_INV ใช้ตัวเดียวกัน · รอบนี้ delete_inv ตัวเดียว (U10)
+const UNDO_POLICY_ACTIONS = Object.freeze(['delete_inv']);
+// payment นี้อ้างใบ id ไหม (invId | invoiceId | invoiceIds[] | allocations[].invoiceId) — ตรรกะเดียวกับ _payRefsInv (01-state)
+function payRefsInv(p, id){ return !!p && !!id && (p.invId === id || p.invoiceId === id || (p.invoiceIds || []).includes(id) || (p.allocations || []).some(x => x && x.invoiceId === id)); }
+// U4: เคยจ่าย = paidAmount > 0 หรือมี payment ที่อนุมัติแล้วผูกใบ (รวมที่กลับรายการไปแล้ว)
+function invEverPaid(state, inv){
+  if(!inv) return false;
+  if((Number(inv.paidAmount) || 0) > 0.005) return true;
+  //   payment แบบเก่าไม่มี approvalStatus = ถือว่าอนุมัติแล้ว (เหมือนผู้อ่านอื่นใน 01-state) → เข้มขึ้นเท่านั้น
+  return ((state && state.payments) || []).some(p => payRefsInv(p, inv.id) && (p.approvalStatus || 'approved') === 'approved');
+}
+function _undoInvMigrated(inv){ return !!inv && (inv._migrated === true || inv.createdBy === 'migration'); }
+// ข้อเท็จจริงของใบสำหรับตัดสินการย้อน (§2.1 ข้อ 3-5)
+// UAT บัญชี F1: ใบที่หักมัดจำ/เครดิตผู้ขาย (CN/RTV) — VOID_INV ไม่คืนมัดจำ/เครดิต/กลับ JE deposit_use ของใบปกติ → ห้ามย้อนทางตรง (ส่งอนุมัติ)
+//   ทุกทางที่หักเข้าใบ: depositUsed (ตั้งหนี้เดี่ยว PATCH_INV + ตั้งหนี้รวม) · deposits[].appliedINVs · depositApplications/depositOffsetIds · JE deposit_use (invId)
+//   creditUsed (CONSUME_SUPPLIER_CREDIT ตอนตั้งหนี้) · creditApplied/memoApplied (ใช้ CN กับใบ) · supplierMemos.appliedToInvId
+function invUsedDepositOrCredit(state, inv){
+  if(!inv) return false;
+  const st = state || {}, n = v => (Number(v) || 0) > 0.005;
+  if(n(inv.depositUsed) || n(inv.creditUsed) || n(inv.creditApplied)) return true;
+  if((inv.depositApplications || []).some(x => x && !x.reversed) || (inv.depositOffsetIds || []).length || (inv.memoApplied || []).length) return true;
+  if((st.deposits || []).some(d => d && (d.appliedINVs || []).some(x => x && x.invId === inv.id && !x.reversed))) return true;
+  if((st.supplierMemos || []).some(m => m && m.appliedToInvId === inv.id && !['void', 'voided', 'cancelled'].includes(m.status))) return true;
+  // verify รอบ 3: ใบลดหนี้อัตโนมัติจากรับของขาด (refInvId · applied_await_doc) ผูกใบนี้ — ไม่พึ่ง creditApplied/memoApplied ที่แก้ได้
+  if((st.supplierMemos || []).some(m => m && m.refInvId === inv.id && !['void', 'voided', 'cancelled'].includes(m.status))) return true;
+  // verify บัญชี: ใบคืน (RTV) ที่หักในใบนี้ (rtvMode 'deduct' → rtvDeductIds + RTV linkedINV/DEDUCTED_IN_PI/closed) — VOID_INV ข้าม DEDUCTED_IN_PI และไม่เปิด RTV คืน
+  //   → ใบใหม่ตั้งหนี้เต็มจำนวน (เครดิตคืนของหายจากเจ้าหนี้) → ต้องให้ ผจก.บัญชีตรวจ
+  if((Array.isArray(inv.rtvDeductIds) && inv.rtvDeductIds.length) || (st.returns || []).some(r => r && r.linkedINV === inv.id && r.rtvStatus !== 'cancelled'
+    && (n(r.deductedFromINV) || r.decideJeId === 'DEDUCTED_IN_PI'))) return true;
+  return (st.journalEntries || []).some(j => j && j.source === 'deposit_use' && j.invId === inv.id && !j.voidedReversal);
+}
+// UAT บัญชี F3: 50 ทวิ ที่ "ออกจริง" = ผูก PV (รวมใบ mergedInto) · หรือมีวันที่หักอยู่เดือนก่อนเดือนปัจจุบัน (อาจยื่น ภ.ง.ด.3/53 แล้ว)
+//   verify บัญชี: วันที่หัก = วันจ่ายจริงแรก → certDate (ใบเพิ่มย้อนหลัง AddWHTRetroModal) → invDate (ใบแบบเก่า legacy) — กติกาเดียวกับ whtCertPayeeEditWarn
+//   (WHTReport นับใบที่มี certDate เข้าเดือนนั้นแล้ว ไม่ pending) · ใบร่างที่สร้างพร้อมใบตั้งหนี้ (ไม่มี certDate ยังไม่จ่าย) ไม่นับ — VOID_INV ยกเลิกใบร่างให้เอง
+//   ตัดช่อง printedAt/issued/filed/payId ทิ้ง — ไม่มีโค้ดไหนเขียนลงใบ 50 ทวิ (ทดสอบผ่านช่องที่ไม่มีจริง = พิสูจน์อะไรไม่ได้)
+function whtCertIssued(c, inv, state, today){
+  if(!c || c.voided) return false;
+  if(c.mergedInto) return true;
+  const d = String((inv && whtFirstPayDate(state, inv.id)) || c.certDate || (c.legacy && inv ? inv.invDate : '') || '');
+  const ym = ymOf(d), cur = ymOf(today || getToday());
+  return !!(ym && cur && ym < cur);
+}
+// UAT บัญชี F2: เดือนเคลมภาษีซื้อที่เก่ากว่าเดือนปัจจุบัน (ใบกำกับที่มีภาษีเคลมได้ > 0) → 'YYYY-MM' ตัวแรกสุด · ไม่มี = ''
+//   ด่าน R3 ใน VOID_INV ทำงานเฉพาะตอนตั้ง periodLockUntil/vatLockUntil — นโยบายย้อนเลยเข้มกว่า (ส่งอนุมัติ ไม่ใช่ห้าม)
+function invVatEarlierMonth(inv, today, state){
+  //   ตัวกรองเดียวกับ _purchaseVatEach (ภ.พ.30) — ใบไหนไม่เข้ารายงาน ภาษีซื้อก็ยื่นไม่ได้
+  //   verify รอบ 2: ประวัติ (ด้านล่าง) ตรวจก่อน/ไม่ขึ้นกับ vat > 0 — แก้ VAT เป็น 0 หลังเคลมเดือนก่อนแล้ว ↩️ ต้องไม่หลบด่าน
+  if(!inv || invVatInEcount(inv)) return '';
+  const cur = ymOf(today || getToday());
+  let out = '';
+  const take = ym => { if(ym && cur && ym < cur && (!out || ym < out)) out = ym; };
+  if((Number(inv.vat) || 0) > 0 && _invHasTaxNo(inv) && invClaimableVat(inv) > 0.005){
+    for(const v of invTaxInvViews(inv)){
+      if(v.vatExpiredAt || !(v._claimVat > 0.005)) continue;
+      take(ymOf(vatClaimDateOf(v)));
+    }
+  }
+  // verify รอบ 2: แก้ VAT เป็น 0 (UPDATE_INV · revisionHistory 'vat: x → 0') หลังเคลมเดือนก่อนแล้ว ↩️ — ใบกำกับยังอยู่ = งวดเดิมอาจยื่นแล้ว
+  //   (ใบไม่มี VAT ตั้งแต่ต้อง (T18 v3) ไม่มีประวัติแก้ vat → ไม่นับ)
+  //   verify รอบ 3: ไม่พึ่ง revisionHistory อย่างเดียว — JE ตั้งหนี้ของใบเอง (source 'inv') เคยลง Dr 1150 · หรือเคยปรับ VAT/ราคา (vatAdjustHistory/priceAdjustHistory)
+  //   = ภาษีซื้อเคยเข้าบัญชีแล้ว → นับเดือนเคลมของใบกำกับทุกใบ (ขยายด่านอย่างเดียว)
+  else if(_invHasTaxNo(inv) && ((inv.revisionHistory || []).some(r => r && /(^|· )vat: /.test(String(r.changes || '')))
+    || (inv.vatAdjustHistory || []).length || (inv.priceAdjustHistory || []).length || _invJeHadVat(state, inv))){
+    for(const v of invTaxInvViews(inv)) if(!v.vatExpiredAt) take(ymOf(vatClaimDateOf(v)));
+  }
+  // verify บัญชี: ลบใบกำกับ (CLEAR_TAX_INV ไม่ต้องอนุมัติเมื่อยังไม่ตั้งล็อก) แล้วค่อย ↩️ = หลบด่านนี้ได้ → ดูประวัติ 'clear' ด้วย
+  //   ใบกำกับที่เคยเคลมเดือนก่อนแล้วถูกลบ = ภาษีซื้ออาจอยู่ใน ภ.พ.30 ที่ยื่นแล้ว → ยังต้องขออนุมัติ (ช่อง #1 + ใบที่ 2+ ใน supTaxInvMore รวมที่ลบแล้ว)
+  const hists = [inv.supTaxInvHistory].concat((Array.isArray(inv.supTaxInvMore) ? inv.supTaxInvMore : []).map(e => e && (e.history || e.supTaxInvHistory)));
+  // verify รอบ 1 H2: ทุก action (ไม่ใช่แค่ 'clear') + ค่าเดิมใน prev — แก้วันที่ใบกำกับจากเดือนก่อนมาเดือนนี้ (SET_TAX_INV เก็บเดือนเดิมไว้ใน prev) แล้วค่อย ↩️ = หลบด่านนี้ได้
+  //   ใช้ claimDate ก่อน (งวดที่ยื่นจริง) · ไม่มีค่อยใช้ date — ใบกำกับลงวันเดือนก่อนแต่เคลมเดือนนี้ไม่แตะงวดเดือนก่อน (เหมือน T18 v5)
+  for(const hs of hists) for(const h of (Array.isArray(hs) ? hs : [])){
+    if(!h) continue;
+    take(ymOf(h.claimDate || h.date));
+    if(h.prev && typeof h.prev === 'object') take(ymOf(h.prev.claimDate || h.prev.date));
+  }
+  // verify รอบ 2: เลื่อนเคลม (DEFER_VAT_CLAIM ล้าง claimDate · ใบกำกับที่คีย์ตอนตั้งหนี้ไม่มี supTaxInvHistory) แล้วค่อย ↩️ = หลบด่านนี้ได้
+  //   → ดู vatClaimHistory (from/to ทุก action · ช่อง #1 + ทุกใบใน supTaxInvMore) + vatDefer.fromClaimDate
+  //   ข้าม from ของ auto_late/expired_entry (= เดือนบนกระดาษ ไม่ใช่งวดเคลม) · vatDefer ของ expiredOnEntry ไม่เคยเคลม
+  const more = Array.isArray(inv.supTaxInvMore) ? inv.supTaxInvMore : [];
+  for(const x of [inv].concat(more)){
+    if(!x) continue;
+    for(const h of (Array.isArray(x.vatClaimHistory) ? x.vatClaimHistory : [])){
+      if(!h) continue;
+      if(h.action !== 'auto_late' && h.action !== 'expired_entry') take(ymOf(h.from));
+      take(ymOf(h.to));
+    }
+    if(x.vatDefer && !x.vatDefer.expiredOnEntry) take(ymOf(x.vatDefer.fromClaimDate));
+  }
+  return out;
+}
+// verify รอบ 3: JE ตั้งหนี้ของใบ (source 'inv' · ไม่ใช่ตัวกลับรายการ) เคยลง Dr 1150 ภาษีซื้อ > 0 — นับแม้ JE ถูกกลับไปแล้ว (ภาษีเคยเข้าเดือนนั้น)
+function _invJeHadVat(state, inv){
+  if(!state || !inv) return false;
+  return (state.journalEntries || []).some(j => j && j.source === 'inv' && j.sourceId === inv.id && !j.voidedReversal && j.status !== 'draft'
+    && (j.lines || []).some(l => l && String(l.accountCode || l.account || l.code || '') === '1150' && (Number(l.debit) || 0) > 0.005));
+}
+// verify รอบ 2: ใบรับของของใบตั้งหนี้ = grIds ∪ grId ∪ GR ที่ชี้กลับมา (invoiceId/splitInvoiceIds) — ใบจ่ายล่วงหน้า (po_advance) ไม่มี grIds ผูกผ่าน gr.invoiceId อย่างเดียว
+function invUndoGrIds(state, inv){
+  if(!inv) return [];
+  const ids = new Set([].concat(inv.grIds || [], inv.grId ? [inv.grId] : []).filter(Boolean));
+  for(const g of ((state && state.grs) || [])) if(g && g.id && (g.invoiceId === inv.id || (Array.isArray(g.splitInvoiceIds) && g.splitInvoiceIds.includes(inv.id)))) ids.add(g.id);
+  return [...ids];
+}
+// verify รอบ 1 H1: ใบคืน (RTV) ที่ยังไม่ยกเลิกผูกใบนี้ (linkedINV) หรือผูกใบรับของของใบนี้ (grId) — รวม RTV ค้างตัดสิน (pending_decision ของออกแล้ว)
+//   หรือใบมียอดคืน/เครดิตค้าง (returnedAmount/creditDue) — ด่านเดียวกับ ADJUST_INV_VAT (01-state) · VOID_INV ไม่ย้าย RTV ไปใบใหม่
+//   → ตัดสิน RTV ทีหลังจะหัก 2100 ของใบที่ยกเลิก ขณะที่ใบใหม่ตั้งหนี้เต็ม (GL 2100 ≠ ทะเบียนเจ้าหนี้) → ต้องให้ ผจก.บัญชีตรวจ
+function invRtvLinked(state, inv){
+  if(!inv) return false;
+  if((Number(inv.returnedAmount) || 0) > 0.005 || (Number(inv.creditDue) || 0) > 0.005) return true;
+  const grIds = invUndoGrIds(state, inv);   // verify รอบ 2: รวม GR ที่ชี้กลับมา (ใบจ่ายล่วงหน้า)
+  return ((state && state.returns) || []).some(r => r && r.rtvStatus !== 'cancelled' && (r.linkedINV === inv.id || (!!r.grId && grIds.includes(r.grId))));
+}
+function invUndoFacts(state, inv, ctxToday){
+  const st = state || {}, out = { everPaid:invEverPaid(st, inv), pendingPays:[], linkedApprovals:[], unknownApprovalIds:[], excluded:null };
+  if(!inv) return out;
+  out.pendingPays = (st.payments || []).filter(p => payRefsInv(p, inv.id) && !p.reversed && !p.voided
+    && (p.status || 'posted') !== 'cancelled' && (p.approvalStatus || 'approved') === 'pending');
+  const grIds = invUndoGrIds(st, inv);   // verify รอบ 2: รวม GR ที่ชี้กลับมา (ใบจ่ายล่วงหน้า po_advance)
+  const grs = (st.grs || []).filter(g => g && grIds.includes(g.id));
+  if(_undoInvMigrated(inv) || inv.migLate) out.excluded = 'ใบนำเข้า/ยกมาจาก Ecount';
+  else if(inv.type === 'deposit_pi') out.excluded = 'ใบมัดจำ/ใช้มัดจำแล้ว';
+  else if(invUsedDepositOrCredit(st, inv)) out.excluded = 'ใบนี้ใช้มัดจำ/เครดิตผู้ขาย — ต้องให้ ผจก.บัญชีตรวจ';   // UAT บัญชี F1
+  else if(invRtvLinked(st, inv)) out.excluded = 'มีใบคืนของ (RTV) ผูกกับใบนี้/ใบรับของของใบนี้ — ต้องให้ ผจก.บัญชีตรวจ (ยกเลิกแล้วตั้งใหม่ เจ้าหนี้จะไม่ตรงกับใบคืน)';   // verify รอบ 1 H1
+  else if(inv.source === 'retention_release' || inv.contractId) out.excluded = 'ใบผูกสัญญางานจ้าง/เงินประกัน';
+  else if((inv.whtCertificates || []).some(c => whtCertIssued(c, inv, st, ctxToday))) out.excluded = 'มีหนังสือรับรองหัก ณ ที่จ่าย (50 ทวิ) ที่ผูกการจ่าย/อยู่งวด ภ.ง.ด. เดือนก่อน (อาจยื่นแล้ว) — ให้ ผจก.บัญชีตรวจ';   // UAT บัญชี F3 + verify: ใบร่างเดือนปัจจุบันไม่นับ
+  else if(grs.some(g => grRegisteredAssets(st, g).length) || (st.assets || []).some(a => a && !a.deleted && a.acquireFromInvId === inv.id))
+    out.excluded = 'มีทรัพย์สินลงทะเบียนจากใบนี้แล้ว';
+  // verify รอบ 2: VAT หมดสิทธิ์ที่โอนเป็นค่าใช้จ่ายแล้ว (MARK_VAT_EXPIRED · JE แยก ไม่ใช่ source 'inv') — VOID_INV ไม่กลับ JE นั้น → 1150 ติดลบ/ค่าใช้จ่ายซ้ำเมื่อตั้งใหม่
+  else if([inv].concat(invTaxInvViews(inv)).some(v => v && v.vatExpiredAt && (!v.vatExpiredAt.jeId || vatExpireJeLive(st, v.vatExpiredAt.jeId))))
+    out.excluded = 'โอน VAT หมดสิทธิ์เป็นค่าใช้จ่ายแล้ว (JE แยก) — ให้ ผจก.บัญชีตรวจ';
+  if(!out.excluded){ const vm = invVatEarlierMonth(inv, ctxToday, st); if(vm) out.excluded = 'ภาษีซื้อของใบนี้อยู่เดือน ' + vm + ' ซึ่งอาจยื่น ภ.พ.30 แล้ว — ให้ ผจก.บัญชีตรวจ'; }   // UAT บัญชี F2
+  const used = inv.usedApprovalIds || [], reqs = st.approvalRequests || [];
+  out.linkedApprovals = reqs.filter(r => r && r.action !== 'delete_inv' && (r.entityId === inv.id || used.includes(r.id))
+    && ['executed', 'approved'].includes(r.status));
+  out.unknownApprovalIds = used.filter(id => !reqs.some(r => r && r.id === id));
+  return out;
+}
+// → { mode:'direct'|'approval'|'deny', basis:'flow'|'approver'|null, why, ctx:{ wasPaid } } · ผู้ใช้ = แถวสดใน state.users (U3/U8)
+function undoPolicy(state, user, action, ctx){
+  const st = state || {}, R = (mode, basis, why, wasPaid) => ({ mode, basis:basis || null, why, ctx:{ wasPaid:!!wasPaid } });
+  if(!UNDO_POLICY_ACTIONS.includes(action)) return R('approval', null, 'ใช้สายอนุมัติเดิม', false);
+  const inv = (st.invoices || []).find(i => i && i.id === (ctx && ctx.invId));
+  if(!inv || inv.voided) return R('deny', null, 'ใบนี้ถูกยกเลิกแล้ว/ไม่พบ', false);
+  const uname = user && (user.username || user);
+  const u = (st.users || []).find(x => x && x.username === uname);
+  if(!u || u.active === false) return R('deny', null, 'ไม่มีสิทธิ์ยกเลิกใบตั้งหนี้', false);
+  // verify 1: ไม่มีสิทธิ์ purchase.inv.delete (เช่น ผจก.บัญชี ที่เห็นปุ่ม 🗑️ ใบยกมา migLate) = ทำเองไม่ได้ แต่ส่งขออนุมัติได้ (พฤติกรรมเดิม §2.3) — ไม่ใช่ทางตัน
+  const noPerm = !(isSuperUser(u) || hasPerm(u, 'purchase', 'inv', 'delete'));
+  const f = invUndoFacts(st, inv, ctx && ctx.today);
+  if(f.pendingPays.length){
+    const ref = f.pendingPays.map(p => p.pvNumber || p.id).join(', ');
+    return R('deny', null, 'มีคำขอจ่ายค้าง ' + ref + ' — กด ✖ ยกเลิกคำขอ ก่อน (ทำได้เลย ไม่ต้องอนุมัติ) แล้วค่อย ↩️ ย้อนไปตั้งหนี้', f.everPaid);
+  }
+  if(noPerm) return R('approval', null, 'ไม่มีสิทธิ์ยกเลิกเอง — ส่งให้ ผจก.บัญชี/GM อนุมัติ', f.everPaid);
+  if(!f.everPaid && !f.linkedApprovals.length && !f.unknownApprovalIds.length && !f.excluded)
+    return R('direct', 'flow', 'ยังไม่มีการจ่าย/คำขอจ่าย และขั้นตั้งหนี้ไม่ต้องอนุมัติ', false);
+  const why = f.everPaid ? 'เคยจ่ายเงินแล้ว (แม้กลับรายการ)' : f.excluded ? f.excluded
+    : f.unknownApprovalIds.length ? 'ใบนี้มีการอนุมัติที่หาไม่พบผูกอยู่'
+    : 'ใบนี้มีการอนุมัติ ' + f.linkedApprovals.map(r => r.label || r.action).join(', ') + ' ผูกอยู่';
+  if(f.everPaid || f.excluded || f.unknownApprovalIds.length) return R('approval', null, why, f.everPaid);
+  // U3: ผู้อนุมัติย้อนเองได้ — กฎย้อนต้องมีขั้นเดียว + ผ่านทุกขั้นของคำขอขาไปทุกใบ + สิทธิ์เสริม + ไม่ใช่ผู้ขอ
+  const rules = findApprovalRules(st, action, { scope:'accounting', amount:Number(inv.netPayable) || 0, wasPaid:false });
+  const steps = approvalMergeSteps(rules);
+  const ok = steps.length === 1 && canApproveStep(steps[0], u, 'accounting') && approvalExtraPermOk(action, u)
+    && f.linkedApprovals.every(r => r.requestedBy !== u.username && approvalExtraPermOk(r.action, u)
+      && (r.steps || []).length > 0 && (r.steps || []).every(s => canApproveStep(s, u, r.entityScope)));
+  if(ok) return R('direct', 'approver', 'คุณเป็นผู้อนุมัติของขั้นนี้ (' + f.linkedApprovals.map(r => r.label || r.action).join(', ') + ')', false);
+  return R('approval', null, why, false);
 }
 
 // 🆕 VAT-DEFER D2: กฎอนุมัติของ เลื่อนเคลม (vat_defer) / เคลมคืน (vat_claim_in) — แหล่งเดียวที่ shell (ส่งคำขอ) + reducer (ตรวจ) + หน้าจอใช้ร่วม
@@ -12020,7 +12297,7 @@ function WhtLinePayeeChip({ state, dispatch, user, supplierId, payeeId, onChange
     // 🆕 UAT S1: เลือกผู้ถูกหักแล้ว → บอกที่อยู่/สาขาที่จะพิมพ์บน 50 ทวิ (ที่อยู่ตามบัตรอาจไม่ใช่ที่อยู่ร้าน)
     pid && (() => { const pp = whtOtherPayee(state, pid) || {}; const ad = String(pp.address || '').trim();
       return h('div', { 'data-tid': tid + '-addr', className:'text-[11px] mt-1 ' + (ad ? 'text-gray-700' : 'text-amber-800') },
-        '📍 ที่อยู่บน 50 ทวิ: ', ad || '⚠️ ยังไม่มีที่อยู่ (เพิ่มในทะเบียนผู้ขาย)', party ? ' · ' + partyBranchLabel(party) : ''); })(),
+        '📍 ที่อยู่บน 50 ทวิ: ', ad || '⚠️ ยังไม่มีที่อยู่ (เพิ่มในทะเบียนผู้ขาย)', party ? partyBranchParen(partyBranchLabel(party)) : ''); })(),
     mis && h('div', { 'data-tid': tid + '-mismatch', className:'text-[11px] text-amber-800 mt-1' }, '⚠️ ', mis),
     selfInd && onChange && h('div', { 'data-tid': tid + '-ind', className:'mt-1 border border-amber-300 bg-amber-50 rounded p-2 text-[12px] text-amber-900 space-y-1' },
       h('div', null, '⚠️ ร้านนี้เป็นบุคคลธรรมดา — ใบ 50 ทวิ ต้องเป็นชื่อเจ้าของตามบัตร: เลือกจากทะเบียน หรือ ➕ เพิ่มเจ้าของร้าน (บันทึกเอกสารได้ตามปกติ)'),
@@ -12920,7 +13197,7 @@ Object.assign(global.ERP, {
   findDupSupInv, consumeSupplierCredit,
   // Helpers
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines,
-  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, _buildInvDrLinesRaw, offInvDiscAmt, offInvDiscWeights, offInvDiscAlloc, offInvDiscCheck, applyOffInvDiscDr, grMigApHeld, grIsVoid, grMigOpening, invVatExactOk, migInvBackDeny, migLateVoidDeny, migLateGenuine, migEcountPaidOrig, invEcountVoucher, invPayParts, invPaySplit, invMigClosed, setPayCenterPrefill, takePayCenterPrefill, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
+  capexThreshold, capexLineExVat, capexUnitExVat, isCapexLine, grLineIsCapex, grLegacyLineIsCapex, grRegisteredAssets, grCapexPriceFixDeny, grCapexFixInfo, CAPEX_PF_BADGE, getAssetInStockLines, assetStockEffLot, getCapexUntickedPOLines, buildInvDrLines, _buildInvDrLinesRaw, offInvDiscAmt, offInvDiscWeights, offInvDiscAlloc, offInvDiscCheck, applyOffInvDiscDr, grMigApHeld, grIsVoid, grMigOpening, invVatExactOk, migInvBackDeny, migLateVoidDeny, migLateGenuine, migEcountPaidOrig, invEcountVoucher, invPayParts, invPaySplit, invMigClosed, setPayCenterPrefill, takePayCenterPrefill, canEditCapexThreshold, CapexThresholdCard,   // 💎 FA-S1
   readUploadFile, getToday, fmtCur, fmtNum, fmtDate, fmtDateFull, fmtDateTH, fmtDurDays, cls,
   // Unit conversion
   resolveToBase, unitUsage, unitUsageAdvice, getBaseUnit, findItemUnit, toBaseQty, rtvReturnBaseQty, rtvLineBaseQty, rtvReplaceBaseQty, unitsForPurpose,
@@ -13001,13 +13278,13 @@ Object.assign(global.ERP, {
   // Thai BE date picker
   BEDateInput, fmtDateBE, TH_MONTHS_FULL, TH_MONTHS_SHORT, TH_DAYS,
   // UI atoms
-  SB, Modal, Spinner, Button, Combobox, supplierComboProps, customerComboProps, partyComboProps, partyBranchLabel, partyLocation, sellerAddress, sellerPhone, sellerBranchCode, partyOptionText, PartyBranchConfirm, normalizeBranchCode, partyBranchCode5, partyTaxBranchText, partyIsDup, partyShowBranch, partyNameWithBranch, PartyBranchChip, partySearchText, partyMatches, isDisallowedExpense, payEffectiveDate, invNonClaimVat, invNonClaimVatBase, invClaimableVat, invMigCloseVatCut, invMigCloseVatCutBase,
+  SB, Modal, Spinner, Button, Combobox, supplierComboProps, customerComboProps, partyComboProps, partyBranchLabel, partyLocation, sellerAddress, sellerPhone, sellerBranchCode, partyOptionText, partyBranchParen, PartyBranchConfirm, normalizeBranchCode, partyBranchCode5, partyTaxBranchText, partyIsDup, partyShowBranch, partyNameWithBranch, PartyBranchChip, partySearchText, partyMatches, isDisallowedExpense, payEffectiveDate, invNonClaimVat, invNonClaimVatBase, invClaimableVat, invMigCloseVatCut, invMigCloseVatCutBase,
   // 🆕 DEPOSIT-VAT (§C-5)
   vatLockOf, vatPeriodLocked, depositKindOf, depositAvail, depositEligible, planDepositApplication, depositVatSplit, invDepositVatOffset, invDepositBaseOffset, invClaimableVatBase, invVatConflictOpen,
   normTaxInvNo, taxInvKey, taxInvKey2, findDupTaxInv, findTaxInvGrant, taxInvClaimWindow, TAX_INV_OVERRIDE_ANYOF, taxInvOverrideApprover,
   // 🆕 VAT-CLAIM (§B1)
-  planInvPriceAdjust, pvLineRate, pvRtvAdjustable:_pvRtvAdjustable, rtvRevisedBannerHtml, priceKeyInSetting, PRICE_KEYIN_DEFAULTS, priceFixNonVat, priceFixNonVatBySupplier, priceFixNonVatAfter, priceFixNonVatVatMsg, PRICE_KEYIN_GM_KEYS, PRICE_FIX_NONVAT_VAT_MSG, PRICE_FIX_NODOCVAT_VAT_MSG,   // 🆕 PRICE-FIX ขั้น 2 (+ PV2-1/PV2-2)
-  approvalIsProposer, PRICE_FIX_LIVE, priceFixLive, priceFixOpenForInv, invPriceApprovalPending, grPriceFixHold, priceFixList, invAmountVsGrDiff, invOverrideDeny,   // 🆕 PRICE-FIX ขั้น 3 (+ invOverrideDeny ขั้น 4)
+  planInvPriceAdjust, priceFixApprovalNeed, PRICE_FIX_TWO_PERSON_NOTE, pvLineRate, pvRtvAdjustable:_pvRtvAdjustable, rtvRevisedBannerHtml, priceKeyInSetting, PRICE_KEYIN_DEFAULTS, priceFixNonVat, priceFixNonVatBySupplier, priceFixNonVatAfter, priceFixNonVatVatMsg, PRICE_KEYIN_GM_KEYS, PRICE_FIX_NONVAT_VAT_MSG, PRICE_FIX_NODOCVAT_VAT_MSG,   // 🆕 PRICE-FIX ขั้น 2 (+ PV2-1/PV2-2)
+  approvalIsProposer, PRICE_FIX_LIVE, priceFixLive, priceFixOpenForInv, invPriceApprovalPending, grPriceApprovalPending, grPriceFixHold, priceFixList, invAmountVsGrDiff, invOverrideDeny,   // 🆕 PRICE-FIX ขั้น 3 (+ invOverrideDeny ขั้น 4)
   TAXINV_VAT_TOL, invTaxMultiOk, invTaxInvViews, invTaxInvViewOf, invTaxInvBlankView, invTaxUncoveredVat, invTaxPaperSum, invTaxInvProgress, invTaxInvLabel, invTaxInvNumbers, vatDocKey,   // 🆕 MULTI-TAXINV
   ymOf, ymAdd, ymDiff, ymEnd, vatDeferred, vatDeferUsed, VAT_DEFER_ONCE_MSG, vatClaimDateOf, vatClaimWindowEnd, vatPaperDateBase, vatPendingDeadlineYm, supMemoNettedInInv, pendingTaxInvIds,
   purchaseVatForPeriod, purchaseVatByPeriod, vatFilingLockOf, vatClaimIndex, siDateGuard, siParseDisc, siLineCalc, siJeLines, SI_EDIT_REASONS, siBuildLines, siDraftFromSi, siKitSplitPrices, planSiEdit, siEditBlock, siEditRecallNeeded, siEditOverpaid, SI_EDIT_ACK_OUT, siEditAckLabel, siEditGoodsReview, siOriginalDue, siEditDraftHash, netDispatchRecs, purchaseVatDocs, purchaseVatClaimState, vatExpireJeLive, jeCr1150, vatNaturalClaimYm, vatFirstOpenYm, vatLockedWithoutFiling,
@@ -13029,7 +13306,8 @@ Object.assign(global.ERP, {
   VAT_AP_ACTIONS, vatApBuiltinRule, vatApprovalMode, vatApPending, vatApPendingLive, vatApPendingLabel, vatApPendingForYm, vatApStale, vatApLastWindowLoss,   // 🆕 VAT-DEFER D2
   countPendingForUser, buildApprovalRequest,
   invVatAdjusted, pendingInvChangeReq,
-  APPROVAL_BUILTIN_RULES, APPROVAL_FAIL_CLOSED, effectiveApprovalRules, approvalBuiltinRule, approvalRuleLoosening, approvalStableJson:_apStable, poApproveDeny, poSelfApproved, poSelfBy, SELF_APPROVE_PERM, SELF_APPROVE_GROUPS, SELF_APPROVE_PO_CAP, SELF_APPROVE_PO_CAP_MSG, selfApprovePoCapOf, selfApprovePoCapMsg, selfCapSelfEditOk, selfApproveCapMsgFor, selfApprovePoCapped, poCapAmount, selfApproveReqPoTotal, selfApproveReqCapped, selfApproveDenyTail, SELF_APPROVE_STOCK_ACTIONS, SELF_APPROVE_NEVER, selfApproveKind, selfApproveUser, selfApproveReqUser, selfApproveHint, SELF_APPROVE_LABEL, PERM_NO_WILDCARD, gmSelfPolicyOn, isTopAuthority, gmSelfUser, invNeedsTwoEye, gmSelfBlockReason, approvalStaleReason, grDateEditTargets, grDateEditJeBlock, grDateEditFixedDeny, grDateEditDeny, grDateEditWarn, grDateEditWarnList, pendingGrDateReq, PO_PAYMODE_LABEL, poPaymodeOf, poPaymodeDeny, pendingPoPaymodeReq, APPROVAL_EXTRA_PERM, approvalExtraPermOk, approvalAdminBlocked, APPROVAL_NO_ADMIN_HI, approvalCanDecide, approvalStuckStep, approvalPredeployCheck, approvalMergeSteps, approvalUserCanDecide,   // 🆕 APPROVAL ขั้น 1
+  APPROVAL_BUILTIN_RULES, APPROVAL_FAIL_CLOSED, effectiveApprovalRules, approvalBuiltinRule, approvalRuleLoosening, approvalSeedRule, UNDO_POLICY_ACTIONS, payRefsInv, invEverPaid, invUndoFacts, undoPolicy, invUsedDepositOrCredit, invRtvLinked, whtCertIssued, invVatEarlierMonth, invUndoGrIds,   // 🆕 UNDO_PRINCIPLE
+   approvalStableJson:_apStable, poApproveDeny, poSelfApproved, poSelfBy, SELF_APPROVE_PERM, SELF_APPROVE_GROUPS, SELF_APPROVE_PO_CAP, SELF_APPROVE_PO_CAP_MSG, selfApprovePoCapOf, selfApprovePoCapMsg, selfCapSelfEditOk, selfApproveCapMsgFor, selfApprovePoCapped, poCapAmount, selfApproveReqPoTotal, selfApproveReqCapped, selfApproveDenyTail, SELF_APPROVE_STOCK_ACTIONS, SELF_APPROVE_NEVER, selfApproveKind, selfApproveUser, selfApproveReqUser, selfApproveHint, SELF_APPROVE_LABEL, PERM_NO_WILDCARD, gmSelfPolicyOn, isTopAuthority, gmSelfUser, invNeedsTwoEye, gmSelfBlockReason, approvalStaleReason, grDateEditTargets, grDateEditJeBlock, grDateEditFixedDeny, grDateEditDeny, grDateEditWarn, grDateEditWarnList, pendingGrDateReq, PO_PAYMODE_LABEL, poPaymodeOf, poPaymodeDeny, pendingPoPaymodeReq, APPROVAL_EXTRA_PERM, approvalExtraPermOk, approvalAdminBlocked, APPROVAL_NO_ADMIN_HI, approvalCanDecide, approvalStuckStep, approvalPredeployCheck, approvalMergeSteps, approvalUserCanDecide,   // 🆕 APPROVAL ขั้น 1
 });
 
 })(window);
@@ -18006,6 +18284,22 @@ const _INV_PROTECTED = Object.freeze(['depositApplications','depositUsed','depos
   'migLate',
   'priceAdjustHistory','priceFixRequest']);   // 🆕 PRICE-FIX verify 2: แก้ได้เฉพาะ ADJUST_INV_PRICE + *_INV_PRICE_FIX (สำเนาเก่าทับ = ปลดด่าน VOID/ปลด hold จ่าย) · 🆕 MIG_LATE_INV verify 1: ตั้งได้เฉพาะ ADD_MIG_LATE_INV (กัน PATCH_INV ตั้งธงให้ใบ ③ แล้วยกเลิกข้ามด่าน)
   //   // 🆕 MIG_VAT_HERE V2: ธงย้ายมาเคลมในระบบนี้ — แก้ได้เฉพาะ MIG_VAT_HERE/_UNDO (ไฟล์นำเข้าใบใหม่ตั้งมาได้)   // 🆕 VAT-CLAIM verify (B3.1): เลื่อนเคลม/ประวัติเคลม/หมดสิทธิ์ — แก้ได้เฉพาะ action ของมัน (V5+)
+// 🆕 UNDO_PRINCIPLE รอบ 3: ประวัติแก้ใบ = หลักฐานของด่านย้อน (invVatEarlierMonth อ่าน 'vat:' ใน revisionHistory) — เพิ่มได้ ลบ/ทับไม่ได้
+//   UPDATE_INV / PATCH_INV.fields / MERGE_IMPORT: ผล = ของเดิมในใบ state ทุกแถว + แถวใหม่ที่ส่งมา (EditINV ต่อท้าย editHistory ได้ตามเดิม)
+//   สำเนาเก่า/ปลอม revisionHistory:[] ลบประวัติ 'vat: 70 → 0' ไม่ได้ (กันหลบด่านภาษีซื้อเดือนก่อนแล้ว ↩️ ทางตรง)
+const _INV_APPEND_ONLY = Object.freeze(['revisionHistory','editHistory','vatAdjustHistory']);
+function _invKeepAppendOnly(old, out, allow, dropped){
+  for(const k of _INV_APPEND_ONLY){
+    if(allow && allow.includes(k)) continue;
+    const o = Array.isArray(old[k]) ? old[k] : [];
+    if(!o.length) continue;
+    const n = Array.isArray(out[k]) ? out[k] : [];
+    const js = x => { try { return JSON.stringify(x); } catch(_e){ return String(x); } };
+    const seen = new Set(o.map(js)), nSeen = new Set(n.map(js));
+    if(o.some(x => !nSeen.has(js(x)))) dropped.push(k);
+    out[k] = o.concat(n.filter(x => !seen.has(js(x))));
+  }
+}
 // PATCH_INV.add ที่สายจ่ายเงินใช้ (บวกเท่านั้น — ค่าลบ/ฟิลด์ควบคุมอื่นถูกตัดทิ้ง)
 const _INV_PROTECTED_ADD_OK = Object.freeze(['paidAmount','nonDeductibleVat','nonDeductibleVatBase']);
 function _protEmpty(v){ return v == null || v === '' || (Array.isArray(v) && v.length === 0); }
@@ -18049,6 +18343,7 @@ function _invKeepProtected(old, nu, allow){
     dropped.push(k);
     if(k in old) out[k] = old[k]; else delete out[k];
   }
+  _invKeepAppendOnly(old, out, allow, dropped);   // 🆕 UNDO_PRINCIPLE รอบ 3
   // 🆕 DEPOSIT-VAT UAT: ใบ migrate (Ecount ยื่นภาษีแล้ว) ห้ามลดสถานะเป็นใบปกติ (ด่าน R2 ตัดสินจาก _migrated/createdBy)
   for(const k of _invMigratedDowngrade(old, out)) dropped.push(k);
   // 🆕 MIG_AP_CLOSE: ใบที่ ✂️ ปิดยอดค้างแล้ว — ยอดสุทธิ/สถานะจ่ายคงค่าเดิม (แก้ได้ทาง ↩️ ยกเลิกการปิดยอด เท่านั้น)
@@ -24304,6 +24599,16 @@ function reducer(s, a){
       //   — ลบข้อยกเว้นนี้เมื่อ S4 ย้ายการหักมัดจำเข้า APPLY_DEPOSIT_TO_INV
       const _allowF = (_cur.depositUsed == null && !(_cur.depositApplications||[]).length) ? ['depositUsed'] : null;
       const _next = _invKeepProtected(_cur, { ..._cur, ..._pf }, _allowF).inv;
+      // 🆕 UNDO_PRINCIPLE รอบ 3: fields เปลี่ยนฟิลด์การเงิน → ลง revisionHistory แบบ UPDATE_INV (เดิมไม่ลง = แก้ vat เป็น 0 เงียบ ๆ แล้ว ↩️ ทางตรงหลบด่านภาษีซื้อเดือนก่อน)
+      { const _pfF = ['amount','netPayable','vat','vatTotal','vatRate','whtAmount','supplierId','partyId','offInvDiscount','retention'];
+        const _pChg = _pfF.filter(f => f in _pf && !_protSame(_cur[f], _next[f]));
+        if(_pChg.length){
+          const _tx = v => (v && typeof v === 'object') ? String(v.amount != null ? v.amount : '-') : String(v);
+          _next.revisionHistory = [...(_next.revisionHistory || []), { rev:(_next.revisionHistory || []).length + 1, ts: Number(a.data.ts) || Date.now(),
+            by: a.data._editedBy || a.data.by || 'system', via:'PATCH_INV',
+            wasPaid: (Number(_cur.paidAmount) || 0) > 0 || _cur.paymentStatus === 'paid' || _cur.paymentStatus === 'partial',
+            changes: _pChg.map(f => f + ': ' + _tx(_cur[f]) + ' → ' + _tx(_next[f])).join(' · ').slice(0, 500) }];
+        } }
       // verify VC2: บวกภาษีซื้อต้องห้ามให้ใบที่งวดภาษียื่น ภ.พ.30 แล้ว = ภาษีซื้อของงวดที่ยื่นเปลี่ยนเงียบ → ปฏิเสธทั้ง action
       if(_invTaxFiled(s, _cur) && ['nonDeductibleVat','nonDeductibleVatBase'].some(k => (Number(_add[k]) || 0) !== 0)){
         alert('ใบกำกับ ' + (_cur.supTaxInvNumber || _cur.invNumber || _pid) + ' อยู่ในงวดที่ยื่น ภ.พ.30 แล้ว (' + String(_invTaxPeriodDate(_cur)).slice(0,7) + ') — ตัดภาษีซื้อเป็นต้องห้ามย้อนหลังไม่ได้ → ให้ ผจก.บัญชี ขอปลดล็อกงวด (GM/เจ้าของอนุมัติ) แล้วยื่นเพิ่มเติม หรือลง JE ปรับในเดือนที่ยังเปิด');
@@ -24513,6 +24818,10 @@ function reducer(s, a){
       if(P.blocks.length){ alert('⛔ ปรับราคาไม่ได้ — ' + P.blocks.join('\n• ')); return s; }
       const inv = P.inv, grs0 = P.grIds.map(id => (s.grs || []).find(g => g && g.id === id)).filter(Boolean);
       const by = d.by || (s.currentUser && s.currentUser.username) || '';
+      // 🆕 PF-NOREAPPROVE verify 1: ผู้ทำ = ผู้ล็อกอินจริง (ยกเว้นทางรันหลังอนุมัติ ที่ by = ผู้ขอ · ผู้กด = GM) — กันอ้างชื่อบัญชีคนอื่นใน d.by
+      //   (ผู้ถือสิทธิ์ทั้งจัดซื้อ+บัญชี คีย์เอง แล้วยืนยันด้วย by ปลอม = คนเดียวทำครบ + audit บันทึกชื่อผิด)
+      const liveBy = (s.currentUser && s.currentUser.username) || '';
+      if(!d.approvalReqId && liveBy && d.by && d.by !== liveBy){ alert('⛔ ผู้ทำรายการต้องเป็นผู้ที่ล็อกอินอยู่ (' + liveBy + ') — ระบุชื่อผู้อื่นไม่ได้'); return s; }
       const actor = _actorOf(s, by);
       const gmDirect = d.direct === true && !!s.currentUser && s.currentUser.username === by && !!E.gmSelfUser(s, by);
       if(!d.approvalReqId && !gmDirect && !(actor && (E.isSuperUser(actor) || E.hasPerm(actor, 'accounting', 'invQueue', 'edit')))){ alert('⛔ ไม่มีสิทธิ์ปรับราคาตามใบกำกับ (ต้องเป็นฝ่ายบัญชี — คิวตั้งหนี้ แก้ไข)'); return s; }
@@ -24524,7 +24833,7 @@ function reducer(s, a){
       const req = reqDoc ? reqDoc.priceFixRequest : null;
       if(d.reqId && (!req || req.status !== 'submitted' || !req.proposal)){ alert('⛔ คำขอแก้ราคานี้ไม่อยู่ในสถานะรอบัญชียืนยัน (อาจถูกยืนยัน/ยกเลิกไปแล้ว)'); return s; }
       const proposalBy = req && req.proposal ? (req.proposal.by || '') : '';
-      if(req && proposalBy && proposalBy === by && !gmDirect){ alert('⛔ ผู้คีย์ราคา (จัดซื้อ) ยืนยันราคาที่ตัวเองคีย์ไม่ได้ — ต้องให้ฝ่ายบัญชีอีกคนยืนยัน'); return s; }
+      if(req && proposalBy && !gmDirect && (proposalBy === by || (!d.approvalReqId && liveBy && proposalBy === liveBy))){ alert('⛔ ผู้คีย์ราคา (จัดซื้อ) ยืนยันราคาที่ตัวเองคีย์ไม่ได้ — ต้องให้ฝ่ายบัญชีอีกคนยืนยัน'); return s; }
       if(inv && d.prevAmount != null && Math.abs((Number(inv.amount) || 0) - (Number(d.prevAmount) || 0)) > 0.01){ alert('⛔ ยอดใบนี้เปลี่ยนไปหลังเปิดหน้าจอ — เปิดใหม่แล้วลองอีกครั้ง'); return s; }
       if(inv && d.prevVat != null && Math.abs((Number(inv.vat) || 0) - (Number(d.prevVat) || 0)) > 0.01){ alert('⛔ VAT ของใบนี้เปลี่ยนไปหลังเปิดหน้าจอ — เปิดใหม่แล้วลองอีกครั้ง'); return s; }
       // expect เทียบเฉพาะฝั่ง AP (ΔInv/ΔVar คิดใหม่จาก remaining สด — ของถูกเบิก/ขายระหว่างรอ push ไม่ทำให้ล้ม)
@@ -24560,10 +24869,15 @@ function reducer(s, a){
       // เกณฑ์อนุมัติ (สะสมเทียบราคาแรกสุด) · บัญชีคีย์เอง (ไม่มีคำขอ) + ราคาขึ้น = ต้องอนุมัติทุกกรณี · GM ทำเอง = direct
       // 🆕 verify 1: บัญชียืนยันด้วยราคาสูงกว่าที่จัดซื้อเสนอ (หรือบรรทัดนอกข้อเสนอ) = บัญชีคีย์เอง → ราคาขึ้นต้องอนุมัติ (R2.6)
       const _pvVr = (x) => (x && x.newVatRate != null && x.newVatRate !== '') ? Number(x.newVatRate) : null;
-      const _pvEff = (x) => { const pl = P.lines.find(y => y.grId === x.grId && y.lineIdx === Number(x.lineIdx)); return pl && pl.vatChanged ? pl.newVatRate : null; };
-      const overProp = !!req && (d.lines || []).some(x => { const p = ((req.proposal && req.proposal.lines) || []).find(y => y.grId === x.grId && Number(y.lineIdx) === Number(x.lineIdx));
-        return !p || Number(x.newUnitPrice) > Number(p.newUnitPrice) + 1e-9 || _pvEff(x) !== _pvVr(p); });   // 🆕 PV5-4: VAT ต่างจากที่จัดซื้อเสนอ = บัญชีคีย์เอง
-      const needAp = !gmDirect && (P.needsApproval || ((!req || overProp) && P.isIncrease));
+      // 🆕 PF-NOREAPPROVE N1: ตัวตัดสินกลาง (00-core priceFixApprovalNeed) — ผู้ยืนยัน = s.currentUser เท่านั้น (ไม่เชื่อ d.by) และต้องเป็นคนเดียวกับ by
+      //   ทางสองคน (จัดซื้อคีย์ + บัญชีอีกคนยืนยันตรงข้อเสนอทุกบรรทัด) = ไม่ต้องอนุมัติ · นอกนั้นกติกาเดิม (เกินเกณฑ์ / บัญชีคีย์เองราคาขึ้น / overProp)
+      const _cfm = (s.currentUser && s.currentUser.username && s.currentUser.username === by) ? s.currentUser.username : '';
+      const AN = E.priceFixApprovalNeed(s, P, req, d.lines, _cfm, { gmDirect });
+      const overProp = AN.overProp, needAp = AN.needAp, twoPerson = AN.twoPerson && !d.approvalReqId;
+      // คำขออนุมัติที่ค้างอยู่ (กติกาเดิม หรือคำขอใหม่เช่นบัญชียืนยันสูงกว่าข้อเสนอ) → ทางสองคนห้ามทำซ้อน · verify 1: ข้อความกลาง ๆ ไม่อ้าง "ก่อนกติกาใหม่" (ไม่งั้นคำขอค้างกลายเป็นกำพร้า) — ยกเลิกคำขออนุมัติก่อน หรือให้ GM อนุมัติ
+      if(twoPerson && (s.approvalRequests || []).some(q => q && q.action === 'adjust_inv_price' && (q.status || 'pending') === 'pending'
+        && (q.entityId === (inv || grs0[0]).id || ((q.payload && q.payload.grIds) || []).some(x => P.grIds.includes(x))))){
+        alert('⛔ มีคำขออนุมัติปรับราคาของเอกสารนี้ค้างอยู่ — ให้ GM อนุมัติ หรือยกเลิกคำขออนุมัตินั้นก่อน แล้วยืนยันใหม่ได้เลย'); return s; }
       const usedDoc = inv || grs0[0];
       if(needAp || d.approvalReqId){
         const J = E.approvalStableJson, normL = (ls) => (ls || []).map(x => ({ grId:x.grId, lineIdx:Number(x.lineIdx), newUnitPrice:Number(x.newUnitPrice), newVatRate:_pvVr(x) }));   // 🆕 PV5-4: อนุมัติผูก VAT ใหม่ด้วย
@@ -24609,7 +24923,7 @@ function reducer(s, a){
       const confirmedLines = P.lines.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, itemId:x.itemId, old:x.oldUnitPrice, new:x.newUnitPrice, ...(x.vatChanged ? _vx(x, x.oldVatRate, x.newVatRate) : {}) }));
       const proposalLines = req && req.proposal ? (req.proposal.lines || []).map(x => ({ grId:x.grId, lineIdx:x.lineIdx, itemId:x.itemId, old:x.oldUnitPrice, new:x.newUnitPrice, ..._vx(x, x.oldVatRate, x.newVatRate) })) : null;
       const vatNote = P.lines.filter(x => x.vatChanged).map(x => ` · VAT บรรทัด ${x.lineIdx + 1} ${x.oldVatRate}% → ${x.newVatRate}%`).join('');
-      const hist = { at, by, mode:P.mode, reqId:d.reqId || null, approvalReqId:d.approvalReqId || null, direct:!!gmDirect, reason, proposalBy:proposalBy || null,
+      const hist = { at, by, mode:P.mode, reqId:d.reqId || null, approvalReqId:d.approvalReqId || null, direct:!!gmDirect, reason, proposalBy:proposalBy || null, ...(twoPerson ? { twoPerson:true } : {}),   /* PF-NOREAPPROVE N1 */
         proposalLines, confirmedLines, supTaxInvNumber:tiNo || null, ...(cashNo ? { cashBillNo:cashNo } : {}), dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet, dInventory:P.dInv, dVariance:P.dVar, jeId:je ? je.id : null, jeNumber:je ? je.jeNumber : null };
       const closeReq = (doc) => (req && doc === reqDoc) ? { priceFixRequest:{ ...req, status:'done', doneAt:at, doneBy:by,
         history:[...(req.history || []), { at, by, act:'confirm', note:reason, lines:confirmedLines.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, old:x.old, new:x.new, ...(x.newVat != null ? { oldVat:x.oldVat, newVat:x.newVat } : {}) })) }] } } : {};
@@ -24633,11 +24947,13 @@ function reducer(s, a){
             // 🆕 PV5-4 + UAT M2: audit แยก field (vatRateFixedAtGr = อัตราแรกก่อนจัดซื้อแก้) — ห้ามใช้ vatRateAdjustedFrom (= "sync กับ INV แล้ว" → override ตอนตั้งหนี้ถูกข้าม)
             ...(x.vatChanged ? { vatRate:x.newVatRate, vatRateFixedAtGr:(l.vatRateFixedAtGr != null ? l.vatRateFixedAtGr : x.oldVatRate) } : {}),
             ...(stalePi && l.piDiscAlloc ? { piDiscAlloc:0 } : {}),
-            ...(l.grossTotal != null ? { grossTotal:r2(x.newUnitPrice * x.qty) } : {}), ...(l.lineTotalBeforePiDisc != null ? { lineTotalBeforePiDisc:r2((Number(l.lineTotalBeforePiDisc) || 0) + x.dAmt) } : {}) };
+            ...(l.grossTotal != null ? { grossTotal:r2(x.newUnitPrice * x.qty) } : {}), ...(l.lineTotalBeforePiDisc != null ? { lineTotalBeforePiDisc:r2((Number(l.lineTotalBeforePiDisc) || 0) + x.dAmt) } : {}),
+            // 🆕 UNDO_PRINCIPLE C6: capexLineExVat อ่าน lineExVat ก่อน → ต้องขยับตาม (Dr 16xx ตอนตั้งหนี้ = ราคาใหม่)
+            ...(x.capex && l.lineExVat != null ? { lineExVat:r2((Number(l.lineExVat) || 0) + x.dAmt) } : {}) };
         });
         return { ...g, lines, ...(g.totalValue != null ? { totalValue:r2((Number(g.totalValue) || 0) + dG) } : {}),
           ...(g.totalValueBeforePiDisc != null ? { totalValueBeforePiDisc:r2((Number(g.totalValueBeforePiDisc) || 0) + dG) } : {}), priceAdjustedAt:at,
-          priceAdjustHistory:[...(g.priceAdjustHistory || []), { ...hist, dGoods:dG, dInventory:dI, dReturn:dR, dVariance:r2(dG - dI - dR), invTotals:{ dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet } }],
+          priceAdjustHistory:[...(g.priceAdjustHistory || []), { ...hist, dGoods:dG, dInventory:dI, dReturn:dR, dVariance:r2(mine.reduce((t, x) => t + (x.dVar || 0), 0)), dCapex:r2(mine.reduce((t, x) => t + (x.dCapex || 0), 0)), invTotals:{ dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet } }],   // 🆕 UNDO_PRINCIPLE C5: dVariance = Σ dVar (ทรัพย์สินไม่นับเป็น 5391) + dCapex
           ...closeReq(g), ...useAp(g) };
       });
       let invoices = s1.invoices;
@@ -24673,11 +24989,14 @@ function reducer(s, a){
         });
       }
       const al = { id:'al_pxadj_' + usedDoc.id + '_' + atK, ts:at, type:'inv_price_adjust', by, entityId:usedDoc.id, entityRef:docRef, amount:Math.abs(P.dNet),
-        note:`ปรับราคาตามใบกำกับ (${P.mode}) สินค้า ${P.dGoods > 0 ? '+' : ''}${P.dGoods.toFixed(2)} · VAT ${P.dVat.toFixed(2)} · ต้นทุนคงเหลือ ${P.dInv.toFixed(2)} · ผลต่าง 5391 ${P.dVar.toFixed(2)}${vatNote} · ${reason}`
+        note:`ปรับราคาตามใบกำกับ (${P.mode}) สินค้า ${P.dGoods > 0 ? '+' : ''}${P.dGoods.toFixed(2)} · VAT ${P.dVat.toFixed(2)} · ต้นทุนคงเหลือ ${P.dInv.toFixed(2)} · ผลต่าง 5391 ${P.dVar.toFixed(2)}${Math.abs(Number(P.dCapex) || 0) > 0.005 ? ` · 💎 ทรัพย์สิน ${P.dCapex > 0 ? '+' : ''}${Number(P.dCapex).toFixed(2)} (ลงบัญชีทรัพย์สินตอนตั้งหนี้)` : ''}${vatNote} · ${reason}`   /* UAT บัญชี F5: บรรทัดทรัพย์สินบอกยอดทรัพย์สิน */
           + (P.rtvDocs || []).map(x => ` · RTV ${x.rtvNumber || x.rtvId} ${r2(x.from).toFixed(2)}→${r2(x.to).toFixed(2)}`).join('')   // 🆕 UAT S2: ใบคืนที่ปรับมูลค่าตาม
           + (proposalBy ? ` · จัดซื้อคีย์ ${proposalBy}` : '') + (d.approvedBy && d.approvedBy !== by ? ` · อนุมัติโดย ${d.approvedBy}` : '') };
       return { ...s1, invoices, grs, fifoLayers, ...((P.rtvPlan || []).length ? { returns, supplierMemos } : {}), journalEntries:je ? [...(s1.journalEntries || []), je] : s1.journalEntries,
-        seq:je ? { ...(s1.seq || {}), je:seqJe } : s1.seq, auditLog:[...(s1.auditLog || []), al] };
+        seq:je ? { ...(s1.seq || {}), je:seqJe } : s1.seq, auditLog:[...(s1.auditLog || []), al,
+          // 🆕 PF-NOREAPPROVE N1: ทางสองคน → บันทึกว่ายืนยันโดยไม่ต้องอนุมัติ (ใครคีย์ · ใครยืนยัน · ยอด)
+          ...(twoPerson ? [{ id:'al_pfconf_' + usedDoc.id + '_' + atK, ts:at, type:'price_fix_confirm', by, entityId:usedDoc.id, entityRef:docRef, amount:Math.abs(P.dNet),
+            note:E.PRICE_FIX_TWO_PERSON_NOTE + ' · จัดซื้อคีย์ ' + proposalBy + ' · บัญชียืนยัน ' + by + ' · สินค้า ' + (P.dGoods > 0 ? '+' : '') + P.dGoods.toFixed(2) + ' · VAT ' + P.dVat.toFixed(2) + ' · ยอดสุทธิ ' + (P.dNet > 0 ? '+' : '') + P.dNet.toFixed(2) }] : [])] };
     }
 
     // 🆕 PRICE-FIX ขั้น 3 (PRICE_VARIANCE_CONTRACT REFRESH R2.1/R2.2): คำขอแก้ราคา P3 — บัญชีขอ → จัดซื้อคีย์ → บัญชียืนยัน (ADJUST_INV_PRICE reqId)
@@ -24719,7 +25038,13 @@ function reducer(s, a){
         for(const gid of grIds){
           const g = (s.grs || []).find(x => x && x.id === gid); if(!g) continue;
           const ls = g.lines || [];
-          if(E.grMigOpening(g) || (ls.length && ls.every(l => E.grLineIsCapex(s, g, l)))){ alert('⛔ ใบรับของ ' + (g.grNumber || gid) + ' เป็นรายการทรัพย์สิน/ยอดยกมา — ใช้ ↩️ ย้อนไปตั้งหนี้ หรือ JE ปรับปรุง'); return s; }
+          // 🆕 UNDO_PRINCIPLE C4: ยอดยกมา = JE ปรับปรุง · ทรัพย์สิน: บล็อกเฉพาะเมื่อไม่มีบรรทัดไหนแก้ได้เลย (at_gr) · ตั้งหนี้แล้ว = ข้อความ C3
+          if(E.grMigOpening(g)){ alert('⛔ ใบรับของ ' + (g.grNumber || gid) + ' เป็นยอดยกมา — ใช้ JE ปรับปรุง'); return s; }
+          if(ls.length && ls.every(l => E.grLineIsCapex(s, g, l))){
+            if(d.target === 'inv'){ alert('⛔ ใบรับของ ' + (g.grNumber || gid) + ' เป็นทรัพย์สิน และตั้งหนี้แล้ว — ให้บัญชี: ↩️ ย้อนไปตั้งหนี้ → จัดซื้อแก้ราคาที่ใบรับของ (ถ้าจ่ายแล้ว: บัญชีออกใบลดหนี้/เพิ่มหนี้)'); return s; }
+            const _dn = ls.map((l, i) => E.grCapexPriceFixDeny(s, g, i));
+            if(_dn.every(Boolean)){ alert('⛔ ใบรับของ ' + (g.grNumber || gid) + ' แก้ราคาไม่ได้ — ' + Array.from(new Set(_dn.map(x => x.msg))).join('\n• ')); return s; }
+          }
         }
         // ด่านระดับเอกสารชุดเดียวกับ ADJUST_INV_PRICE (มัดจำ/จ่ายแล้ว/คำขอจ่ายค้าง/WHT/ส่วนลดท้ายบิล/RTV/ตั้งหนี้แล้ว…) — ขอไปก็ยืนยันไม่ได้
         const P = E.planInvPriceAdjust(s, d.target === 'gr' ? { mode:'at_gr', grIds, lines:[] } : { mode:'post_pi', invId:doc0.id, lines:[] });
@@ -25250,9 +25575,21 @@ function reducer(s, a){
       // remove the payment record (it's pending, no JE was posted)
       const payments = (s.payments||[]).filter(p => p.id !== paymentId);
       // also remove approval request linked to this payment
-      const approvalRequests = (s.approvalRequests||[]).filter(req =>
-        !(req.context?.entityType === 'payment' && req.context?.entityId === paymentId));
-      return { ...s, payments, approvalRequests };
+      // 🆕 UNDO_PRINCIPLE §2.6: เดิมเช็กแค่ req.context (ไม่มีจริง — buildApprovalRequest เก็บ entityId/payload ชั้นบน) → คำขอ approve_payment ค้างในคิว GM
+      const _linked = (req) => !!req && ((req.action === 'approve_payment' && (req.entityId === paymentId || (req.payload && req.payload.payId === paymentId)))
+        || (req.context?.entityType === 'payment' && req.context?.entityId === paymentId));
+      const _rm = (s.approvalRequests||[]).filter(_linked);
+      const _t = Number(a.data.at) || Date.now();
+      const _by = (s.currentUser && s.currentUser.username) || by || '';
+      // 🆕 verify 1: ไม่ลบแถวคำขอ (ขั้นที่อนุมัติไปแล้ว/ผู้อนุมัติ/เวลา ต้องคงไว้) → ตั้ง status 'cancelled' แทน · เฉพาะที่ยังรอ
+      const approvalRequests = (s.approvalRequests||[]).map(req => (_linked(req) && (req.status || 'pending') === 'pending')
+        ? { ...req, status:'cancelled', cancelledAt:_t, cancelledBy:_by, cancelReason:reason || 'ยกเลิกคำขอจ่าย' } : req);
+      const _invIds = [...new Set([pay.invId, pay.invoiceId, ...(pay.invoiceIds || []), ...(pay.allocations || []).map(x => x && x.invoiceId)].filter(Boolean))];
+      const auditLog = [...(s.auditLog||[]), { id:'al_pcan_' + _sanId(paymentId) + '_' + _t.toString(36), ts:_t, type:'pay_request_cancel',
+        by:_by, entityType:'payment', entityId:paymentId, entityRef:pay.pvNumber || paymentId,
+        amount:Number(pay.amount) || 0, invIds:_invIds, note:reason || '', removedApprovalReqIds:_rm.map(r => r.id),
+        partiallyApproved:_rm.some(r => (r.steps || []).some(st => st && st.decision === 'approved')) }];
+      return { ...s, payments, approvalRequests, auditLog };
     }
 
     // 🗑️ VOID INV — ยกเลิกใบตั้งหนี้ (ไม่ลบ — เก็บ audit) + reverse JE + ปลด GR
@@ -25350,10 +25687,20 @@ function reducer(s, a){
       return { ...s, invoices: (s.invoices||[]).map(i => i.id === inv.id ? invNext : i), journalEntries, seq: seqUsed ? { ...(s.seq||{}), je: seqJe } : s.seq, auditLog: [...(s.auditLog||[]), al] };
     }
     case 'VOID_INV': {
-      const { invId, reason, by } = a.data;
+      const { invId, reason } = a.data;
+      let by = a.data.by;
       const inv = (s.invoices||[]).find(i => i.id === invId);
       if(!inv) return s;
       if(inv.voided) { alert('INV นี้ยกเลิกไปแล้ว'); return s; }
+      // 🆕 UNDO_PRINCIPLE §2.4 (U8): ทางตรง (ไม่ผ่านคำขอ) → คำนวณนโยบายซ้ำจาก state สด + s.currentUser · ไม่เชื่อ by/wasPaid จาก payload
+      //   ไม่ใช่ direct หรือ basis ไม่ตรง = ปฏิเสธ · ไม่มี directUndo = ทางเดิม (executor หลังอนุมัติ / GM 👑) · ด่านข้อมูลด้านล่างรันครบ (U7)
+      const _dU = a.data.directUndo || null;
+      let _dPol = null;
+      if(_dU){
+        _dPol = s.currentUser ? global.ERP.undoPolicy(s, s.currentUser, 'delete_inv', { invId }) : null;
+        if(!_dPol || _dPol.mode !== 'direct' || _dPol.basis !== _dU){ alert('⛔ ' + ((_dPol && _dPol.mode !== 'direct' && _dPol.why) || 'ใบนี้ต้องขออนุมัติ')); return s; }
+        by = s.currentUser.username;   // UAT บัญชี F4: ย้อนตรง = ผู้ล็อกอินจริงทุกช่อง (voidedBy · JE กลับรายการ postedBy · reversedBy · ใบ 50 ทวิ) ไม่เชื่อ by จาก payload
+      }
       if(_invWhtMergedInto(inv)){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบรวมอยู่ใน 50 ทวิ ของ PV
       // 🆕 PRICE-FIX ขั้น 2 (R2.2): ใบที่ปรับราคาหลังตั้งหนี้แล้ว — การกลับ JE จะไม่คืนต้นทุนล็อต/ราคา GR (GL 1300 ≠ FIFO ถาวร) → ใช้ DN/CN
       if((inv.priceAdjustHistory || []).some(h => h && h.mode === 'post_pi')){ alert('⛔ ใบนี้ปรับราคาแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN)'); return s; }
@@ -25701,9 +26048,14 @@ function reducer(s, a){
           note:`VOID_INV chain · reverse ${cnToReverse.length} auto-CN apply(s)` });
       }
       const auditLog = [...(s.auditLog||[]),
-        { id:'al_'+Date.now().toString(36), ts:Date.now(), type:'inv_void', by,
-          entityId:invId, entityRef:inv.invNumber, note:reason||'', amount:inv.netPayable||0 },
-        ...chainAudit];
+        { id:'al_'+Date.now().toString(36), ts:Date.now(), type:'inv_void', by:(_dU && s.currentUser && s.currentUser.username) || by,   // 🆕 UNDO_PRINCIPLE UAT SF2: ย้อนตรง = ชื่อเดียวกับแถว undo_direct
+          entityId:invId, entityRef:inv.invNumber, note:reason||'', amount:inv.netPayable||0, ...(_dU ? { directUndo:_dU } : {}) },
+        ...chainAudit,
+        // 🆕 UNDO_PRINCIPLE §2.4/U9: ย้อนเอง (ไม่ต้องอนุมัติ) — ขึ้นรายการตรวจย้อนหลัง ↩️
+        ...(_dU ? [(() => { const _t = Number(a.data.at) || Date.now();
+          return { id:'al_undo_' + invId + '_' + _t.toString(36), ts:_t, type:'undo_direct', action:'delete_inv', basis:_dU,
+            by:s.currentUser.username, entityType:'inv', entityId:invId, entityRef:inv.invNumber, amount:inv.netPayable||0,
+            note:reason||'', why:(_dPol && _dPol.why) || '' }; })()] : [])];
       return { ...s, invoices: invoicesFinal, grs, pos, journalEntries, payments,
         bankAccounts, pettyTxns: pettyTxnsV, supplierMemos, deposits, auditLog };
     }
@@ -26354,6 +26706,17 @@ function reducer(s, a){
         const _stale = (_or.priceAdjustHistory || []).length !== (_nr.priceAdjustHistory || []).length;
         if('priceAdjustHistory' in _or) _nr.priceAdjustHistory = _or.priceAdjustHistory; else delete _nr.priceAdjustHistory;
         if(_stale){ if(Array.isArray(_or.lines)) _nr.lines = _or.lines; _nr.totalValue = _or.totalValue; if('priceAdjustedAt' in _or) _nr.priceAdjustedAt = _or.priceAdjustedAt; }
+        // 🆕 UNDO_PRINCIPLE รอบ 3: ลิงก์ใบตั้งหนี้/ใบรับของที่ตั้งแล้ว คงค่าเดิม (ผูกได้เฉพาะ ว่าง → ใบที่มีอยู่จริง) — ถอดลิงก์ = ปลดด่าน invRtvLinked แล้ว ↩️ ทางตรง
+        //   ยกเลิกใบคืนต้องผ่าน CANCEL_RTV (กลับ JE/สต๊อก/audit) — UPDATE_RTV ตั้ง rtvStatus 'cancelled' ไม่ได้ (คงสถานะเดิม)
+        const _kept = [];
+        for(const k of ['linkedINV', 'grId']){
+          if(_or[k] && _nr[k] !== _or[k]){ _nr[k] = _or[k]; _kept.push(k); }
+        }
+        if(_nr.rtvStatus === 'cancelled' && _or.rtvStatus !== 'cancelled'){
+          if('rtvStatus' in _or) _nr.rtvStatus = _or.rtvStatus; else delete _nr.rtvStatus;
+          _kept.push('rtvStatus');
+        }
+        if(_kept.length){ try { console.warn('⛔ UPDATE_RTV ' + (_or.rtvNumber || _or.id) + ': แก้ทางนี้ไม่ได้ — คงค่าเดิม ' + _kept.join(', ')); } catch(_w){} }
       }
       return { ...s, returns: (s.returns||[]).map(r => r.id===a.data.id ? _nr : r) };
     }
@@ -26421,6 +26784,8 @@ function reducer(s, a){
         alert('RTV นี้ตัดสินใจไปแล้ว'); return s;
       }
       const inv = rtv.linkedINV ? (s.invoices||[]).find(i => i.id === rtv.linkedINV) : null;
+      // verify รอบ 1 H1 (กันซ้ำ): ใบตั้งหนี้ที่ผูกถูกยกเลิกแล้ว → ตัดสินกับใบเดิมจะหัก 2100/ลงเครดิตของใบที่ตายแล้ว (ใบใหม่ตั้งหนี้เต็ม) → ห้าม
+      if(inv && inv.voided){ alert('⛔ ใบตั้งหนี้ ' + (inv.invNumber || inv.id) + ' ที่ผูกกับใบคืนนี้ถูกยกเลิกแล้ว — ตัดสินกับใบเดิมไม่ได้ (เจ้าหนี้จะไม่ตรง)\n→ ให้ ผจก.บัญชีตัดสินใบคืนนี้กับใบตั้งหนี้ใบใหม่ของใบรับของเดียวกัน (ยกเลิกใบคืนนี้แล้วเปิดใบคืนใหม่ที่ผูกใบตั้งหนี้ใบใหม่)'); return s; }
       const isPaid = inv && inv.paymentStatus === 'paid';
       const totalValue = rtv.totalValue || 0;
       // 🆕 council F5: cap มูลค่าคืนไม่เกินยอดบิลที่ผูก (กันออกเครดิตเกินจริง)
@@ -27901,6 +28266,8 @@ function reducer(s, a){
     case 'ADD_TR': {
       // 🆕 PRODUCTION-LIVE คลื่น 1 (B10.4 ช): TR ภายในสาขา — คนขอต้องดูแลคลังปลายทาง (คลังไลน์ = คนในไลน์/ผจก.ผลิต · คลังกลาง/FG = คลัง) · ไม่มี session = ทางระบบ ข้ามด่าน
       const d = a.data || {};
+      // 🆕 TR_DATE D1: trDate = วันที่ต้องการของ (เลือกได้วันนี้/อนาคต — ตรวจที่ UI) · reducer ตรวจแค่รูปแบบ YYYY-MM-DD (ไม่เทียบนาฬิกา = replay deterministic)
+      if(d.trDate != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(d.trDate))){ alert('วันที่ของใบ TR ไม่ถูกรูปแบบ (ต้องเป็น ปปปป-ดด-วว)'); return s; }
       if(_isIntraDoc(d) && s.currentUser){
         if(d.fromLocId === d.toLocId){ alert('คลังต้นทางกับคลังปลายทางต้องต่างกัน'); return s; }
         const _deny = global.ERP.locActDenyReason && global.ERP.locActDenyReason(s, s.currentUser, d.toBranch, d.toLocId, 'request');
@@ -32111,7 +32478,7 @@ const ACTION_READS = Object.freeze({
   UPDATE_RTV: ['invoices','returns'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก linkedINV ที่ไม่มีอยู่จริง
   ADD_RTV: ['assets','boms','fifoLayers','grs','invoices','items','movements','returns','suppliers'],   // 💎 FA-S2: assets+grs (กันคืนเครื่องที่ลงทะเบียนแล้ว) · boms: deductFromStore NEG @negUnitCost (prod-live รอบ 2)
   UPDATE_PAY: ['approvalRequests','auditLog','deposits','invoices','payments','returns','suppliers'],   // B18: + approvalRequests (ป้าย gmSelf จากคำขอ) + auditLog (ต่อท้าย 👑 · APPEND_ONLY)
-  VOID_INV: ['assets','auditLog','bankAccounts','deposits','grs','invoices','journalEntries','payments','pettyTxns','pos','returns','supplierMemos'],   // 💎 FA-S5: assets (บิลเป็นส่วนเพิ่มแล้ว บล็อก)
+  VOID_INV: ['approvalRequests','assets','auditLog','bankAccounts','deposits','grs','invoices','journalEntries','payments','pettyTxns','pos','returns','supplierMemos'],   // 🆕 UNDO_PRINCIPLE: ทางตรงอ่าน approvalRequests (คำขอผูกใบ) + users (หมวดคุม)   // 💎 FA-S5: assets (บิลเป็นส่วนเพิ่มแล้ว บล็อก)
   ADD_ASSET_COMPONENT: ['assetCategories','assets','auditLog','contracts','invoices'],   // 🆕 EXPENSE_PO: + contracts (ส่วนเพิ่มจากสัญญา)
   ADD_ASSET: ['assets','auditLog','contracts','invoices'],   // 🆕 EXPENSE_PO P3.9: ทรัพย์สินจากสัญญา (1 ตัว/สัญญา · บรรทัดบิล)
   PLACE_ASSET_IN_SERVICE: ['assetCategories','assets','auditLog','contracts','grs','invoices','journalEntries'],   // grs = getPendingCapexLines (คิวค้าง)
@@ -32122,9 +32489,9 @@ const ACTION_READS = Object.freeze({
   CLEAR_ASSET_STOCK: ['auditLog','fifoLayers','grs','items','movements'],   // 💎 FA-S3: อ่าน/เขียนหมวดเหล่านี้ + settings/users (หมวดคุม)
   ADD_JE: ['auditLog','invoices','journalEntries'],   // DEPOSIT-VAT E-5 R5: JE ของใบตั้งหนี้ต้องมีใบจริง
   ADJUST_INV_VAT: ['auditLog','grs','invoices','journalEntries','payments','pos','returns'],
-  REQUEST_INV_PRICE_FIX: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'], SUBMIT_INV_PRICE_FIX: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 PRICE-FIX ขั้น 3 (R2.9) · case ร่วม → หมวดชุดเดียว (ด่านเอกสารผ่าน planInvPriceAdjust: pos/returns/items · findDupTaxInv: suppliers/filedTaxInvKeys)
-  RETURN_INV_PRICE_FIX: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'], CANCEL_INV_PRICE_FIX: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'],
-  ADJUST_INV_PRICE: ['approvalRequests','auditLog','fifoLayers','filedTaxInvKeys','grs','invoices','items','journalEntries','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 PRICE-FIX ขั้น 2 (approvalRequests = ทางอนุมัติ · filedTaxInvKeys/suppliers = findDupTaxInv ตอนใบยังไม่มีเลข)
+  REQUEST_INV_PRICE_FIX: ['approvalRequests','assets','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'], SUBMIT_INV_PRICE_FIX: ['approvalRequests','assets','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 PRICE-FIX ขั้น 3 (R2.9) · case ร่วม → หมวดชุดเดียว (ด่านเอกสารผ่าน planInvPriceAdjust: pos/returns/items · findDupTaxInv: suppliers/filedTaxInvKeys)   // 🆕 UNDO_PRINCIPLE C1/C4: + assets (grCapexPriceFixDeny ตรวจทรัพย์สินลงทะเบียนจาก GR)
+  RETURN_INV_PRICE_FIX: ['approvalRequests','assets','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'], CANCEL_INV_PRICE_FIX: ['approvalRequests','assets','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'],
+  ADJUST_INV_PRICE: ['approvalRequests','assets','auditLog','fifoLayers','filedTaxInvKeys','grs','invoices','items','journalEntries','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 PRICE-FIX ขั้น 2 (approvalRequests = ทางอนุมัติ · filedTaxInvKeys/suppliers = findDupTaxInv ตอนใบยังไม่มีเลข)
   SET_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],     // 🆕 DEPOSIT-VAT E-5 R1/R2 (งวดล็อกอยู่ใน settings = หมวดคุม)
   ADD_TAX_INV_ENTRY: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],   // 🆕 MULTI-TAXINV: แถวเดียวกับ SET_TAX_INV
   CLEAR_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],   // 🆕 TAXINV-ANYWHERE R3: + journalEntries (vatExpireJeLive)
@@ -35641,6 +36008,11 @@ const GM_SELF_DEFER = ['transfer_loss', 'edit_gr_date'];   // 🆕 GR-DATE-FIX: 
 function requestApprovalIfNeeded({ action, context, user, state, dispatch, silent, direct, directAct }){
   const { needsApproval, buildApprovalRequest, APPROVAL_ACTIONS } = global.ERP;
   requestApprovalIfNeeded.lastGmDirect = null;
+  // 🆕 UNDO_PRINCIPLE §2.2 (U4): ย้อน/ยกเลิกใบตั้งหนี้ที่เคยจ่าย (แม้กลับรายการแล้ว) = wasPaid เสมอ → กฎ 2 ขั้น · เข้มขึ้นเท่านั้น
+  if(action === 'delete_inv' && context && context.entityId && global.ERP.invEverPaid){
+    const _iv = ((state && state.invoices) || []).find(i => i && i.id === context.entityId);
+    if(_iv) context = { ...context, wasPaid: !!context.wasPaid || global.ERP.invEverPaid(state, _iv) };
+  }
   let rules = needsApproval(state, action, context);
   // transfer_loss: กฎตั้งต้น r_transfer_loss อยู่ใน APPROVAL_BUILTIN_RULES แล้ว (UAT S1) — ไม่มีกรณีพิเศษที่นี่
   // 🆕 VAT-CLAIM V4 (§D OQ2): ปลดล็อกงวด ภ.พ.30 ต้องให้ GM/เจ้าของอนุมัติเสมอ — กฎตั้งต้นในโค้ด (ไม่เพิ่มกฎใน state = ไม่ต้อง migrate · version 37 คงเดิม)
@@ -43364,7 +43736,7 @@ function printRTV(rtv, state, sup){
     <div class="box" style="flex:1">
       <div class="b">🏭 คืนให้ Supplier</div>
       <div>${supName}</div>
-      ${supTax ? `<div>เลขผู้เสียภาษี: ${supTax}${supBr ? ' · ' + supBr : ''}</div>` : (supBr ? `<div>${supBr}</div>` : '')}
+      ${supTax ? `<div>เลขผู้เสียภาษี: ${supTax}${supBr ? ' (' + supBr + ')' : ''}</div>` : (supBr ? `<div>(${supBr})</div>` : '')}
       ${supAddr ? `<div style="font-size:12px;color:#666">${supAddr}</div>` : ''}
     </div>
     <div class="box" style="flex:1">
@@ -47413,9 +47785,9 @@ function TRList({ trs, state, dispatch, user }){
     if(!f.ids) return;
     setFilter('all'); _focusWidenDr(dr, list.map(t => t.trDate));
   } });
-  let filtered = (F.ids ? F.rows : trs).filter(t => inDateRange(t.trDate, dr.startDate, dr.endDate));
+  let filtered = (F.ids ? F.rows : trs).filter(t => trInRange(t, dr));   // 🆕 TR_DATE D2
   if(filter !== 'all') filtered = filtered.filter(t => t.status === filter);
-  const sorted = [...filtered].sort((a,b) => (F.ids ? (b.status === 'rejected') - (a.status === 'rejected') : 0) || (b.trDate||'').localeCompare(a.trDate||''));
+  const sorted = [...filtered].sort((a,b) => (F.ids ? (b.status === 'rejected') - (a.status === 'rejected') : 0) || (filter === 'pending' ? (a.trDate||'').localeCompare(b.trDate||'') : (b.trDate||'').localeCompare(a.trDate||'')));   // 🆕 UAT S3: แท็บรออนุมัติ = วันที่ต้องการเก่า→ใหม่ (ของวันนี้ขึ้นก่อนใบล่วงหน้า)
   const pg = usePaged(sorted, 50);
   // 🆕 TR_PRINT P1: ใบที่เลือก (เฉพาะที่ยังอยู่ในรายการตามตัวกรอง) · อ่านใบล่าสุดจาก state
   const selTrs = sorted.filter(t => sel[t.id]);
@@ -47475,7 +47847,7 @@ function TRList({ trs, state, dispatch, user }){
                   h('td', { className:'px-2 py-2 text-center', onClick:e=>e.stopPropagation() },
                     h('input', { type:'checkbox', checked:!!sel[tr.id], onChange:()=>toggleSel(tr.id), 'data-tr-sel':tr.trNumber, className:'w-5 h-5' })),
                   h('td', { className:'px-3 py-2 font-mono text-xs text-blue-700 font-semibold' }, tr.trNumber, h(global.ERP.RenumBadge, { doc:tr }), _focusDoneMark(F, tr.id)),
-                  h('td', { className:'px-3 py-2 text-xs text-gray-600' }, fmtDate(tr.trDate)),
+                  h('td', { className:'px-3 py-2 text-xs text-gray-600' }, fmtDate(tr.trDate), trFutureBadge(tr)),
                   h('td', { className:'px-3 py-2 text-xs' },
                     isIntra && fromLoc
                       ? h('span', null,
@@ -47521,6 +47893,68 @@ function TRList({ trs, state, dispatch, user }){
 }
 
 // ================================================================
+// 🆕 TR_DATE D1: ช่อง "📅 วันที่ต้องการของ" — ใช้ร่วม NewTRModal + StockShortageModal (หน้าต่าง TR มี 2 ตัว แก้คู่)
+//   ค่าตั้งต้น = วันนี้ · เลือกได้วันนี้/อนาคต (ย้อนหลังไม่ได้ — TR คือคำขอ) · ตรวจที่ UI (reducer ไม่เทียบนาฬิกา)
+// ================================================================
+const _trAddDays = (iso, n) => { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+// 🆕 UAT S1: ปีไม่ใช่ปีนี้ → ต่อท้าย /ปป (พ.ศ. 2 หลัก แบบ fmtDate) — กันเลือกปีพลาด (ปฏิทิน พ.ศ.) แล้วไม่มีใครเห็น
+const _trDDMM = (iso) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || ''); if(!m) return iso || '';
+  return m[1] === String(getToday()).slice(0, 4) ? `${m[3]}/${m[2]}` : `${m[3]}/${m[2]}/${String((+m[1] + 543) % 100).padStart(2, '0')}`; };
+// 🆕 UAT S1: ไกลเกิน 7 วัน → ถามยืนยัน (TR แก้ไม่ได้ — เลือกพลาดต้องยกเลิกเปิดใหม่) · ไม่ล็อกเพดาน
+const TR_FAR_DAYS = 7;
+// 🆕 TR_DATE verify: okFor = วันที่ที่ยืนยันไปแล้วในช่องวันที่ → ตอนบันทึกไม่ถามซ้ำ
+function trFarOk(v, okFor){
+  const today = getToday();
+  if(!v || v <= _trAddDays(today, TR_FAR_DAYS) || (okFor && v === okFor)) return true;
+  return confirm(`วันที่ต้องการของ ${fmtDate(v)} ไกลจากวันนี้เกิน ${TR_FAR_DAYS} วัน — ใบ TR แก้วันที่ทีหลังไม่ได้\n\nยืนยันใช้วันที่นี้?`);
+}
+// วันที่ต้องการที่ใช้ได้จริงตอนกดบันทึก (ว่าง/ผิดรูป → วันนี้ · ย้อนหลัง → null = ห้ามบันทึก)
+function trDateForSave(v){
+  const today = getToday();
+  if(!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return today;
+  return v < today ? null : v;
+}
+// 🆕 TR_DATE verify: "วันนี้" ส่ง null ให้หน้าต่าง = วันนี้แบบสด (เปิดค้างข้ามเที่ยงคืนแล้วบันทึกได้ ไม่ค้างเป็นเมื่อวาน)
+//   value ที่ส่งเข้ามา = ค่าที่แสดง (หน้าต่างแปลง null → วันนี้เอง) · onFarOk(v) = แจ้งว่ายืนยันวันไกลแล้ว
+function TRDateField({ value, onChange, onFarOk }){
+  const today = getToday(); const tomorrow = _trAddDays(today, 1);
+  const BEDateInput = global.ERP.BEDateInput;
+  const set = (v) => { if(!v || v === today) return onChange(null); if(v < today){ alert('เลือกวันที่ย้อนหลังไม่ได้ — กด "วันนี้" หรือเลือกวันถัดไป'); return onChange(null); }
+    if(v !== value && !trFarOk(v)) return; if(onFarOk) onFarOk(v); onChange(v); };   // 🆕 UAT S1: ไม่ยืนยัน = คงค่าเดิม
+  const chip = (lbl, v, key) => h('button', { type:'button', onClick:() => set(v), 'data-tr-date-chip': key,
+    className: cls('px-3 min-h-[36px] rounded border text-xs font-medium', value === v ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50') }, lbl);
+  return h('div', { className:'bg-sky-50 border border-sky-200 rounded-lg p-2', 'data-tr-date-field':'1' },
+    h('label', { className:'block text-xs font-medium mb-1' }, '📅 วันที่ต้องการของ'),
+    h('div', { className:'flex flex-wrap items-center gap-2' },
+      h('div', { className:'w-44', 'data-tr-date-input':'1' }, BEDateInput ? h(BEDateInput, { value, onChange:set, min:today })
+        : h('input', { type:'date', value, min:today, onChange:e => set(e.target.value), className:'w-full px-2 py-1 border rounded text-sm' })),
+      chip('วันนี้', today, 'today'), chip('พรุ่งนี้', tomorrow, 'tomorrow')),
+    value && value > today && h('div', { className:'text-xs text-sky-800 mt-1', 'data-tr-date-note':'1' },
+      `เปิดวันนี้ ${_trDDMM(today)} · ของต้องการวันที่ ${_trDDMM(value)}`));
+}
+// D2: ตัวกรองช่วงวันใช้ trDate เหมือนเดิม · ใบล่วงหน้า (trDate > วันนี้) โผล่เสมอเมื่อช่วงที่เลือกครอบถึงวันนี้ (ช่วงตั้งต้นจบที่วันนี้ — ไม่งั้นใบล่วงหน้าหายจากรายการ)
+function trInRange(tr, dr){
+  const d = tr && tr.trDate; if(!d) return false;
+  if(inDateRange(d, dr.startDate, dr.endDate)) return true;
+  const today = getToday();
+  return d > today && !!dr.endDate && dr.endDate >= today && (!dr.startDate || dr.startDate <= today);
+}
+// D2: วันที่กดเปิดจริง (createdDate · ใบเก่าไม่มี = วันของ createdAt · ไม่มีทั้งคู่ = trDate)
+function trOpenDate(tr){
+  if(!tr) return '';
+  if(tr.createdDate) return tr.createdDate;
+  if(tr.createdAt){ const d = new Date(Number(tr.createdAt)); if(!isNaN(d)) return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  return tr.trDate || '';
+}
+// D2: ป้ายใบล่วงหน้า (trDate > วันนี้) — ให้คลังต้นทางรู้ว่าเป็นของล่วงหน้า
+function trFutureBadge(tr){
+  if(!tr || !tr.trDate || tr.trDate <= getToday()) return null;
+  return h('span', { className:'ml-1 inline-block px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[10px] font-medium whitespace-nowrap', 'data-tr-future':'1' },
+    `📅 ต้องการ ${_trDDMM(tr.trDate)}`);
+}
+
+// ================================================================
 // NEW TR MODAL
 // ================================================================
 function NewTRModal({ state, dispatch, onClose, prefill }){
@@ -47530,6 +47964,8 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
   const pf = prefill || {};   // 🆕 GO-LIVE: เปิดจาก TR เดิม ("➕ เปิด TR ใหม่ (เพิ่มเติม)") → ต้นทาง/ปลายทางเดิม + relatedTrId
   // สาขา (ไม่ใช่ superuser) → ปลายทางล็อคเป็นสาขาที่เข้าถึงได้เท่านั้น — ต้องคำนวณก่อน prefill (prefill ปลายทางที่ไม่ได้รับอนุญาตต้องไม่ผ่าน)
   const lockTo = !isSuperUser(user) && user.role === 'branch';
+  const [needDate, setNeedDate] = useState(null);   // 🆕 TR_DATE D1: วันที่ต้องการของ · null = วันนี้แบบสด (verify: ไม่แช่แข็งวันที่ตอนเปิดหน้าต่าง)
+  const farOkFor = useRef(null);   // 🆕 TR_DATE verify: วันไกลที่ยืนยันในช่องแล้ว → ตอนบันทึกไม่ถามซ้ำ
 
   const [toBranch, setToBranch]     = useState(() => {
     const t = pf.toBranch;
@@ -47651,13 +48087,15 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
       if(!groups.has(src)) groups.set(src, []);
       groups.get(src).push(l);
     }
-    const trDate = getToday(); const made = []; const issued = []; const ids = [];   // review C: เลขที่ออกในลูปนี้ส่งต่อให้ใบถัดไป (กันเลขซ้ำ)
+    const trDate = trDateForSave(needDate); if(!trDate) return alert('เลือกวันที่ย้อนหลังไม่ได้ — กด "วันนี้" หรือเลือกวันถัดไป');   // 🆕 TR_DATE D1
+    if(!trFarOk(trDate, farOkFor.current)) return;   // 🆕 UAT S1: ตรวจซ้ำตอนบันทึก (ยืนยันในช่องแล้ว = ไม่ถามซ้ำ)
+    const createdDate = getToday(); const made = []; const issued = []; const ids = [];   // review C: เลขที่ออกในลูปนี้ส่งต่อให้ใบถัดไป (กันเลขซ้ำ)
     for(const [src, ls] of groups){
       const trNumber = global.ERP.genDocNumber('TR', trDate, [...(state.transferRequests||[]), ...issued], 'trNumber');
       issued.push({ trNumber });
       const id = genId('tr'); ids.push(id);
       dispatch({ type:'ADD_TR', data:{ id, trNumber, trDate, fromBranch:intraBranchId, toBranch:intraBranchId, fromLocId:src, toLocId,
-        lines: ls, note, status:'pending', createdBy:user.username, createdByName:user.name, createdAt:Date.now() } });
+        lines: ls, note, status:'pending', createdBy:user.username, createdByName:user.name, createdAt:Date.now(), createdDate } });
       made.push(`${trNumber} (${_locName(state, intraBranchId, src)})`);
     }
     // 🆕 TR_SUMMARY T1: หน้าสรุป (ไม่มี host = ข้อความเดิม)
@@ -47673,7 +48111,9 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
     if(valid.length === 0) return alert('ใส่จำนวนอย่างน้อย 1 รายการ (กรอกในรายการโปรด หรือค้นหาเพิ่ม)');
 
     // 🆕 GO-LIVE (e): เลขที่ TR ใช้ genDocNumber กลาง (TR-YYMMDD-n, กันชนกันหลายเครื่อง) — เดิม seq.tr แบบ TR-YYMM-0001 ซึ่งต่างจาก TR ที่ระบบผลิตสร้าง
-    const trDate = getToday();
+    const trDate = trDateForSave(needDate);   // 🆕 TR_DATE D1: วันที่ที่เลือก = วันที่บนใบ + เลข TR
+    if(!trDate) return alert('เลือกวันที่ย้อนหลังไม่ได้ — กด "วันนี้" หรือเลือกวันถัดไป');
+    if(!trFarOk(trDate, farOkFor.current)) return;   // 🆕 UAT S1: ตรวจซ้ำตอนบันทึก (ยืนยันในช่องแล้ว = ไม่ถามซ้ำ)
     //   DOC_NUMBER N3: TR-YYYYMMDD-NNNN · fallback (ไม่มี genDocNumber) = แกน pure ตัวเดียวกัน ไม่ใช่ seq รายเดือน
     const trNumber = (global.ERP.genDocNumber || global.ERP.fmtDayDocNo)('TR', trDate, state.transferRequests||[], 'trNumber');
 
@@ -47689,6 +48129,7 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
       createdBy: user.username,
       createdByName: user.name,
       createdAt: Date.now(),
+      createdDate: getToday(),   // 🆕 TR_DATE: วันที่กดเปิดจริง (trDate อาจเป็นวันล่วงหน้า)
     };
     if(pf.relatedTrId){ data.relatedTrId = pf.relatedTrId; data.relatedTrNumber = pf.relatedTrNumber || null; }
     dispatch({ type:'ADD_TR', data });
@@ -47779,6 +48220,7 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
         '🔗 เปิดเพิ่มเติมจาก ', h('b', null, pf.relatedTrNumber || pf.relatedTrId), ' — ใบเดิมแก้รายการไม่ได้ ใบนี้จะเป็นคำขอใหม่แยกต่างหาก'),
 
       modeToggle,
+      h(TRDateField, { value: needDate || getToday(), onChange: setNeedDate, onFarOk: v => { farOkFor.current = v; } }),   // 🆕 TR_DATE D1
       // Branch selection (ข้ามสาขา) · 🆕 ภายในสาขา = เลือกคลังปลายทาง
       isIntra ? intraHeader : h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
         h('div', null,
@@ -48223,7 +48665,10 @@ function TRDetailModal({ tr: trProp, state, dispatch, user, onClose, viewOnly })
       h('div', { className:'flex items-center justify-between flex-wrap gap-2' },
         h('span', { className: cls('px-3 py-1 rounded text-sm font-medium', statusClr) }, statusLabel),
         h('div', { className:'text-xs text-gray-500' },
-          `สร้างโดย ${tr.createdByName || tr.createdBy} เมื่อ ${fmtDate(tr.trDate)}`)
+          `สร้างโดย ${tr.createdByName || tr.createdBy} เมื่อ ${fmtDate(trOpenDate(tr))}`,   // 🆕 TR_DATE D2: เปิดเมื่อ = วันที่กดจริง
+          (tr.trDate && trOpenDate(tr) !== tr.trDate)
+            ? h('span', { className:'ml-1 text-sky-800', 'data-tr-need':'1' }, `· ต้องการของวันที่ ${fmtDate(tr.trDate)}`)
+            : trFutureBadge(tr))   // verify 2: วันเดียวกันไม่แสดงซ้ำ — มีข้อความ "ต้องการของวันที่" แล้วไม่ต้องมีป้าย 📅
       ),
 
       // 🆕 GO-LIVE: ยกเลิกแล้ว → แถบเหตุผล
@@ -48578,6 +49023,9 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
   return h(Modal, { isOpen:true, title:`✅ อนุมัติ + ส่งของ (TR: ${tr.trNumber})`, onClose, size:'xl', docKey:'tr:approve:'+tr.id },
     h('div', { className:'space-y-4' },
       h(RecentPushWarn, { state, tr }),   // UAT S1: เตือนส่งซ้ำกับใบส่งตรง "ไลน์ขอด่วน"
+      // 🆕 TR_DATE D2: ใบล่วงหน้า → บอกคลังต้นทางว่าของต้องการวันไหน (ส่งก่อนได้ ไม่บล็อก)
+      tr.trDate && tr.trDate > getToday() && h('div', { className:'bg-sky-50 border border-sky-300 rounded p-2 text-sm text-sky-900', 'data-tr-approve-need':'1' },
+        `📅 ใบนี้ต้องการของวันที่ ${fmtDate(tr.trDate)} (เปิดเมื่อ ${fmtDate(trOpenDate(tr))})`),
 
       // 🆕 TR_PRINT P5: ป้าย "กำลังจัด" + เตือนสีเหลืองเมื่อคนอื่นพิมพ์ใบจัดไปแล้ว (เตือนอย่างเดียว ไม่บล็อก) · อ่านใบสดจาก state
       (() => { const live = (state.transferRequests || []).find(t => t.id === tr.id) || tr, p = _trPickLast(state, live); if(!p) return null;
@@ -49904,7 +50352,7 @@ function TRSummaryModal({ trs, state, dispatch, user, note, onClose }){
             h('span', { className: cls('font-mono font-bold text-blue-700 text-base', dead && 'line-through') }, tr.trNumber),
             h('span', { className: cls('px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap', st.clr), 'data-tr-sum-pill':'1' }, st.label),
             h('span', { className:'text-sm' }, h('b', null, e.from), ' → ', h('b', null, e.to), e.branch ? h('span', { className:'text-xs text-gray-500' }, ` (${e.branch})`) : null),
-            h('span', { className:'text-xs text-gray-600' }, `${fmtDate(tr.trDate)} · ผู้เปิด ${tr.createdByName || tr.createdBy || ''}`),
+            h('span', { className:'text-xs text-gray-600' }, `${fmtDate(tr.trDate)} · ผู้เปิด ${tr.createdByName || tr.createdBy || ''}`, trFutureBadge(tr)),
             h('button', { type:'button', onClick:()=>setDetail(tr), className:'ml-auto text-xs px-2 py-1.5 rounded border bg-white hover:bg-blue-50 text-blue-700' }, '📋 ดูใบ TR')),
           h('div', { className:'divide-y' },
             (tr.lines || []).map((l, i) => { const v = _trLineView(state, l);
@@ -50106,13 +50554,13 @@ function LineTRList({ state, dispatch, user, branchId, locIds, title, includeMin
     return scoped.map(t => { const cmp = trRecvCompare(state, t, ix); return { tr:t, st: _ltrStatusView(trLiveStatus(state, t), cmp), cmp, bd: trRecvBadge(cmp) }; })
     .filter(r => flt === 'open' ? r.st.open : flt === 'short' ? r.cmp.status === 'short' : flt === 'done' ? r.st.key === 'done' : flt === 'void' ? (r.st.key === 'cancelled' || r.st.key === 'rejected') : true)
     // ยังไม่จบ = ไม่กรองวัน (ใบค้างเก่าต้องเห็น) · สถานะอื่นกรองตามช่วงวันที่
-    .filter(r => flt === 'open' || inDateRange(r.tr.trDate, dr.startDate, dr.endDate))
+    .filter(r => flt === 'open' || trInRange(r.tr, dr))   // 🆕 TR_DATE D2
     .sort((a, b) => (b.tr.trDate || '').localeCompare(a.tr.trDate || '') || (b.tr.createdAt || 0) - (a.tr.createdAt || 0));
   // eslint-disable-next-line — scoped มาจาก state.transferRequests + branchId/locIds/user/includeMine
   }, [folded, state.transferRequests, state.transferOrders, state.grs, state.items, flt, dr.startDate, dr.endDate, branchId, (locIds || []).join(','), user && user.username, includeMine]);
   // 🔧 verify 1 (M): นับ "ได้ไม่ครบ" ในช่วงวันที่ — คำนวณแม้พับ (ดัชนีรอบเดียว) ให้หัวข้อ/ปุ่มพับบอกได้ว่ามีของขาด
   const shortN = useMemo(() => { const ix = trRecvIndex(state);
-    return scoped.filter(t => inDateRange(t.trDate, dr.startDate, dr.endDate) && trRecvCompare(state, t, ix).status === 'short').length;
+    return scoped.filter(t => trInRange(t, dr) && trRecvCompare(state, t, ix).status === 'short').length;
   // eslint-disable-next-line
   }, [state.transferRequests, state.transferOrders, state.grs, state.items, dr.startDate, dr.endDate, branchId, (locIds || []).join(','), user && user.username, includeMine]);
   const pg = usePaged(rows, 30);
@@ -50155,7 +50603,7 @@ function LineTRList({ state, dispatch, user, branchId, locIds, title, includeMin
               h('div', { className:'flex items-center justify-between gap-2' },
                 h('span', { className:'font-mono font-semibold text-blue-700 text-sm' }, tr.trNumber), !_ltrHidePill(st, bd, cmp) && pill(st)),
               h(TRPickBadge, { state, tr }),   // 🆕 UAT พิมพ์TR S2: ฝั่งไลน์เห็นว่าคลังรับใบไปจัดแล้ว
-              h('div', { className:'text-xs text-gray-700 mt-0.5 break-words' }, `${fmtDate(tr.trDate)} · จาก ${fromTxt(tr)} → ${toTxt(tr)}`),
+              h('div', { className:'text-xs text-gray-700 mt-0.5 break-words' }, `${fmtDate(tr.trDate)} · จาก ${fromTxt(tr)} → ${toTxt(tr)}`, trFutureBadge(tr)),
               h('div', { className:'text-xs text-gray-500' }, `${(tr.lines || []).length} รายการ · เปิดโดย ${tr.createdByName || tr.createdBy || '-'}`),
               bd && h('div', { className:'mt-1' }, recvPill(bd), shortLine(cmp)))))
         : h('table', { className:'w-full text-sm' },
@@ -50164,7 +50612,7 @@ function LineTRList({ state, dispatch, user, branchId, locIds, title, includeMin
             h('tbody', { className:'divide-y' }, pg.shown.map(({ tr, st, bd, cmp }) =>
               h('tr', { key:tr.id, onClick:()=>open(tr), 'data-ltr-row':tr.trNumber, className:'hover:bg-gray-50 cursor-pointer' },
                 h('td', { className:'px-2 py-2 font-mono text-xs text-blue-700 font-semibold' }, tr.trNumber),
-                h('td', { className:'px-2 py-2 text-xs' }, fmtDate(tr.trDate)),
+                h('td', { className:'px-2 py-2 text-xs' }, fmtDate(tr.trDate), trFutureBadge(tr)),
                 h('td', { className:'px-2 py-2 text-xs' }, fromTxt(tr)),
                 h('td', { className:'px-2 py-2 text-xs' }, toTxt(tr)),
                 h('td', { className:'px-2 py-2 text-xs' }, `${(tr.lines || []).length} รายการ`),
@@ -50177,6 +50625,7 @@ function LineTRList({ state, dispatch, user, branchId, locIds, title, includeMin
 
 // ==================== REGISTER ====================
 // 🆕 PRODUCTION-LIVE: 📦 คลังไลน์ (mod-production) เปิด ขอของ/ส่งของ/ส่งมอบ ได้จากที่เดียว — NewTRModal (prefill.intra) · ApproveTRModal · HandoverModal
+global.ERP.TRDateField = TRDateField; global.ERP.trDateForSave = trDateForSave; global.ERP.trFutureBadge = trFutureBadge; global.ERP.trOpenDate = trOpenDate; global.ERP.trFarOk = trFarOk; global.ERP.trDDMM = _trDDMM;   // 🆕 TR_DATE
 global.ERP.showTRSummary = showTRSummary;   // 🆕 TR_SUMMARY T1
 global.ERP.TRSummaryHost = TRSummaryHost;
 global.ERP.LineTRList = LineTRList;   // 🆕 TR_SUMMARY T2
@@ -54303,6 +54752,14 @@ function StockShortageModal({ order, shortages, lineLoc, lineId: lineIdProp, bra
     const lid = lineId || (toLoc && toLoc.lineId) || null;
     return (lid && !own.includes(lid)) ? [lid, ...own] : own;
   }, [lineId, toLoc && toLoc.lineId, user]);
+  // 🆕 TR_DATE D1: วันที่ต้องการของ (ค่าตั้งต้นวันนี้) · 🆕 UAT S4: ขอจากใบสั่งผลิตล่วงหน้า → ตั้งต้น = วันผลิตของใบ (ไม่ย้อนหลังกว่าวันนี้)
+  //   🆕 TR_DATE verify: needDate = null จนกว่าจะเลือกเอง → ค่าตั้งต้นคำนวณสดทุกครั้ง (เปิดค้างข้ามเที่ยงคืน: วันผลิตที่เลยมาแล้ว → วันนี้)
+  const [needDate, setNeedDate] = useState(null);
+  const farOkFor = useRef(null);   // 🆕 TR_DATE verify: วันไกลที่ยืนยันในช่องแล้ว → ตอนบันทึกไม่ถามซ้ำ
+  const _needDefault = () => { const t = global.ERP.getToday(); const pd = String((order && order.plannedDate) || '').slice(0, 10);
+    return (/^\d{4}-\d{2}-\d{2}$/.test(pd) && pd > t) ? pd : t; };
+  //   กด "วันนี้" (TRDateField ส่ง null) → 'today' = วันนี้แบบสด ไม่กลับไปวันผลิต
+  const needDateEff = needDate === 'today' ? global.ERP.getToday() : (needDate || _needDefault());
   const [favValues, setFavValues] = useState({});
   const [favSrc, setFavSrc] = useState({});   // itemId → คลังต้นทางที่เลือกเอง (ไม่เลือก = defaultSrcOf)
   const [showFavEdit, setShowFavEdit] = useState(false);
@@ -54397,19 +54854,24 @@ function StockShortageModal({ order, shortages, lineLoc, lineId: lineIdProp, bra
       if(!groups.has(src)) groups.set(src, []);
       groups.get(src).push(t);
     }
+    // 🆕 TR_DATE D1: วันที่ที่เลือก = trDate + เลข TR ทุกใบ (แยกต้นทางหลายใบ = วันที่เดียวกัน) · ย้อนหลัง = ห้าม
+    const trDate = global.ERP.trDateForSave ? global.ERP.trDateForSave(needDateEff) : global.ERP.getToday();
+    if(!trDate){ alert('เลือกวันที่ย้อนหลังไม่ได้ — กด "วันนี้" หรือเลือกวันถัดไป'); return; }
+    if(global.ERP.trFarOk && !global.ERP.trFarOk(trDate, farOkFor.current)) return;   // 🆕 UAT S1: ไกลเกิน 7 วัน = ถามยืนยันซ้ำตอนบันทึก
+    const createdDate = global.ERP.getToday();
     const made = []; const issued = []; const ids = [];   // review C: เลขที่ออกในลูปนี้ส่งต่อให้ใบถัดไป (กันเลขซ้ำ)
     for(const [src, ts] of groups){
-      const trNumber = global.ERP.genDocNumber('TR', global.ERP.getToday(), [...(state.transferRequests||[]), ...issued], 'trNumber');
+      const trNumber = global.ERP.genDocNumber('TR', trDate, [...(state.transferRequests||[]), ...issued], 'trNumber');
       issued.push({ trNumber });
       const trId = global.ERP.genId('tr_'); ids.push(trId);
       dispatch({ type:'ADD_TR', data:{
         id: trId,   // UAT: เดิมไม่มีส่วนสุ่ม
-        trNumber, trDate: global.ERP.getToday(),
+        trNumber, trDate,
         fromBranch: branchId, toBranch: branchId, fromLocId: src, toLocId: toLoc.id,
         lines: ts.map(t => ({ itemId: t.itemId, qty: Number(t.qty)||0, unit: t.unit, note: isRefill ? (refillFor ? 'เติมไลน์สำหรับ ' + refillFor : '') : 'เติมไลน์สำหรับ ' + order.orderNumber })),
         note: isRefill ? (refillFor ? `ขอของเข้า ${toLoc.name} — เติมไลน์สำหรับ ${refillFor}` : `ขอของเข้า ${toLoc.name}`) : `Auto-สร้างจากออเดอร์ผลิต ${order.orderNumber} — วัตถุดิบที่คลังไลน์ขาด`,
         ...(forOrderId ? { forOrderId } : {}),
-        status: 'pending', createdBy: user.username, createdByName: user.name, createdAt: Date.now(),
+        status: 'pending', createdBy: user.username, createdByName: user.name, createdAt: Date.now(), createdDate,
       } });
       made.push(`${trNumber} ← ${locNameOf(src)}`);
     }
@@ -54494,6 +54956,7 @@ function StockShortageModal({ order, shortages, lineLoc, lineId: lineIdProp, bra
           '💡 เปิด TR ขอของเข้า ', h('b', null, toLoc?.name || 'คลังไลน์'), ' (เลือกคลังต้นทางต่อรายการ · ต่างต้นทาง = แยกใบ)',
           isRefill ? '' : ' — หรือกด "สร้างเลย" ได้ทันที: ตอนผลิตระบบตัดจากคลังของไลน์ ส่วนที่ขาดติดลบที่คลังไลน์ (รับของ TR เข้ามา/นับปรับ = หักล้างเอง)')),
       trBlock && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-sm text-red-800', 'data-tr-block':'1' }, '⛔ เปิด TR ไม่ได้: ', trBlock),
+      !trBlock && global.ERP.TRDateField && h(global.ERP.TRDateField, { value: needDateEff, onChange: v => setNeedDate(v || 'today'), onFarOk: v => { farOkFor.current = v; } }),   // 🆕 TR_DATE D1
 
       // 🆕 LINE_TR_FAV F1/F5: ⭐ รายการโปรด (เหนือตาราง · แถว LineRow บรรทัดเดียว) — กรอกเฉพาะที่จะขอ · กรอก > 0 → เลือกต้นทางต่อรายการ
       global.ERP.FavoriteLinesSection && toLoc && h(global.ERP.FavoriteLinesSection, { state, user, purpose:'transfer', branchId, lineIds: favLineIds,
@@ -66175,7 +66638,8 @@ function LineStockTab({ state, dispatch, user, branchId }){
   const _isIntra = (t) => !!(global.ERP.isIntraTO && global.ERP.isIntraTO(t)) && t.fromBranch === branchId;
   const intraPendingTRs = (state.transferRequests||[]).filter(t => t && t.status === 'pending' && _isIntra(t));
   const inTRs  = intraPendingTRs.filter(t => ownLocIds.includes(t.toLocId));
-  const outTRs = intraPendingTRs.filter(t => ownLocIds.includes(t.fromLocId));
+  const outTRs = intraPendingTRs.filter(t => ownLocIds.includes(t.fromLocId))
+    .sort((a, b) => String(a.trDate||'').localeCompare(String(b.trDate||'')) || (Number(a.createdAt)||0) - (Number(b.createdAt)||0));   // 🆕 UAT S3: ต้องการก่อนขึ้นก่อน
   const liveTOs = (state.transferOrders||[]).filter(t => t && (t.status === 'shipping' || t.status === 'partial') && _isIntra(t));
   const inTOs  = liveTOs.filter(t => ownLocIds.includes(t.toLocId));
   const outTOs = liveTOs.filter(t => ownLocIds.includes(t.fromLocId));
@@ -66494,7 +66958,8 @@ function LineStockTab({ state, dispatch, user, branchId }){
                   : h('span', { className:'shrink-0 text-gray-400' }, '🔒'))),
               inTRs.map(t => h('div', { key:t.id, className:'py-1.5 text-xs text-gray-700' },
                 h('span', { className:'font-mono font-semibold text-blue-700' }, t.trNumber),
-                ` ← ${locNm(t.fromLocId)} · ${(t.lines||[]).length} รายการ · `, h('span', { className:'text-amber-700' }, '⏳ รอต้นทางส่ง'))))),
+                ` ← ${locNm(t.fromLocId)} · ${(t.lines||[]).length} รายการ · `, h('span', { className:'text-amber-700' }, '⏳ รอต้นทางส่ง'),
+                global.ERP.trFutureBadge && global.ERP.trFutureBadge(t))))),   // 🆕 TR_DATE D2
       h('div', { className:'bg-white rounded-lg shadow p-2 border-l-4 border-purple-500', 'data-line-out':'1' },
         h('div', { className:'flex items-center justify-between gap-2 mb-1' },
           h('div', { className:'text-sm font-bold text-purple-900' }, `📤 รอส่งให้ไลน์อื่น (${outTRs.length})`),
@@ -66513,7 +66978,8 @@ function LineStockTab({ state, dispatch, user, branchId }){
                 return h('div', { key:t.id, className:'py-1.5 flex items-center justify-between gap-2 text-xs' },
                   h('div', { className:'min-w-0' },
                     h('span', { className:'font-mono font-semibold text-blue-700' }, t.trNumber),
-                    ` → ${locNm(t.toLocId)} · ${(t.lines||[]).length} รายการ · ขอโดย ${t.createdByName || t.createdBy || '-'}`),
+                    ` → ${locNm(t.toLocId)} · ${(t.lines||[]).length} รายการ · ขอโดย ${t.createdByName || t.createdBy || '-'}`,
+                    global.ERP.trFutureBadge && global.ERP.trFutureBadge(t)),   // 🆕 TR_DATE D2: คลังต้นทางรู้ว่าเป็นของล่วงหน้า
                   (MOD_T.ApproveTRModal && canAct(t.fromLocId, 'ship') && !mine)
                     ? h('button', { type:'button', onClick:()=>{ if(global.ERP.restoreMinimized && global.ERP.restoreMinimized('tr:approve:' + t.id)) return; setShipTR(t); },
                         className:'shrink-0 px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded font-medium' }, '✅ ส่งของ')
@@ -72117,6 +72583,9 @@ function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
       h('div', { className:'text-sm text-right space-x-3', 'data-testid':'pricefix-dsum' }, 'ส่วนต่าง (ประมาณ): ',
         [['ก่อน VAT', dSum.net], ...(nonVat ? [] : [['VAT', dSum.v], ['รวม', dSum.tot]])].map(([t, n]) => h('span', { key:t }, t, ' ',
           h('b', { className:n > 0.004 ? 'text-red-700' : 'text-green-700' }, (n > 0.004 ? '+' : '') + fmtCur(n))))),
+      // 🆕 PF-NOREAPPROVE UAT S2: บอกจัดซื้อว่าบัญชียืนยันตรง = ราคามีผลทันที
+      live && h('div', { className:'text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded p-1.5', 'data-testid':'pricefix-noreapprove-note' },
+        'ℹ️ ถ้าบัญชียืนยันตรงตามที่คีย์ ราคามีผลทันที ไม่ต้องอนุมัติราคา (อนุมัติอีกครั้งตอนจ่าย) — ตรวจกับ' + pfPaper(pfCash(state, req, entry.target, doc)) + 'ให้ตรง'),
       live && h('textarea', { className:'w-full border rounded p-2 text-sm', rows:2, placeholder:'หมายเหตุถึงบัญชี (ไม่บังคับ)', value:note, onChange:(e) => setNote(e.target.value) }),
       h('div', { className:'flex justify-end gap-2' },
         h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'),
@@ -72254,7 +72723,12 @@ function PriceKeyTable({ rows, price, setPrice, editable, state, user, proposal,
       const ou = Number(r.l.unitPrice) || 0, v = Number(price[r.key]), q = Number(r.l.qty) || 0, ch = isFinite(v) && v > 0 && Math.abs(v - ou) > 1e-9;
       return h('tr', { key:r.key, className:cls('border-t', ch && 'bg-yellow-50') },
         h('td', { className:'p-1.5 font-mono' }, r.g.grNumber || r.g.id),
-        h('td', { className:'p-1.5' }, nm(r.l.itemId), (() => { const p = propOf(r); if(!p) return null;
+        h('td', { className:'p-1.5' }, nm(r.l.itemId),
+          // 🆕 UNDO_PRINCIPLE C11: บรรทัดทรัพย์สิน (ก่อนตั้งหนี้) — แก้ได้ = ป้าย 💎 · แก้ไม่ได้ = เหตุผล
+          !inv && global.ERP.grLineIsCapex(state, r.g, r.l) && (() => { const dn = global.ERP.grCapexPriceFixDeny(state, r.g, r.idx);
+            return h('div', { className:cls('text-[10px] rounded px-1 mt-0.5 border', dn ? 'text-red-800 bg-red-50 border-red-200' : 'text-cyan-800 bg-cyan-50 border-cyan-300'),
+              'data-testid':dn ? 'pf-capex-deny' : 'pf-capex-badge' }, dn ? '⛔ ' + dn.msg : global.ERP.CAPEX_PF_BADGE); })(),
+          (() => { const p = propOf(r); if(!p) return null;
           const rt = p.newVatRate != null ? Number(p.newVatRate) || 0 : global.ERP.pvLineRate(state, inv || null, r.g, r.l, r.idx), net = (isFinite(v) ? v : ou) * q, vv = net * rt / 100;
           return h('div', { className:'text-[11px] text-blue-800 mt-0.5', 'data-testid':'pf-keyed-info' },
             h('div', null, 'จัดซื้อคีย์ ', h('b', null, m(Number(p.keyedPrice != null ? p.keyedPrice : p.newUnitPrice) || 0)), ' (', (p.keyedMode || (proposal && proposal.priceEntry)) === 'inc' ? 'รวม VAT' : 'ไม่รวม VAT', ') · VAT ', rt, '%',
@@ -72270,7 +72744,7 @@ function PriceKeyTable({ rows, price, setPrice, editable, state, user, proposal,
     })));
 }
 // กล่องผลต่อต้นทุน (ห้ามซ่อน — R2.7): เหลือในสต๊อก → ต้นทุนล็อต c0→c1 · ใช้ไปแล้ว → ผลต่าง 5391 เดือนนี้ · blocks = เหตุผลที่ทำไม่ได้
-function PriceFixImpact({ plan, state, user }){
+function PriceFixImpact({ plan, state, user, ap }){   // ap = priceFixApprovalNeed (PF-NOREAPPROVE N1) · ไม่ส่ง = ป้ายเกณฑ์เดิม
   if(!plan) return null;
   const m = pfMoney(user, state);
   const nm = (id) => ((state.items || []).find(x => x && x.id === id) || {}).name || id;
@@ -72282,6 +72756,10 @@ function PriceFixImpact({ plan, state, user }){
       h('div', { className:'font-semibold text-slate-800' }, '📦 ผลต่อต้นทุน'),
       plan.lines.map(l => {
         const c0 = (plan.costPlan.find(c => c.grId === l.grId && c.lineIdx === l.lineIdx) || {}).from;
+        // 🆕 UNDO_PRINCIPLE C2/C11: ทรัพย์สิน — ไม่มีล็อต/5391 · ส่วนต่างไปที่ราคาบรรทัด (Dr 16xx ตอนตั้งหนี้)
+        if(l.capex) return h('div', { key:l.grId + ':' + l.lineIdx, 'data-testid':'pf-impact-capex' },
+          h('b', null, nm(l.itemId)), ' — ', global.ERP.CAPEX_PF_BADGE, ' · ส่วนต่าง ', h('b', null, pfSigned(m, l.dCapex || 0)),
+          l.vatChanged && h('span', { className:'ml-1 px-1 rounded bg-purple-100 text-purple-800 font-semibold', 'data-testid':'pf-impact-vat' }, 'VAT ', fmtNum(l.oldVatRate), '% → ', fmtNum(l.newVatRate), '%'));
         return h('div', { key:l.grId + ':' + l.lineIdx },
           h('b', null, nm(l.itemId)), ' — เหลือในสต๊อก ', h('b', null, fmtNum(l.remaining)), ' → ต้นทุนล็อต ', m(c0 || 0), ' → ', h('b', null, m(l.c1)), ' (', pfSigned(m, l.dInv), ')',
           ' · ใช้ไปแล้ว ', h('b', null, fmtNum(l.used)), ' → ผลต่าง ', h('b', null, pfSigned(m, l.dVar)), ' ลง 5391 เดือนนี้',
@@ -72298,7 +72776,13 @@ function PriceFixImpact({ plan, state, user }){
         h('div', { className:'text-amber-800 font-semibold' }, '🖨️ พิมพ์ใบคืนของใหม่ให้ผู้ขาย (มูลค่าเปลี่ยน)')),
       h('div', { className:'border-t pt-1 text-slate-700' }, 'รวม: มูลค่าสินค้า ', h('b', null, pfSigned(m, plan.dGoods)), ' · VAT ', pfSigned(m, plan.dVat),
         ' · สต๊อก (1300) ', pfSigned(m, plan.dInv), ' · ผลต่างราคาซื้อ (5391) ', pfSigned(m, plan.dVar),
-        plan.needsApproval && h('span', { className:'ml-1 text-purple-700 font-semibold' }, '· เกินเกณฑ์ต้องอนุมัติ'))),
+        (plan.dCapex || 0) !== 0 && h('span', null, ' · ทรัพย์สิน (ลง 16xx ตอนตั้งหนี้) ', pfSigned(m, plan.dCapex)),   // UNDO_PRINCIPLE C2
+        ap ? (ap.needAp ? h('span', { className:'ml-1 text-purple-700 font-semibold', 'data-testid':'pf-ap-need' }, '· ต้องขออนุมัติ — ', ap.why)
+            : ap.twoPerson ? h('span', { className:'ml-1 text-green-700 font-semibold', 'data-testid':'pf-ap-two' }, '· ✅ ยืนยันได้เลย ไม่ต้องอนุมัติ (จัดซื้อคีย์ · บัญชียืนยัน — อนุมัติอีกครั้งตอนจ่าย)') : null)
+          : plan.needsApproval && h('span', { className:'ml-1 text-purple-700 font-semibold' }, '· เกินเกณฑ์ต้องอนุมัติ'))),
+    // 🆕 UNDO_PRINCIPLE C9: คำเตือนไม่บล็อก (ราคาใหม่ต่ำกว่าเกณฑ์ทรัพย์สิน)
+    (plan.notes || []).length > 0 && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900', 'data-testid':'pf-notes' },
+      plan.notes.map((n, i) => h('div', { key:i }, '⚠️ ', n))),
     blocks.length > 0 && h('div', { className:'bg-red-50 border border-red-200 rounded p-2 text-xs text-red-800', 'data-testid':'pf-blocks' },
       '⛔ ทำไม่ได้: ', blocks.map((b, i) => h('div', { key:i }, '• ', b))));
 }
@@ -72317,11 +72801,9 @@ function pfRunAdjust({ state, dispatch, user, mode, invId, grIds, lines, req, re
     ...(supTaxInvNumber ? { supTaxInvNumber } : {}), ...(cashBillNo ? { cashBillNo } : {}), by:user.username, date:getToday(), at:Date.now() };   // PV2-1: cashBillNo = บิลเงินสด (ไม่มี VAT)
   const act = { type:'ADJUST_INV_PRICE', data };
   const ref = inv ? inv.invNumber : (doc && doc.grNumber) || '';
-  // ราคาสูงกว่าที่จัดซื้อเสนอ (หรือบรรทัดนอกข้อเสนอ) = บัญชีคีย์เอง → ราคาขึ้นต้องอนุมัติ (ตรงกับ reducer)
-  const overProp = !!req && lines.some(x => { const p = ((req.proposal && req.proposal.lines) || []).find(y => y.grId === x.grId && Number(y.lineIdx) === Number(x.lineIdx));
-    const pv = P.lines.find(y => y.grId === x.grId && y.lineIdx === Number(x.lineIdx));
-    return !p || Number(x.newUnitPrice) > Number(p.newUnitPrice) + 1e-9 || ((pv && pv.vatChanged ? pv.newVatRate : null) !== (p.newVatRate != null ? Number(p.newVatRate) : null)); });   // PV5-4 ตรงกับ reducer
-  if(P.needsApproval || ((!req || overProp) && P.isIncrease)){
+  // 🆕 PF-NOREAPPROVE N1: ตัวตัดสินเดียวกับ reducer — ทางสองคน (จัดซื้อคีย์ + บัญชียืนยันตรงข้อเสนอ) = ไม่ต้องอนุมัติ
+  const AN = E.priceFixApprovalNeed(state, P, req, data.lines, user.username);
+  if(AN.needAp){
     if(typeof E.requestApprovalIfNeeded !== 'function'){ alert('⛔ ระบบอนุมัติยังไม่พร้อม — โหลดหน้าใหม่แล้วลองอีกครั้ง'); return 'blocked'; }
     const proposalBy = req && req.proposal ? req.proposal.by : undefined;
     const dAct = { type:'ADJUST_INV_PRICE', data:{ ...data, direct:true } };
@@ -72365,7 +72847,7 @@ function AdjustInvPriceModal({ inv, state, dispatch, user, onClose }){
         '💡 ใช้เมื่อใบกำกับเดิมถูก แต่ระบบคีย์ราคาต่อหน่วยผิด — แก้ราคาได้รายบรรทัด จำนวนแก้ไม่ได้ · ของที่ยังอยู่ปรับต้นทุนล็อต ส่วนที่ใช้ไปแล้วลงผลต่างราคาซื้อ (5391) · ',
         h('b', null, 'บัญชีคีย์เองแล้วราคาขึ้น = ต้องอนุมัติ'), ' (ไม่อยากรออนุมัติ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา)'),
       h(PriceKeyTable, { rows, price, setPrice, editable:true, state, user, inv:live }),
-      h(PriceFixImpact, { plan, state, user }),
+      h(PriceFixImpact, { plan, state, user, ap:plan ? global.ERP.priceFixApprovalNeed(state, plan, null, lines, user && user.username) : null }),
       h('label', { className:'block text-sm', 'data-testid':'pf-adjust-tino-label' }, noLbl + ' *',
         nonVat && h('span', { className:'ml-1 text-xs text-gray-500' }, global.ERP.priceFixNonVatBySupplier(state, 'inv', live) ? '(ผู้ขายไม่จด VAT — ไม่ใช่ใบกำกับภาษี)' : '(เอกสารนี้ไม่มี VAT — ไม่เข้ารายงานภาษีซื้อ)'),
         h('input', { className:cls('w-full border rounded px-2 py-1 text-sm mt-1', curNo && 'bg-gray-100'), value:tiNo, readOnly:!!curNo, 'data-testid':'pf-adjust-tino', onChange:(e) => setTiNo(e.target.value) })),
@@ -72396,6 +72878,9 @@ function PriceFixReqActions({ target, doc, state, dispatch, user, onDone }){
     sw && req.status === 'submitted' && h(Button, { size:'sm', variant:'outline', onClick:() => run('RETURN_INV_PRICE_FIX'), 'data-testid':'pf-return' }, '↩️ ส่งกลับจัดซื้อ'),
     h(Button, { size:'sm', variant:'outline', onClick:() => run('CANCEL_INV_PRICE_FIX'), 'data-testid':'pf-cancel' }, '✖ ยกเลิกคำขอ'));
 }
+// กล่องม่วง: คำขออนุมัติปรับราคาค้างอยู่ (verify 1: ข้อความกลาง ๆ · ใช้ทั้งหน้า PI และหน้าสร้าง INV)
+const PfLegacyApBox = ({ ap }) => h('div', { className:'bg-purple-50 border border-purple-300 rounded p-2 text-xs text-purple-900', 'data-testid':'pf-legacy-ap' },
+  '⏳ มีคำขออนุมัติปรับราคาค้างอยู่ (ขอโดย ', ap.requestedBy || '-', ') — ให้ GM อนุมัติ หรือผู้ขอยกเลิกคำขออนุมัติ (🔔) แล้วกด ✅ ยืนยันราคาใหม่ได้เลย ไม่ต้องส่งจัดซื้อใหม่');
 // แผงในหน้า PI (INVDetailModal): คำขอเปิดอยู่ — open = รอจัดซื้อ · submitted = 🔍 รอบัญชียืนยันราคา (เก่า→ใหม่ + รูป + ผลต่อต้นทุน → ✅/↩️/✖)
 function PriceFixReviewPanel({ inv, state, dispatch, user }){
   const req = inv.priceFixRequest;
@@ -72407,6 +72892,9 @@ function PriceFixReviewPanel({ inv, state, dispatch, user }){
   const lines = pfChanged(rows, price);
   const sub = !!req && req.status === 'submitted';
   const plan = sub && lines.length ? global.ERP.planInvPriceAdjust(state, { mode:'post_pi', invId:inv.id, lines }) : null;
+  const ap = plan ? global.ERP.priceFixApprovalNeed(state, plan, req, lines, user && user.username) : null;   // 🆕 PF-NOREAPPROVE N1
+  // คำขออนุมัติที่ค้างจากกติกาเดิม (ก่อน 2026-10-19) — ผู้ขอยกเลิกได้ (🔔) แล้วยืนยันใหม่ทางสองคน
+  const legacyAp = sub ? global.ERP.invPriceApprovalPending(state, inv.id) : null;
   const att = req && (req.attachments || [])[0];
   if(!req || !global.ERP.priceFixLive(inv)) return null;
   const confirmIt = () => {
@@ -72425,16 +72913,18 @@ function PriceFixReviewPanel({ inv, state, dispatch, user }){
         ' → ', h('b', { className:'text-blue-800' }, m(pp.newNet)), h('span', { className:'text-xs text-blue-700' }, ' (รอยืนยัน)')) : null; })(),
     att && h('a', { href:att.dataUrl, target:'_blank', rel:'noopener', className:'inline-block' }, h('img', { src:att.dataUrl, className:'h-24 border rounded', alt:req.cashBillNo ? 'บิล' : 'ใบกำกับ', 'data-testid':'pf-photo' })),
     sub && h(PriceKeyTable, { rows, price, setPrice, editable:canAcct, state, user, proposal:req.proposal, inv }),
-    sub && h(PriceFixImpact, { plan, state, user }),
+    sub && h(PriceFixImpact, { plan, state, user, ap }),
+    legacyAp && h(PfLegacyApBox, { ap:legacyAp }),
     !pfOn(state) ? h('div', { className:'text-xs text-gray-700', 'data-testid':'pf-switch-off-note' }, 'ปิดการปรับราคาตามใบกำกับแล้ว — คำขอนี้ไม่กันขอจ่ายอีก · กด ✖ ยกเลิกคำขอ เพื่อเก็บกวาด')
       : !sub && h('div', { className:'text-xs text-orange-800' }, 'ระหว่างรอ ขอจ่ายใบนี้ไม่ได้ · ยกเลิกคำขอได้ทุกเมื่อ'),
     pfCanAcct(user) && h('div', { className:'flex gap-2 flex-wrap items-center' },
-      canAcct && sub && h(Button, { size:'sm', variant:'success', onClick:confirmIt, 'data-testid':'pf-confirm', disabled:!!(plan && plan.blocks.length) },
-        plan && plan.needsApproval ? '📤 ยืนยัน + ส่งขออนุมัติ' : '✅ ยืนยันราคา'),
+      canAcct && sub && h(Button, { size:'sm', variant:'success', onClick:confirmIt, 'data-testid':'pf-confirm', disabled:!!(plan && plan.blocks.length) || !!(legacyAp && ap && ap.twoPerson),
+        title:(legacyAp && ap && ap.twoPerson) ? 'มีคำขออนุมัติปรับราคาค้างอยู่ — ให้ GM อนุมัติ หรือยกเลิกคำขอ' : ap && ap.needAp ? 'ต้องขออนุมัติ — ' + ap.why : undefined },
+        ap && ap.needAp ? '📤 ยืนยัน + ส่งขออนุมัติ' : '✅ ยืนยันราคา'),
       h(PriceFixReqActions, { target:'inv', doc:inv, state, dispatch, user })));
 }
 // แผงราคาตามใบกำกับใน CreateINVModal (ยังไม่ตั้งหนี้ → at_gr): ป้ายสถานะ · ตาราง เก่า→ใหม่ (เติมราคาจัดซื้อ) · ผลต่อต้นทุน · ↩️/✖ ของคำขอ
-function CreateInvPricePanel({ state, dispatch, user, grLive, pfReq, pfSub, pfShow, pfKeyOpen, setPfKeyOpen, pfRows, pfPrice, setPfPrice, pfPlan, pfReason, setPfReason, pfPiRemnant, pfBadge }){
+function CreateInvPricePanel({ state, dispatch, user, grLive, pfReq, pfSub, pfShow, pfKeyOpen, setPfKeyOpen, pfRows, pfPrice, setPfPrice, pfPlan, pfAp, pfReason, setPfReason, pfPiRemnant, pfBadge, pfLegacyAp }){
   const canAcct = pfCanAcct(user);
   if(pfBadge && pfBadge.key !== 'submitted') return h('div', { className:'bg-orange-50 border-2 border-orange-300 rounded p-3 text-sm space-y-2', 'data-testid':'inv-pf-hold' },
     h('div', { className:'font-bold text-orange-900' }, pfBadge.tag),
@@ -72453,7 +72943,8 @@ function CreateInvPricePanel({ state, dispatch, user, grLive, pfReq, pfSub, pfSh
       ((pfReq.attachments || [])[0]) && h('a', { href:pfReq.attachments[0].dataUrl, target:'_blank', rel:'noopener', className:'ml-2 text-blue-700 underline' }, '🖼️ ดูรูป' + pfPaper(pfCash(state, pfReq, 'gr', grLive)))),
     !pfSub && h('div', { className:'text-xs text-amber-900' }, 'จำนวนแก้ไม่ได้ · ราคาขึ้นที่บัญชีคีย์เอง = ต้องอนุมัติก่อนตั้งหนี้ (ไม่อยากรอ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา)'),
     h(PriceKeyTable, { rows:pfRows, price:pfPrice, setPrice:setPfPrice, editable:true, state, user, proposal:pfSub ? pfReq.proposal : null }),
-    h(PriceFixImpact, { plan:pfPlan, state, user }),
+    h(PriceFixImpact, { plan:pfPlan, state, user, ap:pfAp }),
+    pfLegacyAp && h(PfLegacyApBox, { ap:pfLegacyAp }),
     !pfSub && h('input', { className:'w-full border rounded px-2 py-1 text-sm', placeholder:'เหตุผลที่แก้ราคา (บังคับ)', value:pfReason, 'data-testid':'inv-pf-reason', onChange:(e) => setPfReason(e.target.value) }),
     pfSub ? h(PriceFixReqActions, { target:'gr', doc:grLive, state, dispatch, user })
       : h('button', { className:'text-xs text-gray-600 underline', onClick:() => { setPfKeyOpen(false); setPfPrice(Object.fromEntries(pfRows.map(r => [r.key, String(Number(r.l.unitPrice) || 0)]))); } }, 'ยกเลิกการคีย์ราคา (ใช้ราคาเดิม)'));
@@ -77569,8 +78060,12 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   const pfVat = Object.fromEntries(((pfSub && pfReq.proposal && pfReq.proposal.lines) || []).filter(x => x && x.newVatRate != null).map(x => [x.grId + ':' + x.lineIdx, x.newVatRate]));
   const pfLines = pfShow ? pfChanged(pfRows, pfPrice, pfVat) : [];
   const { plan:pfPlan, gr } = pfVirtualGr(state, grLive, pfLines);   // 🆕 PV3-2: ตัวช่วยเดียวกับแถวคิวตั้งหนี้
+  const pfAp = pfPlan ? global.ERP.priceFixApprovalNeed(state, pfPlan, pfSub ? pfReq : null, pfLines, user && user.username) : null;   // 🆕 PF-NOREAPPROVE N1: ตัวตัดสินเดียวกับ reducer
   const pfKeyed = !!pfPlan;
   const pfBadge = pfSw ? priceFixBadgeOf(state, 'gr', grLive) : null;
+  // 🆕 PF-NOREAPPROVE UAT S1: คำขออนุมัติค้างจากกติกาเดิม (เช่น GR-20261016-0004) — โชว์กล่องม่วง + ปิดปุ่มตั้งหนี้เมื่อจะไปทางสองคน (reducer กันอยู่แล้ว)
+  const pfLegacyAp = pfSw && pfSub ? global.ERP.grPriceApprovalPending(state, grLive.id) : null;
+  const pfLegacyBlock = pfLegacyAp && pfAp && pfAp.twoPerson ? 'มีคำขออนุมัติปรับราคาค้างอยู่ — ให้ GM อนุมัติ หรือยกเลิกคำขอ' : null;
   const sup = state.suppliers.find(s => s.id === gr.supplierId);
   const po = gr.poId ? state.pos.find(p => p.id === gr.poId) : null;
   const poStatus = po ? getPOReceiveStatus(po, state) : null;
@@ -78345,7 +78840,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
     h('div', { className:'space-y-4' },
 
       // 🆕 PRICE-FIX ขั้น 4: แผงราคาตามใบกำกับ (P1 รายบรรทัด · P4 จำนวนล็อก)
-      pfSw && h(CreateInvPricePanel, { state, dispatch, user, grLive, pfReq, pfSub, pfShow, pfKeyOpen, setPfKeyOpen, pfRows, pfPrice, setPfPrice, pfPlan, pfReason, setPfReason, pfPiRemnant, pfBadge }),
+      pfSw && h(CreateInvPricePanel, { state, dispatch, user, grLive, pfReq, pfSub, pfShow, pfKeyOpen, setPfKeyOpen, pfRows, pfPrice, setPfPrice, pfPlan, pfAp, pfReason, setPfReason, pfPiRemnant, pfBadge, pfLegacyAp }),
       // 🆕 UAT M1 (T12): ปิดสวิตช์แล้ว คำขอค้างไม่กันตั้งหนี้ — ให้บัญชี ✖ ยกเลิกเก็บกวาดได้
       !pfSw && pfReq && pfCanAcct(user) && h('div', { className:'bg-gray-50 border rounded p-2 text-xs flex items-center gap-2 flex-wrap', 'data-testid':'inv-pf-stale' },
         'มีคำขอแก้ราคาค้าง (ปิดการปรับราคาตามใบกำกับแล้ว — ไม่กันตั้งหนี้)', h(PriceFixReqActions, { target:'gr', doc:grLive, state, dispatch, user })),
@@ -78797,14 +79292,18 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
       ),
 
+      pfLegacyBlock && h('div', { className:'bg-purple-50 border border-purple-200 rounded p-2 text-xs text-purple-900', 'data-testid':'inv-create-legacy-block' }, '⛔ ', pfLegacyBlock),
       (pfAmtBlock || pfNetBlock) && h('div', { className:'bg-red-50 border border-red-200 rounded p-2 text-xs text-red-800', 'data-testid':'inv-override-block' }, '⛔ ', pfAmtBlock || pfNetBlock),
       h('div', { className:'flex gap-2 pt-3 border-t flex-wrap' },
-        h(Button, { variant:'primary', onClick:save, 'data-testid':'inv-create-save', disabled:!!(pfBadge && pfBadge.hold) || !!pfAmtBlock || !!pfNetBlock,
-          title:(pfBadge && pfBadge.hold) || pfAmtBlock || pfNetBlock || undefined },
-          pfKeyed && pfPlan && (pfPlan.needsApproval || (!pfSub && pfPlan.isIncrease)) ? '📤 ส่งขออนุมัติราคา (ยังไม่ตั้งหนี้)' : pfKeyed ? '💾 ยืนยันราคา + สร้าง INV + Post JE' : '💾 สร้าง INV + Post JE'),
+        h(Button, { variant:'primary', onClick:save, 'data-testid':'inv-create-save', disabled:!!(pfBadge && pfBadge.hold) || !!pfAmtBlock || !!pfNetBlock || !!pfLegacyBlock,
+          title:(pfBadge && pfBadge.hold) || pfAmtBlock || pfNetBlock || pfLegacyBlock || undefined },
+          pfKeyed && pfPlan && pfAp && pfAp.needAp ? '📤 ส่งขออนุมัติราคา (ยังไม่ตั้งหนี้)' : pfKeyed ? '💾 ยืนยันราคา + สร้าง INV + Post JE' : '💾 สร้าง INV + Post JE'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
         // 🆕 PRICE-FIX ขั้น 4 (P5): ↩️ ส่งให้จัดซื้อแก้ราคา (ยังไม่มีคำขอ) · คำขอที่จัดซื้อส่งกลับแล้ว → ↩️ ส่งกลับ / ✖ ยกเลิก อยู่ในแผงราคาด้านบน
-        pfSw && pfCanAcct(user) && !pfReq && !pfBadge && h(Button, { variant:'outline', 'data-testid':'inv-create-pfreq', onClick:() => setPfReqOpen(true) }, '↩️ ส่งให้จัดซื้อแก้ราคา'),
+        pfSw && pfCanAcct(user) && !pfReq && !pfBadge && h(Button, { variant:'outline', 'data-testid':'inv-create-pfreq',
+          // 🆕 UNDO_PRINCIPLE C11: GR ทรัพย์สินล้วนที่แก้ไม่ได้ = บอกเหตุผล (ไม่ซ่อนปุ่ม)
+          title:(() => { const c = global.ERP.grCapexFixInfo(state, grLive); return c ? (c.deny ? '⛔ ' + c.deny : global.ERP.CAPEX_PF_BADGE) : undefined; })(),
+          onClick:() => { const c = global.ERP.grCapexFixInfo(state, grLive); if(c && c.deny){ alert('⛔ ' + c.deny); return; } setPfReqOpen(true); } }, '↩️ ส่งให้จัดซื้อแก้ราคา'),
       ),
       pfReqOpen && h(PriceFixRequestModal, { target:'gr', doc:grLive, state, dispatch, user, onClose:() => setPfReqOpen(false), onDone:onClose })
     )
@@ -82047,7 +82546,7 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
           '💰 ปรับราคา / ↩️ ส่งให้จัดซื้อ ใช้ไม่ได้: ', priceAdjBlock),
         !inv.voided && (!isMigratedInv || _migBackOk) && hasPerm(user,'purchase','inv','delete') && (inv.paidAmount||0) === 0 && /* MIG_AP_NORMAL N1 */
           !(state.payments||[]).some(p => (p.invId===inv.id || p.invoiceIds?.includes(inv.id)) && p.approvalStatus==='pending') &&
-          h(Button, { variant:'danger',
+          h(Button, { variant:'danger', title:global.ERP.voidInvBtnTitle ? global.ERP.voidInvBtnTitle(state, user, inv, '') : undefined,   // UNDO_PRINCIPLE §2.3
             onClick:()=>{
               // 🆕 FX-1: เช็ค WHT cert ที่ออกไปแล้ว → เตือน user เรื่องภาษี
               const activeWhtCerts = (inv.whtCertificates||[]).filter(c => !c.voided);
@@ -82073,28 +82572,16 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
                 : '• ปลดล็อก GR (ตั้งหนี้ INV ใหม่ได้ · ราคาผิด: ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา)') +
                 (activeWhtCerts.length > 0 ? '\n• Mark WHT cert ' + activeWhtCerts.length + ' ฉบับ เป็น voided' : '') +
                 ((global.ERP.migChargeNote && global.ERP.migChargeNote(inv)) || '') +   // 🆕 MIG_AP_NORMAL UAT SF3
+                ((global.ERP.voidInvPromptLine && global.ERP.voidInvPromptLine(state, user, inv)) || '') +   // 🆕 UNDO_PRINCIPLE UAT SF1
                 '\n\nเหตุผล:', '');
               if(reason === null) return;
               if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
-              const _vAct = { type:'VOID_INV', data:{ invId:inv.id, reason, by:user.username } };
-              const sent = global.ERP.requestApprovalIfNeeded && global.ERP.requestApprovalIfNeeded({ direct:true, directAct:_vAct,   // UAT M1: GM ลองก่อนประทับ 👑
-                action:'delete_inv', user, state, dispatch,
-                context:{
-                  entityType:'inv', entityId:inv.id, entityRef:inv.invNumber,
-                  scope:'accounting', amount: inv.netPayable||0,
-                  wasPaid: (Number(inv.paidAmount) || 0) > 0,   // 🆕 APPROVAL 1b-2 (D-1): ใบจ่ายแล้ว = 2 ขั้น (r_delete_inv_paid)
-                  reason:`↩️ ย้อนไปตั้งหนี้: ${inv.invNumber} · ${reason}`,
-                  payload:{ invId: inv.id, reason }
-                }
-              });
-              if(sent){ onClose(); return; }
-              // No approval rule → execute directly
-              const _gmV = global.ERP.gmDirectLast && global.ERP.gmDirectLast();
-              try { const _cs = { ...state, currentUser:state.currentUser || user };
-                if(global.ERP.reducer && global.ERP.reducer(_cs, _vAct) === _cs){ if(_gmV) global.ERP.gmDirectFail('ระบบไม่รับการยกเลิก ' + inv.invNumber, dispatch); return; } } catch(_e){}   // 🆕 DEPOSIT-VAT R3: ถูกปฏิเสธ → reducer แจ้งแล้ว ไม่ขึ้น ✅
-              dispatch(_vAct);
+              // 🆕 UNDO_PRINCIPLE §2.3: ทางเข้าเดียว (ทำได้เลย/ขออนุมัติ/ปฏิเสธ ตามหลักการย้อน) · GM 👑 + dry-run reducer อยู่ในตัวกลาง
+              const _r = global.ERP.voidInvViaApproval(state, dispatch, user, inv, reason.trim());
+              if(_r === 'sent'){ onClose(); return; }
+              if(_r !== 'done') return;
               alert(`✅ ย้อน ${inv.invNumber} ไปตั้งหนี้แล้ว\nGR กลับเข้าคิว 🧾 เจ้าหนี้ — ตั้งหนี้ใหม่ได้ · ถ้าต้องแก้ PO แจ้งจัดซื้อใช้ 🔧 แก้เต็ม บน PO แล้วส่งอนุมัติใหม่` +
-                (activeWhtCerts.length > 0 ? `\n📋 WHT cert ${activeWhtCerts.length} ฉบับ mark voided — ไป "Voided WHT" ดูรายการสำหรับยื่นแก้` : ''));
+                (activeWhtCerts.length > 0 ? `\n📋 WHT cert ${activeWhtCerts.length} ฉบับ mark voided — ไป "Voided WHT" ดูรายการสำหรับยื่นแก้` : '') + global.ERP.voidInvDirectTail());
               onClose();
             },
             'data-testid':'inv-back-to-ap' }, '↩️ ย้อนไปตั้งหนี้'),   // 🆕 UAT2 N2: ใบยังไม่จ่าย = ↩️ ย้อนไปตั้งหนี้ (คำเดียวกันทุกจอ)
@@ -83848,7 +84335,7 @@ ${_internalHtml}${_row6InternalHtml}
       <span class="id13-label">เลขประจำตัวผู้เสียภาษีอากร (13 หลัก)* ${digits13(sup?.taxId)}</span>
     </div>
     <div class="row1">
-      <span>ชื่อ</span><span class="val full"><u>${sup?.name || inv.supplierNameFreeform || ''}${_supBranchHtml(sup)}</u></span>
+      <span>ชื่อ</span><span class="val full"><u>${sup?.name || inv.supplierNameFreeform || ''}${_supBranchHtml(sup, sup?.name || inv.supplierNameFreeform || '')}</u></span>
       <span class="taxid-inline">เลขประจำตัวผู้เสียภาษีอากร ${digits10('')}</span>
     </div>
     <div class="hint">(ให้ระบุว่าเป็น บุคคล นิติบุคคล บริษัท สมาคม หรือคณะบุคคล)</div>
@@ -84735,9 +85222,11 @@ function openPrintWindow(title, bodyHTML, opts){
 //   ใบที่ตรึง supplierSnapshot ไว้ (PI) → ใช้สาขาตอนตั้งหนี้ก่อน (แก้ทะเบียนทีหลัง ใบเก่าไม่เปลี่ยน)
 //   🆕 (verify): รับ party ตัวเดียว — ผู้เรียกเลือกแหล่ง (piVendor / whtPayee / ทะเบียนสด) ทั้งก้อน ไม่เลือกทีละช่อง
 //   snapshot ที่สาขาว่าง = ตอนนั้นไม่ได้ระบุ → ใบเก่าพิมพ์ซ้ำไม่เติมสาขาจากทะเบียนทีหลัง
-function _supBranchHtml(party){
+//   🆕 (verify 1): ส่ง name (ต่อท้ายชื่อ) → ชื่อลงท้ายด้วยสาขาอยู่แล้ว เช่น "… (สนญ.)" → ไม่พิมพ์ซ้ำ
+function _supBranchHtml(party, name){
   const t = global.ERP.partyTaxBranchText ? global.ERP.partyTaxBranchText(party) : '';
-  return t ? ' · ' + String(t).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c])) : '';
+  if(t && name != null && global.ERP.partyBranchParen && !global.ERP.partyBranchParen(t, name)) return '';
+  return t ? ' (' + String(t).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c])) + ')' : '';   // 🆕 PARTY_BRANCH_PAREN
 }
 // ผู้ขายบนใบพิมพ์ PI/PV/ใบขออนุมัติจ่าย — piVendor (snapshot ก่อน ไม่มีค่อยทะเบียนสด)
 function _printVendor(inv, state){
@@ -85402,7 +85891,7 @@ function payCoverWindowBody(m){
   return `<div class="pcv" data-pcv="${e(m.invId)}">
 <div class="pcv-hd"><div><div class="pcv-cn">${e(m.company.name)}</div><div>${e(m.company.address)}</div>${m.company.taxId ? `<div>เลขประจำตัวผู้เสียภาษี ${e(m.company.taxId)}</div>` : ''}</div>
 <div><div class="pcv-h1">ใบปะหน้าสรุปการจ่าย</div><div style="text-align:right">${m.isExp ? 'บิลค่าใช้จ่าย' : 'ใบตั้งหนี้'} <b>${e(m.invNumber)}</b> · ${e(d(m.invDate))}</div></div></div>
-<div class="pcv-box"><div><div class="pcv-lb">ผู้ขาย</div><div>${e(m.supplier.name)}${m.supplier.branchText ? ' · ' + e(m.supplier.branchText) : ''}</div>
+<div class="pcv-box"><div><div class="pcv-lb">ผู้ขาย</div><div>${e(m.supplier.name)}${e(global.ERP.partyBranchParen(m.supplier.branchText, m.supplier.name))}</div>
 <div class="pcv-lb" style="margin-top:1mm">เลขใบแจ้งหนี้/ใบกำกับ</div><div data-pcv-docnos>${e(m.docNos.join(', ') || '-')}</div></div>
 <div class="pcv-lad">${lad}</div></div>
 <table class="pcv-t"><thead><tr><th style="width:6%">#</th><th style="width:13%">วันที่จ่าย</th><th>ประเภท/แหล่งเงิน</th><th style="width:20%">เลข PV/ใบจ่าย</th><th style="width:15%">ผู้อนุมัติ</th><th style="width:15%">ยอด</th></tr></thead>
@@ -85654,7 +86143,7 @@ function pvVoucherPagesHTML(model, paperKey){
   const ttHTML = `<div class="pvv-tt"><div class="pvv-h1">ใบสำคัญจ่าย${ec ? ' <small>(สำเนา)</small>' : ''}</div><div>PAYMENT VOUCHER</div>`
     + `<div class="pvv-1l">เลขที่ <b>${docNo}</b> · วันที่จ่าย <b>${E(_pvvDate(m.payDate))}</b></div>`
     + (ec ? '<div class="pvv-cp">สำเนาจากประวัติ Ecount — ไม่ใช่การจ่ายในระบบนี้</div>' : '') + '</div>';
-  const supTax = `เลขผู้เสียภาษี <b>${E(sp.taxId || '-')}</b>${sp.branchText ? ' · ' + E(sp.branchText) : ''}`;
+  const supTax = `เลขผู้เสียภาษี <b>${E(sp.taxId || '-')}</b>${sp.branchText ? ' (' + E(sp.branchText) + ')' : ''}`;
   const supBox = `<div class="pvv-box"><div class="pvv-lb">ผู้รับเงิน (Supplier)</div><div class="pvv-1l" title="${E(sp.name)}"><b>${E(sp.name || '-')}</b></div>`
     + `<div class="pvv-cl2">${E(sp.address || '-')}</div><div class="pvv-1l">${supTax}</div></div>`;
   const pl = [];
@@ -93040,7 +93529,8 @@ function DisposeAssetModal({ asset, state, dispatch, user, onClose }){
 
 // 🆕 GM-SELF (เจ้าของ 2026-09-29): รายการที่ GM/เจ้าของ ทำโดยไม่ผ่านอนุมัติ — ให้ผู้ตรวจสอบดูย้อนหลัง (auditLog type gm_self_approved · รวม PO ที่อนุมัติของตัวเอง)
 // SELF-APPROVE UAT S1: kind = 'gm' (👑 ค่าเดิม) · 'perm' (✋ self_approved_perm: PO/จ่าย/คำขอ) · 'all' (ทั้งสองแบบ)
-const _SELF_AUDIT_TYPES = { gm:['gm_self_approved'], perm:['self_approved_perm'], all:['gm_self_approved', 'self_approved_perm'] };
+// 🆕 UNDO_PRINCIPLE §2.8: undo = ↩️ ย้อนเอง (ไม่ต้องอนุมัติ) — undo_direct (ย้อนใบตั้งหนี้) + pay_request_cancel (ยกเลิกคำขอจ่าย)
+const _SELF_AUDIT_TYPES = { gm:['gm_self_approved'], perm:['self_approved_perm'], undo:['undo_direct', 'pay_request_cancel'], all:['gm_self_approved', 'self_approved_perm', 'undo_direct', 'pay_request_cancel'] };
 function gmSelfAuditRows(state, startDate, endDate, kind){
   const _ty = _SELF_AUDIT_TYPES[kind] || _SELF_AUDIT_TYPES.gm;
   return (state.auditLog || []).filter(e => {
@@ -93055,7 +93545,8 @@ function GmSelfReviewList({ state, startDate, endDate, kind, F }){
   const _fx = F && F.focus && F.focus.ids ? F : null;   // 🆕 TODO-DEEPLINK: เหลือเฉพาะแถวที่งานค้างชี้มา + ไฮไลต์
   const rows = gmSelfAuditRows(state, startDate, endDate, kind).filter(e => !_fx || _fx.fr.isHL(e.id));
   const nm = (u) => ((state.users || []).find(x => x && x.username === u) || {}).name || u || '-';
-  if(kind === 'perm') return h(SelfPermReviewList, { state, rows, nm });   // UAT S1: ✋ แยกตารางจาก 👑
+  if(kind === 'perm') return h(SelfPermReviewList, { state, rows, nm });
+  if(kind === 'undo') return h(SelfUndoReviewList, { rows, nm });   // UNDO_PRINCIPLE §2.8   // UAT S1: ✋ แยกตารางจาก 👑
   if(!rows.length) return h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500', 'data-testid':'gm-self-list' }, 'ไม่มีรายการที่ GM/เจ้าของ ทำโดยไม่ผ่านอนุมัติในช่วงนี้');
   return h('div', { className:'bg-white rounded-lg shadow overflow-x-auto', 'data-testid':'gm-self-list' },
     h('div', { className:'p-3 text-sm text-amber-800 bg-amber-50 border-b' }, '👑 รายการที่ GM/เจ้าของ ทำโดยไม่ผ่านอนุมัติ ', h('b', null, rows.length), ' รายการ — ให้ผู้ตรวจสอบดูย้อนหลัง (ปิดสวิตช์ได้ที่ ⚙️ ตั้งค่า → นโยบาย)'),
@@ -93088,6 +93579,26 @@ function SelfPermReviewList({ state, rows, nm }){
         h('td', { className:'px-2 py-1.5 font-mono text-xs' }, e.entityRef || e.entityId || '-'),
         h('td', { className:'px-2 py-1.5 text-right' }, (Number(e.amount) || 0) > 0 ? fmtCur(e.amount) : '-'),
         h('td', { className:'px-2 py-1.5 text-xs ' + st.cls, title:st.title || '' }, st.label)); }))));
+}
+// 🆕 UNDO_PRINCIPLE §2.8 (U9): รายการย้อนเอง (ไม่ต้องอนุมัติ) — ให้ GM/บัญชีตรวจย้อนหลัง · basis flow = ขั้นปกติ · approver = ผู้อนุมัติย้อนเอง
+const _UNDO_BASIS_LABEL = { flow:'ขั้นปกติ', approver:'ผู้อนุมัติย้อนเอง' };
+function SelfUndoReviewList({ rows, nm }){
+  if(!rows.length) return h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500', 'data-testid':'self-undo-list' }, 'ไม่มีรายการย้อนเองในช่วงนี้');
+  return h('div', { className:'bg-white rounded-lg shadow overflow-x-auto', 'data-testid':'self-undo-list' },
+    h('div', { className:'p-3 text-sm text-sky-800 bg-sky-50 border-b' }, '↩️ รายการที่ย้อนเองโดยไม่ต้องขออนุมัติ ', h('b', null, rows.length),
+      ' รายการ — ขาไปไม่ต้องอนุมัติ (ยังไม่จ่าย) หรือผู้ย้อนเป็นผู้อนุมัติเอง · ให้ GM/ผู้ตรวจสอบดูย้อนหลัง'),
+    h('table', { className:'w-full text-sm' },
+      h('thead', { className:'bg-gray-50 text-xs text-gray-600' }, h('tr', null,
+        ['เวลา', 'ผู้ทำ', 'เรื่อง', 'เอกสาร', 'ยอด', 'เหตุที่ทำได้เลย', 'หมายเหตุ'].map(x => h('th', { key:x, className:'px-2 py-1.5 text-left' }, x)))),
+      h('tbody', null, rows.map(e => h('tr', { key:e.id, className:'border-t', 'data-self-undo-row':e.type },
+        h('td', { className:'px-2 py-1.5 whitespace-nowrap' }, e.ts ? new Date(e.ts).toLocaleString('th-TH') : '-'),
+        h('td', { className:'px-2 py-1.5' }, nm(e.by)),
+        h('td', { className:'px-2 py-1.5' }, e.type === 'pay_request_cancel' ? '✖ ยกเลิกคำขอจ่าย' : '↩️ ย้อนไปตั้งหนี้'),
+        h('td', { className:'px-2 py-1.5 font-mono text-xs' }, e.entityRef || e.entityId || '-'),
+        h('td', { className:'px-2 py-1.5 text-right' }, (Number(e.amount) || 0) > 0 ? fmtCur(e.amount) : '-'),
+        h('td', { className:'px-2 py-1.5 text-xs', 'data-undo-basis':e.basis || '' }, e.type === 'pay_request_cancel'
+          ? 'ขั้นปกติ' + (e.partiallyApproved ? ' (มีผู้อนุมัติขั้นแรกแล้ว)' : '') : (_UNDO_BASIS_LABEL[e.basis] || e.basis || '-')),
+        h('td', { className:'px-2 py-1.5 text-xs text-gray-600' }, e.note || '-'))))));
 }
 // 🆕 UAT S1: ผลของคำขอที่ผูกกับแถว 👑 — บันทึกลงก่อนสั่งงาน → ต้องดูสถานะคำขอจริง (ทำแล้ว/ทำไม่ได้) · ไม่มีคำขอ (อนุมัติ PO/จ่ายของตัวเองตรง) = ทำแล้ว
 function gmSelfRowStatus(state, e){
@@ -93143,7 +93654,8 @@ function ApprovalRequestsTab({ state, dispatch, user }){
     rejected: (state.approvalRequests||[]).filter(r => r.status === 'rejected').length,
     cancelled:(state.approvalRequests||[]).filter(r => r.status === 'cancelled').length,
     blocked:  (state.approvalRequests||[]).filter(r => r.status === 'blocked').length,
-    selfPerm: gmSelfAuditRows(state, dr.startDate, dr.endDate, 'perm').length,   // SELF-APPROVE UAT S1: ✋ อนุมัติเองด้วยสิทธิ์
+    selfPerm: gmSelfAuditRows(state, dr.startDate, dr.endDate, 'perm').length,
+    selfUndo: gmSelfAuditRows(state, dr.startDate, dr.endDate, 'undo').length,   // UNDO_PRINCIPLE §2.8   // SELF-APPROVE UAT S1: ✋ อนุมัติเองด้วยสิทธิ์
     gmSelf:   gmSelfAuditRows(state, dr.startDate, dr.endDate).length,   // UAT S1: นับตามช่วงวันที่เดียวกับตาราง   // 🆕 GM-SELF: รายการที่ GM ทำโดยไม่ผ่านอนุมัติ   // 🆕 DEPOSIT-VAT UAT: อนุมัติครบแต่ทำไม่ได้ — ต้องยกเลิกแล้วส่งใหม่
   };
 
@@ -93282,7 +93794,8 @@ function ApprovalRequestsTab({ state, dispatch, user }){
         h('option', { value:'cancelled' }, `🚫 ยกเลิก (${counts.cancelled})`),
         h('option', { value:'blocked' }, `⚠️ ติดเงื่อนไข (${counts.blocked})`),
         h('option', { value:'gm_self' }, `👑 GM ทำโดยไม่ผ่านอนุมัติ (${counts.gmSelf})`),
-        h('option', { value:'self_perm' }, `✋ อนุมัติเอง (สิทธิ์) (${counts.selfPerm})`)),   // SELF-APPROVE UAT S1
+        h('option', { value:'self_perm' }, `✋ อนุมัติเอง (สิทธิ์) (${counts.selfPerm})`),
+        h('option', { value:'self_undo' }, `↩️ ย้อนเอง (ไม่ต้องอนุมัติ) (${counts.selfUndo})`)),   // UNDO_PRINCIPLE §2.8   // SELF-APPROVE UAT S1
       counts.expired > 0 && h('button', { onClick:bulkCancelExpired,
         className:'px-3 py-1.5 rounded text-sm font-medium bg-red-100 text-red-700 hover:bg-red-200 border border-red-300' },
         `🗑️ ยกเลิก expired (${counts.expired} ใบ ค้าง >${expiryDays} วัน)`),
@@ -93299,6 +93812,7 @@ function ApprovalRequestsTab({ state, dispatch, user }){
 
     statusFilter === 'gm_self' ? h(GmSelfReviewList, { state, startDate:dr.startDate, endDate:dr.endDate, F }) :
     statusFilter === 'self_perm' ? h(GmSelfReviewList, { state, startDate:dr.startDate, endDate:dr.endDate, kind:'perm' }) :
+    statusFilter === 'self_undo' ? h(GmSelfReviewList, { state, startDate:dr.startDate, endDate:dr.endDate, kind:'undo' }) :
     requests.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
           'ไม่พบคำขออนุมัติในเงื่อนไขนี้')
@@ -99400,8 +99914,12 @@ function INVQueueTab({ state, dispatch, user }){
                                 onClick:()=>{ if(global.ERP.restoreMinimized && global.ERP.restoreMinimized('inv:gr:'+g.id)) return; setShowCreateINV(g); } }, pfPv ? '💸 ตรวจ + ตั้งหนี้' : '💸 ตั้งหนี้')),   // 🆕 PV3-2
                           // 🆕 PRICE-FIX ขั้น 4 (P5): ปุ่มที่ 3 — ราคาในใบกำกับไม่ตรง → ส่งให้จัดซื้อคีย์ราคาใหม่ (กลับมาที่คิวนี้ ป้าย ✏️)
                           pfCanA && !pfB && !blockPi && PriceFixRequestModal && h(Button, { variant:'outline', size:'sm', 'data-testid':'grq-pf-req',
-                            title:'ราคาในใบกำกับไม่ตรงกับที่รับของ — ส่งให้จัดซื้อคีย์ราคาใหม่ แล้วกลับมาตั้งหนี้ที่คิวนี้',
-                            onClick:()=>{ if(global.ERP.restoreMinimized && global.ERP.restoreMinimized('pf:req:gr:'+g.id)) return; setPfReqGr(g); } }, '↩️ ส่งให้จัดซื้อแก้ราคา'),
+                            // 🆕 UNDO_PRINCIPLE C11: GR ทรัพย์สินล้วน — แก้ได้ถ้า grCapexPriceFixDeny ผ่านอย่างน้อย 1 บรรทัด · แก้ไม่ได้ = บอกเหตุผล (ไม่ซ่อนปุ่ม)
+                            'data-pf-capex':(() => { const c = global.ERP.grCapexFixInfo(state, g); return c ? (c.deny ? 'deny' : 'ok') : undefined; })(),
+                            title:(() => { const c = global.ERP.grCapexFixInfo(state, g);
+                              return c && c.deny ? '⛔ ' + c.deny : 'ราคาในใบกำกับไม่ตรงกับที่รับของ — ส่งให้จัดซื้อคีย์ราคาใหม่ แล้วกลับมาตั้งหนี้ที่คิวนี้' + (c ? ' · ' + global.ERP.CAPEX_PF_BADGE : ''); })(),
+                            onClick:()=>{ const c = global.ERP.grCapexFixInfo(state, g); if(c && c.deny){ alert('⛔ ' + c.deny); return; }
+                              if(global.ERP.restoreMinimized && global.ERP.restoreMinimized('pf:req:gr:'+g.id)) return; setPfReqGr(g); } }, '↩️ ส่งให้จัดซื้อแก้ราคา'),
                         )
                       ),
                     );
@@ -99662,6 +100180,8 @@ function PayApprovalTab({ state, dispatch, user }){
     const sup0 = supOf(list[0].supplierId); const inv0 = invOf(list[0]);
     const payeeName0 = (sup0 && sup0.name) || (inv0 && inv0.supplierNameFreeform) || '-';
     const payeeTax0 = (sup0 && sup0.taxId) || '';
+    // 🆕 PARTY_BRANCH_PAREN verify 2: ไม่มีจุด " · " หลังชื่อ + บอกสาขาผู้ขาย "(สำนักงานใหญ่)" เหมือนใบพิมพ์จัดซื้ออื่น
+    const payeeBr0 = (sup0 && global.ERP.partyBranchParen && global.ERP.partyTaxBranchText) ? global.ERP.partyBranchParen(global.ERP.partyTaxBranchText(sup0) || '', payeeName0) : '';
     const nameTd = (sup, inv) => singlePayee ? '' : `<td class="wrap">${esc(sup?.name || inv?.supplierNameFreeform || '-')}${sup?.taxId ? '<div class="tax mono">' + esc(sup.taxId) + '</div>' : ''}</td>`;
     const gmTag = p => gmPendingIds.has(p.id) ? ' <span class="tag">รอ GM</span>' : '';
     const nCols = singlePayee ? 5 : 6;
@@ -99743,7 +100263,7 @@ function PayApprovalTab({ state, dispatch, user }){
 <div class="sheet">
   <h1>ใบสรุปคำขอจ่ายรออนุมัติ (ตามวันนัดจ่าย)${titleSuffix ? ' — ' + esc(titleSuffix) : ''}</h1>
   <div class="sub">${esc(company.name||'')}${company.address ? ' · ' + esc(company.address) : ''}${company.taxId ? ' · เลขผู้เสียภาษี ' + esc(company.taxId) : ''}</div>
-  ${singlePayee ? `<div class="payee">ผู้รับเงิน: <b>${esc(payeeName0)}</b>${payeeTax0 ? ' · เลขผู้เสียภาษี <span class="mono">' + esc(payeeTax0) + '</span>' : ''}</div>` : ''}
+  ${singlePayee ? `<div class="payee">ผู้รับเงิน: <b>${esc(payeeName0)}</b>${esc(payeeBr0)}${payeeTax0 ? ' เลขผู้เสียภาษี <span class="mono">' + esc(payeeTax0) + '</span>' : ''}</div>` : ''}
   <div class="info">
     <div>พิมพ์วันที่: <b>${esc(fmtDateFull(today))}</b></div>
     <div>พิมพ์โดย: <b>${esc(user.name||user.username)}</b></div>
@@ -101989,7 +102509,7 @@ function TaxInvEntryForm({ inv:invProp, state, dispatch, user, onClose, claimYm,
     if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
     const r = _E.voidInvViaApproval(state, dispatch, user, inv, reason.trim());   // 🆕 UAT SF2: ผ่านสายอนุมัติ delete_inv
     if(r === 'rejected') return;
-    if(r === 'done') alert('✅ ย้อน ' + (inv.invNumber || '') + ' แล้ว — GR กลับเข้าคิว "🧾 เจ้าหนี้" ตั้งหนี้ใหม่ได้' + _cn);
+    if(r === 'done') alert('✅ ย้อน ' + (inv.invNumber || '') + ' แล้ว — GR กลับเข้าคิว "🧾 เจ้าหนี้" ตั้งหนี้ใหม่ได้' + _cn + _E.voidInvDirectTail());
     onClose && onClose();
   };
   const hasPendingPay = (state.payments||[]).some(p => (p.invId === inv.id || p.invoiceIds?.includes(inv.id)) && p.approvalStatus === 'pending');
@@ -102836,8 +103356,8 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
   const pg = usePaged(invs, 50);
   const voidINV = (i, back) => {
     const _mig = !!(global.ERP.invIsMigrated && global.ERP.invIsMigrated(i));
-    const reason = prompt(back ? `↩️ ย้อน ${i.invNumber} ไปตั้งหนี้?\n\n• ใบตั้งหนี้นี้ถูกยกเลิก${_mig ? ' + กลับยอดเจ้าหนี้ยกมา (Dr 2100 / Cr 3900)' : ' (กลับ JE อัตโนมัติ)'}\n• GR กลับเข้าคิว 🧾 เจ้าหนี้ — ตั้งหนี้ใหม่ (เดี่ยว/รวม) พร้อมคีย์ใบกำกับ${global.ERP.migChargeNote(i)}\n\nเหตุผล:`
-      : `❌ ยกเลิก/ลบ INV ${i.invNumber} ทั้งใบ?\n\nเหตุผล (เช่น "คีย์ผิด" / "คืนของทั้งล็อต ไม่ต้องจ่าย"):`, '');
+    const reason = prompt(back ? `↩️ ย้อน ${i.invNumber} ไปตั้งหนี้?\n\n• ใบตั้งหนี้นี้ถูกยกเลิก${_mig ? ' + กลับยอดเจ้าหนี้ยกมา (Dr 2100 / Cr 3900)' : ' (กลับ JE อัตโนมัติ)'}\n• GR กลับเข้าคิว 🧾 เจ้าหนี้ — ตั้งหนี้ใหม่ (เดี่ยว/รวม) พร้อมคีย์ใบกำกับ${global.ERP.migChargeNote(i)}${global.ERP.voidInvPromptLine(state, user, i)}\n\nเหตุผล:`
+      : `❌ ยกเลิก/ลบ INV ${i.invNumber} ทั้งใบ?${global.ERP.voidInvPromptLine(state, user, i)}\n\nเหตุผล (เช่น "คีย์ผิด" / "คืนของทั้งล็อต ไม่ต้องจ่าย"):`, '');
     if(reason === null) return;
     if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
     // 🆕 DEPOSIT-VAT verify: ใบแยกตาม WHT (splitGroup) — GR กลับเข้าคิวเมื่อยกเลิกครบทุกใบในชุด
@@ -102851,7 +103371,7 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
     // 🆕 MIG_AP_NORMAL UAT SF2: ผ่านสายอนุมัติ delete_inv (เหมือนหน้ารายละเอียด PI) · reducer ปฏิเสธ → แจ้งแล้ว ไม่ขึ้น ✅
     const _r = global.ERP.voidInvViaApproval(state, dispatch, user, i, reason.trim());
     if(_r !== 'done') return;
-    alert(`✅ ${back ? `ย้อน ${i.invNumber} ไปตั้งหนี้` : `ยกเลิก INV ${i.invNumber}`} แล้ว\n• Reverse JE แล้ว\n• GR กลับเข้าคิว "🧾 เจ้าหนี้" — ตั้งใหม่ได้` + global.ERP.migChargeNote(i));
+    alert(`✅ ${back ? `ย้อน ${i.invNumber} ไปตั้งหนี้` : `ยกเลิก INV ${i.invNumber}`} แล้ว\n• Reverse JE แล้ว\n• GR กลับเข้าคิว "🧾 เจ้าหนี้" — ตั้งใหม่ได้` + global.ERP.migChargeNote(i) + global.ERP.voidInvDirectTail());
   };
   // 🆕 MIG_LATE_INV UAT MF1: ยกเลิกใบยกมาเพิ่มภายหลัง (คีย์ผิด) — ยังไม่จ่าย · ไม่มี GR/JE ให้กลับ · ผ่านสายอนุมัติ delete_inv เหมือนยกเลิก INV
   const voidMigLate = (i) => {
@@ -102859,7 +103379,7 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
     if(reason === null) return;
     if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
     const _r = global.ERP.voidInvViaApproval(state, dispatch, user, i, reason.trim());
-    if(_r === 'done') alert(`✅ ยกเลิกใบยกมา ${i.invNumber} แล้ว`);
+    if(_r === 'done') alert(`✅ ยกเลิกใบยกมา ${i.invNumber} แล้ว` + global.ERP.voidInvDirectTail());
   };
   if(invs.length === 0){
     return String(q||'').trim()
@@ -102988,7 +103508,7 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
                 // 🆕 MIG_AP_NORMAL N7: ใบที่ยังไม่จ่าย (ไม่มีคำขอจ่ายค้าง — คิวนี้ตัดออกแล้ว) → ↩️ ย้อนไปตั้งหนี้ (VOID_INV · สิทธิ์เดียวกับยกเลิก · เหตุผลบังคับ) — ใบนำเข้าที่ยังไม่จ่ายด้วย
                 canVoid && (Number(i.paidAmount)||0) <= 0.005 && !(global.ERP.migInvBackDeny && global.ERP.migInvBackDeny(state, i)) && h('button', {
                   onClick:()=>voidINV(i, true), 'data-testid':'pay-back-to-ap',
-                  title:'ย้อนใบนี้ไปตั้งหนี้ใหม่ — ใบตั้งหนี้ถูกยกเลิก GR กลับเข้าคิว 🧾 เจ้าหนี้ (เช่น ได้ใบกำกับแล้วต้องการตั้งหนี้รวม/คีย์ใหม่)',
+                  title:global.ERP.voidInvBtnTitle(state, user, i, 'ย้อนใบนี้ไปตั้งหนี้ใหม่ — ใบตั้งหนี้ถูกยกเลิก GR กลับเข้าคิว 🧾 เจ้าหนี้ (เช่น ได้ใบกำกับแล้วต้องการตั้งหนี้รวม/คีย์ใหม่)'),   // UNDO_PRINCIPLE §2.3: บอกว่าทำได้เลย/ต้องขออนุมัติ
                   className:'text-xs px-2 py-1 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-300 rounded font-medium' },
                   '↩️ ย้อนไปตั้งหนี้'),
                 // 🆕 MIG_AP_NORMAL N5: ใบนำเข้าที่ระบบบอกค้าง แต่จ่ายจริงแล้วก่อนตัดระบบ (ผจก.บัญชี/GM)
@@ -104243,10 +104763,22 @@ global.ERP.voidInvViaApproval = function(state, dispatch, user, inv, reason){
   // 🆕 MIG_LATE_INV verify 2: ใบยกมาเพิ่มภายหลัง ไม่มี GR/JE → ยกเลิก = ลบหนี้ทิ้ง ไม่ใช่ "ย้อนไปตั้งหนี้" · ใส่ migLate ใน payload ให้การ์ดอนุมัติโชว์ป้าย
   const _ml = !!inv.migLate, _paid = (Number(inv.paidAmount) || 0) > 0;
   const _pre = _ml ? '🗑️ ยกเลิกใบยกมาเพิ่มภายหลัง (ไม่มี GR/JE — ถ้าลง JE ปรับยอดยกมาไว้ต้องกลับเอง)' : (_paid ? 'ยกเลิก INV' : '↩️ ย้อนไปตั้งหนี้');
+  // 🆕 UNDO_PRINCIPLE §2.3: ตัดสินก่อนดูกฎ (U6) — ขาไปไม่ต้องอนุมัติ = ทำได้เลย + audit · ต้องอนุมัติ = สายเดิม (wasPaid จากประวัติ U4)
+  global.ERP.voidInvViaApproval.lastBasis = null; global.ERP.voidInvViaApproval.lastWhy = '';
+  const pol = E.undoPolicy ? E.undoPolicy(state, user, 'delete_inv', { invId:inv.id }) : { mode:'approval', basis:null, why:'', ctx:{ wasPaid:_paid } };
+  if(pol.mode === 'deny'){ alert('⛔ ' + pol.why); return 'sent'; }
+  if(pol.mode === 'direct'){
+    _vAct.data.directUndo = pol.basis;
+    try { const _cs = { ...state, currentUser: state.currentUser || user };
+      if(E.reducer && E.reducer(_cs, _vAct) === _cs) return 'rejected'; } catch(_e){}
+    dispatch(_vAct);
+    global.ERP.voidInvViaApproval.lastBasis = pol.basis; global.ERP.voidInvViaApproval.lastWhy = pol.why;
+    return 'done';
+  }
   const sent = E.requestApprovalIfNeeded && E.requestApprovalIfNeeded({ direct:true, directAct:_vAct,
     action:'delete_inv', user, state, dispatch,
     context:{ entityType:'inv', entityId:inv.id, entityRef:inv.invNumber, scope:'accounting', amount: inv.netPayable||0,
-      wasPaid: _paid, migLate: _ml || undefined, reason:`${_pre}: ${inv.invNumber} · ${reason}`,
+      wasPaid: !!(pol.ctx && pol.ctx.wasPaid) || _paid, migLate: _ml || undefined, reason:`${_pre}: ${inv.invNumber} · ${reason}${pol.why ? ' · ต้องอนุมัติเพราะ: ' + pol.why : ''}`,   // UNDO_PRINCIPLE: เหตุผลต่อท้าย (คงคำนำหน้าเดิมของการ์ด)
       payload: _ml ? { invId: inv.id, reason, migLate:true } : { invId: inv.id, reason } } });
   if(sent) return 'sent';
   const _gmV = E.gmDirectLast && E.gmDirectLast();
@@ -104254,6 +104786,25 @@ global.ERP.voidInvViaApproval = function(state, dispatch, user, inv, reason){
     if(E.reducer && E.reducer(_cs, _vAct) === _cs){ if(_gmV && E.gmDirectFail) E.gmDirectFail('ระบบไม่รับการยกเลิก ' + inv.invNumber, dispatch); return 'rejected'; } } catch(_e){}
   dispatch(_vAct);
   return 'done';
+};
+// 🆕 UNDO_PRINCIPLE §2.3: ข้อความต่อท้าย ✅ เมื่อทำตรง (ว่าง = ไม่ได้ทำตรง)
+global.ERP.voidInvDirectTail = function(){
+  const f = global.ERP.voidInvViaApproval;
+  return f && f.lastBasis ? '\n(ทำได้เลย ไม่ต้องขออนุมัติ — ' + (f.lastWhy || '') + ' · บันทึกให้ตรวจย้อนหลังแล้ว)' : '';
+};
+// 🆕 UNDO_PRINCIPLE §2.3: title ปุ่ม ↩️/ยกเลิก INV ตามนโยบาย (ไม่ซ่อนปุ่ม)
+global.ERP.voidInvBtnTitle = function(state, user, inv, base){
+  const E = global.ERP, pol = E.undoPolicy && inv ? E.undoPolicy(state, user, 'delete_inv', { invId:inv.id }) : null;
+  const t = !pol ? '' : pol.mode === 'direct' ? 'ทำได้เลย (' + pol.why + ')' : pol.mode === 'deny' ? pol.why : 'ต้องขออนุมัติ: ' + pol.why;
+  return (base ? base + (t ? ' · ' : '') : '') + t;
+};
+// 🆕 UNDO_PRINCIPLE UAT SF1: บรรทัดในกล่องถามเหตุผล — แท็บเล็ตไม่มี hover จึงต้องบอกก่อนพิมพ์ว่าทำได้เลยหรือต้องขออนุมัติ (แสดงผลเท่านั้น)
+global.ERP.voidInvPromptLine = function(state, user, inv){
+  const E = global.ERP, pol = E.undoPolicy && inv ? E.undoPolicy(state, user, 'delete_inv', { invId:inv.id }) : null;
+  if(!pol) return '';
+  return '\n' + (pol.mode === 'direct' ? '• ทำได้เลย ไม่ต้องอนุมัติ (' + pol.why + ')'
+    : pol.mode === 'deny' ? '• ทำไม่ได้: ' + pol.why
+    : '• จะส่งขออนุมัติ เพราะ ' + pol.why);
 };
 // 🆕 MIG_AP_NORMAL UAT SF3: ใบนำเข้าที่มีค่าบริการ (ค่าส่ง ฯลฯ) — บอกผู้ใช้ว่ายกไปต่อท้าย GR ให้ตั้งหนี้ใหม่ได้ยอดครบ
 global.ERP.migChargeNote = function(inv){
@@ -106917,7 +107468,7 @@ function printBilling(bn, state){
   <div class="box"><b>ผู้วางบิล</b><br/>${company.name||''}<br/>${company.address||'-'}<br/>
     เลขประจำตัวผู้เสียภาษี ${company.taxId||'-'} (สำนักงานใหญ่)${company.phone ? '<br/>โทร ' + company.phone : ''}</div>
   <div class="box"><b>ลูกค้า</b><br/>${cs.name||'-'}<br/>${cs.address||''}<br/>
-    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + (_buyerBranchText(cs) ? ' · ' + _buyerBranchText(cs) : '') : ''}</div>
+    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + (_buyerBranchText(cs) ? ' (' + _buyerBranchText(cs) + ')' : '') : ''}</div>
 </div>
 <table>${head}<tbody>${rows}</tbody></table>
 ${isPro ? `<div style="font-size:9.5pt;margin:2mm 0">ราคาข้างต้น <b>${bn.priceMode === 'inclusive' ? 'รวมภาษีมูลค่าเพิ่ม 7% แล้ว' : 'ยังไม่รวมภาษีมูลค่าเพิ่ม 7%'}</b></div>` : ''}
@@ -107372,7 +107923,7 @@ function printQuote(qt, state){
     เลขประจำตัวผู้เสียภาษี ${company.taxId || '-'}${global.ERP.sellerBranchCode(b) ? ' (' + (global.ERP.sellerBranchCode(b) === '00000' ? 'สำนักงานใหญ่' : 'สาขาที่ ' + global.ERP.sellerBranchCode(b)) + ')' : ''}${global.ERP.sellerPhone(company, b) ? '<br/>โทร ' + global.ERP.sellerPhone(company, b) : ''}</div>
   <div class="box"><div class="label">ลูกค้า</div>
     ${cs.name || qt.customerName || '-'}<br/>${cs.address || ''}<br/>
-    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + (_buyerBranchText(cs) ? ' · ' + _buyerBranchText(cs) : '') + '<br/>' : ''}
+    ${cs.taxId ? 'เลขประจำตัวผู้เสียภาษี ' + cs.taxId + (_buyerBranchText(cs) ? ' (' + _buyerBranchText(cs) + ')' : '') + '<br/>' : ''}
     ${qt.contactName ? 'ผู้ติดต่อ: ' + qt.contactName : ''} ${qt.contactPhone || ''}</div>
 </div>
 <table class="items">
@@ -108993,7 +109544,7 @@ function printSalesInvoice(si, state, opts){
       <div><b>${c?.name||'-'}</b></div>
       <div>${c?.address||'-'}</div>
       <div>เลขประจำตัวผู้เสียภาษี: <b>${c?.taxId||'-'}</b></div>
-      ${_buyerBranchText(c) ? `<div>${_buyerBranchText(c)}</div>` : ''}
+      ${_buyerBranchText(c) ? `<div>(${_buyerBranchText(c)})</div>` : ''}
     </div>
   </div>
   <div style="display:flex;justify-content:space-between;margin-bottom:4mm;font-size:10pt">
@@ -109093,7 +109644,7 @@ function printPackingList(si, state){
 <div class="warn">เอกสารนี้ไม่ใช่ใบกำกับภาษี และไม่ใช่เอกสารทางบัญชี</div>
 <div class="info">
   <div class="box"><b>ผู้ส่ง</b><br/>${company.name || ''}${sellerBranch ? ' — ' + sellerBranch.name : ''}</div>
-  <div class="box"><b>ลูกค้า</b><br/>${(c && c.name) || si.customerName || ''}${_buyerBranchText(c) ? ' — <b>' + _buyerBranchText(c) + '</b>' : ''}<br/>${(c && c.address) || ''}
+  <div class="box"><b>ลูกค้า</b><br/>${(c && c.name) || si.customerName || ''}${global.ERP.partyBranchParen(_buyerBranchText(c), (c && c.name) || si.customerName || '') ? ' <b>(' + _buyerBranchText(c) + ')</b>' : ''}<br/>${(c && c.address) || ''}
     ${si.deliveryPlace ? `<br/><b>สถานที่ส่ง:</b> ${si.deliveryPlace}` : ''}
     ${si.contactName || si.contactPhone ? `<br/><b>ผู้ติดต่อ:</b> ${si.contactName || ''} ${si.contactPhone || ''}` : ''}</div>
 </div>
@@ -114177,10 +114728,13 @@ function PartyNameOfferPreview({ original, offer, onUse, onCancel }){
 function PartyDocPreview({ name, address, branchText, taxId, oldLine, warns }){
   return h('div', { className:'rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm', 'data-testid':'party-doc-preview' },
     h('div', { className:'text-xs font-semibold text-slate-600 mb-1' }, '📄 หัวเอกสารจะพิมพ์ว่า'),
-    h('div', { className:'font-semibold text-slate-900 break-words', 'data-testid':'party-doc-preview-name' }, (name || '—') + (branchText ? ' · ' + branchText : '')),
+    h('div', { className:'font-semibold text-slate-900 break-words', 'data-testid':'party-doc-preview-name' }, (name || '—') + global.ERP.partyBranchParen(branchText, name || '')),   // verify 1: ชื่อลงท้ายสาขาอยู่แล้ว → ไม่ซ้ำ   // 🆕 PARTY_BRANCH_PAREN
     address && h('div', { className:'text-slate-700 break-words', 'data-testid':'party-doc-preview-addr' }, address),
     taxId && h('div', { className:'text-slate-700' }, 'เลขประจำตัวผู้เสียภาษี ' + taxId),
-    oldLine && h('div', { className:'mt-1 text-xs text-slate-500 break-words', 'data-testid':'party-doc-preview-old' }, 'เดิม: ' + oldLine + '   (เอกสารเก่าไม่เปลี่ยน)'),
+    // 🆕 PARTY_BRANCH_PAREN UAT M1: ชื่อ/ที่อยู่เดิมแยกบรรทัด — ไม่มีจุด " · " ต่อท้าย "จำกัด"
+    oldLine && h('div', { className:'mt-1 text-xs text-slate-500 break-words', 'data-testid':'party-doc-preview-old' },
+      'เดิม: ' + (Array.isArray(oldLine) ? oldLine[0] : oldLine) + '   (เอกสารเก่าไม่เปลี่ยน)',
+      (Array.isArray(oldLine) && oldLine[1]) ? h('div', { 'data-testid':'party-doc-preview-old-addr' }, oldLine[1]) : null),
     (warns || []).map((w, i) => h('div', { key:i, className:'mt-1 text-xs rounded border border-yellow-300 bg-yellow-50 text-yellow-900 px-2 py-0.5', 'data-testid':'pf-soft-warn' }, w)));
 }
 
@@ -114787,7 +115341,7 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
     const warns = [];
     if(/^\d{13}$/.test(taxD) && pv.addrForeign !== true && !_pfTaxChecksumOk(taxD)) warns.push('⛔ เลขผู้เสียภาษีหลักตรวจสอบไม่ตรง (mod-11) — อาจพิมพ์ผิด 1 ตัว · ต้องแก้ก่อนบันทึก');
     _preview = h(PartyDocPreview, { name:pv.name, address:pv.address, branchText:brText, taxId:pv.taxId,
-      oldLine: oldChanged ? [party.name, party.address].filter(x => x != null && String(x).trim() !== '').join(' · ') : null, warns });
+      oldLine: oldChanged ? [String(party.name == null ? '' : party.name).trim() || '—', String(party.address == null ? '' : party.address).trim()] : null, warns });
   }
   const _docKey = isEdit ? ((addAction === 'ADD_SUPPLIER' ? 'sup' : 'cus') + ':' + party.id) : undefined;
   // WHT-PAYEE CHANGELOG รอบ 3: ช่องชื่อบุคคลตามบัตร (WP1) เอาออก — ผู้ถูกหักเลือกจากทะเบียนคู่ค้า (ชิปผู้ถูกหักตอนคีย์ WHT) · ข้อมูลเก่ายังอ่านได้
@@ -121594,6 +122148,12 @@ const navSups  = (ctx) => ctx.perm('settings','suppliers','view') ? { tab:'setti
 const navApprovals = (ctx) => (ctx.can('accounting') && ctx.perm('accounting','approvals','view')) ? { tab:'accounting', subs:{ acct:'approvals' } } : null;
 const HINT_BELL = 'กดกระดิ่ง 🔔 มุมขวาบน → แท็บ "📥 รออนุมัติ" → เปิดคำขอ → อนุมัติ/ปฏิเสธ พร้อมเหตุผล';
 const daysAgoOf = (ctx, v) => { const d = v ? ctx.daysAgo(v) : null; return (d == null || !Number.isFinite(d)) ? null : Math.max(0, d); };
+// 🆕 TR_DATE UAT S2/M1: ใบล่วงหน้า (trDate > วันนี้) → " (ต้องการ dd/mm)" · วันเปิดจริง (createdDate/createdAt) ใช้นับอายุใบ
+const trNeedTag = (ctx, t) => (t && t.trDate && t.trDate > ctx.today)
+  ? ` (ต้องการ ${global.ERP.trDDMM ? global.ERP.trDDMM(t.trDate) : String(t.trDate).slice(8, 10) + '/' + String(t.trDate).slice(5, 7)})` : '';
+const trOpenOf = (t) => (global.ERP.trOpenDate ? global.ERP.trOpenDate(t) : (t && t.trDate)) || '';
+const byTrDate = (a, b) => String(a.trDate||'').localeCompare(String(b.trDate||'')) || (Number(a.createdAt)||0) - (Number(b.createdAt)||0);
+C.trNeedTag = trNeedTag; C.trOpenOf = trOpenOf; C.byTrDate = byTrDate; C.trAgeDays = (ctx, t) => daysAgoOf(ctx, trOpenOf(t));   // ใช้ใน fragment อื่น (คนละ IIFE)
 
 C.registerGroup({
   key:'purchasing', label:'จัดซื้อ', icon:'🛍️', roles:['purchasing'], primary:['purchasing'],
@@ -122094,6 +122654,7 @@ C.registerGroup({
 'use strict';
 const C = global.ERP.MODULES.checklist;
 const { tdo, mkDocs, docNav, apprNav } = C;   // 🎯 TODO-DEEPLINK: todo 1 ใบ/หลายใบ · docs · nav กรองปลายทาง
+const trNeedTag = (ctx, t) => C.trNeedTag(ctx, t), byTrDate = (a, b) => C.byTrDate(a, b);   // 🆕 TR_DATE UAT (ตัวจริงใน fragment จัดซื้อ)
 const { fmtNum, fmtDate, getLowStockAlerts, getPendingAssetLines, hasUnitForPurpose } = global.ERP;
 const _svcAwait = (ctx) => C.svcAwait(ctx);   // 🔧 EXPENSE_PO B10 (ตัวจริงในโมดูลหลัก)
 
@@ -122489,8 +123050,8 @@ C.registerGroup({
       show: (ctx) => ctx.can('transfer') && ctx.perm('transfer','tr','view'),
       nav: { tab:'transfer', subs:{ transfer:'tr' } },
       todo: (ctx, res) => ctx.perm('transfer','tr','approve')
-        ? tdo(d => `จัดของตาม ${d.ref} (ไป ${d.dst}) แล้วกด «✅ อนุมัติ + สร้าง TO (ส่งของ)»`, n => `จัดของตาม TR ${n} ใบนี้ แล้วกด «✅ อนุมัติ + สร้าง TO (ส่งของ)» ทีละใบ`)(ctx, res)
-        : tdo(d => `จัด/แพ็คของตาม ${d.ref} (กด «🖨️ พิมพ์ใบจัดของ») แล้วแจ้ง ผจก./GM กดอนุมัติส่ง`, n => `จัด/แพ็คของตาม TR ${n} ใบนี้ (กด «🖨️ พิมพ์ใบจัดของ») แล้วแจ้ง ผจก./GM กดอนุมัติส่ง`)(ctx, res),
+        ? tdo(d => `จัดของตาม ${d.ref}${d.need||''} (ไป ${d.dst}) แล้วกด «✅ อนุมัติ + สร้าง TO (ส่งของ)»`, n => `จัดของตาม TR ${n} ใบนี้ แล้วกด «✅ อนุมัติ + สร้าง TO (ส่งของ)» ทีละใบ`)(ctx, res)
+        : tdo(d => `จัด/แพ็คของตาม ${d.ref}${d.need||''} (กด «🖨️ พิมพ์ใบจัดของ») แล้วแจ้ง ผจก./GM กดอนุมัติส่ง`, n => `จัด/แพ็คของตาม TR ${n} ใบนี้ (กด «🖨️ พิมพ์ใบจัดของ») แล้วแจ้ง ผจก./GM กดอนุมัติส่ง`)(ctx, res),
       btn: (ctx) => ctx.perm('transfer','tr','approve') ? 'ส่งของ' : 'ดูใบขอของ',
       hint: (ctx) => ctx.perm('transfer','tr','approve')
         ? 'โอนสาขา → 📝 TR (ขอของ) → เปิด TR → จัดของ/แพ็ค แล้วกด "✅ อนุมัติ + สร้าง TO (ส่งของ)" (ระบบตัดสต๊อกต้นทางทันที) · ปุ่มขึ้นเฉพาะเมื่อสาขาที่เลือกอยู่ = สาขาต้นทางของ TR'
@@ -122511,13 +123072,14 @@ C.registerGroup({
         const l = (ctx.state.transferRequests||[]).filter(t => t && t.status === 'pending' && ctx.inScope(t.fromBranch)
           && (ctx.isSuper || !t.createdBy || t.createdBy !== u.username)
           && (!_isIntra(t) || ctx.isSuper || ownsSrc(t)));
+        l.sort(byTrDate);   // 🆕 TR_DATE UAT S2: ต้องการก่อนขึ้นก่อน (ใบล่วงหน้าไปท้าย)
         // 🆕 PRODUCTION-LIVE คลื่น 1 (B10.6 ข้อ 9): แยกตามคลังต้นทาง (คนดูแลคลังนั้นเป็นคนกดส่ง — คลังกลาง = คลัง · คลังไลน์ = หัวหน้าไลน์/ผจก.ผลิต)
         const bySrc = new Map();
         for(const t of l){ const k = t.fromBranch + '|' + (t.fromLocId || ''); if(!bySrc.has(k)) bySrc.set(k, []); bySrc.get(k).push(t); }
         const dest = (t) => (t.fromBranch === t.toBranch && (t.toLocId || t.fromLocId)) ? `${whereLabel(ctx, t.toBranch, t.toLocId)} (ภายในสาขา)` : ctx.branchName(t.toBranch);
         return { count:l.length, detail:[...bySrc.values()].slice(0,6).map(g => `📤 จาก ${whereLabel(ctx, g[0].fromBranch, g[0].fromLocId || null)}: ${g.length} ใบ — `
-          + g.slice(0,3).map(t => `${t.trNumber||t.id} → ${dest(t)}`).join(', ') + (g.length > 3 ? ` …อีก ${g.length - 3}` : '')),
-          noChips:true, docs:mkDocs(l, t => ({ kind:'tr', id:t.id, ref:t.trNumber || t.id, dst:dest(t) })) };
+          + g.slice(0,3).map(t => `${t.trNumber||t.id}${trNeedTag(ctx, t)} → ${dest(t)}`).join(', ') + (g.length > 3 ? ` …อีก ${g.length - 3}` : '')),
+          noChips:true, docs:mkDocs(l, t => ({ kind:'tr', id:t.id, ref:t.trNumber || t.id, dst:dest(t), need:trNeedTag(ctx, t) })) };
       } },
 
     // 🆕 PRODUCTION-LIVE คลื่น 1 (B10.6 ข้อ 9): ของที่ส่งภายในสาขาแล้ว (TR→TO / ใบส่งมอบ) แต่ปลายทางยังไม่กดรับเกิน 4 ชม. — ของอยู่ระหว่างทาง (ไม่อยู่คลังไหน)
@@ -124535,6 +125097,7 @@ C.registerGroup({
 'use strict';
 const C = global.ERP.MODULES.checklist;
 const { tdo, mkDocs, docNav, apprNav } = C;   // 🎯 TODO-DEEPLINK: todo 1 ใบ/หลายใบ · docs · nav กรองปลายทาง
+const trNeedTag = (ctx, t) => C.trNeedTag(ctx, t), byTrDate = (a, b) => C.byTrDate(a, b);   // 🆕 TR_DATE UAT (ตัวจริงใน fragment จัดซื้อ)
 const {
   fmtNum, getStockAtBranch, getBomOutputs, getPrimaryOutput, toBaseQty, getBaseUnit, resolveToBase,
   getLineStockLocation, getFGDestinationLocation, getBranchLines,
@@ -125268,7 +125831,7 @@ C.registerGroup({
     //   alias: ใบเดียวกับ warehouse.wh_tr_to_ship (frag-warehouse.js นับ TR pending ทุกใบที่ fromBranch ในขอบเขต รวมใบภายในสาขา) → ผู้ที่เห็นกลุ่มคลัง (warehouse/PM/gm/admin/manager) ไม่นับซ้ำที่นี่ (FIX_RULES C)
     //     คนหน้างาน role branch ไม่เห็นกลุ่มคลัง → ยังได้แถวนี้ · store.br_tr_pending_or_rejected ตัดใบภายในสาขาออกแล้ว → ไม่ซ้ำกับกลุ่มสาขา
     { key:'prod_tr_refill_pending', label:'คำขอเติมของเข้าไลน์ (TR) รอฝ่ายคลังอนุมัติ', severity:'info', alias:'warehouse.wh_tr_to_ship',
-      todo: tdo(d => `คำขอเติมไลน์ ${d.ref} รอคลังอนุมัติ — ตามคลังให้กด «✅ อนุมัติ + สร้าง TO (ส่งของ)»`, n => `คำขอเติมไลน์ ${n} ใบนี้รอคลังอนุมัติ — ตามคลังให้กด «✅ อนุมัติ + สร้าง TO (ส่งของ)»`),
+      todo: tdo(d => `คำขอเติมไลน์ ${d.ref}${d.need||''} รอคลังอนุมัติ — ตามคลังให้กด «✅ อนุมัติ + สร้าง TO (ส่งของ)»`, n => `คำขอเติมไลน์ ${n} ใบนี้รอคลังอนุมัติ — ตามคลังให้กด «✅ อนุมัติ + สร้าง TO (ส่งของ)»`),
       btn: 'ตามคลัง',
       show: (ctx) => ctx.can('production') || ctx.can('transfer'),
       nav: (ctx) => {
@@ -125281,9 +125844,9 @@ C.registerGroup({
           ? 'ตามฝ่ายคลังให้อนุมัติ + ส่งของใน 🔀 โอนสาขา → TR · ถ้าไม่ต้องการแล้วให้ลบคำขอ (ผู้มีสิทธิ์ลบ TR)'
           : 'แจ้งฝ่ายคลังให้อนุมัติ + ส่งของ (🔀 โอนสาขา → TR) — บัญชีนี้เปิดหน้า TR ไม่ได้',
       run: (ctx) => {
-        const l = (ctx.state.transferRequests||[]).filter(t => t && t.status === 'pending' && t.fromBranch && t.fromBranch === t.toBranch && ctx.inScope(t.fromBranch));
-        return { count:l.length, detail:l.map(t => `${t.trNumber || t.id} · ${(t.lines||[]).length} รายการ (${ctx.branchName(t.fromBranch)})`),
-                 docs:C.mkDocs(l, t => ({ kind:'tr', id:t.id, ref:t.trNumber || t.id })) };
+        const l = (ctx.state.transferRequests||[]).filter(t => t && t.status === 'pending' && t.fromBranch && t.fromBranch === t.toBranch && ctx.inScope(t.fromBranch)).sort(byTrDate);   // 🆕 TR_DATE UAT S2
+        return { count:l.length, detail:l.map(t => `${t.trNumber || t.id}${trNeedTag(ctx, t)} · ${(t.lines||[]).length} รายการ (${ctx.branchName(t.fromBranch)})`),
+                 docs:C.mkDocs(l, t => ({ kind:'tr', id:t.id, ref:t.trNumber || t.id, need:trNeedTag(ctx, t) })) };
       } },
 
     // ref: src/mod-production.js:530 (แท็บ 📥 นำเข้าจาก POS เฉพาะเครื่อง HQ · :10054 เลือกสาขาเป้าหมายได้ทุกสาขา) · :10249 กุญแจ "นำเข้าวันนี้แล้ว" = branchId+importDate+status!=='voided' · :10053,10382 importDate = "วันที่ของข้อมูล" (ไฟล์สรุปวันมักนำเข้าเช้าวันถัดไป → importDate เมื่อวาน + createdAt วันนี้ = ทำแล้ว)
@@ -126214,6 +126777,7 @@ C.registerGroup({
 'use strict';
 const C = global.ERP.MODULES.checklist;
 const { tdo, mkDocs, docNav, apprNav } = C;   // 🎯 TODO-DEEPLINK: todo 1 ใบ/หลายใบ · docs · nav กรองปลายทาง
+const trNeedTag = (ctx, t) => C.trNeedTag(ctx, t), byTrDate = (a, b) => C.byTrDate(a, b);   // 🆕 TR_DATE UAT (ตัวจริงใน fragment จัดซื้อ)
 const { fmtNum, fmtCur, fmtDate, getStockAtBranch, hasUnitForPurpose, getHQBranchId } = global.ERP;
 const _svcAwait = (ctx) => C.svcAwait(ctx);   // 🔧 EXPENSE_PO B10 (ตัวจริงในโมดูลหลัก)
 
@@ -126680,7 +127244,8 @@ C.registerGroup({
         const pend = seesWarehouse(ctx) ? [] : trs.filter(t => t.status === 'pending');
         const rej  = trs.filter(t => t.status === 'rejected' && _n(t.rejectedAt) >= todayMs - 3 * DAY);
         return { count:pend.length + rej.length, docs:C.mkDocs([...rej, ...pend], t => ({ kind:'tr', id:t.id, ref:t.trNumber || t.id, rejected:t.status === 'rejected', reason:t.rejectReason || t.rejectedReason || '' })), pending:pend.length, rejected:rej.length,
-          detail:[...rej.map(t => `${t.trNumber||t.id}${bTag(ctx, t.toBranch)} ❌ ปฏิเสธ`), ...pend.map(t => `${t.trNumber||t.id}${bTag(ctx, t.toBranch)} รอ HQ${t.trDate ? ' ' + fmtNum(ctx.daysAgo(t.trDate)) + ' วัน' : ''}`)].slice(0,6) }; } },
+          detail:[...rej.map(t => `${t.trNumber||t.id}${bTag(ctx, t.toBranch)} ❌ ปฏิเสธ`), ...pend.map(t => { const age = C.trAgeDays(ctx, t);   // 🆕 TR_DATE UAT M1: อายุนับจากวันเปิดจริง (ไม่ติดลบ)
+            return `${t.trNumber||t.id}${bTag(ctx, t.toBranch)} รอ HQ${age != null ? ' ' + fmtNum(age) + ' วัน' : ''}${t.trDate && t.trDate > ctx.today ? ' · ต้องการ ' + trNeedTag(ctx, t).replace(/^ \(ต้องการ |\)$/g, '') : ''}`; })].slice(0,6) }; } },
 
     // ================= sl_* — ฝ่ายขาย HQ (sales-full) =================
 
