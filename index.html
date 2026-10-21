@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="734cc14fe60e";window.__ERP_BUILT_AT__="2026-10-20T15:28:48";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="452655029a02";window.__ERP_BUILT_AT__="2026-10-21T10:35:00";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -2817,7 +2817,7 @@ function resolveItemFavorites(state, user, opts){
   const lineIds = opts.lineIds || getUserAssignedLines(user);
   const itemsById = new Map(((state && state.items) || []).map(i => [i.id, i]));
   const seen = new Set(); const out = [];
-  const take = (f, source) => { if(!f) return; for(const id of (f.itemIds||[])){ if(seen.has(id)) continue; const it = itemsById.get(id); if(!it || it.active === false) continue; seen.add(id);
+  const take = (f, source) => { if(!f) return; for(const id of (f.itemIds||[])){ if(seen.has(id)) continue; const it = itemsById.get(id); if(!it || it.active === false || (it.expenseItemId && itemExpenseLink(state, id))) continue; seen.add(id);   /* 🆕 FREIGHT_EXPENSE verify 2: ค่าใช้จ่ายไม่นับสต๊อกไม่แสดงในรายการโปรด */
     out.push({ item: it, unit: (f.defaultUnit && f.defaultUnit[id]) || null, source }); } };
   for(const lid of lineIds) take(favs.find(f => f.scope === 'line' && f.scopeId === lid), 'line');
   if(branchId) take(favs.find(f => f.scope === 'branch' && f.scopeId === branchId), 'branch');
@@ -3691,6 +3691,8 @@ function grLineIsCapex(state, gr, line){
   const l = line || {};
   // 🆕 OFF_INV_DISC_ASSET A4: บรรทัดค่าส่ง/ค่าติดตั้งที่ "รวมเข้าราคาทุน 💎" (capInto · noStock:true) ไม่ใช่ทรัพย์สินเอง — ลงทุนผ่านบรรทัดปลายทาง
   if(l.capInto != null && !l.isAsset) return false;
+  // 🆕 FREIGHT_EXPENSE F2: บรรทัดค่าใช้จ่ายที่ไม่นับสต๊อก (expCharge · noStock:true) ไม่ใช่ทรัพย์สิน
+  if(l.expCharge && !l.isAsset) return false;
   if(l.noStock != null) return l.noStock === true;
   return grLegacyLineIsCapex(l);
 }
@@ -4030,12 +4032,20 @@ function _buildInvDrLinesRaw(inv, state, opts){
   // A9: GR line ทรัพย์สิน → Dr บัญชีหมวด (1610/1620/1635/1660 → 1600)
   const grIds = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
   const assetByAcc = {}; let assetTotalRaw = 0;
+  const chargeByAcc = {}; let chargeTotalRaw = 0;   // 🆕 FREIGHT_EXPENSE F3: บรรทัดค่าใช้จ่ายไม่นับสต๊อก (expCharge) → Dr บัญชีของบรรทัด
   grIds.forEach(gid => {
     const gr = (state.grs||[]).find(g => g.id === gid);
     if(!gr) return;
     (gr.lines||[]).forEach((l, idx) => {
       // 🆕 OFF_INV_DISC_ASSET A4: บรรทัดที่รวมเข้าราคาทุน 💎 (capInto) → นับเข้าหมวดบัญชีของบรรทัด 💎 ปลายทาง
       const ti = l ? grCapIntoTarget(gr, idx) : -1, tl = ti >= 0 ? gr.lines[ti] : null;
+      const xc = ti < 0 ? grLineExpCharge(l) : null;
+      if(xc){
+        const xacc = accounts.find(a => a.code === xc.accountCode);
+        const xex = xacc ? capexLineExVat(gr, invCapexGrLine(state, inv, gr, l, idx)) : 0;
+        if(xex > 0){ chargeByAcc[xacc.code] = chargeByAcc[xacc.code] || { acc:xacc, amount:0 }; chargeByAcc[xacc.code].amount += xex; chargeTotalRaw += xex; }
+        return;
+      }
       if(!(tl && grLineIsCapex(state, gr, tl)) && (!l || !l.isAsset || !grLineIsCapex(state, gr, l))) return;
       const lex = capexLineExVat(gr, invCapexGrLine(state, inv, gr, l, idx));
       if(!(lex > 0)) return;
@@ -4048,6 +4058,7 @@ function _buildInvDrLinesRaw(inv, state, opts){
     });
   });
   const canSplitAsset = Object.keys(assetByAcc).length > 0 && assetTotalRaw > 0 && assetTotalRaw <= (Number(inv.amount)||0) + 0.01;
+  const canSplitCharge = chargeTotalRaw > 0 && assetTotalRaw + chargeTotalRaw <= (Number(inv.amount)||0) + 0.01;
   const expLines = inv.source === 'direct_expense' && Array.isArray(inv.expenseLines)
     ? inv.expenseLines.filter(l => l && (Number(l.lineTotal)||0) > 0) : [];
   const expSum = expLines.reduce((t,l) => t + (Number(l.lineTotal)||0), 0);
@@ -4105,13 +4116,20 @@ function _buildInvDrLinesRaw(inv, state, opts){
     return { lines, baseAcc };
   }
   if(capLines.length > 0 && !canSplitAsset){ try { console.warn('[ERP] บรรทัด 💎 รวมเกินยอดใบ — ลงแบบเดิม', inv.invNumber); } catch(_e){} }
-  if(canSplitAsset){
+  if(canSplitAsset || canSplitCharge){
     let pushed = 0;
     for(const code in assetByAcc){
       const a = assetByAcc[code];
       const amt = Number(a.amount.toFixed(2));
       lines.push({ accountId:a.acc.id, accountCode:a.acc.code, accountName:a.acc.name,
         debit: amt, credit:0, branchId: br0, description: 'ทรัพย์สิน: ' + (inv.description||inv.invNumber||'') });
+      pushed += amt;
+    }
+    if(canSplitCharge) for(const code of Object.keys(chargeByAcc).sort()){
+      const c = chargeByAcc[code], amt = Number(c.amount.toFixed(2));
+      if(!(amt > 0.005)) continue;
+      lines.push({ accountId:c.acc.id, accountCode:c.acc.code, accountName:c.acc.name,
+        debit: amt, credit:0, branchId: br0, description: 'ค่าใช้จ่าย (ไม่นับสต๊อก): ' + (inv.description||inv.invNumber||''), expCharge:true });
       pushed += amt;
     }
     const nonAsset = Number(((Number(inv.amount)||0) - pushed).toFixed(2));
@@ -4180,6 +4198,17 @@ function applyOffInvDiscDr(rawLines, inv, state, baseAcc){
       // 🆕 OFF_INV_DISC_ASSET A4: ส่วนแบ่งที่ตกบรรทัด capInto → ลด Dr 16xx เดียวกับบรรทัด 💎 ปลายทาง
       const ti = gl0 ? grCapIntoTarget(gr, Number(a.lineIdx)) : -1;
       const gl = ti >= 0 ? gr.lines[ti] : gl0;
+      // 🆕 FREIGHT_EXPENSE F3: ส่วนแบ่งที่ตกบรรทัดค่าใช้จ่ายไม่นับสต๊อก → ลด Dr บัญชีค่าใช้จ่ายนั้น (ไม่ใช่ Cr 5120)
+      const xc = ti < 0 ? grLineExpCharge(gl0) : null;
+      if(xc){
+        const xi = lines.findIndex(l => l && l.expCharge && l.accountCode === xc.accountCode && (Number(l.debit) || 0) > 0.005);
+        if(xi < 0) continue;
+        const xt = bdR2(Math.min(Number(a.amount) || 0, rest, Number(lines[xi].debit) || 0));
+        if(!(xt > 0)) continue;
+        lines[xi].debit = bdR2(Number(lines[xi].debit) - xt); rest = bdR2(rest - xt);
+        lines[xi].offInvDiscCut = bdR2((Number(lines[xi].offInvDiscCut) || 0) + xt);
+        continue;
+      }
       if(!gl || !gl.isAsset || !grLineIsCapex(state, gr, gl)) continue;
       const cat = ((state && state.assetCategories) || []).find(c => c && c.id === gl.assetCategoryId);
       const code = (accounts.find(x => x.code === ((cat && cat.code) || '1600')) || accounts.find(x => x.code === '1600') || {}).code;
@@ -7720,7 +7749,8 @@ function planInvPriceAdjust(state, opts){
     // R2.4 ข้อ 1: ล็อตของบรรทัด — grLineIdx → (grLot||lot) → itemId ที่มีบรรทัดเดียวในใบ (รวมล็อตลูกจาก split · ข้าม NEG/ของแถม)
     const sameItem = (g.lines || []).filter(x => x && x.itemId === l.itemId && !x.isFreebie);
     let L = [], R = 0, dInv = 0;
-    if(!_cap){   // C2: ทรัพย์สิน noStock ไม่มีล็อต → ข้ามการหาล็อต/ต้นทุน (dInv 0)
+    const _exc = _cap ? null : grLineExpCharge(l);   // 🆕 FREIGHT_EXPENSE F3: ค่าใช้จ่ายไม่นับสต๊อก → ไม่มีล็อต · ส่วนต่างลงบัญชีของบรรทัด
+    if(!_cap && !_exc){   // C2: ทรัพย์สิน noStock ไม่มีล็อต → ข้ามการหาล็อต/ต้นทุน (dInv 0)
     const pool = (S.fifoLayers || []).filter(f => f && f.grRef === g.grNumber && f.itemId === l.itemId && !f.isNegative && !f.isFreebie);
     L = pool.filter(f => f.grLineIdx === idx);
     if(!L.length && String(l.lot || '')){
@@ -7771,9 +7801,11 @@ function planInvPriceAdjust(state, opts){
     if(nRate !== rate) newRate[key] = nRate;
     out.lines.push({ grId:g.id, grNumber:g.grNumber, lineIdx:idx, itemId:l.itemId, qty, baseQty, unit:l.unit, oldUnitPrice:ou, newUnitPrice:nu, firstUnitPrice:first,
       oldLineTotal:olt, newLineTotal:nlt, dAmt, vatRate:nRate, oldVatRate:rate, newVatRate:nRate, vatChanged:nRate !== rate,
-      c1, remaining:R, returned:retBase, used:_cap ? 0 : Math.max(0, baseQty - R - retBase), dInv, dRet,
+      c1, remaining:R, returned:retBase, used:(_cap || _exc) ? 0 : Math.max(0, baseQty - R - retBase), dInv, dRet,
       // C2: ทรัพย์สิน = ไม่มีผลต่างราคา 5391 (dVar 0) · ส่วนต่างทั้งหมดไปอยู่ที่ราคาบรรทัด (ลง 16xx ตอนตั้งหนี้)
-      dVar:_cap ? 0 : _pvR2(dAmt - dInv - dRet), ...(_cap ? { capex:true, dCapex:dAmt } : {}) });
+      // 🆕 FREIGHT_EXPENSE F3: ค่าใช้จ่าย (expCharge) = dVar 0 · ส่วนต่าง dExp ลงบัญชีของบรรทัด (post_pi) / ราคาบรรทัด (at_gr → ลงตอนตั้งหนี้)
+      dVar:(_cap || _exc) ? 0 : _pvR2(dAmt - dInv - dRet), ...(_cap ? { capex:true, dCapex:dAmt } : {}),
+      ...(_exc ? { expCharge:true, expAcc:_exc.accountCode, dExp:_pvR2(dAmt - dRet) } : {}) });
     // C9: ราคาใหม่ต่ำกว่าเกณฑ์ทรัพย์สิน — เตือน ไม่บล็อก (ประเภท freeze ตอนรับของ)
     if(_cap && capexThreshold(S) > 0){
       const _nl = { ...l, unitPrice:nu, lineTotal:nlt, ...(l.lineExVat != null ? { lineExVat:_pvR2((Number(l.lineExVat) || 0) + dAmt) } : {}) };
@@ -7805,7 +7837,10 @@ function planInvPriceAdjust(state, opts){
   out.dInv = _pvR2(out.lines.reduce((t, x) => t + x.dInv, 0));
   out.dVar = _pvR2(out.lines.reduce((t, x) => t + x.dVar, 0));
   out.dRet = _pvR2(out.lines.reduce((t, x) => t + (x.dRet || 0), 0));
-  out.dCapex = _pvR2(out.lines.reduce((t, x) => t + (x.dCapex || 0), 0));   // C2: ส่วนต่างบรรทัดทรัพย์สิน (ไม่ลง JE ตอนนี้)
+  out.dCapex = _pvR2(out.lines.reduce((t, x) => t + (x.dCapex || 0), 0));
+  // 🆕 FREIGHT_EXPENSE F3: ส่วนต่างบรรทัดค่าใช้จ่าย แยกตามบัญชี (post_pi ลง JE · at_gr ไม่ลง JE ตอนนี้)
+  out.dExpByAcc = {};
+  out.lines.forEach(x => { if(x.expCharge && Math.abs(x.dExp || 0) >= 0.005) out.dExpByAcc[x.expAcc] = _pvR2((out.dExpByAcc[x.expAcc] || 0) + x.dExp); });   // C2: ส่วนต่างบรรทัดทรัพย์สิน (ไม่ลง JE ตอนนี้)
   // 🆕 PV4-6: สรุปรายใบคืนของ — มูลค่าเดิม → ใหม่ (พรีวิว/แผงยืนยัน)
   for(const rp of out.rtvPlan){
     let e = out.rtvDocs.find(x => x.rtvId === rp.rtvId);
@@ -8532,6 +8567,10 @@ function _planSiEdit2(s, si, P, out){
   out.moneyBefore = mb; out.moneyAfter = ma;
   out.cls = money ? 'money' : stockItems.length ? 'goods' : (_siDocSig(si) !== _siDocSig(n) ? 'text' : null);
   if(!out.cls){ blocks.push('ไม่มีอะไรเปลี่ยน'); return out; }
+  // 🆕 FREIGHT_EXPENSE UAT ชุด 1 M1: บรรทัดค่าใช้จ่ายที่ล้างล็อตแล้ว — เปลี่ยนของ/จำนวนจะคืนล็อตผี/กลับต้นทุนขายซ้ำ
+  { const cl = new Set((si.lines || []).filter(l => l && l.chargeClearedId).map(l => l.itemId));
+    const hit = stockItems.filter(id => cl.has(id));
+    if(hit.length){ blocks.push('ล้างล็อตแล้ว — ใช้ใบลดหนี้/JE ปรับปรุง (' + hit.map(id => ((s.items || []).find(x => x && x.id === id) || {}).name || id).join(', ') + ')'); return out; } }
   // 🆕 verify 2 (P3): ราคาต่อหน่วย/ส่วนลดของบรรทัดเดิม (srcLineNo+itemId ตรง ไม่ใช่ลูกในชุด) เปลี่ยน แต่ยอดรวมเท่าเดิม
   //   ระดับยังเป็น text/goods ตาม E1 (แตกชุด A2 = บรรทัดใหม่ ไม่นับ) แต่เตือนในพรีวิว + ขึ้นงานค้างให้ผู้จัดการตรวจ (siEditGoodsReview)
   out.priceChanged = [];
@@ -13270,6 +13309,151 @@ function expenseItemOf(state, l){
   const id = l && l.expenseItemId;
   return id ? (((state && state.expenseItems) || []).find(e => e && e.id === id) || null) : null;
 }
+// 🆕 FREIGHT_EXPENSE F1: สินค้าที่ติดธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" (item.expenseItemId) → { expenseItem, accountCode } | null
+//   accountCode = รายการรายจ่าย.accountCode || '5300' · บัญชีต้องมีใน COA ไม่งั้นถือว่าไม่ตั้ง (ของเข้าสต๊อกตามเดิม)
+function itemExpenseLink(state, itemId){
+  const S = state || {}, it = itemId ? (S.items || []).find(x => x && x.id === itemId) : null;
+  const eid = it && it.expenseItemId;
+  if(!eid) return null;
+  const ei = (S.expenseItems || []).find(e => e && e.id === eid && !e.deleted);
+  if(!ei) return null;
+  const code = String(ei.accountCode || '5300');
+  if(!(S.chartOfAccounts || []).some(a => a && a.code === code)) return null;
+  return { expenseItem: ei, accountCode: code };
+}
+// 🆕 FREIGHT_EXPENSE UAT2 S3: สินค้านี้ถูกใช้ที่ไหนบ้าง (เตือนก่อนตั้งธง — เลือกผิดตัว = ซ่อนของจริงจากนับ/ตัวเลือก)
+//   → { boms:[ชื่อสูตร], favs:[ชื่อชุดโปรด], qcs:[ชื่อแม่แบบ QC], stockType:'วัตถุดิบ'|'กึ่งสำเร็จรูป'|'สินค้าสำเร็จรูป'|null }
+function itemExpenseLinkUsage(state, itemId){
+  const S = state || {}, it = (S.items || []).find(x => x && x.id === itemId) || null;
+  const boms = (S.boms || []).filter(b => b && !b.deleted && (b.productId === itemId || (b.outputs || []).some(o => o && o.productId === itemId) || (b.materials || []).some(m => m && m.itemId === itemId)))
+    .map(b => b.name || b.code || b.id);
+  const fName = f => f.scope === 'company' ? '⭐ ' + companyFavName(f)
+    : f.scope === 'line' ? '🏭 ' + ((((S.branches || []).flatMap(b => b.productionLines || [])).find(l => l.id === f.scopeId) || {}).name || f.scopeId)
+    : f.scope === 'branch' ? '🏪 ' + (((S.branches || []).find(b => b.id === f.scopeId) || {}).name || f.scopeId)
+    : '👤 ' + (((S.users || []).find(u => u.id === f.scopeId) || {}).name || f.scopeId);
+  const favs = (S.itemFavorites || []).filter(f => f && !f.deletedAt && (f.itemIds || []).includes(itemId)).map(fName);
+  const qcs = (S.qcTemplates || []).filter(t => t && t.active !== false && t.appliesTo && (t.appliesTo.itemIds || []).includes(itemId)).map(t => t.name || t.id);
+  const TY = { material:'วัตถุดิบ', semi_fg:'กึ่งสำเร็จรูป', finished:'สินค้าสำเร็จรูป' };
+  return { boms, favs, qcs, stockType: (it && TY[it.type]) || null };
+}
+// บรรทัด GR ที่เป็นค่าใช้จ่าย (ไม่นับสต๊อก · freeze ตอนรับ) → { expenseItemId, accountCode } | null
+function grLineExpCharge(line){
+  const l = line || {};
+  return (!l.isAsset && l.noStock === true && l.expCharge && l.expCharge.accountCode) ? l.expCharge : null;
+}
+// 🆕 FREIGHT_EXPENSE F5: แผนล้างล็อตค่าใช้จ่ายที่ค้างในสต๊อก — ใช้ร่วม reducer CLEAR_CHARGE_STOCK + แผงหน้าจอ (ตัวเดียวกัน)
+//   rows ต่อชั้น FIFO ที่ remaining ≠ 0 · kind: 'inv' GR ตั้งหนี้แล้ว (JE Dr บัญชีค่าใช้จ่าย / Cr 1300) · 'uninv' ยังไม่ตั้งหนี้ (ไม่มี JE · ตั้งหนี้ทีหลังลงค่าใช้จ่าย)
+//     · 'other' ชั้นบวกที่ไม่พบ GR (ถือว่ามีมูลค่าใน 1300 → JE เหมือน 'inv') · 'neg' ชั้นติดลบจากการขาย (JE Dr 1300 / Cr 5100 กลับต้นทุนขายที่ลงผิด)
+//   residual: stockByBranch ที่ไม่ตรงผลรวมชั้น ต่อสาขา/ที่เก็บ → ปรับให้ 0 (ไม่มี JE) · null = สินค้าไม่ติดธง
+// 🆕 UAT ชุด 2 S5: ชั้นติดลบเกิดจากอะไร → 'sale' (ขาย = ลง Dr 5100 ตอนขาย) | ชื่อแหล่งอื่นภาษาไทย
+//   ดูจาก id/note ของชั้นก่อน · ชั้นของ DEDUCT_FIFO_LAYERS (ขาย/โอน/ผลิตใช้ร่วม) → ดู movement ขาออกของสินค้านี้ที่สาขาเดียวกัน
+function _chargeNegSrc(S, f){
+  const id = String(f.id || ''), note = String(f.note || '');
+  if(id.startsWith('fl_negsie_')) return 'sale';
+  if(id.startsWith('fl_negst_')) return 'การคืนผู้ขาย/ตัดของเสีย';
+  if(id.startsWith('fl_neg_to_') || id.startsWith('fl_neg_rov_')) return 'การส่งของ (TO)';
+  if(id.startsWith('fl_neg_c_') || note.startsWith('Auto-created จากการผลิต · ')) return 'การผลิต';
+  if(f.source === 'adjust_reverse') return 'การยกเลิกการนับ';
+  if(note.includes('ใบเบิก')) return 'ใบเบิก';
+  const TH = { transfer_out:'การโอน', mi_out:'การย้ายคลัง', production_out:'การผลิต' };
+  const outs = (S.movements || []).filter(m => m && m.itemId === f.itemId && m.branch === f.branch && !m.reversed && (Number(m.qty) || 0) < 0 && (m.type === 'sale_out' || TH[m.type]));
+  if(!outs.some(m => m.type === 'sale_out')) return 'แหล่งที่ไม่พบเอกสารขาย';
+  const other = [...new Set(outs.filter(m => TH[m.type]).map(m => TH[m.type]))];
+  return other.length ? other.join('/') + ' ปนกับการขาย' : 'sale';
+}
+// 🆕 FREIGHT_EXPENSE verify 1: ใบตั้งหนี้ลง JE ตั้งหนี้แล้วหรือยัง (เกณฑ์เดียวกับคิวลงบัญชี AutoPostModal · ไม่นับ JE กลับรายการ/ยกเลิก)
+function _invJePosted(S, inv){
+  return ((S && S.journalEntries) || []).some(j => j && j.source === 'inv' && j.sourceId === inv.id && !j.reversed && j.status !== 'voided' && j.refType !== 'inv_void');
+}
+// 🆕 FREIGHT_EXPENSE verify 2: ใครกด 🧹 ล้างล็อตค่าใช้จ่ายได้ = GM/เจ้าของ หรือผู้มีสิทธิ์บัญชี "สมุดรายวัน (JE) สร้าง" + "ตั้งหนี้ (GR → INV) สร้าง"
+//   (ขั้นของบัญชี — ไม่ใช่สิทธิ์ปรับสต๊อก: ผจก.สาขามี stock.* แต่ไม่ควรลง JE บริษัท) · ใช้ร่วม reducer CLEAR_CHARGE_STOCK / กล่อง 🧹 / งานค้าง
+function canClearChargeStock(user){
+  return !!user && (isSuperUser(user) || (hasPerm(user, 'accounting', 'je', 'create') && hasPerm(user, 'accounting', 'invQueue', 'create')));
+}
+const CLEAR_CHARGE_WHO = 'GM/เจ้าของ หรือผู้ที่ได้สิทธิ์บัญชี «สมุดรายวัน (JE) สร้าง» + «GR → INV สร้าง» (เช่น ผู้จัดการบัญชี) — ตั้งที่ ตั้งค่า → ผู้ใช้';
+function chargeStockClearPlan(state, itemId){
+  const S = state || {}, link = itemExpenseLink(S, itemId);
+  const it = link ? (S.items || []).find(x => x && x.id === itemId) : null;
+  if(!it) return null;
+  const R = v => Math.round((Number(v) || 0) * 100) / 100;
+  const grByNo = new Map();
+  (S.grs || []).forEach(g => { if(g && !g.voided && g.grNumber && !grByNo.has(g.grNumber)) grByNo.set(g.grNumber, g); });
+  const rows = [], net = {}, K = (b, l) => String(b) + '|' + (l || 'default');
+  for(const f of (S.fifoLayers || [])){
+    if(!f || f.itemId !== itemId) continue;
+    const q = Number(f.remaining) || 0;
+    if(Math.abs(q) < 1e-9) continue;
+    net[K(f.branch, f.locId)] = (net[K(f.branch, f.locId)] || 0) + q;
+    const uc = Number(f.unitCost) || 0, base = { layerId:f.id, branch:f.branch, locId:f.locId || null, qty:q, layerQty:Number(f.qty) || 0, unitCost:uc, amount:R(Math.abs(q) * uc) };
+    if(f.isNegative || q < 0){ const src = _chargeNegSrc(S, f); rows.push({ ...base, kind:'neg', gr:null, lineIdxs:[], inv:null, je:'reverse_cogs', src, srcSale:src === 'sale' }); continue; }
+    const gr = f.grRef ? grByNo.get(f.grRef) || null : null;
+    const lineIdxs = gr ? (gr.lines || []).map((l, i) => (l && l.itemId === itemId && !l.isAsset && l.capInto == null) ? i : -1).filter(i => i >= 0) : [];
+    // 🆕 verify 1 (ข้อ 2): ใบตั้งหนี้ที่ยังไม่ลง JE (รอในคิวลงบัญชี) = ยังไม่มี Dr 1300 → ถือเป็น 'uninv' (ลง JE ทีหลัง → Dr ค่าใช้จ่ายจากบรรทัดที่ประทับ)
+    const inv0 = gr && lineIdxs.length ? _grLiveInv(S, gr) : null;
+    const inv = inv0 && _invJePosted(S, inv0) ? inv0 : null;
+    const kind = !gr || !lineIdxs.length ? 'other' : (inv ? 'inv' : 'uninv');
+    rows.push({ ...base, kind, gr:gr ? { id:gr.id, grNumber:gr.grNumber } : null, grRef:f.grRef || null, lineIdxs,
+      inv:inv ? { id:inv.id, invNumber:inv.invNumber || inv.id } : null, je:kind === 'uninv' ? null : 'expense' });
+  }
+  // ยอดในสต๊อกต่อสาขา/ที่เก็บ หลังถอดชั้นแล้ว ต้องเป็น 0 → ส่วนต่าง = residual
+  const sbb = it.stockByBranch || {}, cur = {};
+  Object.keys(sbb).forEach(b => {
+    const v = sbb[b];
+    if(v && typeof v === 'object'){
+      const locs = Object.keys(v.byLoc || {});
+      if(locs.length) locs.forEach(l => { cur[K(b, l)] = (cur[K(b, l)] || 0) + (Number(v.byLoc[l]) || 0); });
+      else cur[K(b, null)] = Number(v._total) || 0;
+    } else cur[K(b, null)] = Number(v) || 0;
+  });
+  const residual = [...new Set([...Object.keys(cur), ...Object.keys(net)])].sort().map(k => {
+    const d = Math.round(((cur[k] || 0) - (net[k] || 0)) * 1e6) / 1e6, [b, l] = [k.slice(0, k.lastIndexOf('|')), k.slice(k.lastIndexOf('|') + 1)];
+    return { branch:b, locId:l === 'default' ? null : l, qty:-d };   // qty = ที่ต้องปรับให้เป็น 0
+  }).filter(x => Math.abs(x.qty) > 1e-6);
+  const sum = (fn) => R(rows.filter(fn).reduce((t, r) => t + r.amount, 0));
+  // 🆕 UAT ชุด 1: ด่านก่อนล้าง (blocks) — M3 ล็อตยังไม่ตั้งหนี้ที่ใช้ไปบางส่วน · S2 TR/TO ที่ยังเปิดอยู่
+  const blocks = [];
+  rows.filter(r => r.kind === 'uninv' && r.layerQty > r.qty + 1e-9).forEach(r =>
+    blocks.push('ใบรับของ ' + r.gr.grNumber + ' ยังไม่ตั้งหนี้ แต่ล็อตถูกใช้ไปแล้ว ' + R(r.layerQty - r.qty) + ' — ตั้งหนี้ใบรับของนี้ก่อนแล้วค่อยล้าง'));
+  // 🆕 verify 1 (ข้อ 1): ล้างประทับ "ทุกบรรทัด" ของสินค้านี้ใน GR → ชั้นที่ใช้หมดแล้ว (remaining 0 · ไม่อยู่ใน rows) ก็ต้องนับ
+  //   ไม่งั้นตั้งหนี้ทีหลัง Dr ค่าใช้จ่ายทั้งใบ ขณะที่ส่วนที่ใช้ไปลง 5100/Cr 1300 แล้ว = ลงซ้ำ + 1300 ติดลบค้าง
+  const seenGr = new Set();
+  rows.filter(r => r.kind === 'uninv').forEach(r => {
+    if(seenGr.has(r.gr.id)) return; seenGr.add(r.gr.id);
+    const g = grByNo.get(r.gr.grNumber), want = r.lineIdxs.reduce((t, i) => { const l = (g.lines || [])[i]; return t + (l && l.noStock !== true ? (Number(l.baseQty) || 0) : 0); }, 0);
+    const lys = (S.fifoLayers || []).filter(f => f && f.grRef === r.gr.grNumber && f.itemId === itemId && !f.isNegative && !(Number(f.remaining) < 0));
+    const have = lys.reduce((t, f) => t + (Number(f.remaining) || 0), 0), recv = lys.reduce((t, f) => t + (Number(f.qty) || 0), 0);
+    const used = (want > 0 ? want : recv) - have;   // ชั้นคืนจากยกเลิกขาย (grRef เดิม) นับใน have ด้วย → ขายแล้วคืนครบ = ไม่บล็อก
+    if(used > 1e-6 && !rows.some(x => x.kind === 'uninv' && x.gr.id === r.gr.id && x.layerQty > x.qty + 1e-9))
+      blocks.push('ใบรับของ ' + r.gr.grNumber + ' ยังไม่ตั้งหนี้ แต่ล็อตถูกใช้ไปแล้ว ' + R(used) + ' — ตั้งหนี้ใบรับของนี้ก่อนแล้วค่อยล้าง');
+  });
+  // 🆕 UAT ชุด 2 S5: ชั้นติดลบที่ไม่ได้เกิดจากการขาย ไม่เคยลง 5100 → กลับเข้า 5100 ไม่ได้ (บล็อก ให้นับปรับ/แจ้งบัญชี)
+  rows.filter(r => r.kind === 'neg' && !r.srcSale).forEach(r =>
+    blocks.push('ชั้นติดลบ ' + R(r.qty) + ' ที่สาขา ' + (((S.branches || []).find(b => b && b.id === r.branch) || {}).name || r.branch) + ' เกิดจาก' + r.src + ' (ไม่ใช่การขาย) — ไม่เคยลงต้นทุนขาย 5100 · เครื่องมือนี้กลับบัญชีให้ไม่ได้ — ยกเลิกธงในฟอร์มสินค้าก่อน → นับ/ปรับสต๊อก → ตั้งธงใหม่ หรือให้บัญชีทำ JE ปรับปรุง'));
+  // 🆕 FREIGHT_EXPENSE (เจ้าของ 20 ต.ค. · ข้อมูลจริง PI-20261010-0001 ลง 1300 ฿23,260 แต่ล็อต ฿24,260): JE ล้างใช้ราคาล็อต
+  //   → ใบตั้งหนี้ที่ยอดสินค้าไม่ตรงกับใบรับของ (Dr 1300 ≠ มูลค่าล็อต) = บล็อก ให้บัญชีแก้ราคาให้ตรง หรือทำ JE ปรับปรุงเอง (กัน 1300 เพี้ยน)
+  [...new Set(rows.filter(r => r.kind === 'inv' && r.inv).map(r => r.inv.id))].forEach(id => {
+    const inv = (S.invoices || []).find(v => v && v.id === id); if(!inv) return;
+    const gids = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+    const grEx = R(gids.reduce((t, gid) => { const g = (S.grs || []).find(x => x && x.id === gid);
+      return t + (g ? (g.lines || []).reduce((u, l, i) => u + (l ? capexLineExVat(g, invCapexGrLine(S, inv, g, l, i)) : 0), 0) : 0); }, 0));
+    const svc = R(((inv.source === 'po_gr' && inv.expenseLines) || []).reduce((t, l) => t + (Number(l && l.lineTotal) || 0), 0));
+    const goods = R((Number(inv.amount) || 0) - svc);
+    if(Math.abs(goods - grEx) > 0.01) blocks.push('ใบตั้งหนี้ ' + (inv.invNumber || inv.id) + ' ยอดสินค้า ฿' + fmtCur(goods) + ' ไม่ตรงกับใบรับของ ฿' + fmtCur(grEx)
+      + ' — ยอดที่ลงสินค้าคงเหลือ (1300) ไม่เท่าราคาล็อต · ให้บัญชีแก้ราคาให้ตรงก่อน หรือทำ JE ปรับปรุงเอง แล้วค่อยล้าง');
+  });
+  const hasIt = d => (d.lines || []).some(l => l && l.itemId === itemId);
+  (S.transferRequests || []).forEach(t => { if(t && t.status === 'pending' && hasIt(t)) blocks.push('ใบขอโอน ' + (t.trNumber || t.id) + ' ยังเปิดอยู่ — ส่งของ/ยกเลิกก่อนแล้วค่อยล้าง'); });
+  (S.transferOrders || []).forEach(t => { if(t && (t.status === 'shipping' || t.status === 'partial') && hasIt(t)) blocks.push('ใบโอน ' + (t.toNumber || t.id) + ' ยังไม่รับของครบ — รับ/ยกเลิกก่อนแล้วค่อยล้าง'); });
+  // 🆕 UAT ชุด 1 M1: บรรทัดขายที่ตัดสต๊อกสินค้านี้ (ก่อนล้าง) → ประทับ chargeClearedId (ยกเลิก/แก้ใบไม่คืนล็อตผี/ไม่กลับ JE ซ้ำ)
+  const siLines = [], slLines = [];
+  (S.salesInvoices || []).forEach(si => { if(si && !si.voided) (si.lines || []).forEach((l, i) => { if(l && l.itemId === itemId && l.noStock !== true && !l.chargeClearedId && Number(l.baseQty) > 0) siLines.push({ siId:si.id, idx:i }); }); });
+  (S.salesLight || []).forEach(e => { if(e && !e.voided) (e.lines || []).forEach((l, i) => { if(l && l.itemId === itemId && l.noStock !== true && !l.chargeClearedId && Number(l.baseQty) > 0) slLines.push({ slId:e.id, idx:i }); }); });
+  // 🆕 UAT ชุด 1 M2: ใบตั้งหนี้ที่ JE ยังถือ Dr 1300 ของล็อตที่ล้าง (แถว 'inv') → ประทับใบ (ยกเลิก/แก้ยอดไม่ได้)
+  const invIds = [...new Set(rows.filter(r => r.kind === 'inv' && r.inv).map(r => r.inv.id))];
+  return { item:it, link, accountCode:link.accountCode, rows, residual, blocks, siLines, slLines, invIds,
+    totals:{ expense:sum(r => r.je === 'expense'), reverseCogs:sum(r => r.je === 'reverse_cogs'), uninv:sum(r => r.kind === 'uninv') },
+    pending:rows.length > 0 || residual.length > 0 };
+}
 // บรรทัดค่าขนส่ง (ตัวเดียวที่ "ยืนยันพร้อมรับของ" ได้ · v1.1)
 const isTransportLine = (l, state) => !!l && ((l.wht && l.wht.sub5 === 'transport') || (expenseItemOf(state, l) || {}).categoryId === 'ec_shipping');
 // ค่าเริ่มต้นการลงบัญชีของรายการรายจ่าย (D11) · ไม่มี field = ค่าใช้จ่าย
@@ -13504,7 +13688,7 @@ function poFullEditDenyReason(oldPo, newPo){
 global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
   docRenumFrom, docNumMatches, RenumBadge,
-  isServiceLine, isStockLine, poHasStockLine, poHasServiceLine, poStockPending, svcConfirmedQty, svcRemainQty, svcInvoicedMap, svcUninvoiced, poStatusFromLines, whtFormForSupplier, whtMinBase, whtAutoOk, expenseItemOf, isTransportLine, expenseItemTreatment, acctFieldsVisible, svcConfirmersFor, svcConfirmDenyReason, svcPoParties, getLastExpensePrice, findSimilarServicePOs, poSvcQuoteBase, poInvoicesOf, poContractSummary, poFullEditDenyReason,   // 🔧 EXPENSE_PO ① PO ค่าบริการ
+  isServiceLine, isStockLine, poHasStockLine, poHasServiceLine, poStockPending, svcConfirmedQty, svcRemainQty, svcInvoicedMap, svcUninvoiced, poStatusFromLines, whtFormForSupplier, whtMinBase, whtAutoOk, expenseItemOf, itemExpenseLink, itemExpenseLinkUsage, grLineExpCharge, chargeStockClearPlan, canClearChargeStock, CLEAR_CHARGE_WHO, isTransportLine, expenseItemTreatment, acctFieldsVisible, svcConfirmersFor, svcConfirmDenyReason, svcPoParties, getLastExpensePrice, findSimilarServicePOs, poSvcQuoteBase, poInvoicesOf, poContractSummary, poFullEditDenyReason,   // 🔧 EXPENSE_PO ① PO ค่าบริการ
   contractInstTotal, contractInvoices, contractInstBilledMap, contractInstAccepted, contractInvAcceptorChanged, contractInstState, contractSummary, contractBranchSummary, contractDenyReason, projectAssetFor, contractCapAccount, retentionAmountFor, isContractAcceptor, contractInstsReadyToBill, supplierOpenContracts, contractAcceptorDeny, CONTRACT_SUM_KEYS, contractCipCode, retentionAccountCode, pettyDenyInv, assetLifeMonths, assetDepStart,   // 📑 สัญญางานจ้าง P2
   amtR2, invNetPayable, invOffInvDisc, invGrossInclVat, invDeductions, invAmtView, dedText, AMT_DED_KEYS, AMT_DED_LABEL, paySourceKey, paySourceLabel, payAmtView, paidRowAmtView, paidSrcSplit, memoAmtView, grGrossInclVat, sumAmt,   // 🆕 AMOUNT-INCL-VAT B2
   canAddPayTag, canSetDocTag, docTagOf, docTagIdsOf, docTagsOf, docTagFields, unionDocTags, DOC_TAG_MAX, commonDocTag, poTagDefault, InvTagField, DocTagChip, TagSelect, DocTagEdit, TagMultiSelect, promptNewPayTag, docHasTag, docTagNames, TagManagerButton,   // 🆕 MULTI-TAG MT4/MT5
@@ -18612,8 +18796,10 @@ const _INV_PROTECTED = Object.freeze(['depositApplications','depositUsed','depos
   //   หรือ action ของมัน (CN: ADD_SUP_MEMO/APPLY_CN_* → creditApplied/memoApplied · VOID_INV → depositOffsetIds) · ไม่มีผู้เรียกจริงตั้งผ่านแก้ใบทั่วไป
   //   (ปลอม type → 'normal' / creditUsed → 0 / memoApplied → [] = ↩️ ทางตรงหลบด่าน + เครดิตผู้ขาย/มัดจำหาย)
   'type','depositId','depositKind','creditUsed','creditApplied','memoApplied','depositOffsetIds','rtvDeductIds',
-  'priceAdjustHistory','priceFixRequest']);   // 🆕 PRICE-FIX verify 2: แก้ได้เฉพาะ ADJUST_INV_PRICE + *_INV_PRICE_FIX (สำเนาเก่าทับ = ปลดด่าน VOID/ปลด hold จ่าย) · 🆕 MIG_LATE_INV verify 1: ตั้งได้เฉพาะ ADD_MIG_LATE_INV (กัน PATCH_INV ตั้งธงให้ใบ ③ แล้วยกเลิกข้ามด่าน)
-  //   // 🆕 MIG_VAT_HERE V2: ธงย้ายมาเคลมในระบบนี้ — แก้ได้เฉพาะ MIG_VAT_HERE/_UNDO (ไฟล์นำเข้าใบใหม่ตั้งมาได้)   // 🆕 VAT-CLAIM verify (B3.1): เลื่อนเคลม/ประวัติเคลม/หมดสิทธิ์ — แก้ได้เฉพาะ action ของมัน (V5+)
+  'priceAdjustHistory','priceFixRequest',
+  'chargeClearedId','chargeClearedItems']);   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 M2: ตั้งได้เฉพาะ CLEAR_CHARGE_STOCK (สำเนาเก่าทับ = ปลดด่านยกเลิก/แก้ยอด)
+  // 🆕 PRICE-FIX verify 2: แก้ได้เฉพาะ ADJUST_INV_PRICE + *_INV_PRICE_FIX (สำเนาเก่าทับ = ปลดด่าน VOID/ปลด hold จ่าย) · 🆕 MIG_LATE_INV verify 1: ตั้งได้เฉพาะ ADD_MIG_LATE_INV (กัน PATCH_INV ตั้งธงให้ใบ ③ แล้วยกเลิกข้ามด่าน)
+  // 🆕 MIG_VAT_HERE V2: ธงย้ายมาเคลมในระบบนี้ — แก้ได้เฉพาะ MIG_VAT_HERE/_UNDO (ไฟล์นำเข้าใบใหม่ตั้งมาได้)   // 🆕 VAT-CLAIM verify (B3.1): เลื่อนเคลม/ประวัติเคลม/หมดสิทธิ์ — แก้ได้เฉพาะ action ของมัน (V5+)
 // 🆕 UNDO_PRINCIPLE รอบ 3: ประวัติแก้ใบ = หลักฐานของด่านย้อน (invVatEarlierMonth อ่าน 'vat:' ใน revisionHistory) — เพิ่มได้ ลบ/ทับไม่ได้
 //   UPDATE_INV / PATCH_INV.fields / MERGE_IMPORT: ผล = ของเดิมในใบ state ทุกแถว + แถวใหม่ที่ส่งมา (EditINV ต่อท้าย editHistory ได้ตามเดิม)
 //   สำเนาเก่า/ปลอม revisionHistory:[] ลบประวัติ 'vat: 70 → 0' ไม่ได้ (กันหลบด่านภาษีซื้อเดือนก่อนแล้ว ↩️ ทางตรง)
@@ -18804,6 +18990,14 @@ function _invFiledFinChange(s, old, nu){
   if(!r) return null;
   alert(r); return s;
 }
+// 🆕 FREIGHT_EXPENSE UAT ชุด 1 S2: สินค้าติดธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" (อ่าน items + expenseItems) — reducer ที่เคลื่อนสต๊อกข้าม/ปฏิเสธ
+function _xlItem(s, itemId){ return !!(itemId && global.ERP && global.ERP.itemExpenseLink && global.ERP.itemExpenseLink(s, itemId)); }
+const _XL_NAME = (s, id) => ((s.items || []).find(x => x && x.id === id) || {}).name || id;
+// 🆕 FREIGHT_EXPENSE verify 2: ใบโอน/ขอของ (TR/TO/ส่งมอบ/ส่งเข้าไลน์) ห้ามมีสินค้าติดธงค่าใช้จ่าย → คืนข้อความปฏิเสธ หรือ null
+function _xlLinesDeny(s, lines){
+  const ids = [...new Set((lines || []).map(l => l && l.itemId).filter(id => _xlItem(s, id)))];
+  return ids.length ? ('⛔ ' + ids.map(id => _XL_NAME(s, id)).join(', ') + ' เป็นค่าใช้จ่าย (ไม่นับสต๊อก) — เอาออกจากใบ/รายการโปรด') : null;
+}
 // 🆕 DEPOSIT-VAT UAT: เหตุผลที่ UPDATE_INV จะปฏิเสธ (แบบเงียบ) — EditINVModal / executor edit_inv ตรวจก่อนลง JE-VOID (ไม่งั้น JE กลับรายการ+JE ใหม่ลงทั้งที่ใบไม่ถูกแก้)
 // 🆕 DEPOSIT-VAT verify: แก้ฟิลด์การเงิน/วันที่ของ PI = กลับ JE เดิม (วันนี้) + ลง JE ใหม่ลงวันที่ invDate → ถ้า invDate เดิม/ใหม่อยู่ในงวด GL ที่ปิด
 //   ADD_JE ตัวใหม่ถูกปฏิเสธ = AP/VAT ของใบหายจาก GL (บันทึกครึ่งเดียว) → ปฏิเสธตั้งแต่ต้น (invUpdateDeny ก่อน JE-VOID + UPDATE_INV ชั้นสุดท้าย)
@@ -18857,6 +19051,7 @@ global.ERP.invUpdateDeny = function(state, old, nu){
     { const _cm = _ctInvMoneyDeny(old, nu); if(_cm) return '⛔ ' + _cm; }
     // 🆕 PRICE-FIX verify 1: ใบปรับราคาแล้ว (post_pi) — ทางแก้ INV กลับ JE ทุกตัวรวม inv_price_adjust แล้วลงใหม่ทั้งก้อนเข้า 1300 (5391 หาย · GL 1300 เกิน FIFO)
     if((old.priceAdjustHistory || []).some(x => x && x.mode === 'post_pi')) return '⛔ ใบนี้ปรับราคาแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN)';
+    if(old.chargeClearedId && _INV_GL_FIN.concat(['netPayable','partyId']).some(f => nu[f] !== undefined && !_protSame(old[f], nu[f]))) return '⛔ ใบนี้ล้างล็อตค่าใช้จ่ายแล้ว — ใช้ใบลดหนี้/JE ปรับปรุง';   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 M2
     return _invFiledFinReason(state, old, nu) || _invGlLockReason(state, old, nu);
   } catch(e){ return 'ตรวจการแก้ใบไม่สำเร็จ: ' + (e && e.message); }
 };
@@ -20050,6 +20245,13 @@ function _stockAssetLines(s, docLines, srcGr, total, isDebit, desc1300, descAsse
     // 🆕 OFF_INV_DISC_ASSET A4: บรรทัดที่รวมเข้าราคาทุน 💎 (capInto) → หมวดของบรรทัด 💎 ปลายทาง
     const _ti = (gl && srcGr && global.ERP && global.ERP.grCapIntoTarget) ? global.ERP.grCapIntoTarget(srcGr, (srcGr.lines || []).indexOf(gl)) : -1;
     const _tg = _ti >= 0 ? srcGr.lines[_ti] : null;
+    // 🆕 FREIGHT_EXPENSE F3: บรรทัดค่าใช้จ่ายไม่นับสต๊อก (expCharge) → บัญชีค่าใช้จ่ายของบรรทัด (ไม่ใช่ 16xx/1300)
+    const _xc = !_tg && ((l.expCharge && l.expCharge.accountCode && !l.isAsset) ? l.expCharge : (gl && !gl.chargeClearedId && global.ERP && global.ERP.grLineExpCharge ? global.ERP.grLineExpCharge(gl) : null));   // verify 1 ข้อ 3: บรรทัดที่ประทับตอนล้าง (chargeClearedId) ไม่ใช้เป็น fallback — ใบคืนก่อนล้างยังอยู่ 1300
+    if(_xc && _acc(s, _xc.accountCode)){
+      if(byCode[_xc.accountCode] == null){ byCode[_xc.accountCode] = 0; order.push(_xc.accountCode); }
+      byCode[_xc.accountCode] += (Number(l.lineTotal) || 0) * amt / all;
+      return;
+    }
     const catId = l.assetCategoryId || ((_tg || gl) && (_tg || gl).assetCategoryId);
     const cat = (s.assetCategories || []).find(c => c.id === catId);
     let code = (cat && cat.code) || '1600';
@@ -22330,6 +22532,8 @@ function _adjustInvPrice(s, a){
       if(P.mode === 'post_pi'){
         sgn.push(['1300', P.dInv, 'ปรับต้นทุนสินค้าคงเหลือ ' + docRef], ['5391', P.dVar, 'ผลต่างราคาซื้อ (ส่วนที่ใช้/ขายไปแล้ว) ' + docRef],
           ['1150', P.dVat, 'ปรับภาษีซื้อ ' + docRef + ((inv.supTaxInvNumber || tiNo) ? ' ตามใบกำกับ ' + (inv.supTaxInvNumber || tiNo) : '')], ['2100', -P.dNet, 'ปรับเจ้าหนี้ ' + docRef + ' (ราคา)']);
+        // 🆕 FREIGHT_EXPENSE F3: บรรทัดค่าใช้จ่ายไม่นับสต๊อก → ส่วนต่างลงบัญชีของบรรทัด (ไม่แตะ 1300/ล็อต)
+        Object.keys(P.dExpByAcc || {}).sort().forEach(code => sgn.push([code, P.dExpByAcc[code], 'ปรับค่าใช้จ่าย (ไม่นับสต๊อก) ' + docRef]));
       } else if(Math.abs(P.dVar) >= 0.005){
         sgn.push(['5391', P.dVar, 'ผลต่างราคาซื้อ (ส่วนที่ใช้/ขายไปแล้ว) ' + docRef], ['1300', -P.dVar, 'ปรับต้นทุนสินค้าคงเหลือ ' + docRef]);
       }
@@ -22619,8 +22823,44 @@ function reducer(s, a){
       return { ...s, branchGroupPresets:{ ...(s.branchGroupPresets||{}), [a.data.branchId]:a.data.groupIds } };
 
     // ---------- Items ----------
-    case 'ADD_ITEM':     return { ...s, items:[...s.items, a.data] };
-    case 'UPDATE_ITEM':  return { ...s, items:s.items.map(i => i.id===a.data.id ? a.data : i) };
+    case 'ADD_ITEM': {
+      // 🆕 FREIGHT_EXPENSE F1: ธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" ตั้งได้ทาง SET_ITEM_EXPENSE_LINK เท่านั้น (ตรวจสิทธิ์บัญชี)
+      if(a.data && 'expenseItemId' in a.data){ const { expenseItemId: _x, ...rest } = a.data; return { ...s, items:[...s.items, rest] }; }
+      return { ...s, items:[...s.items, a.data] };
+    }
+    case 'UPDATE_ITEM': {
+      // 🆕 FREIGHT_EXPENSE F1: expenseItemId คงตามสินค้าใน state (ฟอร์มสินค้า/แท็บเก่าแก้ทับไม่ได้)
+      const _k = (i, d) => { const n = { ...d }; if(i.expenseItemId != null) n.expenseItemId = i.expenseItemId; else delete n.expenseItemId; return n; };
+      return { ...s, items:s.items.map(i => i.id===a.data.id ? ((i.expenseItemId != null || 'expenseItemId' in a.data) ? _k(i, a.data) : a.data) : i) };
+    }
+    // 🆕 FREIGHT_EXPENSE F1: ตั้ง/ยกเลิกธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" { itemId, expenseItemId|null, id, at, by, byName }
+    //   สิทธิ์บัญชี (superuser / accounting.invQueue.create / accounting.expenseItems.edit) ตรวจจากผู้ใช้สด · ส่งซ้ำ = no-op (auditLog al_iel_<id>)
+    //   แตะช่องเดียวบนสินค้าปัจจุบัน · ไม่ย้อนแก้ GR/SI เก่า (expCharge freeze ตอนรับ)
+    case 'SET_ITEM_EXPENSE_LINK': {
+      const d = a.data || {}, E = global.ERP || {};
+      if(!d.id || !d.itemId) return s;
+      if((s.auditLog || []).some(x => x && x.id === 'al_iel_' + d.id)) return s;
+      const u0 = _actorOf(s, d.by), u = u0 ? (_userByRef(s, u0.username) || u0) : null;
+      if(!u || !(E.acctFieldsVisible && E.acctFieldsVisible(u))){ alert('⛔ ไม่มีสิทธิ์บัญชี — ตั้งธง "ไม่นับสต๊อก ลงค่าใช้จ่าย" ไม่ได้ (ให้ ผจก.บัญชี ตั้ง)'); return s; }
+      const it = (s.items || []).find(x => x && x.id === d.itemId);
+      if(!it){ alert('ไม่พบสินค้า'); return s; }
+      const eid = d.expenseItemId ? String(d.expenseItemId) : null;
+      if(eid){
+        const ei = (s.expenseItems || []).find(e => e && e.id === eid && !e.deleted);
+        if(!ei){ alert('⛔ ไม่พบรายการรายจ่ายที่เลือก'); return s; }
+        const code = String(ei.accountCode || '5300');
+        if(!(s.chartOfAccounts || []).some(x => x && x.code === code)){ alert('⛔ บัญชี ' + code + ' ของรายการรายจ่ายนี้ไม่มีในผังบัญชี — แก้รายการรายจ่ายก่อน'); return s; }
+        if(it.isAsset){ alert('⛔ ' + (it.name || it.id) + ' เป็นทรัพย์สิน 💎 — ตั้งเป็นค่าใช้จ่ายไม่นับสต๊อกไม่ได้'); return s; }
+      }
+      if((it.expenseItemId || null) === eid) return s;
+      const before = it.expenseItemId || null;
+      const eiName = id => (((s.expenseItems || []).find(e => e && e.id === id) || {}).name) || id || '-';
+      const items = s.items.map(x => { if(x.id !== it.id) return x; const n = { ...x }; if(eid) n.expenseItemId = eid; else delete n.expenseItemId; return n; });
+      return { ...s, items, auditLog:[...(s.auditLog || []), { id:'al_iel_' + d.id, ts:d.at, type:'item_expense_link', by:u.username, byName:d.byName || u.name || u.username,
+        entityId:it.id, entityRef:it.code || it.name, refType:'item', refId:it.id, refLabel:it.code || it.name, before, after:eid,
+        summary:(eid ? `📦 ตั้ง ${it.name || it.id} เป็น "ไม่นับสต๊อก → ลงค่าใช้จ่าย" (${eiName(eid)})` : `ยกเลิกธงไม่นับสต๊อกของ ${it.name || it.id} (เดิม ${eiName(before)})`)
+          + ' · มีผลกับใบรับของ/ใบขายใหม่เท่านั้น' }] };
+    }
     // 🆕 SALES-W1: ตั้งราคา/ประเภทเป็นชุด — แตะได้เฉพาะ salePrice · priceBook · type
     //   priceBook:null = ลบทิ้ง (กลับไปใช้ salePrice อย่างเดียว) · ไม่ส่ง field ไหนมา = ไม่แตะ field นั้น
     case 'SET_ITEM_PRICE_FIELDS': {
@@ -22808,6 +23048,12 @@ function reducer(s, a){
     // 🆕 ตัด stock + อัพเดต item.stockByBranch (สำหรับ production op start)
     case 'CONSUME_PRODUCTION_MATERIALS': {
       // 🆕 PRODUCTION-LIVE คลื่น 1: lineOnly (หรือ chain) = ตัดเฉพาะคลังของไลน์ + บันทึกการตัดบนใบสั่ง (ดู _consumeLineOnly) · ไม่ส่ง = ทางเดิม
+      // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S2: วัตถุดิบในสูตรที่ติดธงไม่นับสต๊อก → ไม่ตัด (ทั้งสองทาง)
+      if(a.data && Array.isArray(a.data.items) && a.data.items.some(m => m && _xlItem(s, m.itemId))){
+        const _its = a.data.items.filter(m => !(m && _xlItem(s, m.itemId)));
+        if(!_its.length) return s;
+        a = { ...a, data:{ ...a.data, items:_its } };
+      }
       if(a.data && (a.data.lineOnly || a.data.chain)) return _consumeLineOnly(s, a.data);
       // a.data = { branch, locId, allowNegative, items:[{itemId, qty}], movement, orderId? }
       // 🆕 ต้นทุนจริงต่อล็อต: deductFIFO คืน cost + breakdown ของชั้นที่ตัดจริงอยู่แล้ว
@@ -23032,6 +23278,7 @@ function reducer(s, a){
     // a.data: { itemId, branch, delta, unitCost?, reason, movement, newLayer? }
     case 'ADJUST_STOCK': {
       const { itemId, branch, delta, movement } = a.data;
+      if(_xlItem(s, itemId)){ alert('⛔ ' + _XL_NAME(s, itemId) + ' เป็นค่าใช้จ่าย (ไม่นับสต๊อก) — ปรับ/นับสต๊อกไม่ได้ · ล็อตค้างให้ใช้ 🧹 ล้างล็อต (คลังสินค้า → 📥 รับสินค้า → 💎 ทรัพย์สินรอบันทึก) · ถ้าต้องนับจริง: ยกเลิกธงในฟอร์มสินค้าก่อน → นับ/ปรับสต๊อก → ตั้งธงใหม่'); return s; }   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S2
       // 🆕 PRODUCTION-LIVE คลื่น 1 (B3.11): นับ/ปรับระดับคลัง (locId) — ตัด FIFO เฉพาะคลังนั้น · layer เพิ่มลงคลังนั้นเสมอ
       //   · หักล้างบวก/ลบที่คลังนั้นก่อน (_selfNetAtLoc ยอดรวมไม่เปลี่ยน) → นับเจอของ = NEG หาย + JE ผลต่าง (postVarianceJE)
       const _locId = a.data.locId || null;
@@ -24863,6 +25110,14 @@ function reducer(s, a){
             for(const k of [..._CK, 'noStock']){ if(k in o) n[k] = o[k]; else delete n[k]; }
             return n;
           });
+          // 🆕 FREIGHT_EXPENSE F2: ธงค่าใช้จ่ายไม่นับสต๊อก (expCharge + noStock) freeze ตอนรับ — แก้ใบรับของทับไม่ได้
+          _ng.lines = _ng.lines.map((l, i) => {
+            const o = _og.lines[i];
+            if(!l || !o || l.itemId !== o.itemId || !(o.expCharge || l.expCharge) || o.capInto != null) return l;
+            const n = { ...l };
+            for(const k of ['expCharge', 'noStock']){ if(k in o) n[k] = o[k]; else delete n[k]; }
+            return n;
+          });
         }
         // 🆕 UNDO_FIELD_GUARD G7 (UAT คลัง): ลิงก์ GR → ใบตั้งหนี้ที่ยังใช้งาน แก้/ล้างทาง UPDATE_GR ไม่ได้ (ด่านย้อน invUndoGrIds + ด่าน "ตั้งหนี้แล้ว" ของ VOID_GR อ่านลิงก์นี้)
         //   ผูกได้เฉพาะ ว่าง → ใบจริง (ผู้เรียกทุกตัวทำแบบนี้) · ปลด/ย้ายลิงก์ = VOID_INV (reducer ตั้ง invoiceId/prevInvoiceId เอง)
@@ -25255,6 +25510,9 @@ function reducer(s, a){
       if(_oldInv && (_oldInv.priceAdjustHistory || []).some(x => x && x.mode === 'post_pi')
         && ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId'].some(f => a.data[f] !== undefined && !_protSame(_oldInv[f], a.data[f]))){
         alert('⛔ ใบนี้ปรับราคาแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN)'); return s; }
+      // 🆕 FREIGHT_EXPENSE UAT ชุด 1 M2: ใบที่ล้างล็อตค่าใช้จ่ายแล้ว — แก้เงิน = กลับ JE เดิม (Cr 1300 ซ้ำ) + ลงใหม่ Dr 5300 ซ้ำ
+      if(_oldInv && _oldInv.chargeClearedId && _INV_GL_FIN.concat(['netPayable','partyId']).some(f => a.data[f] !== undefined && !_protSame(_oldInv[f], a.data[f]))){
+        alert('⛔ ใบนี้ล้างล็อตค่าใช้จ่ายแล้ว — ใช้ใบลดหนี้/JE ปรับปรุง'); return s; }
       // 🆕 PRICE-FIX verify 3: สวิตช์เปิด — ใบตั้งหนี้จาก GR แก้ 🔧 ปรับยอด/ปัดเศษ ได้ไม่เกิน ±1 ฿ (ทางเดียวกับตอนตั้งหนี้)
       if(_oldInv && s.settings && s.settings.priceKeyInEnabled === true && !_oldInv._migrated
         && (_oldInv.source === 'po_gr' || _oldInv.source === 'po_combined') && a.data.roundingAdjustment !== undefined
@@ -26278,6 +26536,7 @@ function reducer(s, a){
       if(_invWhtMergedInto(inv)){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบรวมอยู่ใน 50 ทวิ ของ PV
       // 🆕 PRICE-FIX ขั้น 2 (R2.2): ใบที่ปรับราคาหลังตั้งหนี้แล้ว — การกลับ JE จะไม่คืนต้นทุนล็อต/ราคา GR (GL 1300 ≠ FIFO ถาวร) → ใช้ DN/CN
       if((inv.priceAdjustHistory || []).some(h => h && h.mode === 'post_pi')){ alert('⛔ ใบนี้ปรับราคาแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN)'); return s; }
+      if(inv.chargeClearedId){ alert('⛔ ใบนี้ล้างล็อตค่าใช้จ่ายแล้ว — ใช้ใบลดหนี้/JE ปรับปรุง'); return s; }   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 M2: JE ใบนี้ยังถือ Dr 1300 ของล็อตที่ล้างแล้ว (กลับ = Cr 1300 ซ้ำ)
       // 🆕 MIG_AP_NORMAL N1 (แทน UAT MF2 เดิมที่ห้ามทุกใบ): ใบนำเข้า Ecount ที่ "ยังไม่จ่าย" ย้อนไปตั้งหนี้ได้เหมือนใบปกติ (ด่านเดิมทุกด่านด้านล่าง)
       //   ใบนำเข้าที่จ่ายแล้ว/จ่ายบางส่วน (ใน Ecount) หรือมี PV/คำขอจ่ายในระบบนี้ = เหมือนใบจ่ายแล้ว → ยกเลิกไม่ได้
       const _migV = _invIsMigrated(inv);
@@ -27187,8 +27446,22 @@ function reducer(s, a){
     // ---------- RTV (Return to Vendor) — compound ----------
     // a.data: { rtv, stockUpdates, movements, invAdjust? }
     case 'ADD_RTV': {
-      const { stockUpdates, movements, invAdjust } = a.data;
+      let { stockUpdates, movements } = a.data;
+      const { invAdjust } = a.data;
       let rtv = a.data.rtv;
+      // 🆕 FREIGHT_EXPENSE F3: บรรทัดคืนของบรรทัด GR ค่าใช้จ่ายไม่นับสต๊อก (expCharge) → ไม่ตัดสต๊อก · Cr บัญชีค่าใช้จ่าย (ไม่เชื่อหน้าจอ · ดูจาก GR สด)
+      if(rtv && rtv.grId && Array.isArray(rtv.lines)){
+        const _xg = (s.grs||[]).find(g => g && g.id === rtv.grId), _XC = global.ERP && global.ERP.grLineExpCharge;
+        if(_xg && _XC && (_xg.lines||[]).some(gl => _XC(gl))){
+          const _gl = rl => { if(rl.grLineIdx != null) return (_xg.lines||[])[Number(rl.grLineIdx)] || null;
+            const c = (_xg.lines||[]).filter(gl => gl && gl.itemId === rl.itemId && !gl.isFreebie); return c.length === 1 ? c[0] : null; };
+          const _xIds = new Set();
+          rtv = { ...rtv, lines: rtv.lines.map(rl => { const xc = rl ? _XC(_gl(rl)) : null; if(!xc) return rl; _xIds.add(rl.itemId); return { ...rl, noStock:true, expCharge:{ ...xc } }; }) };
+          // ตัดแถวสต๊อก/ความเคลื่อนไหวของสินค้าที่ทุกบรรทัดคืนเป็นค่าใช้จ่าย (แท็บเก่าที่ส่งมา)
+          const _all = new Set([..._xIds].filter(id => rtv.lines.filter(rl => rl && rl.itemId === id).every(rl => rl.expCharge)));
+          if(_all.size){ stockUpdates = (stockUpdates||[]).filter(su => !(su && _all.has(su.itemId))); movements = (movements||[]).filter(m => !(m && _all.has(m.itemId))); }
+        }
+      }
       // 🆕 นำเข้า2569 UAT MF1: GR ประวัติ Ecount ไม่ได้เข้าสต๊อก → คืนไม่ได้ (กันตัดสต๊อกนับจริง + แก้บิลที่ยื่น VAT ใน Ecount แล้ว)
       if(rtv && _grIsMigrated((s.grs||[]).find(g => g.id === rtv.grId))){ alert(_MIG_GR_MSG); return s; }
       // 📦 OVER_RECEIVE UAT S1: ป้าย "คืนส่วนเกิน" (rtv.overRecv) เคลียร์ด่านรับเกิน → ต้องเป็นจัดซื้อ (purchase.po.edit) ที่ไม่ใช่คนรับของใบนั้น · ไม่ผ่าน = ไม่ประทับป้าย (ยังเป็นใบคืนปกติ)
@@ -27207,7 +27480,7 @@ function reducer(s, a){
         if(_g && _cur !== (Number(((a.data.grPriceRev) || {})[rtv.grId]) || 0)){ alert('⛔ บันทึกใบคืนไม่ได้ — ราคาใบรับของ ' + (_g.grNumber || _g.id) + ' ถูกปรับแล้ว (ครั้งที่ ' + _cur + ') — ปิดแล้วเปิดหน้าคืนของใหม่'); return s; }
       }
       // 💎 FA-S2: คืนบรรทัดทรัพย์สิน (noStock) ของ GR ที่ลงทะเบียนแล้ว = จำหน่ายทรัพย์สิน + ใบลดหนี้ ไม่ใช่ RTV
-      if(rtv && (rtv.lines||[]).some(l => l && l.noStock === true)){
+      if(rtv && (rtv.lines||[]).some(l => l && l.noStock === true && !l.expCharge)){
         const _g = (s.grs||[]).find(g => g.id === rtv.grId);
         const _regd = (_g && global.ERP && global.ERP.grRegisteredAssets) ? global.ERP.grRegisteredAssets(s, _g) : [];
         if(_regd.length){ alert('คืนเครื่องที่ลงทะเบียนแล้ว = จำหน่ายทรัพย์สิน (ขาย) + ใบลดหนี้ — ทำที่ทะเบียนทรัพย์สิน'); return s; }
@@ -28192,7 +28465,88 @@ function reducer(s, a){
           entityId:gr.id, entityRef:gr.grNumber, refType:'gr', refId:gr.id, refLabel:gr.grNumber,
           summary:`ล้างสต๊อกทรัพย์สิน ${gr.grNumber} บรรทัด ${li + 1} จำนวน ${qty} (ไม่สร้าง JE)`, note:d.note || '' }] };
     }
+    // 🆕 FREIGHT_EXPENSE F5: ล้างล็อตค่าใช้จ่าย (สินค้าติดธงไม่นับสต๊อก) ที่ค้างในสต๊อก ทั้งสินค้า ทุกสาขา/ทุกล็อต · ทำครั้งเดียว ไม่มีปุ่มย้อน
+    //   แผนจาก ERP.chargeStockClearPlan (ตัวเดียวกับหน้าจอ) · id/at/date จาก payload · ส่งซ้ำ = no-op (auditLog al_ccs_<id>) · เลข JE จาก seq.je
+    case 'CLEAR_CHARGE_STOCK': {
+      const d = a.data || {}, E = global.ERP || {};
+      if(!d.id || !d.itemId) return s;
+      if((s.auditLog || []).some(x => x && x.id === 'al_ccs_' + d.id)) return s;   // ส่งซ้ำ
+      // 🆕 verify 2: อ่านสิทธิ์สดจาก s.users (สิทธิ์ถูกถอนแล้ว session เก่ากดไม่ได้) · กฎ = ERP.canClearChargeStock (สิทธิ์บัญชี JE + ตั้งหนี้)
+      const u0 = _actorOf(s, d.by), u = u0 ? (_userByRef(s, u0.username) || u0) : null;
+      if(!(E.canClearChargeStock && E.canClearChargeStock(u))){
+        alert('⛔ ไม่มีสิทธิ์ล้างล็อตค่าใช้จ่าย — กดได้เฉพาะ ' + (E.CLEAR_CHARGE_WHO || 'ผู้มีสิทธิ์บัญชี')); return s; }
+const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
+      if(!P){ alert('สินค้านี้ยังไม่ติดธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" — ตั้งธงในฟอร์มสินค้าก่อน แล้วค่อยล้างล็อต'); return s; }
+      if(!P.pending){ alert('ไม่มีล็อตค้างในสต๊อกแล้ว — ไม่ต้องล้าง'); return s; }
+      if((P.blocks || []).length){ alert('⛔ ล้างล็อตยังไม่ได้\n• ' + P.blocks.join('\n• ')); return s; }   // 🆕 UAT ชุด 1 M3/S2
+      if(!d.date){ alert('ไม่มีวันที่ลงบัญชี — ลองกดใหม่'); return s; }
+      { const locked = _checkDateLock(s, d.date, 'ล้างล็อตค่าใช้จ่ายออกจากสต๊อก'); if(locked) return locked; }
+      const it = P.item, by = d.by, at = d.at, code = P.accountCode, R = v => Math.round((Number(v) || 0) * 100) / 100;
+      const nm = (it.code ? it.code + ' ' : '') + (it.name || it.id);
+      // JE: ① ค่าใช้จ่าย (ชั้นจาก GR ตั้งหนี้แล้ว/ไม่พบ GR) Dr บัญชีค่าใช้จ่าย / Cr 1300 ทีละชั้น · ② ชั้นติดลบ Dr 1300 / Cr 5100
+      const mkLines = (rows, drCode, crCode, descOf) => {
+        const out = [];
+        for(const r of rows){
+          if(!(r.amount >= 0.005)) continue;
+          const dl = _accLine(s, drCode, r.amount, 0, descOf(r)), cl = _accLine(s, crCode, 0, r.amount, descOf(r));
+          if(!dl || !cl) return null;
+          out.push({ ...dl, branchId:r.branch }, { ...cl, branchId:r.branch });
+        }
+        return out;
+      };
+      const xRows = P.rows.filter(r => r.je === 'expense'), nRows = P.rows.filter(r => r.je === 'reverse_cogs');
+      const xl = mkLines(xRows, code, '1300', r => `ล้างล็อต ${nm} ${r.gr ? r.gr.grNumber : (r.grRef || 'ไม่พบใบรับของ')}${r.inv ? ' (ตั้งหนี้ ' + r.inv.invNumber + ')' : ''} ${r.qty} × ${r.unitCost}`);
+      const nl = mkLines(nRows, '1300', '5100', r => `กลับต้นทุนขายที่ลงผิด ${nm} ชั้นติดลบ ${-r.qty} × ${r.unitCost} (ค่าใช้จ่ายไม่นับสต๊อก)`);
+      if(!xl || !nl){ alert('ไม่พบบัญชี ' + code + ' / 1300 / 5100 ในผังบัญชี — ตั้งผังบัญชีก่อน'); return s; }
+      let seqJe = (s.seq && s.seq.je) || 0;
+      const jd = new Date(d.date), ym = `${jd.getFullYear()}-${String(jd.getMonth() + 1).padStart(2, '0')}`;
+      const mkJe = (lines, tag, desc) => {
+        seqJe += 1;
+        const total = R(lines.reduce((t, l) => t + (Number(l.debit) || 0), 0));
+        return { id:'je_ccs_' + d.id + '_' + tag, jeNumber:`JE-${ym}-${String(seqJe).padStart(4, '0')}`, date:d.date, description:desc,
+          refType:'charge_stock_clear', source:'charge_stock_clear', sourceId:it.id, refId:it.id, sourceRef:it.code || it.id, branchId:(lines[0] && lines[0].branchId) || s.currentBranch || null,
+          lines, totalDebit:total, totalCredit:total, status:'posted', createdBy:by, postedBy:by, createdAt:at, postedAt:at, chargeClearId:d.id };
+      };
+      const jes = [];
+      if(xl.length) jes.push(mkJe(xl, 'x', `ล้างล็อตค่าใช้จ่ายออกจากสต๊อก ${nm} → ${code} (${xRows.length} ล็อต)`));
+      if(nl.length) jes.push(mkJe(nl, 'n', `กลับต้นทุนขายที่ลงผิด ${nm} (ชั้นติดลบจากการขาย)`));
+      // movement: ชั้นบวก charge_out −ค้าง · ชั้นติดลบ charge_in +|ค้าง| (รายงานใช้ |qty| ตาม side) · ส่วนต่าง stockByBranch ปรับให้ 0 (ไม่มี JE)
+      let k = 0;
+      const mv = (q, br, loc, ref, note) => ({ id:d.id + '_' + (k++), type:q < 0 ? 'charge_out' : 'charge_in', itemId:it.id, qty:q, branch:br, locId:loc || null,
+        date:d.date, ref, note:('🧹 ' + note + ' ' + (d.note || '')).trim(), by, chargeClearId:d.id });
+      const mvs = P.rows.map(r => mv(-r.qty, r.branch, r.locId, r.gr ? r.gr.grNumber : (r.kind === 'neg' ? 'NEG' : (r.grRef || 'CLEAR')),
+        r.kind === 'neg' ? 'ปิดชั้นติดลบ (ค่าใช้จ่ายไม่นับสต๊อก)' : 'ล้างล็อตค่าใช้จ่ายออกจากสต๊อก'));
+      P.residual.forEach(x => mvs.push(mv(x.qty, x.branch, x.locId, 'CLEAR', 'ปรับยอดสต๊อกให้เป็น 0 (ไม่ตรงกับล็อต · ไม่มี JE)')));
+      // ชั้น: ค้างเต็มชั้น = ถอดออก · ใช้ไปบางส่วน/ชั้นติดลบ = ปิด (remaining 0) เก็บประวัติ
+      const rmap = new Map(P.rows.map(r => [r.layerId, r]));
+      const fifoLayers = (s.fifoLayers || []).filter(f => { const r = f && rmap.get(f.id); return !(r && r.kind !== 'neg' && Math.abs(r.qty - r.layerQty) < 1e-9 && !(Number(f.nettedQty) > 0)); })
+        .map(f => { const r = f && rmap.get(f.id); return r ? { ...f, remaining:0, chargeClearedId:d.id, chargeClearedAt:at } : f; });
+      // GR: stamp บรรทัดสินค้านี้ noStock + expCharge (ตั้งหนี้ทีหลังลงบัญชีค่าใช้จ่ายตาม F3 · ยกเลิก GR ไม่ตัดสต๊อกซ้ำ)
+      const grLines = new Map();
+      P.rows.forEach(r => { if(r.gr && r.lineIdxs.length) grLines.set(r.gr.id, new Set([...(grLines.get(r.gr.id) || []), ...r.lineIdxs])); });
+      const xc = { expenseItemId:P.link.expenseItem.id, accountCode:code };
+      const grs = (s.grs || []).map(g => { const ix = g && grLines.get(g.id); if(!ix) return g;
+        return { ...g, lines:g.lines.map((l, i) => ix.has(i) ? { ...l, noStock:true, expCharge:{ ...xc }, chargeClearedAt:at, chargeClearedBy:by, chargeClearedId:d.id } : l) }; });
+      const z = v => (v && typeof v === 'object') ? { ...v, _total:0, byLoc:Object.fromEntries(Object.keys(v.byLoc || {}).map(l => [l, 0])) } : 0;
+      const items = s.items.map(x => x.id !== it.id ? x : { ...x, stockByBranch:Object.fromEntries(Object.entries(x.stockByBranch || {}).map(([b, v]) => [b, z(v)])) });
+      const nPos = P.rows.filter(r => r.kind !== 'neg').length, nNeg = P.rows.length - nPos;
+      const summary = `ล้างล็อตค่าใช้จ่ายออกจากสต๊อก ${nm}: ${nPos} ล็อต${nNeg ? ' + ชั้นติดลบ ' + nNeg : ''} · JE ${code} ${R(P.totals.expense).toFixed(2)}`
+        + (nNeg ? ` · กลับต้นทุนขาย ${R(P.totals.reverseCogs).toFixed(2)}` : '') + (P.totals.uninv ? ` · ยังไม่ตั้งหนี้ ${R(P.totals.uninv).toFixed(2)} (ไม่มี JE)` : '')
+        + (P.residual.length ? ` · ปรับยอดไม่ตรงล็อต ${P.residual.length} ที่` : '') + ' · สต๊อก = 0 ทุกสาขา';
+      // 🆕 UAT ชุด 1 M1: บรรทัดขายที่ตัดสต๊อกก่อนล้าง → ประทับ (ยกเลิก/แก้ใบไม่คืนล็อตผี/ไม่กลับต้นทุนขายซ้ำ) · M2: ใบตั้งหนี้ที่ JE ยังถือ Dr 1300
+      const stampLines = (list, key, refs) => { if(!refs.length) return list; const m = new Map();
+        refs.forEach(x => m.set(x[key], new Set([...(m.get(x[key]) || []), x.idx])));
+        return (list || []).map(o => { const ix = o && m.get(o.id); return ix ? { ...o, lines:(o.lines || []).map((l, i) => ix.has(i) ? { ...l, chargeClearedId:d.id } : l) } : o; }); };
+      const salesInvoices = stampLines(s.salesInvoices, 'siId', P.siLines || []), salesLight = stampLines(s.salesLight, 'slId', P.slLines || []);
+      const invSet = new Set(P.invIds || []);
+      const invoices = invSet.size ? (s.invoices || []).map(v => v && invSet.has(v.id) ? { ...v, chargeClearedId:d.id, chargeClearedItems:[...new Set([...(v.chargeClearedItems || []), it.id])] } : v) : s.invoices;
+      return { ...s, items, grs, fifoLayers, salesInvoices, salesLight, invoices, movements:[...(s.movements || []), ...mvs],
+        journalEntries:jes.length ? [...(s.journalEntries || []), ...jes] : s.journalEntries, seq:jes.length ? { ...(s.seq || {}), je:seqJe } : s.seq,
+        auditLog:[...(s.auditLog || []), { id:'al_ccs_' + d.id, ts:at, type:'charge_stock_clear', by, byName:d.byName || by, entityId:it.id, entityRef:it.code || it.id,
+          refType:'item', refId:it.id, refLabel:nm, summary, note:d.note || '', jeNumbers:jes.map(j => j.jeNumber) }] };
+    }
     // 🆕 OFF_INV_DISC_ASSET A4: รวมค่าส่ง/ค่าติดตั้ง (บรรทัด GR ที่ไม่ใช่ 💎) เข้าราคาทุนบรรทัด 💎 ในใบเดียวกัน · ก่อนตั้งหนี้เท่านั้น
+
     //   ถอดล็อตค่าส่งออกจากสต๊อก (เก็บสำเนาไว้คืนตอน undo) · ไม่สร้าง JE (ลง Dr 16xx ตอนตั้งหนี้) · id/at/date จาก payload · ส่งซ้ำ = no-op
     case 'CAP_GR_CHARGE_INTO_ASSET': {
       const d = a.data || {}, E = global.ERP || {}, undo = !!d.undo;
@@ -28240,7 +28594,25 @@ function reducer(s, a){
             : `รวม ${nm} (บรรทัด ${li + 1}) เข้าราคาทุน 💎 ${tnm} (บรรทัด ${into + 1}) · ถอดสต๊อก ${qty}`) + ' · ' + gr.grNumber + ' (ไม่สร้าง JE)', note:d.note || '' }] };
     }
     case 'RECEIVE_PO': {
-      const { gr, updatedPO, stockUpdates, movements, fifoLayers } = a.data;
+      let { gr, stockUpdates, movements, fifoLayers } = a.data;
+      const { updatedPO } = a.data;
+      // 🆕 FREIGHT_EXPENSE F2: สินค้าติดธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" (คิดจาก item สด ไม่เชื่อ payload) → บรรทัด noStock + expCharge (freeze)
+      //   ไม่สร้างล็อต/ความเคลื่อนไหว/สต๊อก · แท็บเก่าที่ส่งมาให้ = ตัดทิ้ง · 💎 ทรัพย์สินคงตามเดิม
+      if(gr && Array.isArray(gr.lines) && global.ERP && global.ERP.itemExpenseLink){
+        const _xIds = new Set();
+        const _ls = gr.lines.map(l => {
+          if(!l || l.isAsset) return l;
+          const xl = global.ERP.itemExpenseLink(s, l.itemId);
+          if(!xl){ if(l.expCharge){ const { expCharge: _d, noStock: _n, ...r } = l; return r; } return l; }   // ไม่ติดธง = ไม่เชื่อ expCharge จาก payload
+          _xIds.add(l.itemId);
+          return { ...l, noStock:true, expCharge:{ expenseItemId:xl.expenseItem.id, accountCode:xl.accountCode } };
+        });
+        if(_xIds.size || _ls.some((l, i) => l !== gr.lines[i])){
+          gr = { ...gr, lines:_ls };
+          const _keep = x => !(x && _xIds.has(x.itemId));
+          stockUpdates = (stockUpdates||[]).filter(_keep); movements = (movements||[]).filter(_keep); fifoLayers = (fifoLayers||[]).filter(_keep);
+        }
+      }
       // 🆕 Y2: period-lock — กันรับของย้อนวันเข้างวดปิด (split-brain กับ GL)
       { const locked = _checkDateLock(s, gr?.grDate, 'รับของ (GR)'); if(locked) return locked; }
       // 🆕 RECV-ONBEHALF R3: สาขาของ GR ต้องเป็นสาขาตัวเอง / รับแทน (receiveForBranches) / superuser — ตรวจจากแถวผู้ใช้สด
@@ -28609,6 +28981,7 @@ function reducer(s, a){
       const branch = iss.branchId || s.currentBranch;
       const lines = (iss.lines||[]).filter(l => l && l.itemId && Number(l.qty) > 0);
       if(!lines.length){ alert('ยังไม่ได้ใส่จำนวนที่เบิก'); return s; }
+      { const xl = lines.filter(l => _xlItem(s, l.itemId)); if(xl.length){ alert('⛔ เบิกไม่ได้ — ' + xl.map(l => _XL_NAME(s, l.itemId)).join(', ') + ' เป็นค่าใช้จ่าย (ไม่นับสต๊อก) · เอาออกจากใบเบิก/รายการโปรด'); return s; } }   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S2
       const fromLocId = iss.fromLocId || null;
       let layers = s.fifoLayers.map(l => ({...l}));
       let items = s.items.slice();
@@ -28919,6 +29292,7 @@ function reducer(s, a){
       const d = a.data || {};
       // 🆕 TR_DATE D1: trDate = วันที่ต้องการของ (เลือกได้วันนี้/อนาคต — ตรวจที่ UI) · reducer ตรวจแค่รูปแบบ YYYY-MM-DD (ไม่เทียบนาฬิกา = replay deterministic)
       if(d.trDate != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(d.trDate))){ alert('วันที่ของใบ TR ไม่ถูกรูปแบบ (ต้องเป็น ปปปป-ดด-วว)'); return s; }
+      { const _xd = _xlLinesDeny(s, d.lines); if(_xd){ alert(_xd); return s; } }   // 🆕 FREIGHT_EXPENSE verify 2
       if(_isIntraDoc(d) && s.currentUser){
         if(d.fromLocId === d.toLocId){ alert('คลังต้นทางกับคลังปลายทางต้องต่างกัน'); return s; }
         const _deny = global.ERP.locActDenyReason && global.ERP.locActDenyReason(s, s.currentUser, d.toBranch, d.toLocId, 'request');
@@ -28944,7 +29318,8 @@ function reducer(s, a){
         pickers: (Array.isArray(d.pickers) ? d.pickers : []).slice(0, 6).map(x => String(x || '')), n: Math.max(1, Math.min(6, Number(d.n) || 1)) };
       return { ...s, trPickPrints:[...(s.trPickPrints || []), rec] };
     }
-    case 'ADD_TO':       return { ...s, transferOrders:[...(s.transferOrders||[]), a.data], seq:{ ...s.seq, to:s.seq.to+1 } };
+    case 'ADD_TO':       { const _xd = _xlLinesDeny(s, (a.data || {}).lines); if(_xd){ alert(_xd); return s; } }   // 🆕 FREIGHT_EXPENSE verify 2
+                         return { ...s, transferOrders:[...(s.transferOrders||[]), a.data], seq:{ ...s.seq, to:s.seq.to+1 } };
     case 'UPDATE_TO':    return { ...s, transferOrders:(s.transferOrders||[]).map(t => t.id===a.data.id ? a.data : t) };
 
     // 🆕 CANCEL_TO — ยกเลิก TO ที่ยังไม่ได้รับ → คืน stock+FIFO+counter movement + TR กลับ pending
@@ -29095,10 +29470,10 @@ function reducer(s, a){
       const toNumber = _dayDocNo('TO', date, s.transferOrders, 'toNumber');
       const locName = (id) => ((((s.branches||[]).find(b => b && b.id === tr.fromBranch) || {}).locations || []).find(l => l && l.id === id) || {}).name || id;
       // ส่งได้เฉพาะรายการที่อยู่ในใบขอ (หน้าจอส่งแค่นี้อยู่แล้ว · กันทาง __dispatch)
-      const _trItems = new Set((tr.lines||[]).map(l => l && l.itemId));
+      const _trItems = new Set((tr.lines||[]).map(l => l && l.itemId).filter(id => !_xlItem(s, id)));   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S2: ค่าใช้จ่ายไม่นับสต๊อกไม่ส่ง
       const r = _intraShipOut(s, { branch:tr.fromBranch, fromLocId:tr.fromLocId, toId, toNumber, lines:(d.lines||[]).filter(l => l && _trItems.has(l.itemId)), date, by:u.username,
         moveNote:`ออกจาก ${locName(tr.fromLocId)} → ${locName(tr.toLocId)} (TR:${tr.trNumber})` });
-      if(!r){ alert('ไม่มีรายการที่จะส่ง'); return s; }
+      if(!r){ alert((tr.lines || []).length && (tr.lines || []).every(l => l && _xlItem(s, l.itemId)) ? 'ใบนี้มีแต่ค่าใช้จ่ายไม่นับสต๊อก — ยกเลิกใบ TR นี้' : 'ไม่มีรายการที่จะส่ง'); return s; }   // 🆕 FREIGHT_EXPENSE verify 2
       const to = { id:toId, toNumber, toDate:date, trId:tr.id, trNumber:tr.trNumber, fromBranch:tr.fromBranch, toBranch:tr.toBranch,
         fromLocId:tr.fromLocId, toLocId:tr.toLocId, isIntraBranch:true, stockOut:true, source:'tr',
         lines:r.lines, totalCost:r.totalCost, note:d.note || '', status:'shipping',
@@ -29118,6 +29493,7 @@ function reducer(s, a){
       if(!b || !fromLoc || !toLoc || fromLoc.id === toLoc.id){ alert('ใบส่งมอบต้องมีคลังต้นทางและปลายทางในสาขาเดียวกัน (คนละคลัง)'); return s; }
       if(!fromLoc.lineId){ alert('ใบส่งมอบส่งออกจากคลังของไลน์เท่านั้น'); return s; }
       if(toLoc.lineId){ alert('ส่งมอบเข้าคลังของไลน์ไม่ได้ — ไลน์ที่จะใช้ต้องเปิด TR ขอเอง'); return s; }
+      { const _xd = _xlLinesDeny(s, d.lines); if(_xd){ alert(_xd); return s; } }   // 🆕 FREIGHT_EXPENSE verify 2
       const u = _actorOf(s, d.by);
       // 🆕 UAT (B12 ข้อ 3): ด่าน 'handover' — คนในไลน์ส่งมอบผลผลิตไลน์ตัวเองได้ ไม่ต้องมีสิทธิ์ TR อนุมัติ
       const _deny = global.ERP.locActDenyReason ? global.ERP.locActDenyReason(s, u, b.id, fromLoc.id, 'handover') : (u ? null : 'ไม่พบผู้ใช้');
@@ -29162,6 +29538,7 @@ function reducer(s, a){
       const fromLoc = locs.find(l => l && l.id === d.fromLocId), toLoc = locs.find(l => l && l.id === d.toLocId);
       if(!b || !fromLoc || !toLoc || fromLoc.id === toLoc.id){ alert('ส่งเข้าไลน์ต้องมีคลังต้นทางและคลังไลน์ปลายทางในสาขาเดียวกัน'); return s; }
       if(fromLoc.lineId){ alert('⛔ ต้นทางเป็นคลังของไลน์ — ส่งของระหว่างไลน์ต้องเปิด TR (หรือใช้ 📤 ส่งมอบ)'); return s; }
+      { const _xd = _xlLinesDeny(s, d.lines); if(_xd){ alert(_xd); return s; } }   // 🆕 FREIGHT_EXPENSE verify 2
       if(!toLoc.lineId){ alert('⛔ ปลายทางต้องเป็นคลังของไลน์ — ย้ายระหว่างคลังอื่นใช้ TR'); return s; }
       const rc = PUSH_LINE_REASONS.find(x => x.code === d.reasonCode);
       const rText = String(d.reason || '').trim();
@@ -30610,7 +30987,11 @@ function reducer(s, a){
     // ---------- POS Import (compound) ----------
     // a.data: { posImport, stockUpdates:[{itemId,branch,delta,locId?}], movements:[...] }
     case 'ADD_POS_IMPORT': {
-      const { posImport, stockUpdates, movements } = a.data;
+      // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S2: สินค้าติดธงไม่นับสต๊อก → ข้าม (ทั้งที่ปรับ + ที่เก็บไว้คืนตอนยกเลิก)
+      const _xk = x => !(x && _xlItem(s, x.itemId));
+      const stockUpdates = (a.data.stockUpdates || []).filter(_xk), movements = (a.data.movements || []).filter(_xk);
+      const posImport = (a.data.posImport && Array.isArray(a.data.posImport.stockApplied) && a.data.posImport.stockApplied.some(x => !_xk(x)))
+        ? { ...a.data.posImport, stockApplied:a.data.posImport.stockApplied.filter(_xk), fifoApplied:(a.data.posImport.fifoApplied || []).filter(_xk) } : a.data.posImport;
       let items = s.items;
       (stockUpdates||[]).forEach(su => {
         items = items.map(it => {
@@ -31046,12 +31427,14 @@ function reducer(s, a){
       { const _g = global.ERP.siDateGuard(s, si.invDate); if(_g.block){ alert('⛔ ยกเลิกไม่ได้ — ' + _g.block); return s; } }
       const locked = _checkDateLock(s, si.invDate, 'ยกเลิกใบกำกับขาย');
       if(locked) return locked;
+      // 🆕 FREIGHT_EXPENSE UAT ชุด 1 M1: บรรทัดค่าใช้จ่ายที่ล้างล็อตแล้ว — ยกเลิกจะคืนล็อตผี + กลับต้นทุนขายซ้ำ
+      if((si.lines || []).some(l => l && l.chargeClearedId)){ alert('⛔ ยกเลิกใบ ' + (si.siNumber || '') + ' ไม่ได้ — มีบรรทัดค่าใช้จ่ายที่ล้างล็อตแล้ว — ใช้ใบลดหนี้/JE ปรับปรุง'); return s; }
       let items = s.items.slice();
       let fifoLayers = s.fifoLayers.slice();
       let movements = (s.movements || []).slice();   // ต้อง copy — หน้าที่ memo ด้วย state.movements จะไม่รีเฟรชถ้า mutate ตัวเดิม
       for(const ln of (si.lines||[])){
         const bq = Number(ln.baseQty)||0;
-        if(!(bq > 0)) continue;
+        if(!(bq > 0) || ln.noStock === true) continue;   // 🆕 FREIGHT_EXPENSE F4: บรรทัดไม่นับสต๊อก → ยกเลิกไม่คืนสต๊อก
         const cost = Number(ln.cogs)||0;
         // 🆕 PRODLIVE-W2 E2: บรรทัดที่ตัดตามคลัง (srcParts) → คืนเข้าคลังเดิมทีละส่วน ต้นทุนเฉลี่ยตามสัดส่วนของ cogs
         //   (ส่วนที่ติดลบก็คืนเข้าคลังเดิม เพื่อให้ NEG netting หักล้างได้) · ไม่มี srcParts = พฤติกรรมเดิม (locId null)
@@ -31214,12 +31597,13 @@ function reducer(s, a){
       if(e.voided){ alert('รายการนี้ยกเลิกไปแล้ว'); return s; }
       const locked = _checkDateLock(s, e.date, 'ยกเลิกบันทึกขาย');
       if(locked) return locked;
+      if((e.lines || []).some(l => l && l.chargeClearedId)){ alert('⛔ ยกเลิกไม่ได้ — มีบรรทัดค่าใช้จ่ายที่ล้างล็อตแล้ว — ใช้ใบลดหนี้/JE ปรับปรุง'); return s; }   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 M1
       let items = s.items.slice();
       let fifoLayers = s.fifoLayers.slice();
       let movements = (s.movements || []).slice();   // ต้อง copy — หน้าที่ memo ด้วย state.movements จะไม่รีเฟรชถ้า mutate ตัวเดิม
       for(const ln of (e.lines||[])){
         const bq = Number(ln.baseQty)||0;
-        if(!(bq > 0)) continue;
+        if(!(bq > 0) || ln.noStock === true) continue;   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S1: บรรทัดไม่นับสต๊อก → ยกเลิกไม่คืนสต๊อก
         const cost = Number(ln.cogs)||0;
         // 🆕 UAT (หน้าร้าน): บันทึกขายสาขาแยกคลัง (srcParts) → คืนเข้าคลังเดิมทีละส่วนที่ต้นทุนของส่วนนั้น + หักล้าง NEG ที่คลังนั้น (เหมือน VOID_SALES_INV)
         const _sp = (Array.isArray(ln.srcParts) ? ln.srcParts : []).filter(p => p && Number(p.qty) > 0);
@@ -31789,6 +32173,7 @@ function _siEditStock(s, si, n, opt){
   // E22 กองต้นทุนเดิม: pieces → srcParts (สัดส่วน · ต้นทุนแบบ VOID) → ชิ้นเดียว
   const piecesOf = (l) => {
     const bq = bqOf(l), cogs = Number(l.cogs) || 0;
+    if(l.noStock === true) return [];   // 🆕 FREIGHT_EXPENSE F4: บรรทัดไม่นับสต๊อก ไม่เคยตัดสต๊อก
     if(Array.isArray(l.pieces) && l.pieces.length) return l.pieces.map(p => ({ ...p, qty:Number(p.qty) || 0, unitCost:Number(p.unitCost) || 0 }));
     if(!(bq > 0)) return [];
     const sp = (Array.isArray(l.srcParts) ? l.srcParts : []).filter(p => p && Number(p.qty) > 0), sum = sp.reduce((a, p) => a + Number(p.qty), 0);
@@ -31814,7 +32199,8 @@ function _siEditStock(s, si, n, opt){
   const pilesKept = {};
   Array.from(changed).forEach(itemId => {
     const pile = piles[itemId] || [], O = pile.reduce((a, p) => a + p.qty, 0);
-    const N = (n.lines || []).reduce((a, l) => a + (l && l.lineKind !== 'kit' && l.itemId === itemId ? E.toBaseQty(itemOf(itemId), Number(l.qty) || 0, l.unit) : 0), 0);
+    const N = (E.itemExpenseLink && E.itemExpenseLink(s, itemId)) ? 0   // 🆕 FREIGHT_EXPENSE F4: ติดธง = ไม่ตัดสต๊อก
+      : (n.lines || []).reduce((a, l) => a + (l && l.lineKind !== 'kit' && l.itemId === itemId ? E.toBaseQty(itemOf(itemId), Number(l.qty) || 0, l.unit) : 0), 0);
     dStock.push({ itemId, from:O, to:N });
     let dec = Math.max(0, O - N);
     const take = pile.map(() => 0);
@@ -31871,7 +32257,7 @@ function _siEditStock2(s, si, n, c){
       return Math.abs(bqOf(ol) - E.toBaseQty(itemOf(id), Number(l.qty) || 0, l.unit)) < 1e-9; });
     if(okAll && used.size === old.filter(ol => ol && ol.lineKind !== 'kit' && ol.itemId === id).length) verb.add(id);
   });
-  const COST_F = ['baseQty', 'cogs', 'srcParts', 'pieces'];
+  const COST_F = ['baseQty', 'cogs', 'srcParts', 'pieces', 'noStock', 'chargeClearedId'];   // 🆕 FREIGHT_EXPENSE F4: noStock คงตามบรรทัดเดิม/ธงสินค้าสด · UAT ชุด 1 M1: ธงล้างล็อตคงไว้
   lines.forEach(l => {
     COST_F.forEach(f => { delete l[f]; }); delete l.kitCogs;
     if(l.lineKind === 'kit'){ l.baseQty = 0; return; }
@@ -31879,6 +32265,8 @@ function _siEditStock2(s, si, n, c){
     const id = l.itemId;
     if(verb.has(id)){ const ol = old[l._src]; COST_F.forEach(f => { if(ol[f] !== undefined) l[f] = ol[f]; }); return; }
     const it = itemOf(id), b = E.toBaseQty(it, Number(l.qty) || 0, l.unit);
+    // 🆕 FREIGHT_EXPENSE F4: สินค้าติดธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" → ไม่ตัดสต๊อก/ไม่มีต้นทุนขาย
+    if(E.itemExpenseLink && E.itemExpenseLink(s, id)){ l.noStock = true; l.baseQty = b; l.cogs = 0; return; }
     const kept = pilesKept[id] || (pilesKept[id] = (piles[id] || []).map(p => ({ ...p })));
     const mine = []; let r = b;
     while(r > 1e-9 && kept.length){ const p = kept[0], q = Math.min(p.qty, r); mine.push({ ...p, qty:q }); p.qty -= q; r -= q; if(p.qty <= 1e-9) kept.shift(); }
@@ -31902,7 +32290,7 @@ function _siEditStock2(s, si, n, c){
         date:m.date, ref:no, note:'แก้ใบกำกับ ' + no + ' ครั้งที่ ' + rev + ' — กลับรายการขายเดิม', by });
       return { ...m, reversed:true }; } return m; });
     lines.forEach(l => {
-      if(l.lineKind === 'kit' || !l.itemId || !changed.has(l.itemId)) return;
+      if(l.lineKind === 'kit' || !l.itemId || !changed.has(l.itemId) || l.noStock === true) return;
       const note = 'ขาย ' + (si.customerName || '') + (l.lineKind === 'kit_child' ? ' (ในชุด ' + ((lines.find(x => x.lineKind === 'kit' && x.kitId === l.kitId) || {}).itemName || '') + ')' : '');
       const parts = multi ? Array.from((l.srcParts || []).reduce((m, p) => m.set(p.locId || null, (m.get(p.locId || null) || 0) + p.qty), new Map()).entries()) : [[undefined, l.baseQty]];
       parts.forEach(([loc, q]) => add.push({ id:'mv_siedit_' + si.id + '_' + atK + '_' + (k++), type:'sale_out', itemId:l.itemId, qty:-(parts.length === 1 ? l.baseQty : q),
@@ -33024,6 +33412,8 @@ const ACTION_MERGE = Object.freeze({
   ADD_ASSET_COMPONENT: { kind:'delta' },    // 💎 FA-S5: เพิ่มส่วนเพิ่มเข้าเครื่องเดิม · ส่ง id ซ้ำ = no-op (T3)
   VOID_ASSET_COMPONENT: { kind:'delta' },   // 💎 FA-S5: ยกเลิกส่วนเพิ่ม (ยังไม่ลงค่าเสื่อม) · ยกเลิกแล้ว = no-op
   CLEAR_ASSET_STOCK: { kind:'delta' },   // 💎 FA-S3: ล้างสต๊อก GR 💎 เก่า · ส่งซ้ำ = no-op (clearedAssetStockAt)
+  CLEAR_CHARGE_STOCK: { kind:'delta' },   // 🆕 FREIGHT_EXPENSE F5: ล้างล็อตค่าใช้จ่ายค้างสต๊อก · แผนคิดใหม่จาก state สด · ส่งซ้ำ = no-op (auditLog al_ccs_<id>)
+  SET_ITEM_EXPENSE_LINK: { kind:'delta' },   // 🆕 FREIGHT_EXPENSE F1: ตั้ง/ยกเลิกธงไม่นับสต๊อก → ค่าใช้จ่าย · ส่งซ้ำ = no-op (auditLog al_iel_<id>)
   CAP_GR_CHARGE_INTO_ASSET: { kind:'delta' },   // 🆕 OFF_INV_DISC_ASSET A4: รวมค่าส่งเข้าราคาทุน 💎 / undo · ส่งซ้ำ = no-op (auditLog al_cap_<id>)
   VOID_INV: { kind:'delta' },
   VOID_POS_IMPORT: { kind:'delta' },
@@ -33055,7 +33445,8 @@ const ACTION_READS = Object.freeze({
   CONFIRM_PO_SERVICE: ['approvalRequests','auditLog','docFiles','expenseItems','grs','pos'], VOID_PO_SERVICE_CONFIRM: ['approvalRequests','auditLog','grs','invoices','pos'], CLOSE_PO_SERVICE_LINE: ['auditLog','pos'],   // 🔧 EXPENSE_PO B4.4   // verify 2b: + approvalRequests (svcPoParties → ผู้ขอคำขอแก้ PO)
   UPDATE_PO_PAYMODE: ['approvalRequests','auditLog','deposits','grs','invoices','payments','pos'],   // 🆕 PO-PAYMODE: poPaymodeDeny (PI/จ่าย/มัดจำ UAT S3/GR/คำขอค้าง) + _approvalGate
   UPDATE_PO_FULL: ['approvalRequests','auditLog','expenseItems','pos'],   // 🔧 B18.10-7: + expenseItems   // B18: approvalReqId → _approvalGate อ่านคำขอ (users/settings/approvalRules = หมวดคุม)
-  RECEIVE_PO: ['auditLog','fifoLayers','grs','items','movements','pos'],   // 🆕 RECV-ONBEHALF UAT S2: + auditLog (กันซ้ำ al_grob_<gr.id> ก่อนต่อท้าย)
+  RECEIVE_PO: ['auditLog','expenseItems','fifoLayers','grs','items','movements','pos'],   // 🆕 FREIGHT_EXPENSE F2: + expenseItems (ธงไม่นับสต๊อก itemExpenseLink)
+    // 🆕 RECV-ONBEHALF UAT S2: + auditLog (กันซ้ำ al_grob_<gr.id> ก่อนต่อท้าย)
   ADD_INV: ['approvalRequests','assetCategories','assets','auditLog','contracts','expenseItems','filedTaxInvKeys','grs','invoices','payments','pos','returns','suppliers'],   // 📦 OVER_RECEIVE O1/O5: + returns (คืนส่วนเกิน RTV)   // 🔧 EXPENSE_PO D12: + expenseItems (ค่าเริ่มต้นบัญชี/💎)   // 🆕 EXPENSE_PO P3.8: + assets/assetCategories/contracts (contractCapAccount · ด่านสัญญา)   // VAT-DEFER verify: + approvalRequests (_taxInvDenyReason → vatApPendingLive)   // DEPOSIT-VAT UAT: + grs (ชุดแยกใบเก่า splitInvoiceIds)   // DEPOSIT-VAT review: ใบกำกับที่มากับใบใหม่ → ด่านซ้ำ (findDupTaxInv)
   ADD_MIG_LATE_INV: ['auditLog','filedTaxInvKeys','grs','invoices','pos','suppliers'],   // 🆕 MIG_LATE_INV: ด่านเลข Ecount/ผู้ขาย+เลขใบ (findDupSupInv/findDupTaxInv) · users/settings = หมวดคุม
   ADD_COMBINED_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','payments','pos','returns','suppliers'],   // 📦 OVER_RECEIVE O1/O5: + returns (คืนส่วนเกิน RTV)   // VAT-DEFER verify: + approvalRequests
@@ -33067,20 +33458,21 @@ const ACTION_READS = Object.freeze({
   ADD_PAY_TAG: ['auditLog','payTags'],   // 🆕 PAY-TAGS T1: กันชื่อซ้ำ (อ่านทั้งทะเบียน) — ชื่อซ้ำ = ไม่เขียน จึงต้องตรวจหมวดนี้เสมอ
   SET_PAY_TAG: ['auditLog','payTags','payments'],   // 🆕 PAY-TAGS T3: payTags = ตรวจว่าแท็กยังอยู่ + snapshot ชื่อ
   SET_DOC_TAG: ['auditLog','contracts','invoices','payTags','pos'],   // 🆕 EXPENSE_PO P10.7: + contracts   // 🆕 DOC-TAGS D5: ใบ (pos|invoices) + ทะเบียนแท็ก (ตรวจว่ายังอยู่ + โยงด้วยชื่อ)
-  ADD_QUICK_ISSUE: ['boms','fifoLayers','items','materialIssues','movements'],   // boms: ต้นทุนส่วนติดลบ (negUnitCost) — ระบบผลิตรอบ 1
-  SHIP_PUSH_LINE: ['boms','fifoLayers','items','movements','transferOrders'],   // 🆕 TR_PUSH_FAV (A3): boms = negUnitCost ส่วนติดลบ · transferOrders = กันซ้ำ + เลข TO
+  ADD_QUICK_ISSUE: ['boms','expenseItems','fifoLayers','items','materialIssues','movements'],   // boms: ต้นทุนส่วนติดลบ (negUnitCost) — ระบบผลิตรอบ 1
+  SHIP_PUSH_LINE: ['boms','expenseItems','fifoLayers','items','movements','transferOrders'],   // FREIGHT_EXPENSE verify 2: + expenseItems (ธงไม่นับสต๊อก)
+    // 🆕 TR_PUSH_FAV (A3): boms = negUnitCost ส่วนติดลบ · transferOrders = กันซ้ำ + เลข TO
   VOID_QUICK_ISSUE: ['auditLog','fifoLayers','items','materialIssues','movements'],
   ADD_MATERIAL_ISSUE: ['items','materialIssues','movements'],
   ADD_MOVEMENT: ['movements'],
   DEDUCT_FIFO_LAYERS: ['boms','fifoLayers','items'],
   ADD_FIFO_LAYER: ['fifoLayers'],
-  ADJUST_STOCK: ['auditLog','boms','fifoLayers','items','journalEntries','movements'],
+  ADJUST_STOCK: ['auditLog','boms','expenseItems','fifoLayers','items','journalEntries','movements'],
   REVERSE_ADJUST: ['auditLog','fifoLayers','items','journalEntries','movements'],  // 🆕 S8a: กลับ JE je_adj_<mv.id>
   ADJUST_BRANCH_STOCK: ['items'],
   ADD_WEIGH_LOG: ['boms','fgDispatchKeys','fifoLayers','items','movements','productionOrders','weighLogs'],   // 🆕 WEIGH_FREE_STOCK: ชั่งอิสระตัด/รับของ (_consumeLineOnly + PRODUCE_FG_TO_LOCATION)
   REVIEW_WEIGH_LOG: ['auditLog','boms','fifoLayers','items','movements','productionOrders','weighLogs'], MARK_WEIGH_REPRINT: ['auditLog','weighLogs'],   // 🆕 WEIGH_FREE_STOCK FW5: คัดทิ้งชั่งอิสระ = ตัดผลผลิตเป็นของเสีย
   VOID_WEIGH_LOG_STOCK: ['auditLog','boms','fifoLayers','items','movements','productionOrders','weighLogs'],   // 🆕 FW5 ยกเลิกผลชั่ง (_consumeLineOnly + คืน layer) · boms = negUnitCost → findBomForOutput ตอนถุงถูกใช้ไปแล้ว (verify 1)
-  ADD_TR: ['transferRequests'], UPDATE_TR: ['transferRequests'],
+  ADD_TR: ['expenseItems','items','transferRequests'], UPDATE_TR: ['transferRequests'],
   ADD_TR_PICK_PRINT: ['transferRequests','trPickPrints'],   // 🆕 TR_PRINT P5 (verify: เก็บแยกหมวด)
   // 🆕 EXPENSE_PO ภาค P (P3.11 · P10.8): สัญญา + ไฟล์แนบ (settings/users/chartOfAccounts = หมวดคุม)
   ADD_DOC_FILE: ['docFiles'],
@@ -33092,7 +33484,7 @@ const ACTION_READS = Object.freeze({
   ACCEPT_CONTRACT_INSTALLMENT: ['auditLog','contracts','docFiles','invoices'],
   VOID_CONTRACT_ACCEPT: ['auditLog','contracts','invoices'],
   CLOSE_CONTRACT: ['auditLog','contracts','invoices'],
-  ADD_TO: ['transferOrders'], UPDATE_TO: ['transferOrders'],
+  ADD_TO: ['expenseItems','items','transferOrders'], UPDATE_TO: ['transferOrders'],   // FREIGHT_EXPENSE verify 2: ADD_TR/ADD_TO อ่านธงไม่นับสต๊อก
   ADD_TO_GR: ['fifoLayers','grs','items','movements'],
   ADD_SALES_LIGHT: ['salesLight'],
   VOID_SALES_LIGHT: ['auditLog','fifoLayers','items','journalEntries','movements','salesLight'],
@@ -33103,7 +33495,7 @@ const ACTION_READS = Object.freeze({
   ISSUE_SI_REPLACEMENT: ['salesInvoices'],   // 🆕 SP13 (สิทธิ์อ่าน users = หมวดคุมอยู่แล้ว)
   LINK_SALES_INV_CUSTOMER: ['auditLog','customers','salesInvoices'],   // 🆕 UAT S1
   UPDATE_SALES_INV: ['salesInvoices'],   // 🆕 SALES_HISTORY: ใบนำเข้า Ecount คงฟิลด์เอกสารเดิม (อ่านใบเดิม)
-  EDIT_SALES_INV: ['approvalRequests','auditLog','boms','fifoLayers','items','journalEntries','lotGenealogy','movements','productionOrders','qcTemplates','salesBillings','salesInvoices','salesOrders','vatFilings'],   // 🆕 SI_EDIT §13 (boms = negUnitCost ของส่วนที่ติดลบ) · UAT ชุด 1 S1: productionOrders/qcTemplates = QC ล็อตที่ตัดจริง
+  EDIT_SALES_INV: ['approvalRequests','auditLog','boms','expenseItems','fifoLayers','items','journalEntries','lotGenealogy','movements','productionOrders','qcTemplates','salesBillings','salesInvoices','salesOrders','vatFilings'],   // 🆕 SI_EDIT §13 (boms = negUnitCost ของส่วนที่ติดลบ) · UAT ชุด 1 S1: productionOrders/qcTemplates = QC ล็อตที่ตัดจริง
   ACK_SI_EDIT_FOLLOWUP: ['auditLog','salesInvoices'],   // 🆕 SI_EDIT E44
   ACK_GR_OVER_RECEIVE: ['approvalRequests','auditLog','fifoLayers','filedTaxInvKeys','grs','invoices','items','journalEntries','payments','pos','returns','supplierMemos','suppliers'],   // 📦 OVER_RECEIVE O5: 🎁 แถม เรียกตัวลงบัญชี ADJUST_INV_PRICE at_gr (หมวดเดียวกัน) · ผู้กด = currentUser/users (หมวดคุม) · audit id al_ovr_<gr>_<at>
   VOID_SALES_INV: ['auditLog','fifoLayers','items','journalEntries','movements','salesBillings','salesInvoices','salesOrders','vatFilings'],   // 🆕 SI_EDIT F1: + vatFilings (siDateGuard)   // 🆕 SALES_HISTORY: แถวใหม่ (ด่านใบนำเข้า Ecount)
@@ -33120,7 +33512,7 @@ const ACTION_READS = Object.freeze({
   // 🆕 WEIGH-ORDER E7: ตัวเดียวกับ WEIGH_ORDER_BATCH (นับเป็น Batch ถัดไป = ตัด/ปิดขั้น/รับผลผลิต · ของเสีย = ตัดของ) · weighLogs แก้แถวเดิม (อ่านจริง)
   RESOLVE_WEIGH_JOB_LOG: ['auditLog','boms','fgDispatchKeys','fifoLayers','items','movements','productionOrders','transferOrders','weighLogs'],
   PRODUCE_FG_TO_LOCATION: ['auditLog','fgDispatchKeys','fifoLayers','items','movements','productionOrders','transferOrders'],
-  CONSUME_PRODUCTION_MATERIALS: ['boms','fifoLayers','items','movements','productionOrders'],
+  CONSUME_PRODUCTION_MATERIALS: ['boms','expenseItems','fifoLayers','items','movements','productionOrders'],
   ADD_SCRAP: ['boms','fifoLayers','items','journalEntries','movements','scrapEntries'],   // boms: deductFromStore NEG @negUnitCost (prod-live รอบ 2)
   GM_SELF_APPROVE_REQUEST: ['approvalRequests','auditLog','deposits','grs','invoices','payments','pos','supplierMemos','transferOrders'],   // 🆕 GM-SELF: ข้อยกเว้นจ่ายใบมัดจำ/ระงับจ่าย อ่าน payments+invoices + pos (B18 คำขอ reopen_po ล้าสมัย) · UAT S3: คำขอยกเลิกใบโอนล้าสมัย อ่าน transferOrders+grs · ใบลด/เพิ่มหนี้ supplierMemos (users/settings = หมวดคุม)   // PO-PAYMODE UAT S3: approvalStaleReason(change_po_paymode) อ่าน deposits
   ADD_APPROVAL_REQUEST: ['approvalRequests'], UPDATE_APPROVAL_REQUEST: ['approvalRequests','auditLog','invoices','payments'],   // UAT S2: ✋ ต่อท้าย audit self_approved_perm ใน reducer
@@ -33134,7 +33526,7 @@ const ACTION_READS = Object.freeze({
   SET_ITEM_FAVORITES: ['itemFavorites'],   // TR_PUSH_FAV B2: scope 'company' อ่าน users (หมวดคุม · ไม่ใส่แถว §B4.1c)
   ADD_STOCK_COUNT_SESSION: ['stockCounts'],
   // UAT คลื่น 3: แถวเพิ่ม (ไล่จาก reducer + T-READS)
-  ADD_POS_IMPORT: ['items','movements','posImports'],
+  ADD_POS_IMPORT: ['expenseItems','items','movements','posImports'],
   ADD_GR: ['grs','pos'],   // verify 1 (RECV-ONBEHALF): ตรวจสาขากับปลายทาง PO จริง
   UPDATE_GR: ['grs','invoices'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก invoiceId ที่ไม่มีอยู่จริง
   UPDATE_RTV: ['invoices','returns'],   // 🆕 DEPOSIT-VAT UAT: ห้ามผูก linkedINV ที่ไม่มีอยู่จริง
@@ -33149,6 +33541,8 @@ const ACTION_READS = Object.freeze({
   EDIT_GR_DATE: ['approvalRequests','assets','auditLog','fifoLayers','grs','journalEntries','movements','returns'],   // 🆕 GR-DATE-FIX (settings/users/approvalRules = หมวดคุม)
   VOID_GR: ['assets','auditLog','fifoLayers','grs','invoices','items','journalEntries','movements','pos','returns'],   // 💎 FA-S2: assets (GR ลงทะเบียนแล้ว บล็อก)
   CLEAR_ASSET_STOCK: ['auditLog','fifoLayers','grs','items','movements'],   // 💎 FA-S3: อ่าน/เขียนหมวดเหล่านี้ + settings/users (หมวดคุม)
+  CLEAR_CHARGE_STOCK: ['auditLog','expenseItems','fifoLayers','grs','invoices','items','journalEntries','movements','salesInvoices','salesLight','transferOrders','transferRequests'],   // 🆕 FREIGHT_EXPENSE F5 · UAT ชุด 1: + ขาย (M1 ประทับ) + TR/TO (S2 ด่าน)
+  SET_ITEM_EXPENSE_LINK: ['auditLog','expenseItems','items'],   // 🆕 FREIGHT_EXPENSE F1
   CAP_GR_CHARGE_INTO_ASSET: ['assets','auditLog','fifoLayers','grs','invoices','items','movements','returns'],   // 🆕 OFF_INV_DISC_ASSET A4
   ADD_JE: ['auditLog','invoices','journalEntries'],   // DEPOSIT-VAT E-5 R5: JE ของใบตั้งหนี้ต้องมีใบจริง
   ADJUST_INV_VAT: ['auditLog','grs','invoices','journalEntries','payments','pos','returns'],
@@ -40010,7 +40404,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
         // 🏷️ LOT-LABEL: แนะนำ = จำนวน "ลัง/ถุง" ที่รับ (1 ดวงต่อ 1 ลัง) · ผู้ใช้แก้เองได้
         // 💎 UAT S2: แนะนำตามปกติทุกบรรทัด (💎 ต่ำกว่าเกณฑ์ = ของเข้าสต๊อก ต้องมีสติ๊กเกอร์) · ถึงเกณฑ์ = ซ่อนช่อง + ไม่พิมพ์ (_capUi/_isCap)
         // 🆕 RECV-ONBEHALF UAT M2: รับแทน = ของอยู่ที่สาขา → ค่าเริ่มต้น 0 ดวง (ไม่พิมพ์ที่เครื่อง HQ) · แก้เองได้
-        labelQty: onBehalf ? 0 : suggestLabelQty(_it, _rem, l.unit),
+        // 🆕 FREIGHT_EXPENSE UAT2 S4: สินค้าติดธงไม่นับสต๊อก (ค่าส่ง/ค่าบริการ) = ไม่มีล็อต → 0 ดวง
+        labelQty: (onBehalf || (!l.isAsset && global.ERP.itemExpenseLink(state, l.itemId))) ? 0 : suggestLabelQty(_it, _rem, l.unit),
         _labelTouched: onBehalf,   // แก้เองแล้ว = หยุดวิ่งตามช่อง "รับตอนนี้"
       }];
     })
@@ -40048,13 +40443,15 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
   };
   const removePhoto = (idx) => setPhotos(photos.filter((_,i) => i !== idx));
 
+  // 🆕 FREIGHT_EXPENSE UAT2 S4: บรรทัดค่าส่ง/ค่าบริการติดธง (ไม่ใช่ 💎) — ไม่เข้าสต๊อก
+  const _expUi = (l) => !!(l && !l.isAsset && global.ERP.itemExpenseLink(state, l.itemId));
   const updateLine = (i, k, v) => setRcvLines(rcvLines.map((l,idx) => {
     if(idx !== i) return l;
     const nl = { ...l, [k]: v };
     // 🏷️ ยังไม่ได้แก้จำนวนสติ๊กเกอร์เอง → ให้วิ่งตามจำนวนที่รับ (รับ 5 ลัง = 5 ดวง)
     //    ถ้าไม่ทำ: ลดจำนวนรับจาก 5 เหลือ 2 แต่ยังพิมพ์ 5 ดวง → สติ๊กเกอร์เกินไปแปะผิดลัง
     if(k === 'receiveNow' && !l._labelTouched){   // 💎 UAT S2: 💎 ต่ำกว่าเกณฑ์ก็วิ่งตาม (ถึงเกณฑ์ ช่องถูกซ่อน/ไม่พิมพ์)
-      nl.labelQty = suggestLabelQty((state.items||[]).find(x => x.id === l.itemId), v, l.unit);
+      nl.labelQty = _expUi(l) ? 0 : suggestLabelQty((state.items||[]).find(x => x.id === l.itemId), v, l.unit);
     }
     return nl;
   }));
@@ -40087,6 +40484,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     const probe = { isAsset:true, qty:l.receiveNow, lineTotal: l.isFreebie ? 0 : _netOf(l, _poUi), vatRate:(pl.vatRate ?? 7), isFreebie:!!l.isFreebie };
     return !!global.ERP.isCapexLine(state, { priceMode: _poUi.priceMode || 'exclusive' }, probe);
   };
+  // 🆕 FREIGHT_EXPENSE UAT2 S4: บรรทัดสินค้าติดธง "ไม่นับสต๊อก → ค่าใช้จ่าย" = ไม่มี LOT/หมดอายุ/สติ๊กเกอร์ (เหมือน 💎 ถึงเกณฑ์)
+  const _noLotUi = (l) => _capUi(l) === true || _expUi(l);
   // ป้ายต่อบรรทัด (มือถือ + จอกว้าง) — ไม่มีราคา
   const _capBadge = (l, i, small) => {
     const c = _capUi(l);
@@ -40111,7 +40510,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
   const totalValue = rcvLines.reduce((s,l) => s + _netOf(l, _poUi), 0);
   // 🏷️ นับเฉพาะรายการที่รับจริง — ไม่รับ = ไม่ต้องมีสติ๊กเกอร์
   const totalLabels = rcvLines.reduce((s,l) =>
-    s + ((l.receiveNow||0) > 0 && _capUi(l) !== true ? (Number(l.labelQty)||0) : 0), 0);   // 💎 ทรัพย์สินไม่พิมพ์ (UAT S2)
+    s + ((l.receiveNow||0) > 0 && !_noLotUi(l) ? (Number(l.labelQty)||0) : 0), 0);   // 💎 ทรัพย์สินไม่พิมพ์ (UAT S2)
   const hasAny = rcvLines.some(l => l.receiveNow > 0);
   const hasOverReceive = rcvLines.some(l => l.receiveNow > l.remainQty);
   // 📦 OVER_RECEIVE O1+O5: ส่วนเกินรายบรรทัด — คลังรับตามจริงอย่างเดียว (ไม่มีตัวเลือก) · ระบบส่งให้จัดซื้อตัดสินคิดเงิน/แถม/คืน
@@ -40477,7 +40876,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
     const _labelFrom = (onBehalf ? `ของสาขา ${destBranchObj?.name || branch}` + (_supName ? ' · ' : '') : '') + (_supName ? `ผู้ส่ง: ${_supName}` : '');
     const labelJobs = receiving.map((l, idx) => {
       const n = Math.max(0, Math.min(99, Math.floor(Number(l.labelQty)||0)));
-      if(n <= 0 || _isCap(l)) return null;   // 💎 FA-S2: ทรัพย์สินไม่มีล็อต ไม่พิมพ์สติกเกอร์
+      if(n <= 0 || _isCap(l) || _expUi(l)) return null;   // 💎 FA-S2: ทรัพย์สินไม่มีล็อต ไม่พิมพ์สติกเกอร์ · 📦 UAT2 S4: ค่าใช้จ่ายติดธงก็ไม่พิมพ์
       const item = state.items.find(i => i.id === l.itemId);
       return {
         count: n,
@@ -40508,7 +40907,10 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
 
     // 💎 UAT S1: บอกในป๊อปอัปว่าบรรทัดไหน "ไม่เข้าสต๊อก" (ทรัพย์สิน) — คนรับของไม่เห็นราคา ต้องรู้ว่าไม่ต้องเก็บขึ้นชั้น
     const _capNames = receiving.filter(l => _isCap(l)).map(l => (state.items.find(i => i.id === l.itemId)?.name || l.itemId) + ` ×${fmtNum(l.receiveNow)}`);
+    // 🆕 FREIGHT_EXPENSE UAT2 S4: บอกบรรทัดค่าส่ง/ค่าบริการที่ไม่เข้าสต๊อก (คิดจาก item สด เหมือน reducer)
+    const _expNames = receiving.filter(l => !_isCap(l) && _expUi(l)).map(l => (state.items.find(i => i.id === l.itemId)?.name || l.itemId) + ` ×${fmtNum(l.receiveNow)}`);
     const _capMsg = (_capNames.length ? `\n\n💎 ไม่เข้าสต๊อก (ทรัพย์สิน → บันทึก S/N ที่ "💎 ทรัพย์สินรอบันทึก"): ${_capNames.join(', ')}` : '')
+      + (_expNames.length ? `\n\n📦 ไม่เข้าสต๊อก (ค่าใช้จ่าย · ไม่ต้องติดสติ๊กเกอร์): ${_expNames.join(', ')}` : '')
       + (_shortLost ? `\n\n⚠️ รับขาด ${liveShortLines.length} บรรทัด ยังไม่ได้แจ้งจัดซื้อ (รอโหลดข้อมูลล่าสุด) — แจ้งจัดซื้อเองว่า PO นี้รับไม่ครบ` : '');
     // 🆕 แจ้งว่าผูกกับ INV ล่วงหน้าแล้ว — ไม่ต้องตั้งหนี้อีก
     if(linkedAdvanceInvId){
@@ -40658,7 +41060,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
           return h('div', { key:'m'+i, className: cls('bg-white border-2 rounded-lg p-3',
             done ? 'opacity-50 border-gray-200' : (l.receiveNow > 0 ? 'border-green-400' : 'border-gray-300')) },
             h('div', { className:'font-semibold text-base leading-tight' }, item?.name || l.itemId,
-              l.isAsset && h('span', { className:'ml-1 text-[10px] align-middle bg-indigo-100 text-indigo-800 border border-indigo-200 rounded px-1' }, '💎 ทรัพย์สิน')),
+              l.isAsset && h('span', { className:'ml-1 text-[10px] align-middle bg-indigo-100 text-indigo-800 border border-indigo-200 rounded px-1' }, '💎 ทรัพย์สิน'),
+              !l.isAsset && global.ERP.itemExpenseLink(state, l.itemId) && h('span', { className:'ml-1 text-[10px] align-middle bg-amber-100 text-amber-800 border border-amber-200 rounded px-1', 'data-testid':'rcv-nostock-badge' }, '📦 ไม่นับสต๊อก · ลงค่าใช้จ่าย')),   // 🆕 FREIGHT_EXPENSE F6
             l.isAsset && h('div', { className:'mb-1' }, _capBadge(l, i, false)),   // 💎 UAT S1: ป้ายชัดเจนต่อบรรทัด (ไม่มีราคา)
             h('div', { className:'text-xs text-gray-500 font-mono mb-2' }, item?.code||'',
               eta && h('span', { className: cls('ml-2', isOverdue ? 'text-red-700 font-bold' : 'text-blue-700') },
@@ -40682,6 +41085,8 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
               `🟣 รับเกินที่สั่ง +${fmtNum(l.receiveNow - l.remainQty)}`),
             _capUi(l) === true ? h('div', { 'data-testid':'rcv-cap-nolot-' + i, className:'text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1.5' },
               '💎 ทรัพย์สินไม่ต้องติดสติ๊กเกอร์ล็อต · ไม่มี LOT/วันหมดอายุ')   // UAT S2
+            : _expUi(l) ? h('div', { 'data-testid':'rcv-exp-nolot-' + i, className:'text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5' },
+              '📦 ค่าใช้จ่าย ไม่มี LOT · ไม่ต้องติดสติ๊กเกอร์')   // 🆕 FREIGHT_EXPENSE UAT2 S4
             : h('div', { className:'grid grid-cols-2 gap-2' },
               h('div', null,
                 h('label', { className:'block text-[11px] text-gray-500 mb-0.5' }, 'LOT'),
@@ -40692,7 +41097,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                 h('input', { type:'date', value:l.expiryDate, onChange:e=>updateLine(i,'expiryDate',e.target.value),
                   className:'w-full px-2 py-1.5 border rounded text-sm' }))),
             // 🏷️ LOT-LABEL: จำนวนสติ๊กเกอร์ — โชว์เฉพาะรายการที่รับจริง · ปุ่ม +/- นิ้วโป้งกดได้
-            l.receiveNow > 0 && _capUi(l) !== true && h('div', { className:'mt-2 pt-2 border-t flex items-center gap-1.5 flex-wrap' },
+            l.receiveNow > 0 && !_noLotUi(l) && h('div', { className:'mt-2 pt-2 border-t flex items-center gap-1.5 flex-wrap' },
               h('span', { className:'text-sm font-medium shrink-0' }, '🏷️ สติ๊กเกอร์'),
               h('button', { type:'button',
                 onClick:()=>setLabelQty(i, (Number(l.labelQty)||0) - 1),
@@ -40749,6 +41154,7 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                   eta && h('div', { className: cls('text-[10px] mt-0.5',
                     isOverdue ? 'text-red-700 font-bold' : 'text-blue-700') },
                     isOverdue ? '⚠️ เกินกำหนด: ' : '📅 กำหนดส่ง: ', fmtDate(eta)),
+                  !l.isAsset && global.ERP.itemExpenseLink(state, l.itemId) && h('div', { className:'text-[10px] mt-0.5 inline-block bg-amber-100 text-amber-800 border border-amber-200 rounded px-1', 'data-testid':'rcv-nostock-badge' }, '📦 ไม่นับสต๊อก · ลงค่าใช้จ่าย'),   // 🆕 FREIGHT_EXPENSE F6
                   // 💎 ทรัพย์สิน — ไม่บังคับกรอก S/N ตอนรับ
                   l.isAsset && _capBadge(l, i, true)   // 💎 UAT S1: ป้ายชัดเจนต่อบรรทัด (ไม่มีราคา)
                 ),
@@ -40767,17 +41173,18 @@ function ReceiveFromPOModal({ po, state, dispatch, user, onClose }){
                 // 💎 UAT S2: บรรทัดทรัพย์สิน (ถึงเกณฑ์) ไม่มี LOT/หมดอายุ/สติ๊กเกอร์
                 _capUi(l) === true
                   ? h('td', { colSpan:3, 'data-testid':'rcv-cap-nolot-d' + i, className:'px-2 py-1.5 text-center text-[11px] text-indigo-700' }, '💎 ทรัพย์สินไม่ต้องติดสติ๊กเกอร์ล็อต')
+                  : _expUi(l) ? h('td', { colSpan:3, 'data-testid':'rcv-exp-nolot-d' + i, className:'px-2 py-1.5 text-center text-[11px] text-amber-800' }, '📦 ค่าใช้จ่าย ไม่มี LOT · ไม่ต้องติดสติ๊กเกอร์')
                   : null,
-                _capUi(l) !== true && h('td', { className:'px-2 py-1.5' },
+                !_noLotUi(l) && h('td', { className:'px-2 py-1.5' },
                   h('input', { type:'text', value:l.lot, onChange:e=>updateLine(i,'lot',e.target.value),
                     placeholder:'(auto)', className:'w-full px-2 py-1 border rounded text-xs font-mono' })
                 ),
-                _capUi(l) !== true && h('td', { className:'px-2 py-1.5' },
+                !_noLotUi(l) && h('td', { className:'px-2 py-1.5' },
                   h('input', { type:'date', value:l.expiryDate, onChange:e=>updateLine(i,'expiryDate',e.target.value),
                     className:'w-full px-1 py-1 border rounded text-xs' })
                 ),
                 // 🏷️ LOT-LABEL: จำนวนสติ๊กเกอร์ (จอกว้าง)
-                _capUi(l) !== true && h('td', { className:'px-2 py-1.5' },
+                !_noLotUi(l) && h('td', { className:'px-2 py-1.5' },
                   l.receiveNow > 0
                     ? h('div', { className:'flex items-center justify-center gap-1' },
                         h('button', { type:'button',
@@ -42234,6 +42641,8 @@ function EditLotModal({ layer, state, dispatch, onClose }){
 const MOVE_TYPE_LABEL = {
   gr_in: ['รับเข้า (GR)', 'bg-green-100 text-green-700'],
   gr_void: ['ยกเลิก GR', 'bg-red-200 text-red-800'],
+  charge_out: ['🧹 ล้างล็อตค่าใช้จ่าย', 'bg-orange-100 text-orange-800'],   // 🆕 FREIGHT_EXPENSE F5
+  charge_in: ['🧹 ปิดชั้นติดลบ (ค่าใช้จ่าย)', 'bg-orange-100 text-orange-800'],
   asset_out: ['💎 ล้างสต๊อกทรัพย์สิน', 'bg-indigo-100 text-indigo-800'],   // FA-S3 CLEAR_ASSET_STOCK (ไม่ใช่เบิก/ขาย)
   cap_into_asset: ['💎 รวมเข้าราคาทุนทรัพย์สิน', 'bg-indigo-100 text-indigo-800'],   // 🆕 OFF_INV_DISC_ASSET A4 CAP_GR_CHARGE_INTO_ASSET (ค่าส่งรวมเข้าทุน · ไม่ใช่เบิก/ขาย)
   cap_into_asset_undo: ['↩️ ยกเลิกรวมเข้าราคาทุน 💎', 'bg-indigo-100 text-indigo-800'],
@@ -42451,7 +42860,7 @@ function StockCountTab({ state, dispatch, user, pickedItemIds, presetBranchId, p
   }, [state.fifoLayers, branchId, branchLocFilter]);
 
   const items = useMemo(() => {
-    let list = (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
+    let list = (state.items||[]).filter(i => !i.expenseItemId && i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
     // 🆕 CT: ถ้ามาจาก picker → จำกัดให้แค่ item ที่ติ๊กไว้ (override filter อื่นๆ)
     if(isPickedMode){
       list = list.filter(i => pickedItemIds.has(i.id));
@@ -43642,6 +44051,61 @@ function LegacyAssetStockPanel({ state, dispatch, user, branchIds, F }){
   );
 }
 
+// 🆕 FREIGHT_EXPENSE F5/F6: ล็อตค่าส่ง/ค่าบริการ (สินค้าติดธงไม่นับสต๊อก) ที่ยังค้างในสต๊อก → ปุ่มล้าง (CLEAR_CHARGE_STOCK)
+//   preview ต่อชั้นจาก ERP.chargeStockClearPlan (ตัวเดียวกับ reducer) · ไม่มีอะไรค้าง = ไม่แสดง · ทำครั้งเดียว ไม่มีปุ่มย้อน
+function ChargeStockClearPanel({ state, dispatch, user }){
+  const E = global.ERP;
+  const plans = useMemo(() => (state.items || []).filter(i => i && i.expenseItemId)
+    .map(i => E.chargeStockClearPlan ? E.chargeStockClearPlan(state, i.id) : null).filter(p => p && p.pending),
+    [state.items, state.fifoLayers, state.grs, state.invoices, state.expenseItems, state.chartOfAccounts, state.transferRequests, state.transferOrders, state.salesInvoices, state.salesLight, state.movements, state.journalEntries]);   // UAT2 S5: + movements (ดูที่มาชั้นติดลบ)
+  const canClear = !!(E.canClearChargeStock && E.canClearChargeStock(user));   // 🆕 verify 2: สิทธิ์บัญชี JE + ตั้งหนี้ (กฎเดียวกับ reducer)
+  if(!plans.length || !(canClear || (E.acctFieldsVisible && E.acctFieldsVisible(user)))) return null;
+  const brName = b => { const x = (state.branches || []).find(y => y.id === b); return x ? x.name : b; };
+  const money = v => fmtCur(v);
+  const go = (P) => {
+    const nm = (P.item.code ? P.item.code + ' ' : '') + P.item.name;
+    const msg = `🧹 ล้างล็อต "${nm}" ออกจากสต๊อกทุกสาขา?\n\n`
+      + `• ${P.rows.filter(r => r.je === 'expense').length} ล็อต → ลงค่าใช้จ่าย ${P.accountCode}: ${money(P.totals.expense)} บาท (Dr ${P.accountCode} / Cr 1300)\n`
+      + (P.totals.reverseCogs ? `• ชั้นติดลบจากการขาย → กลับต้นทุนขาย ${money(P.totals.reverseCogs)} บาท (Dr 1300 / Cr 5100)\n` : '')
+      + (P.totals.uninv ? `• ${P.rows.filter(r => r.kind === 'uninv').length} ล็อตที่ยังไม่ตั้งหนี้ ${money(P.totals.uninv)} บาท → ถอดออกจากสต๊อก ไม่ลง JE ตอนนี้ (ตั้งหนี้ทีหลังลง ${P.accountCode})\n` : '')
+      + (P.residual.length ? `• ยอดสต๊อกไม่ตรงกับล็อต ${P.residual.length} ที่ → ปรับให้ 0 (ไม่มี JE)\n` : '')
+      + ((P.siLines || []).length + (P.slLines || []).length ? `• ใบขายที่ตัดสต๊อกสินค้านี้ ${(P.siLines || []).length + (P.slLines || []).length} บรรทัด → ยกเลิก/แก้จำนวนไม่ได้แล้ว (ใช้ใบลดหนี้/JE ปรับปรุง)\n` : '')
+      + ((P.invIds || []).length ? `• ใบตั้งหนี้ ${P.invIds.length} ใบ → ยกเลิก/แก้ยอดไม่ได้แล้ว (ใช้ใบลดหนี้/JE ปรับปรุง)\n` : '')
+      + `\nหลังล้าง สต๊อกสินค้านี้ = 0 ทุกสาขา · ทำครั้งเดียว ไม่มีปุ่มย้อน (ถ้าผิด: ยกเลิกธงในฟอร์มสินค้าก่อน → นับ/ปรับสต๊อก → ตั้งธงใหม่ หรือให้บัญชีทำ JE ปรับปรุง)`;
+    if(!confirm(msg)) return;
+    const at = Date.now();
+    dispatch({ type:'CLEAR_CHARGE_STOCK', data:{ itemId:P.item.id, id:'ccs_' + P.item.id + '_' + at.toString(36), at, date:getToday(), by:user.username, byName:user.name || user.username } });
+  };
+  const jeTxt = (P, r) => r.je === 'expense' ? `Dr ${P.accountCode} / Cr 1300` : (r.je === 'reverse_cogs' ? 'Dr 1300 / Cr 5100' : 'ไม่มี JE (ตั้งหนี้ทีหลังลง ' + P.accountCode + ')');
+  return h('div', { className:'bg-orange-50 border border-orange-300 rounded p-3 mb-3 text-sm', 'data-testid':'ccs-panel' },
+    h('div', { className:'font-bold text-orange-900 mb-1' }, `🧹 ค่าส่ง/ค่าบริการที่ยังค้างในสต๊อก ${plans.length} รายการ`),
+    h('div', { className:'text-xs text-orange-800 mb-2' }, 'สินค้าเหล่านี้ตั้งเป็น "ไม่นับสต๊อก — ลงค่าใช้จ่าย" แล้ว แต่ใบรับของเก่ายังทำให้มีล็อตค้าง · กดล้างเพื่อย้ายมูลค่าไปบัญชีค่าใช้จ่าย และกลับต้นทุนขายที่ลงผิด'),
+    plans.map(P => h('div', { key:P.item.id, className:'bg-white rounded border mb-2 p-2', 'data-testid':'ccs-item', 'data-item-id':P.item.id },
+      h('div', { className:'font-semibold mb-1' }, (P.item.code ? P.item.code + ' ' : '') + P.item.name, h('span', { className:'ml-2 text-xs text-gray-500' }, '→ ' + P.link.expenseItem.name + ' · ' + P.accountCode)),
+      h('div', { className:'overflow-x-auto' }, h('table', { className:'w-full text-xs' },
+        h('thead', null, h('tr', { className:'text-gray-500 text-left' }, ['ใบรับของ', 'สาขา', 'จำนวน', 'ต้นทุน', 'ตั้งหนี้', 'JE ที่จะลง', 'ยอด'].map((t, i) => h('th', { key:i, className:'px-2 py-1' + (i === 2 || i === 3 || i === 6 ? ' text-right' : '') }, t)))),
+        h('tbody', null,
+          P.rows.map(r => h('tr', { key:r.layerId, className:'border-t', 'data-testid':'ccs-row', 'data-kind':r.kind },
+            h('td', { className:'px-2 py-1 font-mono' }, r.gr ? r.gr.grNumber : (r.kind === 'neg' ? (r.srcSale ? 'ติดลบจากการขาย' : '⛔ ติดลบจาก' + r.src) : (r.grRef || 'ไม่พบใบรับของ'))),
+            h('td', { className:'px-2 py-1' }, brName(r.branch)),
+            h('td', { className:'px-2 py-1 text-right' }, fmtNum(r.qty)),
+            h('td', { className:'px-2 py-1 text-right' }, money(r.unitCost)),
+            h('td', { className:'px-2 py-1 font-mono' }, r.inv ? r.inv.invNumber : (r.kind === 'uninv' ? 'ยังไม่ตั้งหนี้' : '-')),
+            h('td', { className:'px-2 py-1' }, jeTxt(P, r)),
+            h('td', { className:'px-2 py-1 text-right' }, r.je ? money(r.amount) : '-'))),
+          P.residual.map((x, i) => h('tr', { key:'res' + i, className:'border-t text-gray-600', 'data-testid':'ccs-residual' },
+            h('td', { className:'px-2 py-1', colSpan:2 }, 'ยอดไม่ตรงล็อต · ' + brName(x.branch)), h('td', { className:'px-2 py-1 text-right' }, fmtNum(x.qty)),
+            h('td', { className:'px-2 py-1', colSpan:4 }, 'ปรับให้ 0 (ไม่มี JE)')))))),
+      h('div', { className:'flex flex-wrap items-center justify-between gap-2 mt-2' },
+        h('div', { className:'text-xs', 'data-testid':'ccs-totals' },
+          h('b', null, `JE ${P.accountCode}: ${money(P.totals.expense)}`),
+          P.totals.reverseCogs ? h('span', { className:'ml-2' }, `· กลับต้นทุนขาย 5100: ${money(P.totals.reverseCogs)}`) : null,
+          P.totals.uninv ? h('span', { className:'ml-2 text-gray-500' }, `· ยังไม่ตั้งหนี้ ${money(P.totals.uninv)} (ไม่มี JE)`) : null),
+        (P.blocks || []).length ? h('div', { className:'text-xs text-red-700', 'data-testid':'ccs-blocks' }, '⛔ ล้างยังไม่ได้: ', (P.blocks || []).map((m, i) => h('div', { key:i }, '• ' + m)))   // 🆕 UAT ชุด 1 M3/S2
+        : canClear ? h(Button, { size:'sm', variant:'warning', onClick:() => go(P), 'data-testid':'ccs-clear' }, '🧹 ล้างล็อตค่าใช้จ่ายออกจากสต๊อก')
+          : h('span', { className:'text-xs text-gray-500' }, '🔒 กดล้างได้เฉพาะ ' + (E.CLEAR_CHARGE_WHO || 'ผู้มีสิทธิ์บัญชี'))))));
+}
+
 // ================================================================
 // 💎 PENDING ASSETS — ทรัพย์สินรอบันทึก (GR line ที่ติ๊ก isAsset แต่ยังไม่มีในทะเบียน)
 //   คลัง/จัดซื้อ: คีย์ S/N · วันเริ่มประกัน · ที่ตั้ง · ผู้รับผิดชอบ → UPDATE_GR_ASSET_INFO (ลง gr.lines[i])
@@ -43725,6 +44189,7 @@ function PendingAssetsTab({ state, dispatch, user }){
       h('div', { className:'text-xs text-indigo-700 mt-1' },
         '📌 รายการจะหลุดจากหน้านี้เมื่อบัญชีลงทะเบียนในทะเบียนทรัพย์สินแล้ว · ซื้อหลายเครื่องในบรรทัดเดียว ใส่ S/N หลายค่าคั่นด้วย , ได้')),
     h(LegacyAssetStockPanel, { state, dispatch, user, branchIds, F }),   // 💎 FA-S3
+    h(ChargeStockClearPanel, { state, dispatch, user }),   // 🆕 FREIGHT_EXPENSE F5/F6
 
     h('div', { className:'grid grid-cols-3 gap-3 mb-4' },
       h(StatCard, { label:'รอบันทึกทั้งหมด', value:allRows.length, color:'blue', icon:'💎' }),
@@ -44164,7 +44629,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId, overRecv }){
     // 💎 FA-S2: บรรทัดทรัพย์สิน (noStock) ไม่ได้เข้าสต๊อก → คืนไม่ตัดสต๊อก · ลงทะเบียนแล้ว = ต้องจำหน่ายทรัพย์สิน ไม่ใช่คืนผ่าน RTV
     {
       const _regd = global.ERP.grRegisteredAssets ? global.ERP.grRegisteredAssets(state, gr) : [];
-      if(returning.some(l => l.noStock === true) && _regd.length)
+      if(returning.some(l => l.noStock === true && !l.expCharge) && _regd.length)   // 🆕 FREIGHT_EXPENSE: ค่าใช้จ่ายไม่นับสต๊อก ≠ ทรัพย์สิน
         return alert(`⛔ GR นี้ลงทะเบียนทรัพย์สินแล้ว (${_regd.map(a => a.assetCode || a.code || a.id).join(', ')})\n\nคืนเครื่องที่ลงทะเบียนแล้ว = จำหน่ายทรัพย์สิน (ขาย) + ใบลดหนี้ — ให้บัญชีทำที่ ทะเบียนทรัพย์สิน`);
     }
     const stockRet = returning.filter(l => l.noStock !== true);
@@ -44237,6 +44702,7 @@ function NewRTVModal({ state, dispatch, user, onClose, initialGrId, overRecv }){
         lineTotal: rtvLineValue(l),
         ...(l.grLineIdx != null ? { grLineIdx: l.grLineIdx } : {}),
         ...(l.noStock === true ? { noStock: true } : {}),   // 💎 FA-S2: ไม่ได้ตัดสต๊อก → ยกเลิก RTV/ของชดเชยไม่คืนสต๊อก
+        ...(l.noStock === true && l.expCharge ? { expCharge: l.expCharge } : {}),   // 🆕 FREIGHT_EXPENSE F3: คืนค่าใช้จ่าย → Cr บัญชีค่าใช้จ่าย
         ...(l.netLineTotal != null ? { grossUnitPrice: l.grossUnitPrice } : {}),   // 🆕 BILL-DISC M2: ราคาก่อนส่วนลด (อ้างอิง)
       })),
       totalValue,
@@ -44938,6 +45404,7 @@ function ReplacementGRModal({ rtv, gr, state, dispatch, user, alreadyReplaced, o
           // 💎 FA-S2: สืบทรัพย์สินจากบรรทัดเดิม (ตัวอ่านใช้ noStock ที่ freeze · ไม่คำนวณเกณฑ์ใหม่)
           //   ไม่ติด isAsset — เครื่องที่ลงทะเบียนคือบรรทัด GR เดิม (กันคิวรอลงทะเบียนซ้ำ 2 แถว)
           ...(l.noStock != null ? { noStock: l.noStock === true } : {}),
+          ...(l.noStock === true && l.expCharge ? { expCharge: l.expCharge } : {}),   // 🆕 FREIGHT_EXPENSE F3: ค่าใช้จ่ายไม่นับสต๊อก → ชดเชยลงบัญชีค่าใช้จ่ายเดิม
         };
       }),
       totalValue, note, photos,
@@ -45113,6 +45580,8 @@ const MOVE_BUCKET = {
   sale_out:       { side:'out', bucket:'sale',      label:'ขาย' },
   adjust_out:     { side:'out', bucket:'adjust',    label:'ปรับ-' },
   rtv_out:        { side:'out', bucket:'return',    label:'คืน supplier' },
+  charge_out:     { side:'out', bucket:'adjust',    label:'ล้างล็อตค่าใช้จ่าย' },   // 🆕 FREIGHT_EXPENSE F5
+  charge_in:      { side:'in',  bucket:'adjust',    label:'ปิดชั้นติดลบ (ค่าใช้จ่าย)' },
   asset_out:      { side:'out', bucket:'adjust',    label:'ล้างสต๊อกทรัพย์สิน' },   // 💎 FA-S3 (ปรับ ไม่ใช่เบิก/ขาย)
   cap_into_asset:      { side:'out', bucket:'adjust', label:'รวมเข้าราคาทุนทรัพย์สิน' },   // 🆕 OFF_INV_DISC_ASSET A4
   cap_into_asset_undo: { side:'in',  bucket:'adjust', label:'ยกเลิกรวมเข้าราคาทุนทรัพย์สิน' },
@@ -45141,6 +45610,8 @@ const MTX_MOVE = {
   rtv_out:       { side:'out', b:'return',     label:'คืน supplier' },
   scrap:         { side:'out', b:'damage',     label:'เสีย/หาย' },
   adjust_out:    { side:'out', b:'count',      label:'นับ/ปรับ-' },
+  charge_out:    { side:'out', b:'count',      label:'ล้างล็อตค่าใช้จ่าย' },   // 🆕 FREIGHT_EXPENSE F5
+  charge_in:     { side:'in',  b:'count',      label:'ปิดชั้นติดลบ (ค่าใช้จ่าย)' },
   asset_out:     { side:'out', b:'count',      label:'ล้างสต๊อกทรัพย์สิน' },   // 💎 FA-S3
   cap_into_asset:     { side:'out', b:'count', label:'รวมเข้าราคาทุนทรัพย์สิน' },   // 🆕 OFF_INV_DISC_ASSET A4
   cap_into_asset_undo: { side:'in',  b:'count', label:'ยกเลิกรวมเข้าราคาทุนทรัพย์สิน' },
@@ -47481,7 +47952,7 @@ function ItemPickerModal({ state, user, onCancel, onConfirm, presetBranchId, pre
 
   const items = useMemo(() => {
     // 🎁 ชุดสินค้าไม่เข้าใบนับสต๊อก (ให้ตรงกับหน้านับที่กรองไว้แล้ว ไม่งั้นติ๊ก 20 ได้ 19)
-    let list = (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
+    let list = (state.items||[]).filter(i => !i.expenseItemId && i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
     if(typeFilter !== '__all__') list = list.filter(i => i.type === typeFilter);
     if(search){
       const q = search.toLowerCase();
@@ -47860,7 +48331,7 @@ function ContractAcceptTab({ state, dispatch, user, focusF }){
 }
 
 global.ERP.ConfirmServiceModal = ConfirmServiceModal; global.ERP.svcConfirmRows = svcConfirmRows;   // 🔧 EXPENSE_PO: PODetail/หน้าแรก/งานค้าง ใช้ร่วม
-global.ERP.registerModule('stock', { main: StockModule, AcceptInstallmentModal, ConfirmServiceModal, SvcConfirmTab, ContractAcceptTab, contractAcceptRows, PendingAssetsTab, ReceiveFromTOModal, printRTV, NewRTVModal, ReplacementGRModal });   // 💎 FA-S2: NewRTVModal/ReplacementGRModal ให้เทสต์ fa_gr_nostock เปิดตรงได้   // 🆕 PendingAssetsTab ให้ mod-accounting ฝังในแท็บทรัพย์สินได้ · 🆕 ReceiveFromTOModal ให้ 📦 คลังไลน์ กดรับของเข้าไลน์ได้ · 🆕 printRTV ให้เทสต์ใบพิมพ์ (PARTY-FORM ขั้น 2) เรียกได้
+global.ERP.registerModule('stock', { main: StockModule, AcceptInstallmentModal, ConfirmServiceModal, SvcConfirmTab, ContractAcceptTab, contractAcceptRows, PendingAssetsTab, ChargeStockClearPanel, ReceiveFromPOModal, ReceiveFromTOModal, printRTV, NewRTVModal, ReplacementGRModal });   // 💎 FA-S2: NewRTVModal/ReplacementGRModal ให้เทสต์ fa_gr_nostock เปิดตรงได้   // 🆕 PendingAssetsTab ให้ mod-accounting ฝังในแท็บทรัพย์สินได้ · 🆕 ReceiveFromTOModal ให้ 📦 คลังไลน์ กดรับของเข้าไลน์ได้ · 🆕 printRTV ให้เทสต์ใบพิมพ์ (PARTY-FORM ขั้น 2) เรียกได้
 
 })(window);
 
@@ -48125,7 +48596,7 @@ function PushTransferModal({ state, dispatch, user, onClose }){
   // 🆕 location options ของ branch ปัจจุบัน (สำหรับ intra-branch mode)
   const myBranchObj = (state.branches||[]).find(b => b.id === myBranch);
   const myLocations = myBranchObj?.locations || [];
-  const activeItems = useMemo(() => (state.items||[]).filter(i => i.active !== false
+  const activeItems = useMemo(() => (state.items||[]).filter(i => !i.expenseItemId && i.active !== false
     && (!isPhysicalItem || isPhysicalItem(i))), [state.items]);   // 🎁 ชุดสินค้าโอนไม่ได้
   const filtered = !search ? activeItems.slice(0,12)
     : activeItems.filter(i =>
@@ -48189,6 +48660,9 @@ function PushTransferModal({ state, dispatch, user, onClose }){
       if(fromLocId === toLocId) return alert('ปลายทางต้องต่างจากต้นทาง');
     }
     if(valid.length === 0) return alert('ใส่รายการอย่างน้อย 1 รายการ');
+    // 🆕 FREIGHT_EXPENSE verify 2: ค่าใช้จ่ายไม่นับสต๊อก (ติดธง) ห้ามส่ง — ตรวจก่อนออก TO/ตัดสต๊อก
+    { const _xl = [...new Set(valid.filter(l => global.ERP.itemExpenseLink && global.ERP.itemExpenseLink(state, l.itemId)).map(l => ((state.items||[]).find(x => x.id === l.itemId) || {}).name || l.itemId))];
+      if(_xl.length) return alert('⛔ ' + _xl.join(', ') + ' เป็นค่าใช้จ่าย (ไม่นับสต๊อก) — เอาออกจากใบ/รายการโปรด'); }
     // 🛠 v16 fix: ตรวจซ้ำ shortage ตอน submit (กรณี user แก้ qty หลัง preview)
     const isIntraCheck = mode === 'intra';
     const recheckShortage = valid.some(l => {
@@ -48741,7 +49215,7 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
   _usePruneFavValues(favIds, setFavValues);
 
   const activeItems = useMemo(() =>
-    (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i))), [state.items]);
+    (state.items||[]).filter(i => !i.expenseItemId && i.active !== false && (!isPhysicalItem || isPhysicalItem(i))), [state.items]);
 
   const filteredItems = itemSearch
     ? activeItems.filter(i =>
@@ -49216,7 +49690,7 @@ function EditPresetModal({ preset, state, dispatch, onClose }){
   const [itemSearch, setItemSearch] = useState('');
   const icons = ['⭐','🧁','🥧','🎂','🍪','🥖','🥛','🧈','🍫','🍬','📦','🎁'];
 
-  const activeItems = (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
+  const activeItems = (state.items||[]).filter(i => !i.expenseItemId && i.active !== false && (!isPhysicalItem || isPhysicalItem(i)));
   const filteredItems = itemSearch
     ? activeItems.filter(i => (i.name||'').toLowerCase().includes(itemSearch.toLowerCase()) || (i.code||'').toLowerCase().includes(itemSearch.toLowerCase()))
     : [];
@@ -49595,6 +50069,9 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
       .filter(l => l.send && Number(l.actualQty) > 0)
       .map(l => ({ ...l, baseQty: (Number(l.actualQty)||0) * (l.factor||1) }));
     if(send.length === 0) return alert('ไม่มีรายการที่จะส่ง');
+    // 🆕 FREIGHT_EXPENSE verify 2: ค่าใช้จ่ายไม่นับสต๊อก (ติดธง) ห้ามส่ง — ตรวจก่อนตัดสต๊อก/ออก TO
+    { const _xl = [...new Set(send.filter(l => global.ERP.itemExpenseLink && global.ERP.itemExpenseLink(state, l.itemId)).map(l => ((state.items||[]).find(x => x.id === l.itemId) || {}).name || l.itemId))];
+      if(_xl.length) return alert('⛔ ' + _xl.join(', ') + ' เป็นค่าใช้จ่าย (ไม่นับสต๊อก) — เอาออกจากใบ/รายการโปรด (ไม่ติ๊กส่งรายการนี้)'); }
     // 🆕 PRODUCTION-LIVE (B10.4 ช): ห้ามส่งตามใบที่ตัวเองเปิด (ยกเว้น superuser) — เฉพาะ TR ภายในสาขา (ปุ่มซ่อนอยู่แล้ว · กันซ้ำตรงนี้)
     if(isIntraBranch && !isSuperUser(user) && tr.createdBy && tr.createdBy === user.username) return alert(`⛔ ส่งของตามใบขอที่ตัวเองเปิด (${tr.trNumber}) ไม่ได้ — ให้คนดูแลคลังต้นทางอีกคนกดส่ง`);
     if(hasShortage && !confirm('⚠️ ส่งเกินสต๊อกที่มี — ระบบยอมให้สต๊อกติดลบ\nยืนยันดำเนินการ?')) return;
@@ -50455,7 +50932,7 @@ function HandoverModal({ state, dispatch, user, branchId, fromLocId, onClose }){
     return ids.map(id => (state.items||[]).find(i => i.id === id)).filter(it => it && (!isPhysicalItem || isPhysicalItem(it)))
       .sort((a, b) => ((RANK[a.type] ?? 3) - (RANK[b.type] ?? 3)) || String(a.name||'').localeCompare(String(b.name||''), 'th'));
   }, [onHand, extra, state.items]);
-  const found = !search.trim() ? [] : (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)) && !rows.some(r => r.id === i.id)
+  const found = !search.trim() ? [] : (state.items||[]).filter(i => !i.expenseItemId && i.active !== false && (!isPhysicalItem || isPhysicalItem(i)) && !rows.some(r => r.id === i.id)
     && ((i.name||'') + ' ' + (i.code||'')).toLowerCase().includes(search.trim().toLowerCase())).slice(0, 8);
   const unitsOf = (it) => { const u = unitsForPurpose(it, 'transfer'); return u.length ? u : (it.units || []); };
   const valOf = (it) => vals[it.id] || { qty:'', unit: (unitsOf(it)[0] || {}).name || it.issueUnit || '' };
@@ -50636,7 +51113,7 @@ function PushLineModal({ state, dispatch, user, branchId, onClose }){
   const rows = extra.map(id => (state.items||[]).find(i => i.id === id)).filter(Boolean);
   const favIds = _useFavIds(state, user, branchId, favLineIds, favValues);
   // verify: ค้นเพิ่มเองไม่แสดงสินค้าที่อยู่ในรายการโปรดแล้ว — กันกรอก 2 แถว (mergeFavLines ทิ้งจำนวนแถวโปรดเงียบ ๆ = ส่งไม่ตรงที่กรอก)
-  const found = !search.trim() ? [] : (state.items||[]).filter(i => i.active !== false && (!isPhysicalItem || isPhysicalItem(i)) && !extra.includes(i.id) && !(favIds && favIds.has(i.id))
+  const found = !search.trim() ? [] : (state.items||[]).filter(i => !i.expenseItemId && i.active !== false && (!isPhysicalItem || isPhysicalItem(i)) && !extra.includes(i.id) && !(favIds && favIds.has(i.id))
     && ((i.name||'') + ' ' + (i.code||'')).toLowerCase().includes(search.trim().toLowerCase())).slice(0, 8);
   const manual = rows.map(it => ({ itemId: it.id, qty: Number(valOf(it).qty) || 0, unit: valOf(it).unit }));
   _usePruneFavValues(favIds, setFavValues);
@@ -55511,7 +55988,7 @@ function StockShortageModal({ order, shortages, lineLoc, lineId: lineIdProp, bra
   const [showAddItem, setShowAddItem] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   // 🆕 PRODUCTION-LIVE: วัตถุดิบจริงเป็น type 'material' (เดิมกรอง 'raw' → เพิ่มไม่ได้เลย) → ของจริงทุกประเภทยกเว้นชุดสินค้า (kit)
-  const allItems = (state.items||[]).filter(it => it && it.active !== false && (!global.ERP.isPhysicalItem || global.ERP.isPhysicalItem(it)));
+  const allItems = (state.items||[]).filter(it => it && !it.expenseItemId && it.active !== false && (!global.ERP.isPhysicalItem || global.ERP.isPhysicalItem(it)));
   const matchedItems = useMemo(() => {
     if(!searchTerm.trim()) return allItems.slice(0, 30);
     const q = searchTerm.toLowerCase();
@@ -60337,7 +60814,7 @@ function QuickIssueTabInner({ state, dispatch, user, branchId: branchIdProp }){
   const term = search.trim().toLowerCase();
   const searchHits = useMemo(() => {
     if(!term) return [];
-    return (state.items||[]).filter(i => i.active !== false && issuableTypes.includes(i.type||'material')
+    return (state.items||[]).filter(i => !i.expenseItemId && i.active !== false && issuableTypes.includes(i.type||'material')
       && ((i.name||'') + ' ' + (i.code||'') + ' ' + (i.barcode||'')).toLowerCase().includes(term)).slice(0, 12);
   }, [term, state.items, issuableTypes]);
 
@@ -65599,7 +66076,7 @@ function BOMEditModal({ bom, state, dispatch, branchId, onClose }){
     }));
   };
 
-  const allPossibleMaterials = (state.items||[]).filter(i =>
+  const allPossibleMaterials = (state.items||[]).filter(i => !i.expenseItemId &&
     i.active !== false && !outputs.some(o => o.productId === i.id)
     && (!global.ERP.isPhysicalItem || global.ERP.isPhysicalItem(i))   // 🎁 ชุดสินค้าใส่ในสูตร BOM ไม่ได้ (ไม่มีสต๊อกของตัวเอง)
   );
@@ -66244,7 +66721,7 @@ function POSImportTab({ state, dispatch, user, branchId }){
 
   const branches = (state.branches || []);
   // 🎁 ชุดสินค้าไม่เข้ากระบวนการนำเข้า POS (ไม่มีสต๊อกของตัวเอง — จะกลายเป็นสต๊อกผี)
-  const allItems = (state.items || []).filter(i => (!global.ERP.isPhysicalItem || global.ERP.isPhysicalItem(i)));
+  const allItems = (state.items || []).filter(i => (!global.ERP.isPhysicalItem || global.ERP.isPhysicalItem(i)) && !i.expenseItemId);   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S2: ค่าใช้จ่ายไม่นับสต๊อกไม่เข้าการนำเข้า POS
   const history = state.posImports || [];
   // 🆕 TODO-DEEPLINK: focus 'production.posimport' (ids = posImport id ในสาขาที่เข้าถึงได้) → ตารางประวัติแสดงเฉพาะไฟล์นั้น (ไม่ตัดที่ 5) · cta = ปุ่มนำเข้า
   const _allowedBr = new Set((getAllowedBranches(user, state) || []).map(b => b.id));
@@ -66464,6 +66941,7 @@ function POSImportTab({ state, dispatch, user, branchId }){
     consumeByItem.forEach((v, itemId) => {
       const q = Number(v.qty.toFixed(6));
       if(!(q > 0)) return;
+      if(global.ERP.itemExpenseLink && global.ERP.itemExpenseLink(state, itemId)) return;   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S2: ค่าใช้จ่ายไม่นับสต๊อกในสูตร → ไม่ตัดสต๊อก
       const cur = Number(getStockAtBranch(state.items.find(x=>x.id===itemId)||{}, targetBranch)) || 0;
       if(q > cur) bomShort.push(`${v.name}: มี ${fmtNum(cur)}, ใช้ ${fmtNum(q)}`);   // ยอดรวมข้ามสูตร (กันพลาดของใช้ร่วม)
       if(_posMulti){
@@ -71403,15 +71881,18 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
     const _slPlan = (L, it, itemId, q) => _E.planLocDeduct(state, L, branch, _slLoc(it), itemId, q, { spill:true, sellOnly: !!(_E.isSellOnlyItem && _E.isSellOnlyItem(it)) });
     const _locNm = (id) => (((_bObj && _bObj.locations) || []).find(x => x.id === id) || {}).name || id || 'ทั้งสาขา';
     const short = [];
+    const _xl = (l) => !!(_E.itemExpenseLink && _E.itemExpenseLink(state, l.itemId));   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S1: ค่าใช้จ่ายไม่นับสต๊อก ไม่ต้องเตือนสต๊อกขาด
     if(_multi){
       const _wl = state.fifoLayers.map(x => ({ ...x }));
       for(const l of valid){
+        if(_xl(l)) continue;
         const it = state.items.find(x => x.id === l.itemId);
         const pl = _slPlan(_wl, it, l.itemId, toBaseQty(it, l.qty, l.unit));
         pl.parts.filter(pp => pp.neg).forEach(pp => short.push(`${it?.name}: ขาด ${fmtNum(pp.qty)} → ติดลบที่ ${_locNm(pp.locId)}`));
       }
     } else
     for(const l of valid){
+      if(_xl(l)) continue;
       const it = state.items.find(x => x.id === l.itemId);
       const stock = getStockAtBranch ? (getStockAtBranch(it, branch) || 0) : (it?.stockByBranch?.[branch] || 0);
       const baseQty = toBaseQty(it, l.qty, l.unit);
@@ -71442,11 +71923,13 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
     // จับต้นทุน FIFO (COGS) จาก clone — ไม่กระทบ layer จริง
     const _cogLayers = state.fifoLayers.map(x => ({ ...x }));
     let cogsTotal = 0;
-    const lineCogs = [], lineParts = [];
+    const lineCogs = [], lineParts = [], lineNoStock = [];
     const _genealogyDispatch = [];   // 🆕 LT
     valid.forEach((l, i) => {
       const it = state.items.find(x => x.id === l.itemId);
       const baseQty = toBaseQty(it, l.qty, l.unit);
+      // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S1: สินค้าติดธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" → ไม่ตัดสต๊อก/ไม่มีต้นทุนขาย (เหมือนขายเต็ม F4)
+      if(_E.itemExpenseLink && _E.itemExpenseLink(state, l.itemId)){ lineCogs[i] = 0; lineParts[i] = null; lineNoStock[i] = true; return; }
       const _plan = _multi ? _slPlan(_cogLayers, it, l.itemId, baseQty) : null;
       const _cogRes = _plan
         ? { cost: _plan.parts.reduce((t, pp) => t + (Number(pp.cost)||0), 0), breakdown: [].concat(..._plan.parts.map(pp => pp.breakdown || [])) }
@@ -71503,6 +71986,7 @@ function NewSaleModal({ state, dispatch, user, branch, onClose }){
           lineTotal: (Number(l.qty)||0) * (Number(l.unitPrice)||0),
           cogs: lineCogs[idx]||0,   // 🆕 FIX-7: ต้นทุนราย line ไว้คืน FIFO ตอน void
           ...(lineParts[idx] ? { srcParts: lineParts[idx] } : {}),   // 🆕 UAT: คลังที่ตัดจริง (คืนเข้าคลังเดิมตอนยกเลิก)
+          ...(lineNoStock[idx] ? { noStock: true } : {}),   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 S1: ยกเลิกไม่คืนสต๊อก
         };
       }),
       totalRevenue: totalRev,
@@ -71664,7 +72148,7 @@ function EntryDetailModal({ entry, state, dispatch, user, onClose }){
         h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'))));
 }
 
-global.ERP.registerModule('sales-light', { main: SalesLightModule });
+global.ERP.registerModule('sales-light', { main: SalesLightModule, NewSaleModal });   // NewSaleModal: freight_expense_e2e (UAT ชุด 1 S1)
 
 })(window);
 
@@ -73759,6 +74243,10 @@ function capexHintKind(state, doc, line){
   return null;
 }
 function capexHintEl(state, doc, line, tid){
+  // 🆕 FREIGHT_EXPENSE F6: สินค้าติดธงไม่นับสต๊อก → ป้ายบรรทัด (ไม่ใช่ 💎)
+  const _xl = line && !line.isAsset && line.itemId && global.ERP.itemExpenseLink ? global.ERP.itemExpenseLink(state, line.itemId) : null;
+  if(_xl) return h('div', { 'data-testid':'po-nostock-badge' + (tid ? '-' + tid : ''), className:'text-[10px] text-amber-800 bg-amber-50 border border-amber-300 rounded px-1 mt-0.5' },
+    '📦 ไม่นับสต๊อก · ลงค่าใช้จ่าย' + (global.ERP.acctFieldsVisible && global.ERP.acctFieldsVisible(state.currentUser) ? ` (${_xl.accountCode})` : ''));   // verify 3: D10 จัดซื้อไม่เห็นรหัสบัญชี
   const k = capexHintKind(state, doc, line);
   if(!k) return null;
   return k.kind === 'over'
@@ -80051,6 +80539,13 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
 
       // 🆕 OFF_INV_DISC_ASSET UAT M1: รวมค่าส่ง/ค่าติดตั้งเข้าราคาทุน 💎
       h(CapIntoAssetPanel, { state, dispatch, user, grs: [grLive], costGr: gr, draftInv: { billDiscount: piDiscInvField.billDiscount || null } }),   // verify 1: ทุนตามราคา/ส่วนลดท้ายบิลในฟอร์ม
+      // 🆕 FREIGHT_EXPENSE F6: บรรทัดค่าใช้จ่ายไม่นับสต๊อก (expCharge · freeze ตอนรับ) → ตั้งหนี้ลงบัญชีค่าใช้จ่าย ไม่ใช่ 1300
+      (() => { const xs = (grLive.lines || []).map((l, i) => ({ l, i, xc: global.ERP.grLineExpCharge(l) })).filter(x => x.xc && x.l.capInto == null);
+        if(!xs.length) return null;
+        return h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900', 'data-testid':'pi-nostock-note' },
+          '📦 ไม่นับสต๊อก · ลงค่าใช้จ่าย: ', xs.map(x => { const it = (state.items || []).find(k => k.id === x.l.itemId);
+            return `บรรทัด ${x.i + 1} ${(it && it.name) || x.l.itemName || x.l.itemId} → Dr ${x.xc.accountCode}`; }).join(' · '),
+          ' (ไม่ลง 1300 สินค้าคงเหลือ)'); })(),
       // 🆕 BILL-DISC §B5 + §V: ส่วนลดท้ายบิลตามใบกำกับ (ผู้ขายให้เพิ่มจาก PO) — เกลี่ยลงบรรทัด GR แล้วคิด VAT ใหม่ราย line
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 space-y-1', 'data-testid':'pi-billdisc-box' },
         poBillDiscAmt > 0 && h('div', { className:'text-xs font-medium text-rose-800 bg-rose-50 border border-rose-300 rounded p-1.5', 'data-testid':'pi-billdisc-po-note' },
@@ -107318,7 +107813,7 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote, fromSi, onSaveE
           stockLines.push({ itemId:c.itemId, qty: Number(c.qtyPerKit) * Number(l.qty), unit:c.unit,
             _kitId: l.kitId, _kitName: kitItem.name || '', _fromKit:true });
         });
-      } else {
+      } else if(!(global.ERP.itemExpenseLink && global.ERP.itemExpenseLink(state, l.itemId))){   // 🆕 FREIGHT_EXPENSE F4: ติดธงไม่นับสต๊อก = ไม่ตรวจ/ไม่ตัดสต๊อก
         stockLines.push({ itemId:l.itemId, qty:Number(l.qty), unit:l.unit });
       }
     });
@@ -107502,6 +107997,8 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote, fromSi, onSaveE
       if(l.lineKind === 'kit') return;        // 🎁 แถวแม่ไม่มีสต๊อกของตัวเอง (ของจริงอยู่แถวลูก)
       const it = state.items.find(x => x.id === l.itemId);
       const baseQty = toBaseQty(it, l.qty, l.unit);
+      // 🆕 FREIGHT_EXPENSE F4: สินค้าติดธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" (ค่าส่ง/ค่าบริการ) → ไม่ตัดสต๊อก ไม่สร้างติดลบ ไม่มีต้นทุนขาย
+      if(global.ERP.itemExpenseLink && global.ERP.itemExpenseLink(state, l.itemId)){ l.noStock = true; l.baseQty = baseQty; l.cogs = 0; return; }
       // 🆕 PRODLIVE-W2 E1: สาขาแยกคลัง → ตัดจากคลังต้นทางเดียว (planLocDeduct) · ไม่ข้ามไปคลังไลน์
       const _plan = (_srcMulti && global.ERP.planLocDeduct) ? planSrc(_cogLayers, it, l.itemId, baseQty) : null;
       const _cogRes = _plan
@@ -112998,7 +113495,8 @@ function ItemsSettings({ state, dispatch }){
                 h('td', { className:'px-3 py-2 font-mono text-xs' }, i.code || i.id, _focusDoneMark(F, i.id)),
                 h('td', { className:'px-3 py-2 font-medium' },
                   i.name,
-                  i.active===false && h('span', { className:'ml-1 text-xs text-gray-400' }, '(ปิด)')
+                  i.active===false && h('span', { className:'ml-1 text-xs text-gray-400' }, '(ปิด)'),
+                  i.expenseItemId && h('span', { className:'ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap', 'data-testid':'item-nostock-badge' }, '📦 ไม่นับสต๊อก · ลงค่าใช้จ่าย')   // 🆕 FREIGHT_EXPENSE F1
                 ),
                 h('td', { className:'px-3 py-2 text-center' },
                   h('span', { className: cls('px-1.5 py-0.5 rounded text-xs', typeClr) },
@@ -113710,6 +114208,46 @@ function ItemInfoPanel({ item, state, onOpenPrices }){
 // purposeScope: 'purchase' | 'bom' | undefined — ไม่ส่งมา = derive จาก role ของ currentUser (ROLE_PURPOSE_SCOPE)
 // onSaved(data): callback หลัง dispatch (quick-add จาก PO/BOM เลือกต่อได้ทันที — แบบเดียวกับ PartyEditModal)
 // onOpenPrices(item): 🆕 ITEM-FORM ปุ่ม 💲 ตั้งราคาขาย (ส่งมาเฉพาะผู้มีสิทธิ์แก้สินค้า) — ฟอร์มไม่มีช่องราคาแล้ว
+// 🆕 FREIGHT_EXPENSE F1/F6: ช่อง "📦 ไม่นับสต๊อก — ลงค่าใช้จ่าย" (เห็นเฉพาะผู้มีสิทธิ์บัญชี) → SET_ITEM_EXPENSE_LINK ทันที (ไม่รอปุ่มบันทึก)
+function ItemExpenseLinkField({ item, state, dispatch }){
+  const E = global.ERP, u = state.currentUser;
+  const live = (state.items || []).find(x => x && x.id === (item && item.id)) || item || {};
+  if(!live.id || !(E.acctFieldsVisible && E.acctFieldsVisible(u))) return null;
+  const eis = (state.expenseItems || []).filter(e => e && !e.deleted && (e.active !== false || e.id === live.expenseItemId));
+  const cur = live.expenseItemId || '', link = E.itemExpenseLink(state, live.id);
+  // UAT2 S3: สินค้าถูกใช้ในสูตร/ชุดโปรด/QC หรือเป็นวัตถุดิบ/สินค้าผลิต → เตือนแดง (เลือกผิดตัว = ซ่อนของจริงจากนับ/ตัวเลือก แต่สูตรยังตัดอยู่)
+  const use = E.itemExpenseLinkUsage ? E.itemExpenseLinkUsage(state, live.id) : { boms:[], favs:[], qcs:[], stockType:null };
+  const _ls = a => a.slice(0, 5).join(', ') + (a.length > 5 ? ` และอีก ${a.length - 5}` : '');
+  const useLines = [
+    use.stockType && `ประเภทสินค้า: ${use.stockType} (ปกติต้องนับสต๊อก)`,
+    use.boms.length && `อยู่ในสูตรผลิต (BOM) ${use.boms.length} สูตร: ${_ls(use.boms)} — สูตรยังตัดสินค้านี้อยู่`,
+    use.favs.length && `อยู่ในรายการโปรด ${use.favs.length} ชุด: ${_ls(use.favs)}`,
+    use.qcs.length && `อยู่ในแม่แบบ QC ${use.qcs.length} แบบ: ${_ls(use.qcs)}`].filter(Boolean);
+  const onPick = (v) => {
+    if((v || '') === cur) return;
+    const ei = eis.find(e => e.id === v);
+    const warn = (v && useLines.length) ? `\n\n⚠️⚠️ ตรวจให้แน่ใจว่าเลือกถูกตัว — สินค้านี้ดูเหมือนของจริง:\n• ${useLines.join('\n• ')}\nถ้าตั้งผิด: ของจะหายจากการนับ/ตัวเลือก และเครื่องมือล้างล็อตจะตัดเป็นค่าใช้จ่าย` : '';
+    const msg = v ? `ตั้ง "${live.name}" เป็นค่าใช้จ่าย ไม่นับสต๊อก (${ei ? ei.name + ' · บัญชี ' + (ei.accountCode || '5300') : v})?${warn}\n\n• รับของครั้งต่อไป: ไม่เข้าสต๊อก ตั้งหนี้ลงบัญชีค่าใช้จ่าย\n• ขาย: ไม่ตัดสต๊อก ไม่มีต้นทุนขาย\n• ใบรับของ/ใบขายเก่าไม่เปลี่ยน — ล็อตที่ค้างในสต๊อกให้ล้างที่ 🧹 กล่องล้างล็อต (คลังสินค้า → 📥 รับสินค้า → 💎 ทรัพย์สินรอบันทึก)`
+      : `ยกเลิกธง "ไม่นับสต๊อก" ของ "${live.name}"?\n\nรับของครั้งต่อไปจะเข้าสต๊อกตามปกติ (ใบเก่าไม่เปลี่ยน)`;
+    if(!confirm(msg)) return;
+    const at = Date.now();
+    dispatch({ type:'SET_ITEM_EXPENSE_LINK', data:{ itemId:live.id, expenseItemId:v || null, id:'iel_' + live.id + '_' + at.toString(36), at, by:u.username, byName:u.name || u.username } });
+  };
+  return h('div', { className:'border rounded p-2 ' + (cur ? 'bg-amber-50 border-amber-300' : 'bg-gray-50'), 'data-testid':'item-expense-link' },
+    h('div', { className:'font-bold text-sm mb-1' }, '📦 ไม่นับสต๊อก — ลงค่าใช้จ่าย'),
+    h('div', { className:'text-xs text-gray-600 mb-1' }, 'ใช้กับค่าส่ง/ค่าบริการที่คีย์เป็นสินค้า — รับของแล้วไม่เข้าสต๊อก ตั้งหนี้ลงค่าใช้จ่าย · ขายไม่ตัดสต๊อก'),
+    (use.boms.length + use.favs.length + use.qcs.length) > 0 && h('div', { className:'text-xs text-red-700 bg-red-50 border border-red-300 rounded p-1 mb-1', 'data-testid':'item-expense-link-usage' },
+      h('div', { className:'font-bold' }, cur ? '⚠️ สินค้านี้ถูกใช้อยู่ — ตรวจว่าตั้งธงถูกตัว' : '⚠️ สินค้านี้ดูเหมือนของจริง — อย่าตั้งธงถ้าไม่ใช่ค่าส่ง/ค่าบริการ'),
+      useLines.filter(t => !t.startsWith('ประเภทสินค้า')).map((t, i) => h('div', { key:i }, '• ' + t))),
+    h('select', { className:'border rounded px-2 py-1 text-sm max-w-full', value:cur, onChange:e => onPick(e.target.value), 'data-testid':'item-expense-link-pick' },
+      h('option', { value:'' }, '— สินค้าปกติ (นับสต๊อก) —'),
+      eis.map(e => h('option', { key:e.id, value:e.id }, (e.code ? e.code + ' ' : '') + e.name + ' · ' + (e.accountCode || '5300')))),
+    // UAT2 N1: ตั้งธงแล้วแต่ยังมีล็อตค้าง → บอกที่อยู่กล่องล้างล็อต
+    (() => { const P = cur && link && E.chargeStockClearPlan ? E.chargeStockClearPlan(state, live.id) : null;
+      return P && P.pending ? h('div', { className:'text-xs text-orange-800 bg-orange-50 border border-orange-300 rounded p-1 mt-1', 'data-testid':'item-expense-link-pending' },
+        `🧹 ยังมีล็อตค้างในสต๊อก ${P.rows.length} ล็อต — ล้างที่ คลังสินค้า → 📥 รับสินค้า → 💎 ทรัพย์สินรอบันทึก (กล่องสีส้ม) · ขึ้นในงานค้างของผู้จัดการบัญชีด้วย`) : null; })(),
+    cur && !link && h('div', { className:'text-xs text-red-700 mt-1' }, '⚠️ รายการรายจ่ายนี้ไม่มีบัญชีในผังบัญชี — ระบบยังนับสต๊อกตามปกติ แก้รายการรายจ่ายก่อน'));
+}
 function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved, onOpenPrices }){
   const isEdit = !!item;
   const types = state.itemTypes || [];
@@ -114225,6 +114763,8 @@ function ItemEditModal({ item, state, dispatch, onClose, purposeScope, onSaved, 
           h('label', { className:'flex items-center gap-2 text-sm' },
             h('input', { type:'checkbox', checked:active, onChange:e=>setActive(e.target.checked), 'data-testid':'item-active' }),
             h('span', null, 'เปิดใช้งาน (uncheck = ซ่อนจาก dropdown)')))),
+
+      isEdit && h(ItemExpenseLinkField, { item, state, dispatch }),   // 🆕 FREIGHT_EXPENSE F1/F6
 
       isEdit && h('div', null,
         h('h4', { className:'font-bold text-sm mb-2 pb-1 border-b' }, '🏢 สต๊อกปัจจุบัน (read-only)'),
@@ -124690,6 +125230,22 @@ const _ctCanCoa = (ctx) => ctx.perm('accounting','contracts','view') && (ctx.isS
 C.registerGroup({
   key:'accounting', label:'บัญชี', icon:'💰', roles:['accounting'], primary:['accounting'],
   checks:[
+    // 🆕 FREIGHT_EXPENSE verify 2: ย้ายจากกลุ่มคลังมากลุ่มบัญชี (ผู้กดล้าง = บัญชี JE + ตั้งหนี้ · กลุ่มคลังไม่แสดงให้ role บัญชี) · key เดิม
+    // UAT ชุด 2 N1 ref: src/00-core.js chargeStockClearPlan (ตัวเดียวกับ reducer CLEAR_CHARGE_STOCK)
+    //      src/mod-stock.js ChargeStockClearPanel (แท็บ 💎 ทรัพย์สินรอบันทึก · ต้องมี purchase.gr.view) · ผู้กดล้าง = canClearChargeStock (บัญชี JE + ตั้งหนี้)
+    { key:'wh_charge_in_stock', label:'🧹 ค่าส่ง/ค่าบริการ (ติดธงไม่นับสต๊อก) ยังค้างในสต๊อก', severity:'warn',
+      // 🆕 verify 2: แสดงเฉพาะคนที่กดล้างได้จริง (ERP.canClearChargeStock = สิทธิ์บัญชี JE + ตั้งหนี้ — กฎเดียวกับ reducer)
+      show: (ctx) => ctx.can('stock') && ctx.perm('purchase','gr','view') && !!(ctx.H.canClearChargeStock && ctx.H.canClearChargeStock(ctx.user)),
+      nav: { tab:'stock', subs:{ stock:'assetPending' } },
+      todo: tdo(d => `${d.ref} ยังค้างในสต๊อก — กด «🧹 ล้างล็อตค่าใช้จ่ายออกจากสต๊อก»`, n => `มีค่าส่งค้างในสต๊อก ${n} รายการ — กด «🧹 ล้างล็อตค่าใช้จ่ายออกจากสต๊อก» ทีละรายการ`),
+      btn: 'ไปล้างล็อต',
+      hint: 'คลังสินค้า → 📥 รับสินค้า → 💎 ทรัพย์สินรอบันทึก → กล่องสีส้ม "🧹 ค่าส่ง/ค่าบริการที่ยังค้างในสต๊อก" → ตรวจตาราง JE แล้วกด "🧹 ล้างล็อตค่าใช้จ่ายออกจากสต๊อก" (ผู้จัดการบัญชีกด)',
+      run: (ctx) => {
+        const fn = ctx.H.chargeStockClearPlan;
+        const l = (ctx.state.items || []).filter(i => i && i.expenseItemId).map(i => (typeof fn === 'function' ? fn(ctx.state, i.id) : null)).filter(P => P && P.pending);
+        return { count:l.length, detail:l.map(P => `${P.item.code ? P.item.code + ' ' : ''}${P.item.name} · ${P.rows.length} ล็อต` + ((P.blocks || []).length ? ' · ⛔ ต้องแก้ก่อนล้าง' : '')),
+          docs:mkDocs(l, P => ({ kind:'item', id:P.item.id, ref:`${P.item.code || ''} ${P.item.name || ''}`.trim() || P.item.id })) };
+      } },
     // 🆕 PRICE-FIX ขั้น 3 (R2.8): จัดซื้อแก้ราคาแล้ว รอบัญชียืนยัน (submitted) — นับตรงกับ ERP.priceFixList · PI → เปิดใบตั้งหนี้ · GR → คิวตั้งหนี้
     { key:'acct_price_fix_review', label:'🔍 จัดซื้อแก้ราคาแล้ว รอบัญชียืนยัน', severity:'warn',
       show: (ctx) => _pfSwOn(ctx) && ctx.can('accounting') && ctx.perm('accounting','invQueue','edit'),
