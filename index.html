@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="406d3a6e23f8";window.__ERP_BUILT_AT__="2026-10-21T15:58:35";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="eb75f5db6932";window.__ERP_BUILT_AT__="2026-10-21T16:48:29";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -14281,7 +14281,53 @@ function expenseMemoBranch(state, invId){
   const b = _xbRowsBranch(expenseLineRows(state).filter(r => (r.kind === 'inv' || r.kind === 'gr') && r.docId === invId));
   return b ? b.branch : null;
 }
-const _XB_ADJ_SRC = ['sup_memo_cn', 'sup_memo_dn', 'rtv'];
+// 🆕 PV_BRANCH: สาขาของค่าใช้จ่าย/ของในใบตั้งหนี้ (ไว้พิมพ์บนใบสำคัญจ่าย) → [{ branchId, name, amount, unset? }] เรียงยอดมาก→น้อย ("ยังไม่ระบุ" ท้ายสุด) · pure (อ่านอย่างเดียว)
+//   จ่ายล่วงหน้า/มัดจำ = สาขาปลายทางของ PO · บรรทัดค่าใช้จ่าย = สาขาของบรรทัด (ยังไม่ยืนยัน+ว่าง/เท่าหัวใบ = "ยังไม่ระบุ") · ของจาก GR = สาขาที่รับ (gr.branch)
+//   บรรทัด GR ค่าใช้จ่าย (expCharge) ยืนยันสาขาแล้ว = costBranch · หาอะไรไม่ได้เลย = "ยังไม่ระบุ" (branchId '__unset') · id สาขาใช้ตามจริง ไม่ normalize
+function invCostBranches(state, inv){
+  if(!inv) return [];
+  const S = state || {}, acc = new Map(), head = inv.branch || 'b1';
+  const add = (b, v) => { const k = b || head; acc.set(k, (acc.get(k) || 0) + (Number(v) || 0)); };
+  const isAdv = inv.source === 'po_advance' || inv.isAdvance || inv.type === 'deposit_pi';
+  const po = isAdv && inv.poId ? (S.pos || []).find(p => p && p.id === inv.poId) : null;
+  if(isAdv && po && po.destinationBranch) add(po.destinationBranch, inv.amount);
+  else {
+    // คำตอบเจ้าของ 2026-10-21: บรรทัดยังไม่ยืนยัน + สาขาว่าง/เท่าหัวใบ (= ค่าเริ่มต้น ไม่ได้เลือกเอง) → กอง "ยังไม่ระบุ" · เลือกสาขาอื่นไว้ = ใช้สาขานั้น
+    //   ยอด 0/บรรทัดคำอธิบาย = ข้าม (หน้า 🏷️ ก็ไม่แสดง แก้ไม่ได้) · 💎 ทรัพย์สิน = สาขาตามบรรทัด/หัวใบ เสมอ (หน้า 🏷️ ไม่รับบรรทัดทรัพย์สิน)
+    (inv.expenseLines || []).forEach(l => { if(!l || !(Number(l.lineTotal) || 0)) return;
+      const unset = !expLineIsCapex(l) && l.branchConfirmed !== true && (!l.branch || l.branch === head);
+      add(unset ? _PVB_UNSET : l.branch, l.lineTotal); });
+    const gids = (inv.grIds && inv.grIds.length) ? inv.grIds : (inv.grId ? [inv.grId] : []);
+    for(const gid of gids){
+      const gr = (S.grs || []).find(g => g && g.id === gid);
+      if(!gr || gr.voided) continue;
+      (gr.lines || []).forEach(l => { if(!l) return;
+        const xc = grLineExpCharge(l);
+        add(xc && l.branchConfirmed === true && l.costBranch ? l.costBranch : gr.branch, l.lineTotal); });
+    }
+  }
+  if(!acc.size) add(_PVB_UNSET, inv.amount);   // หาที่มาไม่ได้เลย → "ยังไม่ระบุ" (ไม่เดาหัวใบ)
+  else {
+    // ปรับสัดส่วนให้ยอดรวมทุกสาขา = ยอดใบ (ก่อน VAT) · ใบแยก 50 ทวิ จาก GR เดียว/ส่วนลดนอกใบ/แก้ราคา ไม่ให้นับ GR ซ้ำเต็มก้อน
+    const tot = [...acc.values()].reduce((a, v) => a + v, 0), want = Number(inv.amount) || 0;
+    if(tot > 0 && want > 0 && Math.abs(tot - want) > 0.005) for(const [k, v] of acc) acc.set(k, v * want / tot);
+  }
+  const R = v => Math.round(v * 100) / 100, brs = S.branches || [];
+  return _pvbSort([...acc.entries()].map(([branchId, amount]) => { if(branchId === _PVB_UNSET) return { branchId, name:'ยังไม่ระบุ', amount:R(amount), unset:true };
+    const b = brs.find(x => x && x.id === branchId);
+    return { branchId, name: (b && b.name) || branchId, amount: R(amount) }; }));
+}
+// กอง "ยังไม่ระบุ" ของใบสำคัญจ่าย (ค่าเดียวกับ EXP_COL_UNSET) · เรียง: สาขาจริงยอดมาก→น้อย แล้ว "ยังไม่ระบุ" ท้ายสุด
+const _PVB_UNSET = '__unset';
+function _pvbSort(a){ return a.sort((x, y) => ((x.unset ? 1 : 0) - (y.unset ? 1 : 0)) || (y.amount - x.amount) || String(x.name).localeCompare(String(y.name))); }
+// รวมหลายใบ (ใบสำคัญจ่ายวางบิลรวม) → รูปแบบเดียวกับ invCostBranches
+function invsCostBranches(state, invs){
+  const m = new Map();
+  (invs || []).forEach(iv => invCostBranches(state, iv).forEach(r => { const o = m.get(r.branchId);
+    if(o) o.amount = Math.round((o.amount + r.amount) * 100) / 100; else m.set(r.branchId, { ...r }); }));
+  return _pvbSort([...m.values()]);
+}
+const _XB_ADJ_SRC =['sup_memo_cn', 'sup_memo_dn', 'rtv'];
 // แถวปรับค่าใช้จ่ายจาก JE ใบลด/เพิ่มหนี้ (kind 'memo') + คืนของบรรทัดค่าใช้จ่าย (kind 'rtv') — ยอด = Dr−Cr บัญชีค่าใช้จ่ายใน JE ที่ยังเปิด (ลดหนี้ = ติดลบ)
 //   ไม่นับ JE ที่ถูกกลับแล้ว (reversed/voided) และ JE กลับรายการ (sup_memo_void/rtv_void) — เกณฑ์เดียวกับ branchExpenseJeTotals
 //   สาขา = บรรทัดค่าใช้จ่ายของใบอ้างอิงยืนยันสาขาเดียว → สาขานั้น (ยืนยัน) · ไม่งั้น = สาขาใน JE (ยังไม่ระบุ) · ระบุที่หน้า 🏷️ ไม่ได้ (แก้ที่ใบอ้างอิง)
@@ -14742,7 +14788,7 @@ global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
   docRenumFrom, docNumMatches, RenumBadge,
   EXP_BRANCH_ALIASES, expBranchIsHq, expBranchFromText, expenseBranchSuggest, EXP_TYPE_KEYWORDS, expenseSpecialKind, EXP_SPECIAL_LABEL, expenseExtCodeSuggest, expenseLineType,   // 🆕 BRANCH_EXPENSE_REPORT R1-R2
-  expenseLinePostedBranch, expenseLineRows, expenseMemoBranch, EXP_COL_HQ, EXP_COL_UNSET, expenseRowCol, branchExpenseReport, branchExpenseJeTotals, expBranchReclassUndoLines, expBranchReclassUndoJe, profitLossByBranch, expenseBranchPlan, canSetExpenseBranch, canMapExpenseExtCode,
+  expenseLinePostedBranch, expenseLineRows, expenseMemoBranch, invCostBranches, invsCostBranches, EXP_COL_HQ, EXP_COL_UNSET, expenseRowCol, branchExpenseReport, branchExpenseJeTotals, expBranchReclassUndoLines, expBranchReclassUndoJe, profitLossByBranch, expenseBranchPlan, canSetExpenseBranch, canMapExpenseExtCode,
   POS_BRANCH_SRC, POS_BRANCH_MAP_DEFAULT, POS_BRANCH_NAMES, posBranchMapResolved, canSetPosBranchMap, posReadKeyOf, posKeyMasked, posKeyTail, posKeySig, posKeyClean, posKeyDenyReason, fetchPosDailySales, branchProfitReport,   // 🆕 POS_BRANCH_SALES
   isServiceLine, isStockLine, poHasStockLine, poHasServiceLine, poStockPending, svcConfirmedQty, svcRemainQty, svcInvoicedMap, svcUninvoiced, poStatusFromLines, whtFormForSupplier, whtMinBase, whtAutoOk, expenseItemOf, itemExpenseLink, itemExpenseLinkUsage, grLineExpCharge, chargeStockClearPlan, canClearChargeStock, CLEAR_CHARGE_WHO, s2aUndoAsk, S2A_UNDO_WHERE, isTransportLine, expenseItemTreatment, acctFieldsVisible, svcConfirmersFor, svcConfirmDenyReason, svcPoParties, getLastExpensePrice, findSimilarServicePOs, poSvcQuoteBase, poInvoicesOf, poContractSummary, poFullEditDenyReason,   // 🔧 EXPENSE_PO ① PO ค่าบริการ
   contractInstTotal, contractInvoices, contractInstBilledMap, contractInstAccepted, contractInvAcceptorChanged, contractInstState, contractSummary, contractBranchSummary, contractDenyReason, projectAssetFor, contractCapAccount, retentionAmountFor, isContractAcceptor, contractInstsReadyToBill, supplierOpenContracts, contractAcceptorDeny, CONTRACT_SUM_KEYS, contractCipCode, retentionAccountCode, pettyDenyInv, assetLifeMonths, assetDepStart,   // 📑 สัญญางานจ้าง P2
@@ -88078,6 +88124,7 @@ function printPayApprovalSheet(pay, inv, state){
     <div class="amt">${fmtAmt(pay.amount)} บาท</div>
     <div class="amt-small">(${bahtText(pay.amount)})</div>
     <div class="row" style="margin-top:4mm"><div class="l">วิธีจ่าย</div><div class="v">${PAY_METHODS.find(m=>m.v===pay.method)?.label || pay.method}</div></div>
+    ${(() => { /* UAT S1: ชื่อสาขาอย่างเดียว (ไม่พิมพ์ยอดต่อสาขา — ยอดก่อน VAT/ไม่ปรับตามยอดจ่ายบางส่วน รวมไม่ตรงจำนวนเงิน) */ const brs = global.ERP.invCostBranches ? global.ERP.invCostBranches(state, inv) : []; const nReal = brs.filter(b => !b.unset).length, un = brs.some(b => b.unset); /* คำตอบเจ้าของ 2026-10-21: นับเฉพาะสาขาจริง · มี "ยังไม่ระบุ" = title บอกที่ระบุ · verify 2: (N สาขา) ต่อท้ายสาขาจริง แล้ว " + ยังไม่ระบุ" (แบบเดียวกับใบ A5) */ return brs.length ? `<div class="row pv-br"${un ? ' title="ให้ฝ่ายบัญชีระบุสาขาที่ เจ้าหนี้ (AP) → ระบุสาขาค่าใช้จ่าย (ค้นหา: ระบุสาขา)"' : ''}><div class="l">สาขา</div><div class="v">${nReal ? brs.filter(b => !b.unset).map(b => _pvvE(b.name)).join(', ') : 'ยังไม่ระบุ'}${nReal > 1 ? ' (' + nReal + ' สาขา)' : ''}${un && nReal ? ' + ยังไม่ระบุ' : ''}</div></div>` : ''; })()}
     <div class="row"><div class="l">บัญชีที่ตัดจ่าย</div><div class="v">${pay.bankName||'-'} ${pay.bankNumber?'('+pay.bankNumber+')':''}</div></div>
     <div class="row"><div class="l">เลขอ้างอิง</div><div class="v">${pay.ref||'-'}</div></div>
     <div class="row"><div class="l">คงเหลือหลังจ่าย</div><div class="v">${fmtAmt(remain)} บาท</div></div>
@@ -88959,7 +89006,8 @@ function pvVoucherModel(pay, inv, state){
     supplier: { name: (sup && sup.name) || '', address: (sup && sup.address) || '', taxId: (sup && sup.taxId) || '',
       branchText: (sup && global.ERP.partyTaxBranchText) ? (global.ERP.partyTaxBranchText(sup) || '') : '' },
     payment: { method: pay.method || '', methodLabel, bankLine, chequeNo: pay.chequeNo || pay.chequeNumber || '', ref: pay.ref || '',
-      requestedPayDate: pay.requestedPayDate && pay.requestedPayDate !== payDate ? pay.requestedPayDate : '', count: rows.length },
+      requestedPayDate: pay.requestedPayDate && pay.requestedPayDate !== payDate ? pay.requestedPayDate : '', count: rows.length,
+      branches: global.ERP.invsCostBranches ? global.ERP.invsCostBranches(state, invs) : [] },   // 🆕 PV_BRANCH: สาขาของค่าใช้จ่ายทุกใบในใบสำคัญนี้
     rows, total, wht, net, words: net < 0 ? 'ลบ' + bahtText(-net) : bahtText(net), notes,
     preparer: { name: pay.createdByName || (prepU && prepU.name) || prepUn, sigDataUrl: (prepU && prepU.signature && prepU.signature.dataUrl) || '' },
     approver: { name: pay.approvedBy ? ((apU && apU.name) || pay.approvedBy) : '',   // 🆕 PRINT-TIDY: ชื่อผู้อนุมัติไม่ต่อท้าย (self)/(GM อนุมัติเอง) — ป้ายควบคุมยังพิมพ์ในส่วนป้ายท้ายใบ
@@ -89125,7 +89173,8 @@ function pvEcountVoucherModel(members, state){
     company: { name: company.name || '', address: company.address || '', taxId: company.taxId || '' },
     supplier: { name: (sup && sup.name) || '', address: (sup && sup.address) || '', taxId: (sup && sup.taxId) || '',
       branchText: (sup && global.ERP.partyTaxBranchText) ? (global.ERP.partyTaxBranchText(sup) || '') : '' },
-    payment: { method: '', methodLabel: '', bankLine: banks.join(', '), chequeNo: '', ref: '', requestedPayDate: '', count: rows.length },
+    payment: { method: '', methodLabel: '', bankLine: banks.join(', '), chequeNo: '', ref: '', requestedPayDate: '', count: rows.length,
+      branches: global.ERP.invsCostBranches ? global.ERP.invsCostBranches(state, ms.map(m => m.inv)) : [] },   // 🆕 PV_BRANCH
     rows, total, wht, net, words: net < 0 ? 'ลบ' + bahtText(-net) : bahtText(net), notes,
     preparer: { name: '', sigDataUrl: '' }, approver: { name: '', sigDataUrl: '' },
     badges: [partial ? '⚠️ จ่ายบางส่วนใน Ecount — ยอดที่เหลือของบิลจ่ายในระบบนี้/ยังค้าง (ดูใบสำคัญจ่ายของระบบนี้)' : '', revBadge].filter(Boolean),
@@ -89315,17 +89364,30 @@ function pvVoucherPagesHTML(model, paperKey){
   const supTax = `เลขผู้เสียภาษี <b>${E(sp.taxId || '-')}</b>${sp.branchText ? ' (' + E(sp.branchText) + ')' : ''}`;
   const supBox = `<div class="pvv-box"><div class="pvv-lb">ผู้รับเงิน (Supplier)</div><div class="pvv-1l" title="${E(sp.name)}"><b>${E(sp.name || '-')}</b></div>`
     + `<div class="pvv-cl2">${E(sp.address || '-')}</div><div class="pvv-1l">${supTax}</div></div>`;
+  // UAT S2: กล่องคงที่ 4 บรรทัด — "จ่ายใบกำกับ N ใบ" ต่อท้ายบรรทัดวิธีจ่าย (ec = บรรทัดบัญชี) แบบไม่หด · บัญชี+เช็ครวมบรรทัดเดียว (เลขเช็คไม่หด)
+  //   → สาขาบรรทัด 2 แล้ววันนัดจ่าย/อ้างอิงยังได้บรรทัดของตัวเอง (ไม่ถูกรวมท้ายจนตัด …)
+  const cntTx = `จ่ายใบกำกับ <b>${rows.length}</b> ใบ${m.isGroup ? ' (วางบิลรวม)' : ''}`;
+  const withCnt = (x) => `<div class="pvv-dd pvv-cnt"><span class="pvv-dn">${x}</span><span class="pvv-dm"> · ${cntTx}</span></div>`;
   const pl = [];
   if(ec){
     pl.push(`วิธีจ่าย: <b>${E(tags.voucherText || '')}</b>`);
-    pl.push(`บัญชีที่ใช้จ่าย: <b>${E(py.bankLine || '-')}</b>`);
+    pl.push(withCnt(`บัญชีที่ใช้จ่าย: <b>${E(py.bankLine || '-')}</b>`));
     if(tags.refText) pl.push(`อ้างอิง Ecount: <b>${E(tags.refText)}</b>`);
   } else {
-    pl.push(`วิธีจ่าย: <b>${E(py.methodLabel || '-')}</b>`);
+    // verify 1: เลขเช็คอยู่บรรทัดวิธีจ่าย (ไม่แย่งที่บัญชี — A5 แนวตั้งเลขบัญชีเคยถูกตัดเหลือ "1…") · บัญชีมีบรรทัดของตัวเอง
+    //   เช็ค: "เช็ค <เลข> · " ไม่หด (เลขเช็คเห็นเสมอ) + "จ่ายใบกำกับ N ใบ" หดได้ (A5 แนวตั้งวางบิลรวม ตัดแค่ "(วางบิลรวม)")
+    if(py.chequeNo) pl.push(`<div class="pvv-dd pvv-cnt pvv-chq"><span class="pvv-dm"><b>${E(py.methodLabel || 'เช็ค')}</b> <b>${E(py.chequeNo)}</b> · </span><span class="pvv-dn">${cntTx}</span></div>`);
+    else pl.push(withCnt(`วิธีจ่าย: <b>${E(py.methodLabel || '-')}</b>`));
     if(py.bankLine) pl.push(`บัญชีที่ใช้จ่าย: <b>${E(py.bankLine)}</b>`);
-    if(py.chequeNo) pl.push(`เลขที่เช็ค: <b>${E(py.chequeNo)}</b>`);
   }
-  pl.push(`จ่ายใบกำกับ <b>${rows.length}</b> ใบ${m.isGroup ? ' (วางบิลรวม)' : ''}`);
+  // 🆕 PV_BRANCH: "สาขา: …" เป็นบรรทัดที่ 2 เสมอ · หลายสาขา = รายชื่อ + (N สาขา) · title = ยอดต่อสาขา
+  const brs = py.branches || [];
+  //   คำตอบเจ้าของ 2026-10-21: "ยังไม่ระบุ" ต่อท้ายรายชื่อ · (N สาขา) นับเฉพาะสาขาจริง · title บอกที่ระบุสาขา
+  const brN = brs.filter(b => !b.unset).length, brTip = brs.map(b => b.name + ' ' + fmtAmt(b.amount)).join(' · ') + (brs.some(b => b.unset) ? ' · ให้ฝ่ายบัญชีระบุสาขาที่ เจ้าหนี้ (AP) → ระบุสาขาค่าใช้จ่าย (ค้นหา: ระบุสาขา)' : '');
+  //   verify 1: "ยังไม่ระบุ" อยู่ช่องไม่หด (ชื่อสาขาจริงยาวถูกตัด … ก่อน · "ยังไม่ระบุ" ต้องเห็นเสมอ) · ทั้งใบไม่ระบุ = "สาขา: ยังไม่ระบุ"
+  const brUn = brs.some(b => b.unset), brReal = brs.filter(b => !b.unset).map(b => b.name).join(', ');
+  const brTail = (brN > 1 ? ` (${brN} สาขา)` : '') + (brUn && brN ? ' + <b>ยังไม่ระบุ</b>' : '');
+  if(brs.length) pl.splice(1, 0, `<div class="pvv-dd pvv-br" title="${E(brTip)}"><span class="pvv-dn">สาขา: <b>${brN ? E(brReal) : 'ยังไม่ระบุ'}</b></span>${brTail ? `<span class="pvv-dm">${brTail}</span>` : ''}</div>`);
   const rq = [py.requestedPayDate ? `วันนัดจ่าย: <b>${E(_pvvDate(py.requestedPayDate))}</b>` : '', py.ref ? `อ้างอิง: <b>${E(py.ref)}</b>` : ''].filter(Boolean).join(' · ');   // วันนัดจ่ายก่อน อ้างอิงยาวไม่บัง
   if(rq) pl.push(rq);
   while(pl.length > 4){ const t = pl.pop(); pl[pl.length - 1] += ' · ' + t; }   // กล่องสูงคงที่ 4 บรรทัด
