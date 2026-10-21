@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="afdb3ae2ad82";window.__ERP_BUILT_AT__="2026-10-21T13:08:24";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="406d3a6e23f8";window.__ERP_BUILT_AT__="2026-10-21T15:58:35";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -14526,12 +14526,224 @@ function canMapExpenseExtCode(user){
   return !!user && (isSuperUser(user) || hasPerm(user, 'accounting', 'invQueue', 'create') || hasPerm(user, 'accounting', 'expenseItems', 'edit'));
 }
 
+// ==================== 🆕 POS_BRANCH_SALES: กำไรรายสาขา (ผู้บริหาร) — ยอดขาย POS จากระบบผู้จัดการ (อ่านอย่างเดียว · ไม่ลงบัญชี) ====================
+// แหล่ง = Supabase ของระบบผู้จัดการสาขา (คนละโปรเจคกับ ERP) · ตาราง pos_daily_sales · ERP เรียก GET อย่างเดียว ห้ามเขียน
+//   key = anon key สาธารณะตัวเดียวกับเว็บระบบผู้จัดการ (ต้องเป็น role anon / sb_publishable_ เท่านั้น — posKeyDenyReason ตรวจก่อนทุกครั้ง)
+const POS_BRANCH_SRC = { url:'https://vvdflnqmurzbwmqnngvt.supabase.co', key:'' };
+// จับคู่ค่าเริ่มต้น (รหัสระบบผู้จัดการ → id สาขา ERP) · null = ไม่มีใน ERP · id ห้าม normalize (ํYume005 มีอักขระไทยนำหน้า)
+const POS_BRANCH_MAP_DEFAULT = { B001:'Yume004', B002:'Yume001', B003:'Yume003', B004:'Yume002', B005:'Yume006', B006:'ํYume005',
+  B3615:'Yume007', B3616:'Yume0009', B3617:null, B3618:'Yume00009', B3619:'Yume0010' };
+const POS_BRANCH_NAMES = { B001:'วังหลัง', B002:'สามย่านมิตรทาวน์', B003:'ทรูดิจิทัล', B004:'เซ็นทรัลพระรามสอง', B005:'เดอะมอลล์งามวงศ์วาน', B006:'เดอะมอลล์บางแค',
+  B3615:'Silom Complex', B3616:'สาขาปิ่นเกล้า', B3617:'โรบินสัน ศรีสมาน', B3618:'ศูนย์การแพทย์กาญจนา', B3619:'พระราม3' };
+// ตารางจับคู่ที่ใช้จริง = ค่าเริ่มต้น ทับด้วย settings.posBranchMap (มีคีย์ = ใช้ค่านั้น · null = ไม่มีใน ERP) → { posId: erpId|null }
+function posBranchMapResolved(state){
+  const ov = (state && state.settings && state.settings.posBranchMap) || {}, out = { ...POS_BRANCH_MAP_DEFAULT };
+  for(const [k, v] of Object.entries(ov)) out[String(k)] = v ? String(v) : null;
+  return out;
+}
+// ใครแก้จับคู่สาขา POS / สวิตช์ VAT / คีย์อ่าน ได้ = GM/ผจก.บัญชี/admin (P2: ตัวเดียวกับเกณฑ์ทรัพย์สิน canEditCapexThreshold — ไม่ใช่ทุกคนที่มี je.create)
+function canSetPosBranchMap(user){
+  return !!user && canEditCapexThreshold(user);
+}
+// P2: คีย์อ่านที่ใช้จริง = settings.posReadKey (ผู้มีสิทธิ์วางเองในการ์ด 🔗) ก่อน แล้วค่อย POS_BRANCH_SRC.key ในโค้ด
+function posReadKeyOf(state){
+  const k = state && state.settings && state.settings.posReadKey;
+  return (typeof k === 'string' && k.trim()) ? k.trim() : (POS_BRANCH_SRC.key || '');
+}
+// P2 (UAT S2): แสดงคีย์แบบปิดบัง = ส่วนหัว (sb_publishable_ หรือ 12 ตัวแรกของ JWT) + … + 4 ตัวท้าย — แยกได้ว่าใช้คีย์ไหน · ห้ามแสดง/บันทึกคีย์เต็ม
+function posKeyTail(key){ const k = String(key || ''); return k.length > 8 ? k.slice(-4) : ''; }
+function posKeyMasked(key){
+  const k = String(key || ''); if(!k) return '';
+  const head = /^sb_publishable_/.test(k) ? 'sb_publishable_' : k.slice(0, 12);
+  return head + '…' + posKeyTail(k);
+}
+// P2 (UAT M1): ลายเซ็นคีย์สั้น ๆ (djb2 ทั้งคีย์ → base36) ใช้เป็นตัวบอกเปลี่ยนคีย์ใน deps · ไม่แสดง/ไม่ log
+function posKeySig(key){
+  const k = String(key || ''); if(!k) return '';
+  let x = 5381; for(let i = 0; i < k.length; i++) x = ((x * 33) ^ k.charCodeAt(i)) >>> 0;
+  return k.length.toString(36) + '.' + x.toString(36);
+}
+// POS verify 2: ล้างคีย์ที่วางมาแบบผิดบ่อย — ตัดช่องว่างหัวท้าย + เครื่องหมายคำพูด/backtick ที่ครอบอยู่ ("…" '…' `…`) ก่อนตรวจ/บันทึก
+function posKeyClean(key){
+  let k = String(key == null ? '' : key).trim();
+  for(let i = 0; i < 3 && k.length >= 2; i++){
+    const q = k[0];
+    if((q === '"' || q === "'" || q === '`') && k[k.length - 1] === q) k = k.slice(1, -1).trim(); else break;
+  }
+  return k;
+}
+// ตรวจคีย์ก่อนใช้: JWT ต้อง role = anon · คีย์แบบใหม่ต้องขึ้นต้น sb_publishable_ · อื่น ๆ (service_role / sb_secret_) = ปฏิเสธ → ข้อความ | null
+function posKeyDenyReason(key){
+  const k = String(key || '');
+  // P2: ไม่มีคีย์ → บอกว่าใครวางคีย์ได้และเอามาจากไหน (การ์ด 🔗 จับคู่สาขา)
+  if(!k) return 'ยังไม่ได้ใส่คีย์อ่านยอดขาย — GM/ผจก.บัญชี/admin กด 🔗 จับคู่สาขา POS แล้ววางคีย์ Publishable (sb_publishable_…) ของระบบผู้จัดการ (Supabase → Project Settings → API Keys)';
+  if(/^sb_secret_/.test(k)) return 'คีย์นี้เป็นคีย์ลับ (sb_secret_) — ห้ามใช้ ต้องเป็นคีย์ Publishable (sb_publishable_…) เท่านั้น';
+  // POS verify 1: จำกัดความยาว (คีย์ซิงก์ไปทุกเครื่อง) + JWT ต้องเป็น base64url 3 ท่อน
+  if(k.length > 512) return 'คีย์ยาวผิดปกติ — คัดลอกเฉพาะคีย์ Publishable (sb_publishable_…)';
+  if(/^sb_publishable_[A-Za-z0-9_-]{1,200}$/.test(k)) return null;
+  if(/\s/.test(k)) return 'คีย์มีช่องว่าง/ขึ้นบรรทัด — คัดลอกใหม่ให้ครบทั้งคีย์';
+  // POS verify 2: ขึ้นต้น sb_ (ตัดไม่ครบ/ผิดชนิด) หรือไม่ใช่ 3 ท่อน (ไม่ใช่ JWT) → บอกให้คัดลอก sb_publishable_ ให้ครบ · คำว่า anon ใช้เฉพาะสตริงที่หน้าตาเป็น JWT
+  if(/^sb_/i.test(k) || k.split('.').length !== 3) return 'คีย์ไม่ครบ/ไม่ถูกรูปแบบ — ต้องขึ้นต้น sb_publishable_ และคัดลอกให้ครบทั้งคีย์';
+  const p = k.split('.');
+  if(p.length !== 3 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(k)) return 'คีย์ระบบผู้จัดการไม่ถูกรูปแบบ (ต้องเป็นคีย์สาธารณะ anon)';
+  try {
+    const b = p[1].replace(/-/g, '+').replace(/_/g, '/'), pl = JSON.parse(atob(b + '==='.slice((b.length + 3) % 4)));
+    return pl && pl.role === 'anon' ? null : 'คีย์ระบบผู้จัดการไม่ใช่คีย์สาธารณะ (anon) — ไม่ใช้';
+  } catch(e){ return 'อ่านคีย์ระบบผู้จัดการไม่ได้'; }
+}
+const POS_FETCH_TIMEOUT = { timeout:true };   // ตัวบอกว่าหมดเวลา (เทียบด้วย ===)
+// cache ในหน่วยความจำต่อช่วง (ไม่เก็บลง state/cloud ของ ERP) · { 'from|to': { rows, at } }
+const _posSalesCache = new Map();
+let _posSalesCacheKey = '';   // P2: เปลี่ยนคีย์ → ล้าง cache (ไม่เก็บคีย์ใน cache key)
+// ดึง pos_daily_sales ช่วงวันที่ (YYYY-MM-DD) — GET อย่างเดียว · แบ่งหน้า 1000 แถว · o.force = ข้าม cache
+//   → Promise<{ ok:true, rows:[{ branch_id, date, net, gross, disc, bills }], at, cached } | { ok:false, error }>  (ไม่ throw)
+async function fetchPosDailySales(from, to, o){
+  const x = o || {}, f = String(from || '').slice(0, 10), t = String(to || '').slice(0, 10), ck = f + '|' + t;
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(f) || !/^\d{4}-\d{2}-\d{2}$/.test(t)) return { ok:false, error:'ช่วงวันที่ไม่ถูกต้อง' };
+  { const kk = posReadKeyOf(x.state); if(kk !== _posSalesCacheKey){ _posSalesCache.clear(); _posSalesCacheKey = kk; } }
+  if(!x.force && _posSalesCache.has(ck)){ const c = _posSalesCache.get(ck); return { ok:true, rows:c.rows, at:c.at, cached:true }; }
+  // P2: คีย์จาก settings.posReadKey ก่อน (o.state) แล้วค่อยคีย์ในโค้ด · ห้าม log คีย์
+  const src = { url:POS_BRANCH_SRC.url, key:posReadKeyOf(x.state) }, deny = posKeyDenyReason(src.key);
+  if(deny) return { ok:false, error:deny };
+  const fx = x.fetch || global.fetch;
+  if(typeof fx !== 'function') return { ok:false, error:'เบราว์เซอร์นี้เรียกข้อมูลไม่ได้' };
+  const rows = [], N = 1000, tmoMs = Number(x.timeoutMs) > 0 ? Number(x.timeoutMs) : 12000;
+  try {
+    for(let off = 0; off < 100000; off += N){
+      const url = src.url + '/rest/v1/pos_daily_sales?select=branch_id,date,net,gross,disc,bills&date=gte.' + f + '&date=lte.' + t
+        + '&order=date.asc,branch_id.asc&limit=' + N + '&offset=' + off;
+      // verify 3: ทุกหน้ามี timeout (Promise.race แบบ 00-party-th.js) — เน็ตค้าง/captive portal ไม่ทำให้หน้าค้าง ⏳ ตลอด
+      let timer = null;
+      const tmo = new Promise(res => { timer = setTimeout(() => res(POS_FETCH_TIMEOUT), tmoMs); });
+      const js = await Promise.race([(async () => {
+        const r = await fx(url, { method:'GET', headers:{ apikey:src.key, Authorization:'Bearer ' + src.key, Accept:'application/json' }, cache:'no-store' });
+        // UAT S3: 401/403 = คีย์ใช้ไม่ได้ (ไม่ใช่เน็ตมีปัญหา) → บอกให้วางคีย์ใหม่
+        if(r && (r.status === 401 || r.status === 403)) return { _err:'คีย์อ่านยอดขายใช้ไม่ได้ (ผิดโปรเจกต์/ถูกยกเลิก) — GM/ผจก.บัญชี/admin กด 🔗 จับคู่สาขา POS แล้ววางคีย์ใหม่', keyBad:true };
+        if(!r || !r.ok) return { _err:'โหลดยอดขายจากระบบผู้จัดการไม่ได้ (HTTP ' + ((r && r.status) || '?') + ')' };
+        return r.json();
+      })(), tmo]).finally(() => { if(timer) clearTimeout(timer); });
+      if(js === POS_FETCH_TIMEOUT) return { ok:false, timeout:true, error:'โหลดยอดขายจากระบบผู้จัดการไม่ทัน (เกินเวลา) — ลองกด 🔄 ใหม่' };
+      if(js && js._err) return { ok:false, error:js._err, ...(js.keyBad ? { keyBad:true } : {}) };
+      if(!Array.isArray(js)) return { ok:false, error:'ข้อมูลยอดขายที่ได้ไม่ถูกรูปแบบ' };
+      rows.push(...js);
+      if(js.length < N) break;
+    }
+  } catch(e){ return { ok:false, error:'โหลดยอดขายจากระบบผู้จัดการไม่ได้ (เน็ต/เซิร์ฟเวอร์) — ' + ((e && e.message) || e) }; }
+  const at = Date.now();
+  _posSalesCache.set(ck, { rows, at });
+  return { ok:true, rows, at, cached:false };
+}
+// รายงานกำไรรายสาขา (ผู้บริหาร) · pure · posRows = แถว pos_daily_sales (null = โหลดไม่ได้ → แสดงส่วน ERP ต่อ) · range { from, to } YYYY-MM-DD
+//   o.inclVat (ค่าเริ่ม settings.posSalesInclVat ≠ false) = ยอด net รวม VAT → ไม่รวม VAT = ÷ 1.07
+//   → { cols:[{ key, label, kind:'branch'|'pos'|'hq'|'total', posIds }], cell:{ col:{ sales, salesEx, cost, noCost, noCostLines, gross, grossPct, expense, profit, profitPct, bills, perBill } },
+//       posByCol:{ col:[แถวรายวัน] }, toByCol:{ col:[{ id, toNumber, date, fromBranch, toBranch, cost, sign, noCostLines, shortAction, fullCost? }] }, unmapped:[posId], unsetExpense, posOk, inclVat }
+// บัญชีผลต่างสต๊อก — ไม่นับในแถวค่าใช้จ่ายสาขา (5380 ของหายระหว่างขนส่ง · 5385 นับ/ปรับสต๊อก · 5386 ของเสีย · 5390/5391 ผลต่างราคาซื้อ)
+const BPR_STOCK_VAR_CODES = ['5380', '5385', '5386', '5390', '5391'];
+function branchProfitReport(state, posRows, range){
+  const S = state || {}, g = range || {}, R = v => Math.round((Number(v) || 0) * 100) / 100;
+  const from = String(g.from || '').slice(0, 10), to = String(g.to || '').slice(0, 10);
+  const inclVat = g.inclVat != null ? !!g.inclVat : !(S.settings && S.settings.posSalesInclVat === false);
+  const map = posBranchMapResolved(S), brs = (S.branches || []).filter(b => b && b.id && !expBranchIsHq(S, b.id))
+    .slice().sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id), 'th'));
+  const isBr = id => brs.some(b => b.id === id);
+  // verify 3: สาขา ERP ที่ไม่มีรหัส POS ใดจับคู่มา → noPos (ไม่มีแหล่งยอดขาย · หน้าจอแสดง — แทนขาดทุนปลอม)
+  const mappedTo = new Set(Object.values(map).filter(Boolean));
+  const cols = brs.map(b => ({ key:b.id, label:b.name || b.id, kind:'branch', posIds:[], noPos:!mappedTo.has(b.id) })), extra = new Map(), unmapped = [];
+  const colOfPos = pid => {
+    const e = map[pid];
+    if(e && isBr(e)) return e;
+    if(e && expBranchIsHq(S, e)) return EXP_COL_HQ;
+    const k = 'pos:' + pid;
+    if(!extra.has(k)){
+      const known = Object.prototype.hasOwnProperty.call(map, pid), nm = POS_BRANCH_NAMES[pid];
+      extra.set(k, { key:k, kind:'pos', posIds:[pid], label:known && !e ? (nm || pid) + ' (ไม่มีใน ERP)' : 'รหัส ' + pid + (nm ? ' ' + nm : '') + ' (ยังไม่จับคู่)' });
+      if(!(known && !e)) unmapped.push(pid);
+    }
+    return k;
+  };
+  const z = () => ({ sales:0, salesEx:0, cost:0, noCost:0, noCostLines:0, gross:0, grossPct:null, expense:0, profit:0, profitPct:null, bills:0, perBill:null });
+  const cell = {}, posByCol = {}, toByCol = {}, C = k => (cell[k] = cell[k] || z());
+  for(const r of (posRows || [])){
+    if(!r || !r.branch_id) continue;
+    const d = String(r.date || '').slice(0, 10);
+    if((from && d < from) || (to && d > to)) continue;
+    const k = colOfPos(String(r.branch_id)), c = C(k);
+    c.sales = R(c.sales + (Number(r.net) || 0)); c.bills += Number(r.bills) || 0;
+    (posByCol[k] = posByCol[k] || []).push({ branch_id:String(r.branch_id), date:d, net:R(r.net), gross:R(r.gross), disc:R(r.disc), bills:Number(r.bills) || 0 });
+    const col = cols.find(x => x.key === k) || extra.get(k);
+    if(col && !col.posIds.includes(String(r.branch_id))) col.posIds.push(String(r.branch_id));
+  }
+  // ต้นทุนของที่ส่งไปสาขา = มูลค่า FIFO ของ TO ข้ามสาขา (ตามวันที่ส่ง toDate) · ปลายทาง + · ต้นทางที่เป็นสาขา − (ของคืน) · ข้าม intra/ยกเลิก
+  for(const t of (S.transferOrders || [])){
+    if(!t || ['cancelled', 'voided', 'rejected'].includes(t.status) || t.isIntraBranch || !t.fromBranch || !t.toBranch || t.fromBranch === t.toBranch) continue;
+    const d = String(t.toDate || '').slice(0, 10);
+    if((from && d < from) || (to && d > to)) continue;
+    // UAT S3: ปิดยอดขาด + ↩️ คืนต้นทาง → ของส่วนขาดกลับเข้าสต๊อกต้นทางแล้ว → คิดต้นทุนเฉพาะที่สาขารับจริง (finalQty × ต้นทุนต่อหน่วย)
+    //   💸 ของหาย (loss) = คิดเต็มที่ส่ง (ไม่หักซ้ำกับ JE 5380 ของหาย — ต้นทุนที่ส่งออกไปแล้วตกที่สาขา)
+    const ret = !!(t.closedShort && t.shortAction === 'return'), lns = (t.lines || []).filter(Boolean);
+    // verify 1 (S1/S2): ต้นทุนบรรทัด = totalCost (FIFO จริงตอนส่ง) · ไม่มี → unitCost × qty (TO จากผลิตส่งสาขาเก็บแค่ unitCost)
+    const fullLine = l => (Number(l.totalCost) > 0 ? Number(l.totalCost) : 0) || (Number(l.unitCost) || 0) * (Number(l.qty) || 0);
+    const lineCost = l => { const tc = fullLine(l), q = Number(l.qty) || 0;
+      if(!ret || l.finalQty == null || !(q > 0)) return tc;
+      const fq = Math.max(0, Math.min(q, Number(l.finalQty) || 0));
+      return tc * fq / q; };
+    // ผลรวมบรรทัดก่อน (หัวใบ TR→ส่ง = ยอดพรีวิว อาจไม่ตรง FIFO จริง) · ไม่มีต้นทุนบรรทัดเลย → ใช้หัวใบ
+    const lc = lns.reduce((s, l) => s + lineCost(l), 0), cost = R(ret ? lc : (lc > 0 ? lc : (Number(t.totalCost) || 0)));
+    // UAT S2: บรรทัดที่ไม่มีต้นทุน (ทั้ง totalCost และ unitCost × qty ≤ 0) → นับรายบรรทัด (ใบที่มีต้นทุนบางบรรทัดก็เตือน)
+    const ncl = lns.filter(l => (Number(l.qty) || 0) > 0 && !(fullLine(l) > 0)).length;
+    for(const [b, sign] of [[t.toBranch, 1], [t.fromBranch, -1]]){
+      if(!isBr(b)) continue;
+      const c = C(b);
+      if(cost > 0) c.cost = R(c.cost + sign * cost); else if(sign > 0) c.noCost++;
+      if(sign > 0 && ncl > 0) c.noCostLines += ncl;
+      (toByCol[b] = toByCol[b] || []).push({ id:t.id, toNumber:t.toNumber || t.id, date:d, fromBranch:t.fromBranch, toBranch:t.toBranch, cost, sign, lines:lns.length,
+        noCostLines:ncl, shortAction:t.closedShort ? (t.shortAction || null) : null, fullCost:ret ? R(lns.reduce((s, l) => s + fullLine(l), 0) || Number(t.totalCost) || 0) : undefined });
+    }
+  }
+  // verify 1 (M1): ค่าใช้จ่ายสาขา = บัญชีประเภท expense ใน JE ที่ลงแล้ว (เกณฑ์เดียวกับ P&L เทียบสาขา) ยกเว้นผลต่างสต๊อก
+  //   (ของหายระหว่างขนส่ง/นับสต๊อก/ของเสีย/ผลต่างราคา) — ต้นทุนของที่ส่งไปสาขาคิดในแถว 3 แล้ว ไม่หักซ้ำ
+  // verify 1 (M2): เก็บยอดรายบัญชีต่อคอลัมน์ (expByCol) ให้หน้ากดดูรวมได้เท่ากับตัวเลขในตาราง
+  const pl = profitLossByBranch(S, { from, to }), expByCol = {}, expExclByCol = {};
+  for(const r of ((pl.rows || {}).expense || [])){
+    const code = String(r.account.code || ''), skip = BPR_STOCK_VAR_CODES.includes(code);
+    for(const [k, v0] of Object.entries(r.byCol || {})){
+      const v = R(v0);
+      if(Math.abs(v) < 0.005) continue;
+      if(skip){ expExclByCol[k] = R((expExclByCol[k] || 0) + v); continue; }
+      (expByCol[k] = expByCol[k] || []).push({ code, name:r.account.name || code, amount:v });
+    }
+  }
+  for(const k of [...brs.map(b => b.id), EXP_COL_HQ]) C(k).expense = R((expByCol[k] || []).reduce((s, x) => s + x.amount, 0));
+  const allCols = [...cols, ...[...extra.values()].sort((a, b) => a.key.localeCompare(b.key)), { key:EXP_COL_HQ, label:'สำนักงานใหญ่/โรงงาน (ส่วนกลาง)', kind:'hq', posIds:[] }];
+  // verify 2 (M1): คอลัมน์ POS ที่ไม่มีใน ERP/ยังไม่จับคู่ (kind 'pos') ไม่มีต้นทุน/ค่าใช้จ่ายใน ERP
+  //   → กำไร/% = null (ไม่โชว์ 100% ปลอม) · รวม: ยอดขาย/บิลนับทุกคอลัมน์ แต่กำไรรวมคิดจากยอดขายของคอลัมน์ที่จับคู่ ERP เท่านั้น
+  const tot = C('total'), isPosCol = new Set(allCols.filter(c => c.kind === 'pos').map(c => c.key));
+  tot.salesExErp = 0;
+  for(const c of allCols){
+    const v = C(c.key), np = isPosCol.has(c.key);
+    v.salesEx = R(inclVat ? v.sales / 1.07 : v.sales);
+    for(const f of (np ? ['sales', 'salesEx', 'bills'] : ['sales', 'salesEx', 'cost', 'expense', 'bills', 'noCost', 'noCostLines'])) tot[f] = R(tot[f] + v[f]);
+    if(!np) tot.salesExErp = R(tot.salesExErp + v.salesEx);
+  }
+  for(const k of [...allCols.map(c => c.key), 'total']){
+    const v = C(k);
+    v.perBill = v.bills ? R(v.sales / v.bills) : null;
+    if(isPosCol.has(k)){ v.noErp = true; v.gross = null; v.profit = null; v.grossPct = null; v.profitPct = null; continue; }
+    const base = k === 'total' ? v.salesExErp : v.salesEx;
+    v.gross = R(base - v.cost); v.profit = R(v.gross - v.expense);
+    v.grossPct = base ? R(v.gross / base * 100) : null; v.profitPct = base ? R(v.profit / base * 100) : null;
+  }
+  return { cols:[...allCols, { key:'total', label:'รวม', kind:'total', posIds:[] }], cell, posByCol, toByCol, expByCol, expExclByCol, unmapped, posOk:Array.isArray(posRows), inclVat,
+    unsetExpense:pl.unsetExpense, from, to };
+}
+
 // ==================== EXPORT ====================
 global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
   docRenumFrom, docNumMatches, RenumBadge,
   EXP_BRANCH_ALIASES, expBranchIsHq, expBranchFromText, expenseBranchSuggest, EXP_TYPE_KEYWORDS, expenseSpecialKind, EXP_SPECIAL_LABEL, expenseExtCodeSuggest, expenseLineType,   // 🆕 BRANCH_EXPENSE_REPORT R1-R2
   expenseLinePostedBranch, expenseLineRows, expenseMemoBranch, EXP_COL_HQ, EXP_COL_UNSET, expenseRowCol, branchExpenseReport, branchExpenseJeTotals, expBranchReclassUndoLines, expBranchReclassUndoJe, profitLossByBranch, expenseBranchPlan, canSetExpenseBranch, canMapExpenseExtCode,
+  POS_BRANCH_SRC, POS_BRANCH_MAP_DEFAULT, POS_BRANCH_NAMES, posBranchMapResolved, canSetPosBranchMap, posReadKeyOf, posKeyMasked, posKeyTail, posKeySig, posKeyClean, posKeyDenyReason, fetchPosDailySales, branchProfitReport,   // 🆕 POS_BRANCH_SALES
   isServiceLine, isStockLine, poHasStockLine, poHasServiceLine, poStockPending, svcConfirmedQty, svcRemainQty, svcInvoicedMap, svcUninvoiced, poStatusFromLines, whtFormForSupplier, whtMinBase, whtAutoOk, expenseItemOf, itemExpenseLink, itemExpenseLinkUsage, grLineExpCharge, chargeStockClearPlan, canClearChargeStock, CLEAR_CHARGE_WHO, s2aUndoAsk, S2A_UNDO_WHERE, isTransportLine, expenseItemTreatment, acctFieldsVisible, svcConfirmersFor, svcConfirmDenyReason, svcPoParties, getLastExpensePrice, findSimilarServicePOs, poSvcQuoteBase, poInvoicesOf, poContractSummary, poFullEditDenyReason,   // 🔧 EXPENSE_PO ① PO ค่าบริการ
   contractInstTotal, contractInvoices, contractInstBilledMap, contractInstAccepted, contractInvAcceptorChanged, contractInstState, contractSummary, contractBranchSummary, contractDenyReason, projectAssetFor, contractCapAccount, retentionAmountFor, isContractAcceptor, contractInstsReadyToBill, supplierOpenContracts, contractAcceptorDeny, CONTRACT_SUM_KEYS, contractCipCode, retentionAccountCode, pettyDenyInv, assetLifeMonths, assetDepStart,   // 📑 สัญญางานจ้าง P2
   amtR2, invNetPayable, invOffInvDisc, invGrossInclVat, invDeductions, invAmtView, dedText, AMT_DED_KEYS, AMT_DED_LABEL, paySourceKey, paySourceLabel, payAmtView, paidRowAmtView, paidSrcSplit, memoAmtView, grGrossInclVat, sumAmt,   // 🆕 AMOUNT-INCL-VAT B2
@@ -23744,6 +23956,19 @@ function reducer(s, a){
         if(JSON.stringify(_dropXm || {}) !== JSON.stringify((s.settings || {}).expenseExtCodeMap || {})) console.warn('[UPDATE_SETTINGS] ไม่รับ expenseExtCodeMap — ใช้หน้าจับคู่รหัส Ecount');
         a = { ...a, data:_rest };
       }
+      // 🆕 POS_BRANCH_SALES: จับคู่สาขา POS + สวิตช์ยอดรวม VAT แก้ได้ทาง SET_POS_BRANCH_MAP เท่านั้น (สิทธิ์ + audit)
+      if(a.data && ['posBranchMap', 'posSalesInclVat'].some(k => Object.prototype.hasOwnProperty.call(a.data, k))){
+        const { posBranchMap:_dropPm, posSalesInclVat:_dropPv, ..._rest } = a.data;
+        const _cs = s.settings || {};
+        if(JSON.stringify(_dropPm || {}) !== JSON.stringify(_cs.posBranchMap || {}) || (_dropPv !== undefined && _dropPv !== _cs.posSalesInclVat)) console.warn('[UPDATE_SETTINGS] ไม่รับ posBranchMap/posSalesInclVat — ใช้การ์ดจับคู่สาขา POS');
+        a = { ...a, data:_rest };
+      }
+      // 🆕 P2: คีย์อ่านยอดขาย POS แก้ได้ทาง SET_POS_READ_KEY เท่านั้น (สิทธิ์ + ตรวจคีย์) · ห้าม log คีย์
+      if(a.data && Object.prototype.hasOwnProperty.call(a.data, 'posReadKey')){
+        const { posReadKey:_dropRk, ..._rest } = a.data;
+        if((_dropRk || '') !== ((s.settings || {}).posReadKey || '')) console.warn('[UPDATE_SETTINGS] ไม่รับ posReadKey — ใช้การ์ดจับคู่สาขา POS');
+        a = { ...a, data:_rest };
+      }
       // 🆕 verify (นำเข้า2569): lastWipe / dataEpoch ตั้งได้ทาง MIGRATION_WIPE / IMPORT_STATE เท่านั้น — กันปลอม "ล้างแล้ว" เพื่อข้ามด่านนำเข้า + ทับรุ่นข้อมูล
       if(a.data && ['lastWipe', 'dataEpoch'].some(k => Object.prototype.hasOwnProperty.call(a.data, k))){
         const { lastWipe:_dropLw, dataEpoch:_dropDe, ..._rest } = a.data;
@@ -24028,6 +24253,50 @@ function reducer(s, a){
       return { ...s, settings:{ ...(s.settings || {}), expenseExtCodeMap:next },
         auditLog:[...(s.auditLog || []), { id:'al_xmap_' + d.id, ts:Number(d.at) || 0, type:'expense_extcode_map', by:(u && u.username) || d.by, diff,
           summary:'🔗 จับคู่รหัส Ecount → รายการรายจ่าย ' + n + ' รหัส' }] };
+    }
+    // 🆕 POS_BRANCH_SALES: จับคู่รหัสสาขาระบบผู้จัดการ (B…) → สาขา ERP { map:{ posId: erpId|null }, inclVat?, id, at, by }
+    //   เก็บที่ settings.posBranchMap (ทับค่าเริ่มต้นในโค้ด) · null = ไม่มีใน ERP · inclVat = settings.posSalesInclVat · สิทธิ์ผู้ใช้สด · ส่งซ้ำ/ไม่เปลี่ยน = no-op
+    case 'SET_POS_BRANCH_MAP': {
+      const d = a.data || {}, E = global.ERP || {};
+      if(!d.id || ((!d.map || typeof d.map !== 'object') && typeof d.inclVat !== 'boolean')) return s;
+      if((s.auditLog || []).some(x => x && x.id === 'al_posmap_' + d.id)) return s;
+      const u0 = _actorOf(s, d.by), u = u0 ? (_userByRef(s, u0.username) || u0) : null;
+      if(!(E.canSetPosBranchMap && E.canSetPosBranchMap(u))){ alert('⛔ ไม่มีสิทธิ์จับคู่สาขา POS — ทำได้เฉพาะ GM/ผจก.บัญชี/admin'); return s; }
+      const cs = s.settings || {}, cur = cs.posBranchMap || {}, eff = E.posBranchMapResolved ? E.posBranchMapResolved(s) : {}, next = { ...cur }, diff = {};
+      for(const [p0, e0] of Object.entries(d.map || {})){
+        const pid = String(p0 || '').trim(), eid = e0 ? String(e0) : null;
+        if(!/^B\d{1,6}$/.test(pid)){ alert('⛔ รหัสสาขาระบบผู้จัดการไม่ถูกต้อง: ' + pid); return s; }
+        if(eid && !(s.branches || []).some(b => b && b.id === eid)){ alert('⛔ ไม่พบสาขา ERP ' + eid + ' (รหัส ' + pid + ')'); return s; }
+        if(Object.prototype.hasOwnProperty.call(eff, pid) && (eff[pid] || null) === eid) continue;
+        diff[pid] = { old:eff[pid] || null, new:eid };
+        next[pid] = eid;
+      }
+      const vatCh = typeof d.inclVat === 'boolean' && d.inclVat !== (cs.posSalesInclVat !== false);
+      if(!Object.keys(diff).length && !vatCh) return s;
+      const settings = { ...cs, ...(Object.keys(diff).length ? { posBranchMap:next } : {}), ...(vatCh ? { posSalesInclVat:d.inclVat } : {}) };
+      return { ...s, settings,
+        auditLog:[...(s.auditLog || []), { id:'al_posmap_' + d.id, ts:Number(d.at) || 0, type:'pos_branch_map', by:(u && u.username) || d.by, diff, ...(vatCh ? { inclVat:d.inclVat } : {}),
+          summary:'🏪 จับคู่สาขา POS ' + Object.keys(diff).length + ' รหัส' + (vatCh ? ' · ยอด POS ' + (d.inclVat ? 'รวม' : 'ไม่รวม') + ' VAT' : '') }] };
+    }
+    // 🆕 P2 POS_BRANCH_SALES: คีย์อ่านยอดขายระบบผู้จัดการ { key: string | null(ล้าง), id, at, by } → settings.posReadKey
+    //   สิทธิ์ผู้ใช้สด (canSetPosBranchMap = GM/ผจก.บัญชี/admin) · ตรวจ posKeyDenyReason (รับ sb_publishable_/JWT anon เท่านั้น) · audit ไม่เก็บคีย์ · ส่งซ้ำ/ไม่เปลี่ยน = no-op
+    case 'SET_POS_READ_KEY': {
+      const d = a.data || {}, E = global.ERP || {};
+      if(!d.id || !(d.key === null || typeof d.key === 'string')) return s;
+      if((s.auditLog || []).some(x => x && x.id === 'al_poskey_' + d.id)) return s;
+      const u0 = _actorOf(s, d.by), u = u0 ? (_userByRef(s, u0.username) || u0) : null;
+      if(!(E.canSetPosBranchMap && E.canSetPosBranchMap(u))){ alert('⛔ ไม่มีสิทธิ์ตั้งคีย์อ่านยอดขาย — ทำได้เฉพาะ GM/ผจก.บัญชี/admin'); return s; }
+      const k = typeof d.key === 'string' ? (E.posKeyClean ? E.posKeyClean(d.key) : d.key.trim()) : '';   // verify 2: ตัดเครื่องหมายคำพูดที่ครอบมา
+      if(k){ const why = E.posKeyDenyReason ? E.posKeyDenyReason(k) : 'ตรวจคีย์ไม่ได้'; if(why){ alert('⛔ ' + why); return s; } }
+      const cs = s.settings || {}, cur = cs.posReadKey || '';
+      if(cur === k) return s;
+      const settings = { ...cs };
+      if(k) settings.posReadKey = k; else delete settings.posReadKey;
+      return { ...s, settings,
+        auditLog:[...(s.auditLog || []), { id:'al_poskey_' + d.id, ts:Number(d.at) || 0, type:'pos_read_key', by:(u && u.username) || d.by, op:k ? 'set' : 'clear',
+          // UAT S2: เก็บแค่ 4 ตัวท้าย (keyTail) ไว้ไล่ว่าช่วงไหนใช้คีย์ไหน — ห้ามเก็บคีย์เต็ม
+          ...(k && E.posKeyTail ? { keyTail:E.posKeyTail(k) } : {}), ...(cur && E.posKeyTail ? { prevTail:E.posKeyTail(cur) } : {}),
+          summary:k ? '🔑 ตั้งคีย์อ่านยอดขาย POS' + (E.posKeyMasked ? ' (' + E.posKeyMasked(k) + ')' : '') : '🔑 ล้างคีย์อ่านยอดขาย POS' }] };
     }
     // 🆕 SALES-W1: ตั้งราคา/ประเภทเป็นชุด — แตะได้เฉพาะ salePrice · priceBook · type
     //   priceBook:null = ลบทิ้ง (กลับไปใช้ salePrice อย่างเดียว) · ไม่ส่ง field ไหนมา = ไม่แตะ field นั้น
@@ -33090,6 +33359,10 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       const _lkCur = String((s.settings && s.settings.vatLockUntil) || ''), _lkFile = String((d.settings && d.settings.vatLockUntil) || '');
       const _lk = _lkCur > _lkFile ? _lkCur : _lkFile;
       let _ns2 = { ..._ns, vatFilings:_vf, settings:{ ...(_ns.settings || {}), vatLockUntil:_lk } };
+      // 🆕 POS verify 1: กู้คืนทั้งชุดจากไฟล์ห้ามลบ/ทับคีย์อ่านยอดขาย POS (เปลี่ยนได้ทาง SET_POS_READ_KEY เท่านั้น) · เฉพาะกิ่ง __importStamp (ดึง cloud ยังส่งคีย์ต่อได้ปกติ)
+      { const _pk = (s.settings || {}).posReadKey, _st = { ..._ns2.settings };
+        if(_pk) _st.posReadKey = _pk; else delete _st.posReadKey;
+        _ns2 = { ..._ns2, settings:_st }; }
       // 🆕 GM-SELF verify (G3): กู้คืนทั้งชุดโดยคนที่ไม่ใช่ GM/เจ้าของ → บทบาท gm/owner + สวิตช์ 👑 คงของเดิม
       //   และประวัติ 👑 / แก้สวิตช์ / แก้กฎ ของเดิมต้องอยู่ครบ (ไฟล์ลบไม่ได้ · id ซ้ำ = ของเดิมชนะ)
       { const _gu = _guardTopUsersImport(s, _ns2.users);
@@ -33191,6 +33464,9 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
         delete _st.dataEpoch; delete _st.lastWipe;
         if(_cs.dataEpoch) _st.dataEpoch = _cs.dataEpoch;
         if(_cs.lastWipe) _st.lastWipe = _cs.lastWipe;
+        // 🆕 POS verify 1: คีย์อ่านยอดขาย POS เปลี่ยนได้ทาง SET_POS_READ_KEY เท่านั้น (ตรวจรูปแบบ+สิทธิ์+audit) — ไฟล์นำเข้าห้ามลบ/ทับ
+        delete _st.posReadKey;
+        if(_cs.posReadKey) _st.posReadKey = _cs.posReadKey;
         rest.settings = _st;
       }
       // 🆕 DEPOSIT-VAT E-5 R4: ใบตั้งหนี้ที่มีอยู่แล้ว → ฟิลด์ควบคุมคงค่าเดิม (นำเข้าซ้ำห้ามทับยอดจ่าย/ใบกำกับ/มัดจำ) + audit 'import'
@@ -34693,6 +34969,8 @@ const ACTION_MERGE = Object.freeze({
   SET_ITEM_EXPENSE_LINK: { kind:'delta' },   // 🆕 FREIGHT_EXPENSE F1: ตั้ง/ยกเลิกธงไม่นับสต๊อก → ค่าใช้จ่าย · ส่งซ้ำ = no-op (auditLog al_iel_<id>)
   SET_EXPENSE_BRANCH: { kind:'delta' },   // 🆕 BRANCH_EXPENSE_REPORT R1: ระบุสาขาบรรทัดค่าใช้จ่าย + JE ย้ายสาขา · แผนคิดใหม่จาก state สด · ส่งซ้ำ = no-op (auditLog al_xbr_<id>)
   SET_SUPPLIER_COST_BRANCH: { kind:'delta' },   // 🆕 BRANCH_EXPENSE_REPORT R1: สาขาประจำผู้ขาย · แตะช่องเดียว · ส่งซ้ำ = no-op (al_scb_<id>)
+  SET_POS_READ_KEY: { kind:'delta' },   // 🆕 P2: คีย์อ่าน POS (settings.posReadKey) · ส่งซ้ำ = no-op (al_poskey_<id>)
+  SET_POS_BRANCH_MAP: { kind:'delta' },   // 🆕 POS_BRANCH_SALES: จับคู่สาขา POS (settings.posBranchMap/posSalesInclVat) · ส่งซ้ำ = no-op (al_posmap_<id>)
   SET_EXPENSE_EXTCODE_MAP: { kind:'delta' },   // 🆕 BRANCH_EXPENSE_REPORT R2: จับคู่รหัส Ecount → รายการรายจ่าย (settings.expenseExtCodeMap) · ส่งซ้ำ = no-op (al_xmap_<id>)
   CAP_GR_CHARGE_INTO_ASSET: { kind:'delta' },   // 🆕 OFF_INV_DISC_ASSET A4: รวมค่าส่งเข้าราคาทุน 💎 / undo · ส่งซ้ำ = no-op (auditLog al_cap_<id>)
   EXPENSE_BELOW_THRESHOLD_ASSET: { kind:'delta' },   // 🆕 STOCK_TO_ASSET S4: ทรัพย์สินต่ำกว่าเกณฑ์ → ลงค่าใช้จ่าย / undo · ส่งซ้ำ = no-op (auditLog al_bte_<id>)
@@ -34827,6 +35105,8 @@ const ACTION_READS = Object.freeze({
   SET_ITEM_EXPENSE_LINK: ['auditLog','expenseItems','items'],   // 🆕 FREIGHT_EXPENSE F1
   SET_EXPENSE_BRANCH: ['auditLog','grs','invoices','journalEntries'],   // 🆕 BRANCH_EXPENSE_REPORT R1 (branches/settings/chartOfAccounts/users = หมวดคุม)
   SET_SUPPLIER_COST_BRANCH: ['auditLog','suppliers'],   // 🆕 BRANCH_EXPENSE_REPORT R1
+  SET_POS_READ_KEY: ['auditLog'],   // 🆕 P2 (settings = หมวดคุม)
+  SET_POS_BRANCH_MAP: ['auditLog'],   // 🆕 POS_BRANCH_SALES (settings/users/branches = หมวดคุม)
   SET_EXPENSE_EXTCODE_MAP: ['auditLog','expenseItems'],   // 🆕 BRANCH_EXPENSE_REPORT R2 (settings = หมวดคุม)
   CAP_GR_CHARGE_INTO_ASSET: ['assets','auditLog','fifoLayers','grs','invoices','items','movements','returns'],   // 🆕 OFF_INV_DISC_ASSET A4
   EXPENSE_BELOW_THRESHOLD_ASSET: ['assetCategories','assets','auditLog','grs','invoices','items','journalEntries','movements','returns'],   // 🆕 STOCK_TO_ASSET S4
@@ -35411,6 +35691,7 @@ mod('settings',    'ตั้งค่า',    { icon:'⚙️', group:'admin', h
   pg('cashFore',  'ประมาณการเงินสด',           RP, { kind:'report', old:'💸 Cash Forecast', perm:P('cashFore'), aliases:['cash forecast','เงินสด','กระแสเงินสด','forecast'] });
   pg('expCat',    'ค่าใช้จ่ายตามประเภท',        RP, { kind:'report', old:'📝 ค่าใช้จ่ายตามประเภท', perm:P('expCat'), aliases:['ค่าใช้จ่าย','expense'] });
   pg('expBranch', 'ค่าใช้จ่ายรายสาขา',          RP, { kind:'report', old:'💰 ค่าใช้จ่ายรายสาขา', perm:P('pl', ['expCat']), aliases:['ค่าใช้จ่ายรายสาขา','ค่าใช้จ่ายสาขา','สาขาไหนจ่าย','branch expense'] });   // 🆕 BRANCH_EXPENSE_REPORT R4
+  pg('posProfit', 'กำไรรายสาขา (ผู้บริหาร)',    RP, { kind:'report', old:'🏪 กำไรรายสาขา (ผู้บริหาร)', perm:P('pl'), aliases:['กำไรรายสาขา','กำไรสาขา','ยอดขายสาขา','ยอดขายหน้าร้าน','branch profit'] });   // 🆕 POS_BRANCH_SALES
   pg('expByInv',  'รายจ่ายตามใบแจ้งหนี้',        RP, { kind:'report', old:'📋 รายจ่ายตาม INV (Reconcile)', perm:P('expByInv'), aliases:['รายจ่าย','reconcile'] });
   pg('audit',     'ประวัติการแก้ไข (Audit)',    RP, { old:'📜 Audit Log (ประวัติการแก้)', perm:P('audit'), aliases:['audit','audit log','ประวัติการแก้','ใครแก้'] });
   pg('actlog',    'ประวัติทุกการกระทำ',          RP, { old:'🧾 ประวัติทุกการกระทำ', perm:P('actlog'), aliases:['action log','log','ประวัติ'] });
@@ -94074,6 +94355,7 @@ function AccountingModule({ state, dispatch }){
     || (subKey === 'vatRd' && (hasPerm(user, 'accounting', 'vat', 'view') || hasPerm(user, 'accounting', 'vatByInv', 'view')))
     // 🆕 BRANCH_EXPENSE_REPORT: ไม่มีคีย์สิทธิ์ใหม่ — รายงาน = คนดู P&L/ค่าใช้จ่ายตามประเภท · ระบุสาขา/จับคู่ = ผู้มีสิทธิ์ทำ (core) หรือดูคิวตั้งหนี้
     || (subKey === 'expBranch' && (hasPerm(user, 'accounting', 'pl', 'view') || hasPerm(user, 'accounting', 'expCat', 'view')))
+    || (subKey === 'posProfit' && hasPerm(user, 'accounting', 'pl', 'view'))   // 🆕 POS_BRANCH_SALES: ไม่มีคีย์สิทธิ์ใหม่ — สิทธิ์เดียวกับดู P&L
     || (subKey === 'expBranchTag' && (global.ERP.canSetExpenseBranch(user) || hasPerm(user, 'accounting', 'invQueue', 'view')))
     || (subKey === 'expExtMap' && (global.ERP.canMapExpenseExtCode(user) || hasPerm(user, 'accounting', 'expenseItems', 'view')))   // 🆕 VAT-RD-FORM: ไม่มีคีย์สิทธิ์ใหม่ — ดู VAT สรุปเดือน/ภาษีซื้อตาม INV ได้ = ดูแบบยื่นได้
     || (subKey === 'assetFromStock' && !!(global.ERP.canReclassStockToAsset && global.ERP.canReclassStockToAsset(user)));   // 🆕 STOCK_TO_ASSET S3: ไม่มีคีย์สิทธิ์ใหม่ — คนที่ย้ายได้ (JE สร้าง + GR→INV สร้าง) เห็นแท็บ   // 🆕 VAT-RD-FORM: ไม่มีคีย์สิทธิ์ใหม่ — ดู VAT สรุปเดือน/ภาษีซื้อตาม INV ได้ = ดูแบบยื่นได้
@@ -94140,6 +94422,7 @@ function AccountingModule({ state, dispatch }){
         { k:'cashFore', label:'💸 Cash Forecast' },
         { k:'expCat',  label:'📝 ค่าใช้จ่ายตามประเภท' },
         { k:'expBranch', label:'💰 ค่าใช้จ่ายรายสาขา' },   // 🆕 BRANCH_EXPENSE_REPORT R4
+        { k:'posProfit', label:'🏪 กำไรรายสาขา (ผู้บริหาร)' },   // 🆕 POS_BRANCH_SALES
         { k:'expByInv', label:'📋 รายจ่ายตาม INV (Reconcile)' },
         { k:'audit',    label:'📜 Audit Log (ประวัติการแก้)' },
         { k:'actlog',   label:'🧾 ประวัติทุกการกระทำ' },
@@ -94266,6 +94549,7 @@ function AccountingModule({ state, dispatch }){
       bs:         ()=>h(BalanceSheet,   { state }),
       expCat:     ()=>h(ExpenseByCategory, { state }),
       expBranch:  ()=>h(BranchExpenseReport, { state, dispatch, user, onGo:setTab }),   // 🆕 BRANCH_EXPENSE_REPORT R4
+      posProfit:  ()=>h(BranchProfitReport, { state, dispatch, user, onGo:setTab }),   // 🆕 POS_BRANCH_SALES
       expBranchTag: ()=>h(ExpenseBranchTagTab, { state, dispatch, user, onGo:setTab }),   // 🆕 R3
       expExtMap:  ()=>h(ExpenseExtCodeMapTab, { state, dispatch, user }),   // 🆕 R2
       expByInv:   ()=>h(ExpenseByInvoiceReport, { state, dispatch, user }),
@@ -101493,6 +101777,8 @@ ${data.unallocated>0?`<div class="note">* มี ${data.unallocated} ราย�
       plq.noBranch.amount > 0.005 && h('div', { 'data-testid':'pl-dq-nobranch' }, `• รายการ P&L ที่ไม่มีสาขา ${fmtCur(plq.noBranch.amount)} (${plq.noBranch.jes} JE) → ตกเป็นสำนักงานใหญ่อัตโนมัติ`),
       plq.unsetExpense.amount > 0.005 && h('div', { 'data-testid':'pl-dq-unset' }, `• ค่าใช้จ่ายที่ยังไม่ระบุสาขา ${fmtCur(plq.unsetExpense.amount)} (${plq.unsetExpense.lines} บรรทัด) — ตอนนี้นับเป็นสำนักงานใหญ่ `,
         onGo && h('button', { className:'underline font-medium', onClick:() => onGo('expBranchTag'), 'data-testid':'pl-dq-go' }, '🏷️ ไประบุสาขา'))),
+    plCompare && onGo && h('div', { className:'mb-2 text-sm' }, h('button', { className:'text-purple-700 underline', onClick:() => onGo('posProfit'), 'data-testid':'pl-go-posprofit' },
+      '🏪 ดูกำไรรายสาขา (ผู้บริหาร) — รวมยอดขายหน้าร้านจาก POS')),   // 🆕 POS_BRANCH_SALES
     plCompare ? h(PLCompareTable, { plq, dr }) :
     h('div', { className:'bg-white rounded-lg shadow p-4 max-w-3xl mx-auto' },
       h('h3', { className:'text-center font-bold text-lg mb-1' }, '💹 งบกำไรขาดทุน'),
@@ -109032,9 +109318,271 @@ function _xbGroups(state, rep){
 function _xbSum(rep, keys, col){
   return Math.round(keys.reduce((s, k) => s + (col === 'total' ? (rep.typeTotal[k] || 0) : ((rep.cell[k] || {})[col] || 0)), 0) * 100) / 100;
 }
+// 🆕 POS_BRANCH_SALES: 🏪 กำไรรายสาขา (ผู้บริหาร) — ยอดขาย POS จากระบบผู้จัดการ (GET อย่างเดียว · ไม่ลงบัญชี · cache ในหน่วยความจำ)
+//   ต้นทุน = TO ข้ามสาขา (FIFO) · ค่าใช้จ่าย = profitLossByBranch · ข้อมูล = ERP.branchProfitReport (pure)
+function BranchProfitReport({ state, dispatch, user, onGo }){
+  const E = global.ERP, today = getToday();
+  const [from, setFrom] = useState(today.slice(0, 8) + '01'), [to, setTo] = useState(today);
+  const [pos, setPos] = useState({ loading:true, rows:null, error:null, at:null });
+  const [drill, setDrill] = useState(null);   // { kind:'sales'|'cost', col }
+  const [showMap, setShowMap] = useState(false);
+  const lo = from <= to ? from : to, hi = from <= to ? to : from;
+  // verify 2 (S2): ตัวนับคำขอ — คำตอบเก่า (ช่วงวันก่อนหน้า) มาถึงช้ากว่า → ทิ้ง ไม่ทับยอดของช่วงปัจจุบัน
+  const reqRef = useRef(0);
+  // P2 (UAT M1): ตั้ง/เปลี่ยน/ล้างคีย์อ่านในการ์ด 🔗 → โหลดใหม่ · ลายเซ็น = hash ทั้งคีย์ (คีย์ยาวเท่ากัน/หัวเหมือนกันก็แยกได้) · ไม่เอาคีย์เต็มไปไว้ใน deps/log
+  const posKeySig = E.posKeySig(E.posReadKeyOf(state));
+  const load = force => {
+    const my = ++reqRef.current, cur = () => my === reqRef.current;
+    setPos(p => ({ ...p, loading:true, error:null }));
+    E.fetchPosDailySales(lo, hi, { force:!!force, state }).then(r => { if(cur()) setPos(r.ok ? { loading:false, rows:r.rows, error:null, at:r.at } : { loading:false, rows:null, error:r.error, at:null, keyErr:!!r.keyBad || !!E.posKeyDenyReason(E.posReadKeyOf(state)) }); },   // POS verify 1: keyErr = ปัญหาที่คีย์ (ไม่มี/ผิดรูปแบบ/401-403) → ปุ่ม 🔑 ไปวางคีย์
+      e => { if(cur()) setPos({ loading:false, rows:null, error:'โหลดยอดขายไม่ได้ — ' + ((e && e.message) || e), at:null }); });
+  };
+  // พิมพ์ปีในช่องวันที่ทีละหลักยิง onChange ทุกหลัก → หน่วง 400ms ก่อนโหลด (ครั้งแรกโหลดทันที)
+  const firstRef = useRef(true);
+  useEffect(() => {
+    if(firstRef.current){ firstRef.current = false; load(false); return; }
+    const t = setTimeout(() => load(false), 400);
+    return () => clearTimeout(t);
+  }, [lo, hi, posKeySig]);
+  const rep = useMemo(() => E.branchProfitReport(state, pos.rows, { from:lo, to:hi }),
+    [pos.rows, state.transferOrders, state.journalEntries, state.chartOfAccounts, state.branches, state.settings, state.invoices, state.grs, lo, hi]);
+  const cols = rep.cols, cv = (k, f) => ((rep.cell[k] || {})[f]);
+  const canMap = E.canSetPosBranchMap(user);
+  // UAT S1: ส่งช่วงวัน + สาขาที่กดไปด้วย (รายงานค่าใช้จ่ายรายสาขากรองได้ทีละเดือน → ช่วงไม่เต็มเดือนแสดงป้าย "(ทั้งเดือน)")
+  const goExp = k => { const c = (rep.cols.find(x => x.key === k) || {});
+    E._xbRangeHint = { fromM:lo.slice(0, 7), toM:hi.slice(0, 7), from:lo, to:hi, col:k || null, colLabel:c.label || null, partial:bprPartialMonth(lo, hi) };
+    onGo && onGo('expBranch'); };
+  const ROWS = [
+    { f:'sales', label:'1. ยอดขายหน้าร้าน (POS) ' + (rep.inclVat ? 'รวม VAT' : 'ไม่รวม VAT'), pos:true, drill:'sales' },
+    { f:'salesEx', label:'2. ยอดขายไม่รวม VAT', pos:true, hint:rep.inclVat ? 'สูตร: ยอดรวม VAT ÷ 1.07' : 'ยอด POS ไม่รวม VAT อยู่แล้ว (ไม่หาร)' },
+    { f:'cost', label:'3. ต้นทุนของที่ส่งไปสาขา (TO)', drill:'cost', hint:'มูลค่า FIFO ของใบส่งของข้ามสาขา ตามวันที่ส่ง · หักของคืนจากสาขา · ไม่นับโอนภายในสาขา · ปิดยอดขาดแบบคืนต้นทาง = คิดเฉพาะที่รับจริง · แบบของหาย = คิดเต็มที่ส่ง (ไม่หักซ้ำกับ JE ของหาย)' },
+    { f:'gross', label:'4. กำไรขั้นต้น', pct:'grossPct', bold:true, posDep:true },
+    { f:'expense', label:'5. ค่าใช้จ่ายสาขา', drill:'expense', hint:'ยอดบัญชีค่าใช้จ่ายจาก JE ที่ลงแล้ว (ไม่รวมต้นทุนขาย · ไม่รวมผลต่างสต๊อก: ของหายขนส่ง/นับสต๊อก/ของเสีย/ผลต่างราคา) · กดดูรายบัญชี' },
+    { f:'profit', label:'6. กำไรสาขา (ผู้บริหาร)', pct:'profitPct', bold:true, posDep:true },
+    { f:'bills', label:'7. จำนวนบิล', pos:true, num:true },
+    { f:'perBill', label:'   ยอดต่อบิล', pos:true },
+  ];
+  return h(BranchProfitView, { state, dispatch, user, E, rep, cols, cv, ROWS, pos, lo, hi, from, to, setFrom, setTo, load, drill, setDrill, showMap, setShowMap, canMap, goExp, onGo });
+}
+function BranchProfitView(p){
+  const { E, rep, cols, cv, ROWS, pos, lo, hi, drill, setDrill } = p;
+  const fmtV = (r, k) => {
+    // UAT M1: ไม่มียอดขาย (โหลดไม่ได้/ยังไม่ตั้งคีย์) → แถวที่ใช้ยอดขาย (ยอดขาย/บิล/กำไรขั้นต้น/กำไรสาขา) แสดง — แทนตัวเลขขาดทุนปลอม (ส่วนกลางคิดได้ตามปกติ)
+    if((r.pos || r.posDep) && !bprPosOk(rep, k)) return h('span', { className:'text-gray-400', title:(cols.find(c => c.key === k) || {}).noPos && rep.posOk ? 'สาขานี้ยังไม่จับคู่รหัส POS — ไม่มียอดขาย คำนวณกำไรไม่ได้' : 'ไม่มียอดขายจากระบบผู้จัดการ — คำนวณกำไรไม่ได้', 'data-testid':'bpr-dash-' + r.f, 'data-col':k }, '—');
+    // verify 2 (M1): คอลัมน์ POS ที่ไม่มีใน ERP → ต้นทุน/กำไร/ค่าใช้จ่าย = — (ไม่โชว์กำไร 100% ปลอม)
+    if(bprNoErp(rep, r, k)) return h('span', { className:'text-gray-400', title:'ไม่มีต้นทุน/ค่าใช้จ่ายใน ERP', 'data-testid':'bpr-noerp-' + r.f, 'data-col':k }, '—');
+    const v = cv(k, r.f);
+    if(v == null || Math.abs(v) < 0.005) return h('span', { className:'text-gray-300' }, '-');
+    const pct = r.pct && cv(k, r.pct) != null ? h('div', { className:'text-[10px] text-gray-500', 'data-testid':'bpr-pct' }, cv(k, r.pct).toFixed(1) + '%') : null;
+    const txt = r.num ? fmtNum(v) : fmtCur(v), cl = cls('font-mono', r.bold && 'font-bold', v < 0 && 'text-red-700');
+    const dr = r.drill && k !== 'total' && !(r.drill === 'expense' && (cols.find(c => c.key === k) || {}).kind === 'pos');
+    return h('div', null, dr ? h('button', { className:cls(cl, 'hover:underline'), 'data-testid':'bpr-cell-' + r.f, 'data-col':k,
+      onClick:() => setDrill({ kind:r.drill, col:k }) }, txt) : h('span', { className:cl, 'data-testid':'bpr-val-' + r.f, 'data-col':k }, txt), pct);
+  };
+  const noCostN = c => cv(c.key, 'noCost') || 0;
+  const ncLines = c => cv(c.key, 'noCostLines') || 0;
+  return h('div', { 'data-testid':'bpr-report' },
+    h('div', { className:'bg-purple-50 border border-purple-300 rounded p-2 mb-3 text-sm text-purple-900', 'data-testid':'bpr-mgmt-banner' },
+      '🏪 ตัวเลขผู้บริหาร — ยอดขายจากระบบผู้จัดการ (POS) ไม่ได้ลงบัญชีใน ERP · ไม่ใช่งบการเงิน'),
+    h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex flex-wrap items-center gap-2 text-sm' },
+      h('span', null, 'ช่วง'), h('input', { type:'date', value:p.from, onChange:e => p.setFrom(e.target.value || p.from), className:'border rounded px-2 py-1', 'data-testid':'bpr-from' }),
+      h('span', null, 'ถึง'), h('input', { type:'date', value:p.to, onChange:e => p.setTo(e.target.value || p.to), className:'border rounded px-2 py-1', 'data-testid':'bpr-to' }),
+      h('button', { onClick:() => p.load(true), disabled:pos.loading, className:'px-3 py-1 border-2 rounded hover:bg-gray-50 disabled:opacity-50', 'data-testid':'bpr-reload' }, pos.loading ? '⏳ กำลังโหลด…' : '🔄 โหลดยอดขายใหม่'),
+      pos.at && h('span', { className:'text-xs text-gray-500', 'data-testid':'bpr-loaded-at' }, 'โหลดล่าสุด ' + new Date(pos.at).toLocaleString('th-TH')),
+      h('button', { onClick:() => p.setShowMap(!p.showMap), className:'px-3 py-1 border rounded hover:bg-gray-50', 'data-testid':'bpr-map-toggle' }, '🔗 จับคู่สาขา POS'),
+      h('button', { onClick:() => bprExportCSV(rep, ROWS, lo, hi), className:'ml-auto px-3 py-1 border-2 rounded hover:bg-gray-50', 'data-testid':'bpr-export' }, '📥 CSV')),
+    pos.error && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 mb-3 text-sm text-red-800', 'data-testid':'bpr-error' },
+      '⚠️ ' + pos.error + ' — แสดงเฉพาะส่วนของ ERP (ต้นทุน/ค่าใช้จ่าย) ไปก่อน ',
+      // POS verify 1: ปัญหาที่คีย์ + มีสิทธิ์ → ปุ่มเปิดการ์ด 🔗 แล้วเลื่อนไปช่องวางคีย์
+      pos.keyErr && p.canMap && h('button', { className:'underline font-medium', 'data-testid':'bpr-go-key', onClick:() => { p.setShowMap(true);
+        setTimeout(() => { try { const el = document.querySelector('[data-testid="bpr-key-box"]'); if(el){ el.scrollIntoView({ block:'center' }); const i = el.querySelector('[data-testid="bpr-key-input"]'); if(i) i.focus(); } } catch(_e){} }, 50); } }, '🔑 ไปวางคีย์')),
+    rep.unmapped.length > 0 && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 mb-3 text-sm text-amber-900', 'data-testid':'bpr-unmapped' },
+      '⚠️ มีรหัสสาขาจากระบบผู้จัดการที่ยังไม่จับคู่: ' + rep.unmapped.join(', ') + ' ',
+      h('button', { className:'underline font-medium', onClick:() => p.setShowMap(true), 'data-testid':'bpr-go-map' }, '🔗 ไปจับคู่')),
+    (rep.unsetExpense.amount || 0) > 0.005 && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 mb-3 text-sm text-amber-900', 'data-testid':'bpr-unset' },
+      '⚠️ ค่าใช้จ่ายยังไม่ระบุสาขา ' + fmtCur(rep.unsetExpense.amount) + ' (ยังนับตามสาขาที่ใบตั้งหนี้ลงบัญชีไว้ — ส่วนใหญ่คือส่วนกลาง) ',
+      p.onGo && h('button', { className:'underline font-medium', onClick:() => p.onGo('expBranchTag'), 'data-testid':'bpr-go-tag' }, '🏷️ ไประบุสาขา')),
+    p.showMap && h(PosBranchMapCard, { state:p.state, dispatch:p.dispatch, user:p.user, canMap:p.canMap, rep }),
+    h('div', { className:'bg-white rounded-lg shadow overflow-x-auto' },
+      h('table', { className:'text-xs min-w-full', 'data-testid':'bpr-table' },
+        h('thead', { className:'bg-gray-100' }, h('tr', null,
+          h('th', { className:'px-2 py-2 text-left sticky left-0 bg-gray-100 min-w-[220px] max-w-[260px]' }, 'รายการ'),
+          cols.map(c => h('th', { key:c.key, className:cls('px-2 py-2 text-right whitespace-nowrap', c.kind === 'hq' && 'bg-sky-50', c.kind === 'pos' && 'bg-amber-50', c.kind === 'total' && 'bg-gray-200'),
+            'data-testid':'bpr-col', 'data-col':c.key }, c.label,
+            // verify 3: สาขา ERP ไม่มีรหัส POS จับคู่ → บอกว่าไม่มียอด POS (ไม่ใช่ขาดทุนจริง)
+            c.noPos && !(c.posIds || []).length && h('div', { className:'text-[10px] text-amber-700 font-normal', 'data-testid':'bpr-col-nopos' }, 'ไม่มียอด POS (ยังไม่จับคู่)'),
+            (c.posIds || []).length > 1 && h('div', { className:'text-[10px] text-amber-700 font-normal', 'data-testid':'bpr-col-posids' }, 'รวม POS ' + c.posIds.join(' + ')),
+            noCostN(c) > 0 && h('div', { className:'text-[10px] text-red-600 font-normal', 'data-testid':'bpr-nocost' }, 'ไม่มีต้นทุน ' + noCostN(c) + ' ใบ'),
+            ncLines(c) > 0 && h('div', { className:'text-[10px] text-red-600 font-normal', 'data-testid':'bpr-nocost-lines' }, 'ต้นทุนไม่ครบ ' + ncLines(c) + ' บรรทัด'))))),
+        h('tbody', null, ROWS.map(r => h('tr', { key:r.f, className:cls('border-t', r.bold && 'bg-green-50'), 'data-testid':'bpr-row-' + r.f },
+          h('td', { className:cls('px-2 py-1.5 sticky left-0 whitespace-nowrap', r.bold ? 'bg-green-50 font-bold' : 'bg-white') }, r.label,
+            // verify 2 (M2): คำอธิบายยาวตัดบรรทัด ไม่ให้คอลัมน์ป้ายที่ติดซ้ายกว้างจนบังตัวเลข
+            r.hint && h('div', { className:'text-[10px] text-gray-500 font-normal whitespace-normal max-w-[240px]', 'data-testid':'bpr-hint' }, r.hint)),
+          cols.map(c => h('td', { key:c.key, className:'px-2 py-1.5 text-right whitespace-nowrap' }, fmtV(r, c.key)))))))),
+    drill && (drill.kind === 'expense' ? h(BranchProfitExpDrill, { rep, drill, setDrill, goExp:p.goExp })
+      : h(BranchProfitDrill, { rep, drill, setDrill, state:p.state })));
+}
+// กดยอดขาย → รายวัน (วัน · net · gross · disc · bills) · กดต้นทุน → รายการ TO (+ ส่งเข้า / − ของคืน)
+function BranchProfitDrill({ rep, drill, setDrill, state }){
+  const col = rep.cols.find(c => c.key === drill.col) || { label:drill.col };
+  const brName = id => ((state.branches || []).find(b => b.id === id) || {}).name || id;
+  const sales = drill.kind === 'sales', rows = sales ? (rep.posByCol[drill.col] || []).slice().sort((a, b) => a.date.localeCompare(b.date) || a.branch_id.localeCompare(b.branch_id))
+    : (rep.toByCol[drill.col] || []).slice().sort((a, b) => a.date.localeCompare(b.date));
+  const th = t => h('th', { className:'px-2 py-1 text-right' }, t), td = (v, k) => h('td', { key:k, className:'px-2 py-1 text-right font-mono' }, v);
+  return h('div', { className:'bg-white rounded-lg shadow p-3 mt-3', 'data-testid':'bpr-drill' },
+    h('div', { className:'flex items-center mb-2' }, h('h4', { className:'font-bold' }, (sales ? '📅 ยอดขายรายวัน — ' : '🚚 ใบส่งของ (TO) — ') + col.label),
+      h('button', { className:'ml-auto px-2 py-0.5 border rounded', onClick:() => setDrill(null), 'data-testid':'bpr-drill-close' }, '✕ ปิด')),
+    h('div', { className:'overflow-x-auto' }, h('table', { className:'text-xs min-w-full' },
+      h('thead', { className:'bg-gray-100' }, sales ? h('tr', null, h('th', { className:'px-2 py-1 text-left' }, 'วันที่'), h('th', { className:'px-2 py-1 text-left' }, 'รหัส POS'), th('ยอดสุทธิ (net)'), th('ยอดก่อนลด (gross)'), th('ส่วนลด'), th('บิล'))
+        : h('tr', null, h('th', { className:'px-2 py-1 text-left' }, 'วันที่ส่ง'), h('th', { className:'px-2 py-1 text-left' }, 'เลขที่'), h('th', { className:'px-2 py-1 text-left' }, 'จาก → ถึง'), th('ต้นทุน'), h('th', { className:'px-2 py-1 text-left' }, 'หมายเหตุ'))),
+      h('tbody', null, rows.length === 0 && h('tr', null, h('td', { colSpan:6, className:'p-3 text-center text-gray-500' }, 'ไม่มีรายการ')),
+        rows.map((r, i) => sales ? h('tr', { key:i, className:'border-t', 'data-testid':'bpr-drill-row' }, h('td', { className:'px-2 py-1' }, fmtDate(r.date)), h('td', { className:'px-2 py-1' }, r.branch_id),
+            td(fmtCur(r.net), 'n'), td(fmtCur(r.gross), 'g'), td(fmtCur(r.disc), 'd'), td(fmtNum(r.bills), 'b'))
+          : h('tr', { key:i, className:'border-t', 'data-testid':'bpr-drill-row' }, h('td', { className:'px-2 py-1' }, fmtDate(r.date)), h('td', { className:'px-2 py-1' }, r.toNumber),
+            h('td', { className:'px-2 py-1' }, brName(r.fromBranch) + ' → ' + brName(r.toBranch) + (r.sign < 0 ? ' (ของคืน/ส่งออก)' : '')),
+            td(r.cost > 0 ? fmtCur(r.sign * r.cost) : 'ไม่มีต้นทุน', 'c'),
+            h('td', { className:'px-2 py-1 text-[11px]', 'data-testid':'bpr-drill-note' },
+              r.noCostLines > 0 && h('div', { className:'text-red-600', 'data-testid':'bpr-drill-nocost' }, '⚠️ ไม่มีต้นทุน ' + r.noCostLines + '/' + r.lines + ' บรรทัด'),
+              r.shortAction === 'return' && h('div', { className:'text-sky-700', 'data-testid':'bpr-drill-ret' }, '↩️ ปิดยอดขาด คืนต้นทาง — คิดเฉพาะที่รับจริง' + (r.fullCost ? ' (ส่ง ' + fmtCur(r.fullCost) + ')' : '')),
+              r.shortAction === 'loss' && h('div', { className:'text-gray-600', 'data-testid':'bpr-drill-loss' }, '💸 ปิดยอดขาด ของหาย — คิดเต็มที่ส่ง'))))))));
+}
+// verify 1 (M2): กดค่าใช้จ่ายสาขา → ยอดรายบัญชี (เกณฑ์ JE เดียวกับแถว 5 · รวมเท่ากับตัวเลขในตาราง) + ลิงก์รายงานค่าใช้จ่ายรายสาขา (เฉพาะใบตั้งหนี้/รับของ)
+function BranchProfitExpDrill({ rep, drill, setDrill, goExp }){
+  const col = rep.cols.find(c => c.key === drill.col) || { label:drill.col };
+  const rows = ((rep.expByCol || {})[drill.col] || []).slice().sort((a, b) => a.code.localeCompare(b.code));
+  const tot = Math.round(rows.reduce((s, r) => s + r.amount, 0) * 100) / 100, excl = (rep.expExclByCol || {})[drill.col] || 0;
+  const td = (v, k, x) => h('td', { key:k, className:cls('px-2 py-1', x) }, v);
+  return h('div', { className:'bg-white rounded-lg shadow p-3 mt-3', 'data-testid':'bpr-drill' },
+    h('div', { className:'flex items-center mb-2 gap-2' }, h('h4', { className:'font-bold' }, '💰 ค่าใช้จ่ายรายบัญชี — ' + col.label),
+      h('button', { className:'ml-auto px-2 py-0.5 border rounded hover:bg-gray-50', onClick:() => goExp(drill.col), 'data-testid':'bpr-drill-goexp' }, '📊 รายงานค่าใช้จ่ายรายสาขา'),
+      h('button', { className:'px-2 py-0.5 border rounded', onClick:() => setDrill(null), 'data-testid':'bpr-drill-close' }, '✕ ปิด')),
+    h('table', { className:'text-xs min-w-full' },
+      h('thead', { className:'bg-gray-100' }, h('tr', null, h('th', { className:'px-2 py-1 text-left' }, 'รหัส'), h('th', { className:'px-2 py-1 text-left' }, 'บัญชี'), h('th', { className:'px-2 py-1 text-right' }, 'ยอด'))),
+      h('tbody', null, rows.length === 0 && h('tr', null, h('td', { colSpan:3, className:'p-3 text-center text-gray-500' }, 'ไม่มีรายการ')),
+        rows.map(r => h('tr', { key:r.code, className:'border-t', 'data-testid':'bpr-drill-row' }, td(r.code, 'c'), td(r.name, 'n'), td(fmtCur(r.amount), 'a', 'text-right font-mono'))),
+        h('tr', { className:'border-t-2 font-bold' }, td('', 'c'), td('รวม', 'n'), h('td', { className:'px-2 py-1 text-right font-mono', 'data-testid':'bpr-drill-exp-total' }, fmtCur(tot))))),
+    Math.abs(excl) >= 0.005 && h('div', { className:'text-[11px] text-gray-600 mt-2', 'data-testid':'bpr-drill-exp-excl' },
+      'ไม่นับผลต่างสต๊อก (ของหายขนส่ง/นับสต๊อก/ของเสีย/ผลต่างราคา) ' + fmtCur(excl) + ' — ต้นทุนของที่ส่งไปสาขาคิดในแถว 3 แล้ว'),
+    h('div', { className:'text-[11px] text-gray-500 mt-1' }, 'รายงานค่าใช้จ่ายรายสาขาแสดงเฉพาะบรรทัดค่าใช้จ่ายของใบตั้งหนี้/รับของ (ไม่รวมค่าเสื่อม/รายการปรับปรุงอื่น) และแยกคอลัมน์ "ยังไม่ระบุสาขา" — ยอดอาจไม่เท่าตารางนี้'));
+}
+// ช่วงวันที่ไม่เต็มเดือน (ไม่เริ่มวันที่ 1 หรือไม่จบสิ้นเดือน) → รายงานรายเดือนจะแสดงยอดทั้งเดือน
+function bprPartialMonth(lo, hi){
+  const end = ym => { const [y, m] = ym.split('-').map(Number); return ym + '-' + String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0'); };
+  return String(lo).slice(8, 10) !== '01' || String(hi).slice(0, 10) !== end(String(hi).slice(0, 7));
+}
+// คอลัมน์นี้มียอดขายใช้ได้ไหม (โหลดได้ หรือเป็นส่วนกลาง/สำนักงานใหญ่ที่ไม่มีหน้าร้าน)
+//   verify 3: สาขา ERP ที่ไม่มีรหัส POS จับคู่ (noPos) → ไม่มียอดขาย ถึงโหลด POS ได้ก็ตาม
+function bprPosOk(rep, k){
+  const c = rep.cols.find(x => x.key === k) || {};
+  if(c.noPos && !(c.posIds || []).length) return false;
+  return !!rep.posOk || c.kind === 'hq';
+}
+// verify 2 (M1): แถวที่มาจาก ERP (ต้นทุน/กำไรขั้นต้น/ค่าใช้จ่าย/กำไร) ในคอลัมน์ POS ที่ไม่มีใน ERP/ยังไม่จับคู่ → แสดง —
+function bprNoErp(rep, r, k){
+  return !r.pos && ((rep.cols.find(c => c.key === k) || {}).kind === 'pos');
+}
+function bprExportCSV(rep, ROWS, lo, hi){
+  const out = [['กำไรรายสาขา (ผู้บริหาร)'], ['ช่วง', lo + ' ถึง ' + hi], ['หมายเหตุ', 'ตัวเลขผู้บริหาร — ยอดขายจากระบบผู้จัดการ (POS) ไม่ได้ลงบัญชีใน ERP · ไม่ใช่งบการเงิน'],
+    ...(rep.posOk ? [] : [['คำเตือน', 'โหลดยอดขายไม่ได้ — ไม่มียอดขาย/กำไรในไฟล์นี้ (มีแต่ต้นทุน/ค่าใช้จ่าย ERP)']]),
+    ...(rep.cols.some(c => c.noPos && !(c.posIds || []).length) ? [['ไม่มียอด POS (ยังไม่จับคู่)', rep.cols.filter(c => c.noPos && !(c.posIds || []).length).map(c => c.label).join(', ')]] : []), [], ['รายการ', ...rep.cols.map(c => c.label)]];
+  for(const r of ROWS){
+    // UAT M1: ไม่มียอดขาย → ช่องที่ใช้ยอดขาย (รวมกำไรขั้นต้น/กำไรสาขา/%) เว้นว่าง
+    const blank = c => (r.pos || r.posDep) && !bprPosOk(rep, c.key);
+    // verify 2 (M1): คอลัมน์ POS ที่ไม่มีใน ERP → '—' (ไม่มีต้นทุน/ค่าใช้จ่ายใน ERP)
+    const cellTxt = (c, f, fmt) => { if(bprNoErp(rep, r, c.key)) return '—'; const v = (rep.cell[c.key] || {})[f]; return v == null || blank(c) ? '' : fmt(v); };
+    out.push([r.label.trim(), ...rep.cols.map(c => cellTxt(c, r.f, v => r.num ? String(v) : Number(v).toFixed(2)))]);
+    if(r.pct) out.push(['   % ของยอดขาย', ...rep.cols.map(c => cellTxt(c, r.pct, v => Number(v).toFixed(2)))]);
+  }
+  exportCSV('branch-profit_' + lo + '_' + hi + '.csv', out);
+}
+// การ์ดจับคู่สาขา POS (GM/ผจก.บัญชี แก้ได้ · คนอื่นดูอย่างเดียว) → SET_POS_BRANCH_MAP
+function PosBranchMapCard({ state, dispatch, user, canMap, rep }){
+  const E = global.ERP, eff = E.posBranchMapResolved(state);
+  const ids = [...new Set([...Object.keys(eff), ...rep.unmapped])].sort((a, b) => a.length - b.length || a.localeCompare(b));
+  // verify 2 (S1): ค่าเริ่มต้น — รู้จักแล้ว = สาขา ERP หรือ '__none__' (ไม่มีใน ERP) · รหัสใหม่ที่ยังไม่จับคู่ = '' (ยังไม่เลือก)
+  //   รหัสใหม่เลือก '— ไม่มีใน ERP —' ได้ (เช่น สาขาปิด/ทดสอบ) → บันทึกเป็น null
+  const init = k => (k in eff) ? (eff[k] || '__none__') : '';
+  const [draft, setDraft] = useState(() => Object.fromEntries(ids.map(k => [k, init(k)])));
+  const [vat, setVat] = useState(rep.inclVat);
+  const [saved, setSaved] = useState(false);
+  // UAT N3: โหลดใหม่แล้วมีรหัส POS ใหม่ระหว่างการ์ดเปิดอยู่ → เติมเข้า draft (ไม่ทับค่าที่กำลังแก้)
+  //   ใช้ effect แทน key — ถ้า key ตาม rep.unmapped การบันทึกเองจะทำให้การ์ด remount และข้อความ ✅ หาย
+  const idsKey = ids.join('|');
+  useEffect(() => { setDraft(d => { const miss = ids.filter(k => !(k in d)); return miss.length ? { ...d, ...Object.fromEntries(miss.map(k => [k, init(k)])) } : d; }); }, [idsKey]);
+  const brs = (state.branches || []).filter(b => b && b.id);
+  const changed = ids.filter(k => (draft[k] || '') !== '' && (draft[k] || '') !== init(k));
+  // UAT S4: หลายรหัส POS → สาขา ERP เดียวกัน = ยอดขายถูกรวมกัน → เตือนบนการ์ด + ยืนยันก่อนบันทึก
+  const brName = id => ((brs.find(b => b.id === id) || {}).name || id);
+  const dups = Object.entries(ids.reduce((m, k) => { const e = draft[k]; if(e && e !== '__none__') (m[e] = m[e] || []).push(k); return m; }, {})).filter(([, v]) => v.length > 1);
+  const dupTxt = dups.map(([e, v]) => brName(e) + ' ← ' + v.join(' + ')).join(' · ');
+  const save = () => {
+    if(!changed.length && vat === rep.inclVat) return;
+    if(dups.length && !confirm('⚠️ มีหลายรหัส POS จับคู่สาขา ERP เดียวกัน — ยอดขายจะถูกรวมกัน:\n' + dupTxt + '\n\nยืนยันบันทึก?')) return;
+    dispatch({ type:'SET_POS_BRANCH_MAP', data:{ map:Object.fromEntries(changed.map(k => [k, draft[k] && draft[k] !== '__none__' ? draft[k] : null])), inclVat:vat, id:genId('posmap'), at:Date.now(), by:user.username } });
+    setSaved(true);
+  };
+  return h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 text-sm', 'data-testid':'bpr-map-card' },
+    h('div', { className:'font-bold mb-1' }, '🔗 จับคู่สาขา: ระบบผู้จัดการ (POS) → สาขา ERP'),
+    !canMap && h('div', { className:'text-xs text-gray-500 mb-1' }, 'ดูอย่างเดียว — แก้ได้เฉพาะ GM/ผจก.บัญชี/admin'),
+    h(PosReadKeyBox, { state, dispatch, user, canMap }),
+    h('table', { className:'text-xs' }, h('tbody', null, ids.map(k => h('tr', { key:k, className:'border-t' },
+      h('td', { className:'px-2 py-1 font-mono' }, k), h('td', { className:'px-2 py-1' }, E.POS_BRANCH_NAMES[k] || '(รหัสใหม่)'),
+      h('td', { className:'px-2 py-1' }, h('select', { value:draft[k] || '', disabled:!canMap, 'data-testid':'bpr-map-sel', 'data-pos':k,
+        onChange:e => { const v = e.target.value; setSaved(false); setDraft(d => ({ ...d, [k]:v })); }, className:'border rounded px-1 py-0.5' },
+        !(k in eff) && h('option', { value:'' }, '— ยังไม่จับคู่ —'),
+        h('option', { value:'__none__' }, '— ไม่มีใน ERP —'), brs.map(b => h('option', { key:b.id, value:b.id }, b.name || b.id)))))))),
+    dups.length > 0 && h('div', { className:'mt-2 bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900', 'data-testid':'bpr-map-dup' },
+      '⚠️ หลายรหัส POS ไปสาขาเดียวกัน (ยอดขายรวมกัน): ' + dupTxt),
+    h('label', { className:'flex items-center gap-1 mt-2' }, h('input', { type:'checkbox', checked:vat, disabled:!canMap, onChange:e => { setSaved(false); setVat(e.target.checked); }, 'data-testid':'bpr-map-vat' }),
+      'ยอด net จาก POS เป็นราคารวม VAT (หาร 1.07 เป็นยอดไม่รวม VAT)'),
+    canMap && h('button', { onClick:save, disabled:!changed.length && vat === rep.inclVat, className:'mt-2 px-3 py-1 bg-blue-600 text-white rounded disabled:opacity-50', 'data-testid':'bpr-map-save' }, '💾 บันทึกการจับคู่'),
+    saved && h('span', { className:'ml-2 text-xs text-green-700', 'data-testid':'bpr-map-saved' }, '✅ บันทึกแล้ว'));
+}
+// P2: ช่องวางคีย์อ่านยอดขาย (Publishable key ของระบบผู้จัดการ) → SET_POS_READ_KEY
+//   ช่องซ่อนตัวอักษร · หลังบันทึกแสดงแค่หัวคีย์ + … + 4 ตัวท้าย · ตรวจ posKeyDenyReason ก่อนส่ง (reducer ตรวจซ้ำ) · ห้าม log คีย์
+function PosReadKeyBox({ state, dispatch, user, canMap }){
+  const E = global.ERP, stored = ((state.settings || {}).posReadKey || '');
+  const [val, setVal] = useState(''), [err, setErr] = useState(''), [msg, setMsg] = useState('');
+  // UAT N1: ขึ้น ✅/🗑️ ก็ต่อเมื่อ settings.posReadKey เปลี่ยนจริง (reducer รับแล้ว) — reducer ปฏิเสธ = ไม่ขึ้นติ๊กเขียวคู่กับ ⛔
+  const pendRef = useRef(null);   // { want: sig ของคีย์ที่ส่ง ('' = ล้าง), ok: ข้อความ }
+  const storedSig = E.posKeySig(stored);
+  useEffect(() => {
+    const p = pendRef.current; if(!p) return;
+    if(storedSig === p.want){ pendRef.current = null; setMsg(p.ok); setErr(''); }
+  }, [storedSig]);
+  const send = (key, okMsg) => {
+    pendRef.current = { want:E.posKeySig(key || ''), ok:okMsg }; setMsg('');
+    dispatch({ type:'SET_POS_READ_KEY', data:{ key, id:genId('poskey'), at:Date.now(), by:user.username } });
+    // reducer ปฏิเสธ (alert ⛔) หรือคีย์เดิมอยู่แล้ว = state ไม่เปลี่ยน → ล้าง pending รอบถัดไป (ไม่ขึ้นข้อความสำเร็จ)
+    setTimeout(() => { const p = pendRef.current; if(p && p.ok === okMsg){ pendRef.current = null; } }, 1500);
+  };
+  const save = () => {
+    const k = E.posKeyClean ? E.posKeyClean(val) : val.trim(), why = E.posKeyDenyReason(k);   // verify 2: ตัดเครื่องหมายคำพูดที่ครอบมา
+    if(why){ setErr(why); setMsg(''); return; }
+    if(E.posKeySig(k) === storedSig){ setVal(''); setErr(''); setMsg('ℹ️ คีย์นี้ตั้งไว้แล้ว'); return; }
+    setVal(''); setErr(''); send(k, '✅ บันทึกคีย์แล้ว (' + E.posKeyMasked(k) + ')');
+  };
+  const clear = () => { if(!confirm('ล้างคีย์อ่านยอดขาย? รายงานจะไม่มียอดขาย POS จนกว่าจะวางคีย์ใหม่')) return; setErr(''); send(null, '🗑️ ล้างคีย์แล้ว'); };
+  return h('div', { className:'border rounded p-2 mb-2 bg-gray-50', 'data-testid':'bpr-key-box' },
+    h('div', { className:'font-semibold text-xs mb-1' }, '🔑 คีย์อ่านยอดขายจากระบบผู้จัดการ'),
+    h('div', { className:'text-xs mb-1', 'data-testid':'bpr-key-status' }, stored
+      ? h('span', null, 'ตั้งแล้ว: ', h('span', { className:'font-mono' }, E.posKeyMasked(stored)))
+      : h('span', { className:'text-amber-700' }, E.POS_BRANCH_SRC.key ? 'ใช้คีย์ค่าเริ่มต้นในระบบ' : 'ยังไม่ได้ใส่คีย์ — GM/ผจก.บัญชี/admin เป็นผู้วางคีย์')),
+    canMap && h('div', { className:'text-xs text-gray-600 mb-1' },
+      'วิธีหา: เปิด Supabase โปรเจกต์ของระบบผู้จัดการสาขา → Project Settings → API Keys → คัดลอก Publishable key (ขึ้นต้น sb_publishable_…) มาวาง · ห้ามใช้ Secret key (sb_secret_…) หรือ service_role'),
+    canMap && h('div', { className:'flex flex-wrap items-center gap-1' },
+      h('input', { type:'password', value:val, autoComplete:'off', spellCheck:false, placeholder:'วางคีย์ sb_publishable_…', 'data-testid':'bpr-key-input',
+        onChange:e => { setVal(e.target.value); setErr(''); setMsg(''); }, className:'border rounded px-2 py-1 text-xs flex-1 min-w-0' }),
+      h('button', { onClick:save, disabled:!val.trim(), className:'px-2 py-1 bg-blue-600 text-white rounded text-xs disabled:opacity-50', 'data-testid':'bpr-key-save' }, '💾 บันทึกคีย์'),
+      stored && h('button', { onClick:clear, className:'px-2 py-1 border border-red-300 text-red-700 rounded text-xs', 'data-testid':'bpr-key-clear' }, '🗑️ ล้างคีย์')),
+    err && h('div', { className:'text-xs text-red-700 mt-1', 'data-testid':'bpr-key-err' }, '⛔ ' + err),
+    msg && h('div', { className:'text-xs text-green-700 mt-1', 'data-testid':'bpr-key-msg' }, msg));
+}
 function BranchExpenseReport({ state, dispatch, user, onGo }){
   const E = global.ERP, ym0 = getToday().slice(0, 7);
-  const [fromM, setFromM] = useState(ym0), [toM, setToM] = useState(ym0);
+  // 🆕 POS_BRANCH_SALES: เปิดจากรายงานกำไรรายสาขา → ใช้ช่วงเดือนเดียวกัน (ครั้งเดียว)
+  const [hint0] = useState(() => { const x = E._xbRangeHint; E._xbRangeHint = null; return x || null; });
+  const [fromM, setFromM] = useState((hint0 && hint0.fromM) || ym0), [toM, setToM] = useState((hint0 && hint0.toM) || ym0);
   const [supplierId, setSupplierId] = useState('');
   const [inclDeposit, setInclDeposit] = useState(true), [withVat, setWithVat] = useState(false);
   const [open, setOpen] = useState(() => new Set());
@@ -109078,7 +109626,12 @@ function BranchExpenseReport({ state, dispatch, user, onGo }){
   const colName = k => (cols.find(c => c.key === k) || {}).label || k;
   const brName = id => ((state.branches || []).find(b => b.id === id) || {}).name || id;
   const supName = id => ((state.suppliers || []).find(s => s.id === id) || {}).name || '-';
+  // UAT S1: มาจากกำไรรายสาขา → บอกสาขา/ช่วงวันที่กด + เตือนถ้ารายงานนี้แสดงทั้งเดือน (ไฮไลต์คอลัมน์สาขานั้น)
+  const fromBpr = hint0 && hint0.from && lo === hint0.fromM && hi === hint0.toM ? hint0 : null, hiCol = fromBpr && fromBpr.col;
   return h('div', { 'data-testid':'xbr-report' },
+    fromBpr && h('div', { className:'bg-yellow-50 border border-yellow-300 rounded p-2 mb-3 text-sm text-yellow-900', 'data-testid':'xbr-from-bpr' },
+      '🏪 เปิดจากกำไรรายสาขา: ' + (fromBpr.colLabel || 'ทุกสาขา') + ' · ช่วง ' + fmtDate(fromBpr.from) + ' – ' + fmtDate(fromBpr.to),
+      fromBpr.partial && h('span', { className:'font-medium', 'data-testid':'xbr-whole-month' }, ' (ทั้งเดือน) — รายงานนี้กรองได้ทีละเดือน ยอดจึงอาจมากกว่าช่องที่กด')),
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3 flex flex-wrap items-center gap-2 text-sm' },
       h('span', null, 'เดือน'), h('input', { type:'month', value:fromM, onChange:e => setFromM(e.target.value || ym0), className:'border rounded px-2 py-1', 'data-testid':'xbr-from' }),
       h('span', null, 'ถึง'), h('input', { type:'month', value:toM, onChange:e => setToM(e.target.value || ym0), className:'border rounded px-2 py-1', 'data-testid':'xbr-to' }),
@@ -109095,8 +109648,8 @@ function BranchExpenseReport({ state, dispatch, user, onGo }){
       h('table', { className:'text-xs min-w-full', 'data-testid':'xbr-table' },
         h('thead', { className:'bg-gray-100' }, h('tr', null,
           h('th', { className:'px-2 py-2 text-left sticky left-0 bg-gray-100 min-w-[200px]' }, 'ประเภทค่าใช้จ่าย'),
-          cols.map(c => h('th', { key:c.key, className:cls('px-2 py-2 text-right whitespace-nowrap', c.key === E.EXP_COL_HQ && 'bg-sky-50', c.key === E.EXP_COL_UNSET && 'bg-amber-50', c.key === 'total' && 'bg-gray-200'),
-            'data-testid':'xbr-col-' + c.key }, c.label)))),
+          cols.map(c => h('th', { key:c.key, className:cls('px-2 py-2 text-right whitespace-nowrap', c.key === E.EXP_COL_HQ && 'bg-sky-50', c.key === E.EXP_COL_UNSET && 'bg-amber-50', c.key === 'total' && 'bg-gray-200', hiCol && c.key === hiCol && 'ring-2 ring-yellow-400 bg-yellow-100'),
+            'data-testid':'xbr-col-' + c.key, 'data-hl':hiCol && c.key === hiCol ? '1' : undefined }, c.label)))),
         h('tbody', null,
           groups.length === 0 && h('tr', null, h('td', { colSpan:cols.length + 1, className:'p-4 text-center text-gray-500' }, 'ไม่มีค่าใช้จ่ายในช่วงนี้')),
           groups.flatMap(g => {
