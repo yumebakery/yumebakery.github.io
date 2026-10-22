@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="eb75f5db6932";window.__ERP_BUILT_AT__="2026-10-21T16:48:29";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="bf6ee9f88287";window.__ERP_BUILT_AT__="2026-10-22T14:19:20";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -49986,7 +49986,7 @@ const {
   cls, fmtCur, fmtNum, fmtDate, getToday, genId,
   getBranch, getAllowedBranches, isHQ, isSuperUser, hasPerm,
   Modal, Button, SB, deductFIFO,
-  unitsForPurpose, findItemUnit, toBaseQty, getBaseUnit, resolveToBase,
+  unitsForPurpose, unitsForIssue, findItemUnit, toBaseQty, getBaseUnit, resolveToBase,
   useDateRange, usePersistedTab, DateRangeBar, inDateRange,
   usePaged, Pager,
   // 🆕 GO-LIVE: ซ่อนต้นทุน · แถวมือถือ · รายการโปรด
@@ -51644,15 +51644,83 @@ function TRDetailModal({ tr: trProp, state, dispatch, user, onClose, viewOnly })
 // ================================================================
 // APPROVE TR + CREATE TO
 // ================================================================
+// 🆕 TO_SHIP_UNIT: หน่วยที่เลือกส่งได้ = หน่วยที่สั่ง (ก่อน) + หน่วยฐาน + หน่วยแปลงที่ "มีตัวคูณจริง" · ไม่ซ้ำ
+//   UAT M2: ใช้ชุดหน่วยเบิก/โอน (unitsForIssue — ตัดหน่วยซื้ออย่างเดียวออก) และข้ามหน่วยที่ไม่มีตัวคูณ
+//   (resolveToBase คิดเป็น ×1 เงียบ ๆ → เลือก "ลัง" ส่ง 2 = ตัดสต๊อก 2 หน่วยฐาน แต่ใบเขียน 2 ลัง)
+function _shipUnitHasFactor(u){
+  return !!(u && (u.isBase || (u.equalTo && u.equalTo.unit) || Number(u.toBase) > 0));
+}
+function _shipUnitOpts(item, orderUnit){
+  const out = [];
+  const add = (n) => { n = String(n || '').trim(); if(n && !out.includes(n)) out.push(n); };
+  add(orderUnit);
+  add(item && getBaseUnit(item));
+  (item ? unitsForIssue(item) : []).forEach(u => { if(_shipUnitHasFactor(u)) add(u.name); });
+  return out;
+}
+// ช่องเลือกหน่วยต่อบรรทัด (มีหน่วยเดียว = ข้อความเฉย ๆ)
+function _ShipUnitSel({ l, i, item, onChange, disabled, className }){
+  const opts = _shipUnitOpts(item, l.unit);
+  const cur = l.shipUnit || l.unit || '';
+  if(opts.length <= 1) return h('span', { className:'text-xs text-gray-500 whitespace-nowrap', 'data-testid':'tr-ship-unit-fixed' }, cur);
+  return h('select', { value:cur, disabled, onChange:e => onChange(i, e.target.value), 'data-testid':'tr-ship-unit', 'aria-label':'หน่วยที่ส่ง',
+    className: className || 'h-[var(--ctl-h,36px)] px-1 border rounded-md text-xs bg-white' },
+    opts.map(n => h('option', { key:n, value:n }, n)));
+}
+// ข้อความช่วยตัดสิน "สั่ง 1 ลัง (= 12 ชิ้น) · ส่ง 7 ชิ้น (= 0.58 ลัง)" — ขึ้นเฉพาะเมื่อหน่วยที่ส่ง ≠ หน่วยที่สั่ง
+function _shipUnitHint(l){
+  const su = l.shipUnit || l.unit;
+  if(!l.unit || su === l.unit) return null;
+  const of = l.orderFactor || 1, f = l.factor || 1, aq = Number(l.actualQty) || 0;
+  return `สั่ง ${fmtNum(l.qty)} ${l.unit} (= ${fmtNum(Math.round((Number(l.qty)||0) * of / f * 1000) / 1000)} ${su}) · ส่ง ${fmtNum(aq)} ${su} (= ${fmtNum(Math.round(aq * f / of * 100) / 100)} ${l.unit})`;
+}
+
 function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
   // 🆕 UI ทำงานในหน่วยที่สาขาสั่ง (เช่น "ถุง") — แปลงเป็น base (กรัม) ใต้ฉากเฉพาะตอนตัด FIFO
   //   actualQty = หน่วยที่สั่ง (50 ถุง) · factor = base per 1 หน่วย (500 ก./ถุง) · base = actualQty × factor
+  // 🆕 TO_SHIP_UNIT (เจ้าของ 2026-10-22): คลังเปลี่ยนหน่วยที่ส่งได้ทีละบรรทัด — l.unit = หน่วยที่ไลน์สั่ง (คงเดิม ไม่แตะใบ TR)
+  //   shipUnit = หน่วยที่คลังเลือก · factor = ฐานต่อ 1 shipUnit · orderFactor = ฐานต่อ 1 หน่วยที่สั่ง (ไว้โชว์ "สั่ง 1 ลัง (= 12 ชิ้น)")
   const [outLines, setOutLines] = useState(() =>
     (tr.lines||[]).map(l => {
       const item = state.items.find(i => i.id === l.itemId);
       const factor = toBaseQty(item, 1, l.unit) || 1;
-      return { ...l, factor, actualQty: l.qty, send: true };
+      // UAT S1: baseAnchor = ยอดหน่วยฐานจริงของบรรทัด (ไม่ปัด) · qtyTouched = คลังพิมพ์จำนวนเองแล้ว (UAT M1)
+      return { ...l, factor, orderFactor: factor, shipUnit: l.unit || getBaseUnit(item) || '', actualQty: l.qty, send: true,
+        baseAnchor: (Number(l.qty) || 0) * factor, qtyTouched: false };
     }));
+  // เปลี่ยนหน่วย:
+  //   · ยังไม่พิมพ์จำนวน → แปลงจาก baseAnchor (ยอดฐานเท่าเดิม · ปัด 3 ตำแหน่งเฉพาะที่โชว์ · กลับหน่วยที่สั่ง = l.qty ตรงเป๊ะ)
+  //   · พิมพ์จำนวนเองแล้ว (เช่น พิมพ์ 7 ก่อนแล้วค่อยเลือก "ชิ้น") → คงเลข 7 เปลี่ยนแค่หน่วย/ตัวคูณ (UAT M1 — เดิม 7 ลัง กลายเป็น 84 ชิ้น)
+  const changeShipUnit = (i, u) => setOutLines(outLines.map((l, idx) => {
+    if(idx !== i || u === l.shipUnit) return l;
+    const item = state.items.find(x => x.id === l.itemId);
+    const nf = toBaseQty(item, 1, u) || 1;
+    if(l.qtyTouched){
+      const q = Number(l.actualQty) || 0;
+      return { ...l, shipUnit: u, factor: nf, baseAnchor: q * nf };
+    }
+    const _raw = (Number(l.baseAnchor) || 0) / nf;
+    let q = (u === l.unit) ? (Number(l.qty) || 0) : Math.round(_raw * 1000) / 1000;
+    // verify 1: หน่วยใหญ่มาก (เช่น ขอ 10 กรัม → กระสอบ 25,000 ก.) ปัด 3 ตำแหน่งแล้วเป็น 0 → ใช้ 6 ตำแหน่ง/ค่าจริง ไม่ให้บรรทัดหายเงียบ
+    if(q === 0 && _raw > 0) q = Math.round(_raw * 1e6) / 1e6 || _raw;
+    return { ...l, shipUnit: u, factor: nf, actualQty: q };
+  }));
+  // คลังพิมพ์จำนวน → ติดธง qtyTouched + อัปเดต baseAnchor ตามหน่วยปัจจุบัน
+  const setShipQty = (i, v) => setOutLines(outLines.map((l, idx) => idx !== i ? l
+    : { ...l, actualQty: v, qtyTouched: true, baseAnchor: (Number(v) || 0) * (l.factor || 1) }));
+  // ยอดหน่วยฐานที่จะตัด/ส่ง — ใช้ baseAnchor (ไม่สะสมเศษปัดจากการแปลงหน่วย) · fallback actualQty × factor
+  const lineBase = (l) => (l.baseAnchor != null && isFinite(Number(l.baseAnchor))) ? Number(l.baseAnchor) : (Number(l.actualQty) || 0) * (l.factor || 1);
+  // verify 1: บรรทัดที่จะส่ง = ติ๊กส่ง + มีจำนวน (ดูทั้งเลขที่โชว์และยอดฐาน — เปลี่ยนหน่วยแล้วต้องไม่หลุดเงียบ)
+  const willSend = (l) => l.send && (Number(l.actualQty) > 0 || lineBase(l) > 0);
+  // verify 3: ส่งมากกว่าที่ขอ (เทียบหน่วยฐาน) → ข้อความเตือน · null = ไม่เกิน
+  const overAsk = (l) => {
+    if(!l.send) return null;
+    const of = l.orderFactor || 1, askBase = (Number(l.qty) || 0) * of, b = lineBase(l);
+    if(!(askBase > 0) || b <= askBase * (1 + 1e-9) + 1e-9) return null;
+    const bu = of === 1 ? (l.unit || '') : (getBaseUnit(state.items.find(x => x.id === l.itemId)) || '');
+    const r = (x) => fmtNum(Math.round(x * 1000) / 1000);
+    return `⚠️ ส่งมากกว่าที่ขอ (ขอ ${r(askBase)} ${bu} · จะส่ง ${r(b)} ${bu})`;
+  };
   const [shipNote, setShipNote] = useState('');
   const [showPick, setShowPick] = useState(false);   // 🆕 TR_PRINT P2/P3
 
@@ -51676,7 +51744,7 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
   // Preview FIFO cost per line — แปลง actualQty (order unit) → base ตอนเช็ค FIFO
   const previews = useMemo(() =>
     outLines.map(l => {
-      const baseQty = (Number(l.actualQty)||0) * (l.factor||1);
+      const baseQty = lineBase(l);   // UAT S1
       if(!l.send) return { cost:0, shortage:0, baseQty };
       const layers = state.fifoLayers.map(x => ({...x}));
       const _ll = lineLoc(l.itemId);
@@ -51703,9 +51771,12 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
     const live = (state.transferRequests||[]).find(t => t.id === tr.id) || tr;
     if(live.status !== 'pending') return alert(`⛔ TR ${tr.trNumber} สถานะเปลี่ยนเป็น "${(TR_STATUS_MAP[live.status]||[live.status])[0]}" แล้ว (อาจส่ง/ยกเลิกจากเครื่องอื่น) — ปิดหน้าต่างนี้`);
     const send = outLines
-      .filter(l => l.send && Number(l.actualQty) > 0)
-      .map(l => ({ ...l, baseQty: (Number(l.actualQty)||0) * (l.factor||1) }));
+      .filter(willSend)   // verify 1
+      .map(l => ({ ...l, baseQty: lineBase(l) }));   // UAT S1: ฐานจาก baseAnchor
     if(send.length === 0) return alert('ไม่มีรายการที่จะส่ง');
+    // verify 3: ส่งมากกว่าที่ขอ (เช่น พิมพ์ 7 แล้วสลับกลับเป็น ลัง = 84 ชิ้น) → ถามยืนยันก่อน
+    { const _ov = send.map(l => { const m = overAsk(l); return m && ('• ' + (((state.items||[]).find(x => x.id === l.itemId) || {}).name || l.itemId) + ': ' + m.replace(/^⚠️ /, '')); }).filter(Boolean);
+      if(_ov.length && !confirm('⚠️ บางรายการส่งมากกว่าที่ขอ:\n\n' + _ov.join('\n') + '\n\nกด OK = ส่งตามนี้ · กด Cancel = กลับไปแก้')) return; }
     // 🆕 FREIGHT_EXPENSE verify 2: ค่าใช้จ่ายไม่นับสต๊อก (ติดธง) ห้ามส่ง — ตรวจก่อนตัดสต๊อก/ออก TO
     { const _xl = [...new Set(send.filter(l => global.ERP.itemExpenseLink && global.ERP.itemExpenseLink(state, l.itemId)).map(l => ((state.items||[]).find(x => x.id === l.itemId) || {}).name || l.itemId))];
       if(_xl.length) return alert('⛔ ' + _xl.join(', ') + ' เป็นค่าใช้จ่าย (ไม่นับสต๊อก) — เอาออกจากใบ/รายการโปรด (ไม่ติ๊กส่งรายการนี้)'); }
@@ -51719,7 +51790,7 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
       if(deny) return alert(deny);
       const toNo = global.ERP.nextDayDocNo ? global.ERP.nextDayDocNo('TO', getToday(), state.transferOrders || [], 'toNumber') : '';
       dispatch({ type:'SHIP_TR', data:{ trId: tr.id, toId: genId('to'), note: shipNote, by: user.username,
-        lines: send.map(l => ({ itemId: l.itemId, baseQty: l.baseQty, displayQty: Number(l.actualQty) || 0, displayUnit: l.unit, note: l.note || '' })) } });
+        lines: send.map(l => ({ itemId: l.itemId, baseQty: l.baseQty, displayQty: Number(l.actualQty) || 0, displayUnit: l.shipUnit || l.unit, note: l.note || '' })) } });   // 🆕 TO_SHIP_UNIT: หน่วยที่คลังเลือก
       onClose();
       onDone && onDone();
       _toastOk(`✅ ส่งแล้ว ${toNo} (${send.length} รายการ) → "${_locName(state, tr.toBranch, tr.toLocId)}" กดรับที่ 📥 รับเข้า`);
@@ -51768,8 +51839,8 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
         itemId: l.itemId,
         qty: l.baseQty,                                              // store in base unit
         unit: state.items.find(i => i.id === l.itemId)?.issueUnit || '',
-        displayQty: Number(l.actualQty)||0,                          // user-visible qty (in original unit)
-        displayUnit: l.unit,
+        displayQty: Number(l.actualQty)||0,                          // user-visible qty (หน่วยที่คลังเลือกส่ง)
+        displayUnit: l.shipUnit || l.unit,                           // 🆕 TO_SHIP_UNIT
         note: l.note||'',
         unitCost: res.cost / (l.baseQty || 1),
         totalCost: res.cost,
@@ -51881,7 +51952,7 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
 
       // 🆕 GO-LIVE (b): มือถือ (<md) = แถวซ้อน ☑ · ชื่อ(ขอมา/มี) · ส่งจริง · หน่วย — ไม่มีตารางกว้าง · ต้นทุนเฉพาะคนมีสิทธิ์
       h('div', { className:'md:hidden bg-white border rounded-lg px-2' },
-        h('div', { className:'grid grid-cols-[1.5rem_minmax(0,1fr)_4.75rem_3.5rem] gap-2 text-[11px] text-gray-500 pt-2 pb-1 border-b' },
+        h('div', { className:'grid grid-cols-[1.5rem_minmax(0,1fr)_4.75rem_4.5rem] gap-2 text-[11px] text-gray-500 pt-2 pb-1 border-b' },
           h('div', null, '☑'), h('div', null, 'สินค้า'), h('div', { className:'text-right' }, 'ส่งจริง'), h('div', null, 'หน่วย')),
         outLines.map((l,i) => {
           const item = state.items.find(x => x.id === l.itemId);
@@ -51892,18 +51963,22 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
           const p = previews[i] || {cost:0,shortage:0,baseQty:0};
           const shortage = p.shortage > 0;
           const actualQtyNum = Number(l.actualQty)||0;
-          return h('div', { key:i, className: cls('grid grid-cols-[1.5rem_minmax(0,1fr)_4.75rem_3.5rem] gap-2 items-center py-2 border-b border-gray-100', !l.send && 'opacity-40', shortage && 'bg-orange-50 -mx-1 px-1 rounded') },
+          const su = l.shipUnit || l.unit || baseUnit;   // 🆕 TO_SHIP_UNIT: หน่วยที่คลังเลือก
+          const hint = _shipUnitHint(l);
+          return h('div', { key:i, 'data-ship-line':l.itemId, className: cls('grid grid-cols-[1.5rem_minmax(0,1fr)_4.75rem_4.5rem] gap-2 items-center py-2 border-b border-gray-100', !l.send && 'opacity-40', shortage && 'bg-orange-50 -mx-1 px-1 rounded') },
             h('input', { type:'checkbox', checked:l.send, onChange:e=>updateLine(i,'send',e.target.checked), className:'w-5 h-5' }),
             h('div', { className:'min-w-0' },
               h('div', { className:'text-sm font-medium leading-snug', style:{ display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' } }, item?.name||l.itemId),
               h('div', { className: cls('text-[11px] truncate', srcStockOrder < actualQtyNum ? 'text-orange-700' : 'text-gray-500') },
-                `ขอ ${fmtNum(l.qty)} ${l.unit||baseUnit} · ${srcHint(l.itemId) ? srcHint(l.itemId) + ' ' : ''}มี ${fmtNum(_r2(srcStockOrder))} ${l.unit||baseUnit}`),
+                `ขอ ${fmtNum(l.qty)} ${l.unit||baseUnit} · ${srcHint(l.itemId) ? srcHint(l.itemId) + ' ' : ''}มี ${fmtNum(_r2(srcStockOrder))} ${su}`),
+              hint && h('div', { className:'text-[11px] text-blue-700', 'data-testid':'tr-ship-unit-hint' }, hint),
+              overAsk(l) && h('div', { className:'text-[11px] text-red-600 font-medium', 'data-testid':'tr-ship-over' }, overAsk(l)),
               shortage && h('div', { className:'text-[11px] text-red-600' }, '⚠️ เกินสต๊อก — ต้นทางจะติดลบ'),
-              showValue && l.send && actualQtyNum > 0 && h('div', { className:'text-[11px] text-gray-400' }, `${fmtCur((p.cost||0) / actualQtyNum)}/${l.unit||baseUnit} · รวม ${fmtCur(p.cost||0)}`)),
+              showValue && l.send && actualQtyNum > 0 && h('div', { className:'text-[11px] text-gray-400' }, `${fmtCur((p.cost||0) / actualQtyNum)}/${su} · รวม ${fmtCur(p.cost||0)}`)),
             h('input', { type:'number', inputMode:'decimal', step:'any', min:0, value:l.actualQty, disabled:!l.send,
-              onChange:e=>updateLine(i,'actualQty',Number(e.target.value)||0), onFocus:e=>{ try{ e.target.select(); }catch(_e){} },
+              onChange:e=>setShipQty(i,Number(e.target.value)||0), onFocus:e=>{ try{ e.target.select(); }catch(_e){} },
               className: cls('w-full h-[var(--ctl-h,36px)] px-2 border rounded-md text-right text-sm font-mono', shortage && 'border-orange-400 bg-orange-50') }),
-            h('div', { className:'text-sm text-gray-700 truncate' }, l.unit||baseUnit));
+            h(_ShipUnitSel, { l, i, item, onChange:changeShipUnit, disabled:!l.send, className:'w-full h-[var(--ctl-h,36px)] px-1 border rounded-md text-xs bg-white' }));
         }),
         showValue && h('div', { className:'flex justify-between items-center py-2 text-sm font-bold' },
           h('span', null, 'รวมมูลค่าจริง'), h('span', { className:'text-green-700' }, fmtCur(totalCost)))),
@@ -51917,7 +51992,7 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
               h('th', { className:'px-2 py-2 text-left text-xs font-medium' }, 'สินค้า'),
               h('th', { className:'px-2 py-2 text-right text-xs font-medium' }, 'ขอมา'),
               h('th', { className:'px-2 py-2 text-right text-xs font-medium' }, 'มีที่ต้นทาง'),
-              h('th', { className:'px-2 py-2 text-right text-xs font-medium w-36' }, 'ส่งจริง'),
+              h('th', { className:'px-2 py-2 text-right text-xs font-medium w-44' }, 'ส่งจริง'),
               showValue && h('th', { className:'px-2 py-2 text-right text-xs font-medium' }, 'ต้นทุน/หน่วย'),
               showValue && h('th', { className:'px-2 py-2 text-right text-xs font-medium' }, 'รวม'),
             )
@@ -51932,8 +52007,10 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
               const p = previews[i] || {cost:0,shortage:0,baseQty:0};
               const shortage = p.shortage > 0;
               const actualQtyNum = Number(l.actualQty)||0;
-              const resultStockOrder = srcStockOrder - actualQtyNum;        // หลังส่ง (ในหน่วยถุง)
-              return h('tr', { key:i, className: cls('hover:bg-gray-50', !l.send && 'opacity-40') },
+              const resultStockOrder = srcStockOrder - actualQtyNum;        // หลังส่ง (ในหน่วยที่เลือกส่ง)
+              const su = l.shipUnit || l.unit || baseUnit;   // 🆕 TO_SHIP_UNIT
+              const hint = _shipUnitHint(l);
+              return h('tr', { key:i, 'data-ship-line':l.itemId, className: cls('hover:bg-gray-50', !l.send && 'opacity-40') },
                 h('td', { className:'px-2 py-2 text-center' },
                   h('input', { type:'checkbox', checked:l.send, onChange:e=>updateLine(i,'send',e.target.checked),
                     className:'w-4 h-4' })
@@ -51949,7 +52026,7 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
                   srcStockBase <= 0 ? 'text-red-600 font-bold'
                     : srcStockOrder < actualQtyNum ? 'text-orange-600 font-bold'
                     : 'text-green-700') },
-                  `${fmtNum(Math.round(srcStockOrder*100)/100)} ${l.unit||baseUnit}`,
+                  `${fmtNum(Math.round(srcStockOrder*100)/100)} ${su}`,
                   factor !== 1 && h('div', { className:'text-[10px] text-gray-400' },
                     `(= ${fmtNum(srcStockBase)} ${baseUnit})`),
                   srcHint(l.itemId) && h('div', { className:'text-[10px] text-gray-500 font-normal', 'data-testid':'tr-line-src' }, srcHint(l.itemId))
@@ -51958,17 +52035,20 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
                   h('div', { className:'flex items-center gap-1' },
                     h('input', { type:'number', value:l.actualQty, step:'any', inputMode:'decimal',
                       disabled:!l.send,
-                      onChange:e=>updateLine(i,'actualQty',Number(e.target.value)||0),
+                      onChange:e=>setShipQty(i,Number(e.target.value)||0),
+                      onFocus:e=>{ try{ e.target.select(); }catch(_e){} },   // verify 2: แตะแล้วพิมพ์ทับ (ไม่ต่อท้ายเป็น 127)
                       className: cls('w-full px-2 py-1 border rounded text-sm text-right',
                         shortage && 'border-orange-400 bg-orange-50') }),
-                    h('span', { className:'text-xs text-gray-500 whitespace-nowrap' }, l.unit||baseUnit),
+                    h(_ShipUnitSel, { l, i, item, onChange:changeShipUnit, disabled:!l.send, className:'px-1 py-1 border rounded text-xs bg-white' }),
                   ),
+                  hint && h('div', { className:'text-[10px] text-blue-700 mt-0.5 text-right', 'data-testid':'tr-ship-unit-hint' }, hint),
+                  overAsk(l) && h('div', { className:'text-[10px] text-red-600 font-medium mt-0.5 text-right', 'data-testid':'tr-ship-over' }, overAsk(l)),
                   shortage && h('div', { className:'text-[10px] text-orange-600 mt-0.5 text-right' },
-                    `หลังส่ง: ${fmtNum(Math.round(resultStockOrder*100)/100)} ${l.unit||baseUnit}`)
+                    `หลังส่ง: ${fmtNum(Math.round(resultStockOrder*100)/100)} ${su}`)
                 ),
                 showValue && h('td', { className:'px-2 py-2 text-right text-xs' },
                   l.send && actualQtyNum > 0
-                    ? `${fmtCur((p.cost||0) / actualQtyNum)}/${l.unit||baseUnit}`
+                    ? `${fmtCur((p.cost||0) / actualQtyNum)}/${su}`
                     : '-'
                 ),
                 showValue && h('td', { className:'px-2 py-2 text-right font-medium text-sm' },
@@ -51986,7 +52066,7 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
         )
       ),
       h('div', { className:'text-[11px] text-gray-500' },
-        '💡 นี่คือจุดเดียวที่ปรับจำนวนได้ — ติ๊กออก/ลดจำนวนตามที่ส่งจริง (ใบขอ TR แก้ไม่ได้)'),
+        '💡 ปรับจำนวนและเปลี่ยนหน่วยที่ส่งได้ที่นี่ (เช่น สั่ง 1 ลัง แต่มี 7 ชิ้น → เลือก ชิ้น แล้วใส่ 7) — ใบขอ TR แก้ไม่ได้'),
 
       hasShortage && h('div', { className:'bg-orange-50 border border-orange-200 rounded p-2 text-sm text-orange-700' },
         '⚠️ บางรายการส่งเกินสต๊อกที่มี — สต๊อกต้นทางจะติดลบ (ระบบยอมให้)'
@@ -52000,7 +52080,7 @@ function ApproveTRModal({ tr, state, dispatch, user, onClose, onDone }){
 
       h('div', { className:'flex gap-2 pt-3 border-t flex-wrap' },
         h(Button, { variant:'success', onClick:dispatch_,
-          disabled: outLines.filter(l => l.send && Number(l.actualQty) > 0).length === 0 },
+          disabled: outLines.filter(willSend).length === 0 },
           '🚚 ยืนยันส่งของ + สร้าง TO'),
         // 🆕 TR_PRINT P1: คลังพิมพ์ใบ TR ไปจัดของก่อนคีย์ส่ง
         h(Button, { variant:'secondary', onClick:()=>printTR(state, [tr], user) }, '🖨️ พิมพ์ใบ TR'),
