@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="05b4b832281f";window.__ERP_BUILT_AT__="2026-10-26T10:06:24";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="45f1c89ecfbc";window.__ERP_BUILT_AT__="2026-10-27T09:07:43";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -8145,6 +8145,64 @@ function pvLineRate(state, inv, g, l, idx){
   if(inv && l.vatRateAdjustedFrom == null){ const ov = (inv.vatLineOverrides || []).find(x => x && (x.grId == null || x.grId === (g && g.id)) && x.lineIdx === idx); if(ov) return Number(ov.to) || 0; }
   return l.vatRate !== undefined && l.vatRate !== null ? (Number(l.vatRate) || 0) : (inv ? (Number(inv.vatRate) || 0) : 7);
 }
+// 🆕 PRICE_FIX_DISCOUNT PFD1: ส่วนลดระดับ GR ของบรรทัด (ก่อน VAT) — ตามใบกำกับ (invDiscFix) แทนส่วนลดตอนรับของ (discAmt จาก PO) · ของแถม = 0
+//   discAmt/billDiscPart ห้ามเขียนทับ (ใช้นับส่วนลด PO ที่ใบรับนี้ใช้ไป — recvDiscAppliedLive/CN ของขาด)
+function grLineDiscGr(l){
+  if(!l || l.isFreebie) return 0;
+  if(l.invDiscFix && l.invDiscFix.amt != null) return Number(l.invDiscFix.amt) || 0;
+  return Number(l.discAmt) || 0;
+}
+// 🆕 PFD19: สวิตช์ปิดฉุกเฉิน (ไม่มีค่า = เปิด) — คุมเฉพาะ UI + SUBMIT ไม่คุม helper/planner
+function priceFixInvDiscOn(state){ return !(state && state.settings && state.settings.priceFixInvDiscEnabled === false); }
+function grLineDiscEff(l){ return l && l.isFreebie ? 0 : grLineDiscGr(l) + (Number(l && l.piDiscAlloc) || 0); }
+// 🆕 PFD5 + §1.5 ข้อ 1: คำนวณส่วนลดตามใบกำกับ (ส่วนลดบรรทัดที่กรอก → ก่อน VAT + ส่วนลดรวมสูงสุด 2 กล่อง เกลี่ยด้วย allocBillDiscount) — ใช้ร่วมฟอร์มจัดซื้อ + SUBMIT (ตรวจซ้ำ)
+//   ctx = { mode:'at_gr'|'post_pi', invId?, grIds?, priceEntry? } · lines = [{ grId, lineIdx, newUnitPrice, newVatRate?, keyedPrice?, keyedMode?, discLine }]
+//   billDiscs = [{ mode:'thb'|'pct', value, scope?, entered? }] · คืน { rows:[{ key, grId, lineIdx, itemId, gross, line, bill, amt, D0, pi, keyed }], heads, error }
+function pfInvDiscCalc(state, ctx, lines, billDiscs){
+  const S = state || {}, c = ctx || {}, out = { rows:[], heads:[], error:'' };
+  const fail = (m) => { if(!out.error) out.error = m; return out; };
+  const inv = c.mode === 'post_pi' ? ((S.invoices || []).find(i => i && i.id === c.invId) || null) : null;
+  const probe = [];
+  for(const w of (lines || [])){
+    const g0 = (S.grs || []).find(x => x && x.id === (w && w.grId)), g = g0 ? grEffective(g0, S.invoices) : null;
+    const idx = Number(w && w.lineIdx), l = g && Number.isInteger(idx) ? (g.lines || [])[idx] : null;
+    if(!l) return fail('ไม่พบบรรทัดที่ส่งมาในใบรับของ');
+    if(l.isFreebie) continue;   // PFD6: ของแถมไม่เกี่ยว
+    const it = (S.items || []).find(x => x && x.id === l.itemId), nm = (it && it.name) || l.itemId || '';
+    const nu = Number(w.newUnitPrice), qty = Number(l.qty) || 0;
+    if(!(isFinite(nu) && nu > 0)) return fail('ราคาใหม่ของ ' + nm + ' ต้องมากกว่า 0');
+    const vr = (w.newVatRate != null && w.newVatRate !== '') ? Number(w.newVatRate) : pvLineRate(S, inv, g, l, idx);
+    const raw = w.discLine == null || w.discLine === '' ? 0 : Number(w.discLine);
+    if(!isFinite(raw) || raw < 0) return fail('ส่วนลดของ ' + nm + ' ต้องเป็นตัวเลขไม่ติดลบ');
+    const gross = bdR2(nu * qty), inc = (w.keyedMode || c.priceEntry) === 'inc' && vr > 0, kp = Number(w.keyedPrice);
+    let line = 0;
+    if(raw > 0){
+      if(inc && isFinite(kp) && kp > 0) line = Math.max(0, bdR2(gross - bdR2((bdR2(kp * qty) - raw) / (1 + vr / 100))));   // §1.5 ข้อ 1: ยอดสุทธิก่อน VAT ตรงกระดาษ
+      else if(inc) line = bdR2(raw / (1 + vr / 100));   // ทางสำรอง (ไม่มีราคาที่คีย์)
+      else line = bdR2(raw);
+    }
+    const pi = Number(l.piDiscAlloc) || 0;
+    out.rows.push({ key:g.id + ':' + idx, grId:g.id, lineIdx:idx, itemId:l.itemId, nm, gross, line, bill:0, amt:0, D0:grLineDiscGr(l), pi,
+      keyed:{ value:raw, entered:inc ? 'incl' : 'excl' } });
+    probe.push({ itemId:l.itemId, qty, unitPrice:nu, discount:line, vatRate:vr, isFreebie:false });
+  }
+  const bds = (Array.isArray(billDiscs) ? billDiscs : []).filter(b => b && Number(b.value) > 0);
+  if(bds.length > 2) return fail('ส่วนลดรวมใส่ได้สูงสุด 2 กล่อง');
+  const scs = bds.map(b => billDiscScope(b.scope));
+  if(scs.length > 1 && (scs.includes('all') || scs[0] === scs[1])) return fail('ส่วนลดรวมเลือกกลุ่มซ้ำ');
+  for(const b of bds){
+    const r = allocBillDiscount(probe, b, 'exclusive');   // GR inclusive ถูกบล็อกที่ planner → price basis = ก่อน VAT เสมอ
+    if(r.error) return fail('ส่วนลดรวม: ' + (r.error === 'เกินยอด' ? 'เกินยอดสินค้าในกลุ่ม — แก้กล่องส่วนลดรวมให้ไม่เกินยอดสินค้าของกลุ่มนั้น' : r.error));
+    if(!r.bd || !(r.amount > 0)) continue;
+    out.heads.push({ ...r.bd, scope:billDiscScope(b.scope) });
+    r.allocs.forEach((a, i) => { out.rows[i].bill = bdR2(out.rows[i].bill + a); });
+  }
+  for(const x of out.rows){
+    x.amt = bdR2(x.line + x.bill);
+    if(x.amt > bdR2(x.gross - x.pi) + 0.005) return fail('ส่วนลดของ ' + x.nm + ' เกินยอดสินค้า — แก้ช่องส่วนลดบรรทัด/ส่วนลดรวมให้ไม่เกินยอด (ราคา×จำนวน)');
+  }
+  return out;
+}
 function planInvPriceAdjust(state, opts){
   const o = opts || {}, S = state || {}, blocks = [];
   const push = (m) => { if(m && !blocks.includes(m)) blocks.push(m); };
@@ -8213,9 +8271,26 @@ function planInvPriceAdjust(state, opts){
     if(first > 0 && Math.abs(nu - first) / first * 100 > blockPct + 1e-9){ push(nm + ': ราคาใหม่ต่างจากราคาเดิมเกิน ' + blockPct + '% — น่าจะคีย์ผิดหน่วย'); continue; }
     if(first > 0 && Math.abs(nu - first) / first * 100 > warnPct + 1e-9) out.warnLines.push(key);
     if(!(qty > 0) || !(baseQty > 0)){ push(nm + ': จำนวนรับเป็น 0 — ปรับราคาไม่ได้'); continue; }
-    const nlt = _pvR2(olt + (nu - ou) * qty);
+    // 🆕 PRICE_FIX_DISCOUNT PFD8: ส่วนลดเดิม D0 (ตามใบกำกับถ้าเคยแก้ · ไม่งั้นส่วนลด PO) · ส่ง newDiscAmt = โหมดส่วนลด (คิดยอดตรงจาก gross)
+    const D0 = grLineDiscGr(l), pi = Number(l.piDiscAlloc) || 0, discSent = w.newDiscAmt != null && w.newDiscAmt !== '';
+    let D1 = D0, nlt;
+    if(discSent){
+      D1 = _pvR2(w.newDiscAmt);
+      if(!isFinite(Number(w.newDiscAmt)) || D1 < 0){ push('ส่วนลดของ ' + nm + ' ต้องเป็นตัวเลขไม่ติดลบ'); continue; }
+      if(Math.abs(_pvR2(ou * qty) - olt - D0 - pi) > 0.02){ push('ยอดใบรับของไม่ตรงส่วนลดที่บันทึก (' + nm + ') — ใช้ CN/DN'); continue; }   // กันหักส่วนลดซ้ำ (GR รุ่นเก่า/ยอดหักแล้วแต่ไม่มี discAmt)
+      if(mode === 'post_pi' && pi > 0.005){ push('ใบนี้มีส่วนลดท้ายบิลจากตอนตั้งหนี้ — ↩️ ย้อนไปตั้งหนี้แล้วตั้งใหม่'); continue; }
+      if(D1 > _pvR2(_pvR2(nu * qty) - pi) + 0.005){ push('ส่วนลดของ ' + nm + ' เกินยอดสินค้า'); continue; }
+      if(Math.abs(D1 - _pvR2(_pvR2(nu * qty) - pi)) < 0.005) out.notes.push(nm + ': ส่วนลดเต็มจำนวน (ต้นทุนล็อต = 0) — ถ้าเป็นของแถมจริง ให้ ↩️ ส่งคืนแล้วคลังรับใหม่เป็นของแถม');
+      nlt = _pvR2(_pvR2(nu * qty) - D1 - pi);
+    } else nlt = _pvR2(olt + (nu - ou) * qty);
     if(nlt < -0.005){ push(nm + ': ยอดหลังส่วนลดติดลบ'); continue; }
-    const disc = (Number(l.discAmt) || 0) + (Number(l.piDiscAlloc) || 0);
+    // PFD7: เตือนราคาสุทธิต่อหน่วย (เทียบจุดแรกสุด PFD9) — โหมดส่วนลดเท่านั้น · ไม่บล็อก
+    if(discSent){
+      const Df = l.invDiscFix && l.invDiscFix.from != null ? (Number(l.invDiscFix.from) || 0) : D0;
+      const nf = (olt + (first - ou) * qty + (D0 - Df)) / qty, nn = nlt / qty;
+      if(nf > 0 && Math.abs(nn - nf) / nf * 100 > warnPct + 1e-9 && !out.warnLines.includes(key)) out.warnLines.push(key);
+    }
+    const disc = D1 + pi;
     const c1 = Math.max(0, nu * qty - disc) / baseQty;
     // R2.4 ข้อ 1: ล็อตของบรรทัด — grLineIdx → (grLot||lot) → itemId ที่มีบรรทัดเดียวในใบ (รวมล็อตลูกจาก split · ข้าม NEG/ของแถม)
     const sameItem = (g.lines || []).filter(x => x && x.itemId === l.itemId && !x.isFreebie);
@@ -8272,6 +8347,7 @@ function planInvPriceAdjust(state, opts){
     if(nRate !== rate) newRate[key] = nRate;
     out.lines.push({ grId:g.id, grNumber:g.grNumber, lineIdx:idx, itemId:l.itemId, qty, baseQty, unit:l.unit, oldUnitPrice:ou, newUnitPrice:nu, firstUnitPrice:first,
       oldLineTotal:olt, newLineTotal:nlt, dAmt, vatRate:nRate, oldVatRate:rate, newVatRate:nRate, vatChanged:nRate !== rate,
+      oldDiscAmt:D0, newDiscAmt:discSent ? D1 : null, discChanged:discSent && Math.abs(D1 - D0) >= 0.005,   // 🆕 PFD8
       c1, remaining:R, returned:retBase, used:(_cap || _exc) ? 0 : Math.max(0, baseQty - R - retBase), dInv, dRet,
       // C2: ทรัพย์สิน = ไม่มีผลต่างราคา 5391 (dVar 0) · ส่วนต่างทั้งหมดไปอยู่ที่ราคาบรรทัด (ลง 16xx ตอนตั้งหนี้)
       // 🆕 FREIGHT_EXPENSE F3: ค่าใช้จ่าย (expCharge) = dVar 0 · ส่วนต่าง dExp ลงบัญชีของบรรทัด (post_pi) / ราคาบรรทัด (at_gr → ลงตอนตั้งหนี้)
@@ -8286,13 +8362,17 @@ function planInvPriceAdjust(state, opts){
     }
   }
   let vOld = 0, vNew = 0, sumLt = 0, cum = 0, cumV = 0, cumVs = 0, cumBase = 0, dvb = 0, deb = 0, volatile = false;
+  const tot = { before:{ exempt:0, vatable:0 }, after:{ exempt:0, vatable:0 } };   // 🆕 PFD8: กล่องสรุปเทียบกระดาษ
   for(const g of grs) (g.lines || []).forEach((l, idx) => {
     if(!l) return;
     const k = g.id + ':' + idx, olt = Number(l.lineTotal) || 0, nlt = (k in newLt) ? newLt[k] : olt, rate = rateOf(g, l, idx), nr = (k in newRate) ? newRate[k] : rate;
     sumLt += olt; vOld += olt * rate / 100; vNew += nlt * nr / 100;   // 🆕 PV5-4: VAT ใหม่ตามอัตราใหม่ของบรรทัด
+    tot.before[rate > 0 ? 'vatable' : 'exempt'] += olt; tot.after[nr > 0 ? 'vatable' : 'exempt'] += nlt;
     dvb += (nr > 0 ? nlt : 0) - (rate > 0 ? olt : 0); deb += (nr > 0 ? 0 : nlt) - (rate > 0 ? 0 : olt);
     const ou = Number(l.unitPrice) || 0, first = l.priceAdjustedFrom != null ? (Number(l.priceAdjustedFrom) || 0) : ou;
-    const flt = olt + (first - ou) * (Number(l.qty) || 0);   // ยอดบรรทัด ณ ราคาแรกสุด (เกณฑ์สะสม กันกดซ้ำทีละนิด)
+    // 🆕 PFD9: ยอดบรรทัด ณ ราคาแรกสุด + ส่วนลดแรกสุด (invDiscFix.from) — แก้ส่วนลดทีละนิดหลายรอบไม่หลุดเกณฑ์ · ไม่มี invDiscFix = สูตรเดิม
+    const _D0 = grLineDiscGr(l), _Df = l.invDiscFix && l.invDiscFix.from != null ? (Number(l.invDiscFix.from) || 0) : _D0;
+    const flt = olt + (first - ou) * (Number(l.qty) || 0) + (_D0 - _Df);   // ยอดบรรทัด ณ ราคาแรกสุด (เกณฑ์สะสม กันกดซ้ำทีละนิด)
     cumBase += flt;
     // 🆕 PV5 เจ้าของ 14 ต.ค. "ข้ามอนุมัติได้เลย ยอดรวมเท่าเดิม": บรรทัดที่ VAT ต่างจากอัตราแรก (แก้รอบนี้/รอบก่อน · vatRateFixedAtGr)
     //   วัดส่วนต่าง "ยอดรวม VAT" (แปลงกลับเป็นฐานอัตราแรก) แทนมูลค่าก่อน VAT → ย้าย VAT 0→7 ที่ยอดจ่ายเท่าเดิม = ไม่นับเกณฑ์ · ยอดรวมเปลี่ยน = นับส่วนที่เปลี่ยน
@@ -8305,6 +8385,9 @@ function planInvPriceAdjust(state, opts){
   });
   out.dGoods = _pvR2(out.lines.reduce((t, x) => t + x.dAmt, 0));
   out.dVat = _pvR2(_pvR2(vNew) - _pvR2(vOld));
+  { const mk = (t, v) => { const e = _pvR2(t.exempt), b = _pvR2(t.vatable), vv = _pvR2(v); return { exempt:e, vatable:b, vat:vv, total:_pvR2(e + b + vv) }; };
+    out.totals = { before:mk(tot.before, vOld), after:mk(tot.after, vNew) }; }
+  out.discChanged = out.lines.some(x => x.discChanged);   // 🆕 PFD3
   out.dNet = _pvR2(out.dGoods + out.dVat);
   out.dInv = _pvR2(out.lines.reduce((t, x) => t + x.dInv, 0));
   out.dVar = _pvR2(out.lines.reduce((t, x) => t + x.dVar, 0));
@@ -8327,7 +8410,7 @@ function planInvPriceAdjust(state, opts){
   const tA = priceKeyInSetting(S, volatile ? 'priceKeyInVolatileTolAbs' : 'priceKeyInTolAbs'), tP = priceKeyInSetting(S, volatile ? 'priceKeyInVolatileTolPct' : 'priceKeyInTolPct');
   out.needsApproval = out.cumApprove > tA + 0.005 || (out.cumBase > 0 ? out.cumApprove / out.cumBase * 100 > tP + 1e-9 : out.cumApprove > 0.005);
   out.vatChanged = out.lines.some(x => x.vatChanged);   // 🆕 PV5-2: เปลี่ยน VAT อย่างเดียว = ถือว่าเปลี่ยน
-  if(out.lines.length && Math.abs(out.dGoods) < 0.005 && !out.vatChanged) push('ราคาเท่าเดิม — ไม่มีอะไรต้องปรับ');
+  if(out.lines.length && Math.abs(out.dGoods) < 0.005 && !out.vatChanged && !out.discChanged) push('ราคาเท่าเดิม — ไม่มีอะไรต้องปรับ');
   if(inv){
     if(invVatInEcount(inv)) push('PI นำเข้าจาก Ecount — ยื่น ภ.พ.30 ในระบบเดิมแล้ว ปรับราคาทางนี้ไม่ได้');
     if(inv.source === 'po_gr' && (inv.expenseLines || []).length) push('PI นี้รวมค่าบริการกับสินค้า (PO ผสม) — ปรับราคาทางนี้ไม่ได้');
@@ -8370,13 +8453,18 @@ function priceFixApprovalNeed(state, P, req, lines, confirmer, opts){
   const eff = (x) => { const y = pl.find(z => z.grId === x.grId && z.lineIdx === Number(x.lineIdx)); return y && y.vatChanged ? y.newVatRate : null; };
   const pOf = (x) => prop.find(y => y.grId === x.grId && Number(y.lineIdx) === Number(x.lineIdx));
   // overProp (กติกาเดิม R2.6/PV5-4): บรรทัดนอกข้อเสนอ · ราคาสูงกว่าข้อเสนอ · VAT ต่างจากข้อเสนอ = บัญชีคีย์เอง
-  const overProp = !!req && ls.some(x => { const p = pOf(x); return !p || Number(x.newUnitPrice) > Number(p.newUnitPrice) + 1e-9 || eff(x) !== vr(p); });
+  // 🆕 PRICE_FIX_DISCOUNT PFD10: ส่วนลดตามใบกำกับต้องตรงข้อเสนอ — ส่วนลดน้อยลง (ต้นทุนขึ้น) / ไม่ส่ง / ส่งเกินมาเอง = บัญชีคีย์เอง
+  const dOf = (x) => (x && x.newDiscAmt != null && x.newDiscAmt !== '') ? Number(x.newDiscAmt) : null;
+  const discOver = (x, p) => { const dx = dOf(x), dp = dOf(p); return (dp != null && (dx == null || dx < dp - 0.005)) || (dp == null && dx != null); };
+  const overProp = !!req && ls.some(x => { const p = pOf(x); return !p || Number(x.newUnitPrice) > Number(p.newUnitPrice) + 1e-9 || eff(x) !== vr(p) || discOver(x, p); });
   // exact: ตรงข้อเสนอทุกบรรทัด (ราคาต่ำกว่าข้อเสนอ / ทิ้งบรรทัดที่จัดซื้อแก้ = บัญชีแก้ตัวเลขเอง)
   const grLine = (p) => { const g = ((state && state.grs) || []).find(z => z && z.id === p.grId); return g && (g.lines || [])[Number(p.lineIdx)]; };
+  const dEq = (x, p) => { const dx = dOf(x), dp = dOf(p); return (dx == null && dp == null) || (dx != null && dp != null && Math.abs(dx - dp) <= 0.005); };
   const exact = !!req && prop.length > 0 && !overProp
-    && ls.every(x => { const p = pOf(x); return p && Math.abs(Number(x.newUnitPrice) - Number(p.newUnitPrice)) <= 1e-6; })
+    && ls.every(x => { const p = pOf(x); return p && Math.abs(Number(x.newUnitPrice) - Number(p.newUnitPrice)) <= 1e-6 && dEq(x, p); })
     && prop.every(p => ls.some(x => x.grId === p.grId && Number(x.lineIdx) === Number(p.lineIdx))
-      || (() => { const l = grLine(p); return !!l && Math.abs((Number(l.unitPrice) || 0) - Number(p.newUnitPrice)) <= 1e-6 && vr(p) == null; })());
+      || (() => { const l = grLine(p); return !!l && Math.abs((Number(l.unitPrice) || 0) - Number(p.newUnitPrice)) <= 1e-6 && vr(p) == null
+        && (dOf(p) == null || Math.abs(grLineDiscGr(l) - dOf(p)) <= 0.005); })());
   const cf = String(confirmer || '');
   const twoPerson = !o.gmDirect && !!req && req.status === 'submitted' && !!proposalBy && !!cf && cf !== proposalBy && exact;
   const needAp = !o.gmDirect && !twoPerson && !!P && (!!P.needsApproval || ((!req || overProp) && !!P.isIncrease));
@@ -15235,7 +15323,7 @@ Object.assign(global.ERP, {
   vatLockOf, vatPeriodLocked, depositKindOf, depositAvail, depositEligible, planDepositApplication, depositVatSplit, invDepositVatOffset, invDepositBaseOffset, invClaimableVatBase, invVatConflictOpen,
   normTaxInvNo, taxInvKey, taxInvKey2, findDupTaxInv, findTaxInvGrant, taxInvClaimWindow, TAX_INV_OVERRIDE_ANYOF, taxInvOverrideApprover,
   // 🆕 VAT-CLAIM (§B1)
-  planInvPriceAdjust, priceFixApprovalNeed, PRICE_FIX_TWO_PERSON_NOTE, pvLineRate, pvRtvAdjustable:_pvRtvAdjustable, rtvRevisedBannerHtml, priceKeyInSetting, PRICE_KEYIN_DEFAULTS, priceFixNonVat, priceFixNonVatBySupplier, priceFixNonVatAfter, priceFixNonVatVatMsg, PRICE_KEYIN_GM_KEYS, PRICE_FIX_NONVAT_VAT_MSG, PRICE_FIX_NODOCVAT_VAT_MSG,   // 🆕 PRICE-FIX ขั้น 2 (+ PV2-1/PV2-2)
+  planInvPriceAdjust, priceFixApprovalNeed, grLineDiscGr, grLineDiscEff, pfInvDiscCalc, priceFixInvDiscOn, /* 🆕 PRICE_FIX_DISCOUNT PFD1/PFD5 */ PRICE_FIX_TWO_PERSON_NOTE, pvLineRate, pvRtvAdjustable:_pvRtvAdjustable, rtvRevisedBannerHtml, priceKeyInSetting, PRICE_KEYIN_DEFAULTS, priceFixNonVat, priceFixNonVatBySupplier, priceFixNonVatAfter, priceFixNonVatVatMsg, PRICE_KEYIN_GM_KEYS, PRICE_FIX_NONVAT_VAT_MSG, PRICE_FIX_NODOCVAT_VAT_MSG,   // 🆕 PRICE-FIX ขั้น 2 (+ PV2-1/PV2-2)
   approvalIsProposer, PRICE_FIX_LIVE, priceFixLive, priceFixOpenForInv, invPriceApprovalPending, grPriceApprovalPending, grPriceFixHold, priceFixList, invAmountVsGrDiff, invOverrideDeny,   // 🆕 PRICE-FIX ขั้น 3 (+ invOverrideDeny ขั้น 4)
   TAXINV_VAT_TOL, invTaxMultiOk, invTaxInvViews, invTaxInvViewOf, invTaxInvBlankView, invTaxUncoveredVat, invTaxPaperSum, invTaxInvProgress, invTaxInvLabel, invTaxInvNumbers, vatDocKey,   // 🆕 MULTI-TAXINV
   ymOf, ymAdd, ymDiff, ymEnd, vatDeferred, vatDeferUsed, VAT_DEFER_ONCE_MSG, vatClaimDateOf, vatClaimWindowEnd, vatPaperDateBase, vatPendingDeadlineYm, supMemoNettedInInv, pendingTaxInvIds,
@@ -24124,6 +24212,27 @@ function _adjustInvPrice(s, a){
       const reqDoc = d.reqId ? (inv ? (inv.priceFixRequest && inv.priceFixRequest.id === d.reqId ? inv : null) : grs0.find(g => g.priceFixRequest && g.priceFixRequest.id === d.reqId)) : null;
       const req = reqDoc ? reqDoc.priceFixRequest : null;
       if(d.reqId && (!req || req.status !== 'submitted' || !req.proposal)){ alert('⛔ คำขอแก้ราคานี้ไม่อยู่ในสถานะรอบัญชียืนยัน (อาจถูกยืนยัน/ยกเลิกไปแล้ว)'); return s; }
+      // 🆕 PRICE_FIX_DISCOUNT PFD10 (hard ทุกทาง รวม gmDirect/approvalReqId): ส่วนลดต้องตรงที่จัดซื้อคีย์ · ใบเปลี่ยนหลังคีย์ = บล็อก
+      const _pdDisc = (x) => x && x.newDiscAmt != null && x.newDiscAmt !== '';
+      const _pdInv = !!(req && req.proposal && req.proposal.discMode === 'invoice'), _pdProp = _pdInv ? (req.proposal.lines || []) : [];
+      const _pdLn = (x) => { const g = (s.grs || []).find(z => z && z.id === x.grId); return g && (g.lines || [])[Number(x.lineIdx)]; };
+      // UAT N2: ข้อความระบุเลขใบรับของ + ชื่อสินค้า (post_pi หลายใบรับของ)
+      const _pdTag = (x) => { const g = (s.grs || []).find(z => z && z.id === x.grId) || {}, l = (g.lines || [])[Number(x.lineIdx)] || {}, it = (s.items || []).find(z => z && z.id === l.itemId);
+        return (g.grNumber || x.grId || '-') + ' บรรทัด ' + (Number(x.lineIdx) + 1) + (l.itemId ? ' (' + ((it && it.name) || l.itemId) + ')' : ''); };
+      const _pdAt = (ls, x) => (ls || []).find(y => y && y.grId === x.grId && Number(y.lineIdx) === Number(x.lineIdx));
+      { const why = [];
+        for(const p of _pdProp){
+          const l = _pdLn(p), y = _pdAt(d.lines, p);
+          if(!l || Math.abs(E.grLineDiscGr(l) - (Number(p.oldDiscAmt) || 0)) > 0.005){ why.push('ใบรับของเปลี่ยนหลังจัดซื้อคีย์ (' + _pdTag(p) + ') — ↩️ ส่งกลับจัดซื้อคีย์ใหม่'); continue; }
+          if(p.discChanged && (!_pdDisc(y) || Math.abs(Number(y.newDiscAmt) - Number(p.newDiscAmt)) > 0.005)) why.push(_pdTag(p) + ' ไม่ได้ส่งส่วนลดตามข้อเสนอ');
+        }
+        for(const x of (d.lines || [])){
+          if(!_pdDisc(x)) continue;
+          const p = _pdAt(_pdProp, x);
+          if(!p || p.newDiscAmt == null || Math.abs(Number(x.newDiscAmt) - Number(p.newDiscAmt)) > 0.005) why.push(_pdTag(x) + ' ส่วนลดไม่มีข้อเสนอจัดซื้อรองรับ');
+        }
+        if(why.length){ alert('⛔ ส่วนลดต้องตรงกับที่จัดซื้อคีย์ — ถ้าไม่ตรงให้ ↩️ ส่งกลับจัดซื้อ\n• ' + Array.from(new Set(why)).join('\n• ')); return s; }
+      }
       const proposalBy = req && req.proposal ? (req.proposal.by || '') : '';
       if(req && proposalBy && !gmDirect && (proposalBy === by || (!d.approvalReqId && liveBy && proposalBy === liveBy))){ alert('⛔ ผู้คีย์ราคา (จัดซื้อ) ยืนยันราคาที่ตัวเองคีย์ไม่ได้ — ต้องให้ฝ่ายบัญชีอีกคนยืนยัน'); return s; }
       if(inv && d.prevAmount != null && Math.abs((Number(inv.amount) || 0) - (Number(d.prevAmount) || 0)) > 0.01){ alert('⛔ ยอดใบนี้เปลี่ยนไปหลังเปิดหน้าจอ — เปิดใหม่แล้วลองอีกครั้ง'); return s; }
@@ -24173,7 +24282,7 @@ function _adjustInvPrice(s, a){
         alert('⛔ มีคำขออนุมัติปรับราคาของเอกสารนี้ค้างอยู่ — ให้ GM อนุมัติ หรือยกเลิกคำขออนุมัตินั้นก่อน แล้วยืนยันใหม่ได้เลย'); return s; }
       const usedDoc = inv || grs0[0];
       if(needAp || d.approvalReqId){
-        const J = E.approvalStableJson, normL = (ls) => (ls || []).map(x => ({ grId:x.grId, lineIdx:Number(x.lineIdx), newUnitPrice:Number(x.newUnitPrice), newVatRate:_pvVr(x) }));   // 🆕 PV5-4: อนุมัติผูก VAT ใหม่ด้วย
+        const J = E.approvalStableJson, normL = (ls) => (ls || []).map(x => ({ grId:x.grId, lineIdx:Number(x.lineIdx), newUnitPrice:Number(x.newUnitPrice), newVatRate:_pvVr(x), newDiscAmt:_pdDisc(x) ? Number(x.newDiscAmt) : null }));   /* 🆕 PFD10: key ส่วนลดสมมาตรสองฝั่ง */   // 🆕 PV5-4: อนุมัติผูก VAT ใหม่ด้วย
         const g = _approvalGate(s, d.approvalReqId, 'adjust_inv_price', { scope:'accounting', amount:(P.cumApprove != null ? P.cumApprove : Math.abs(P.cumGoods)), isIncrease:P.isIncrease, wasPaid:false },
           (q) => { const p = q.payload || {};
             return q.entityId === usedDoc.id && p.mode === P.mode && J(normL(p.lines)) === J(normL(d.lines)) && Math.abs((Number(q.amount) || 0) - (P.cumApprove != null ? P.cumApprove : Math.abs(P.cumGoods))) < 0.01
@@ -24214,16 +24323,17 @@ function _adjustInvPrice(s, a){
           date:jeDate, description:'ปรับราคาตามใบกำกับ ' + docRef + ' (' + (P.dGoods > 0 ? '+' : '') + P.dGoods.toFixed(2) + ') — ' + reason,
           refType:'inv_price_adjust', ...src, sourceRef:docRef, branchId:(inv && inv.branch) || grs0[0].branch || s.currentBranch,
           lines:jl, totalDebit:tD, totalCredit:tC, status:'posted', createdBy:by, postedBy:by, createdAt:at, postedAt:at,
-          priceAdjust:{ mode:P.mode, dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet, dInventory:P.dInv, dVariance:P.dVar } };
+          priceAdjust:{ mode:P.mode, dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet, dInventory:P.dInv, dVariance:P.dVar, ...(_pdInv ? { billDiscs:req.proposal.billDiscs || [] } : {}) } };   // 🆕 PFD16
       }
       const _vx = (x, o, n) => (n != null && n !== o) ? { oldVat:o, newVat:n } : {};   // 🆕 PV5-4: บันทึก VAT เดิม→ใหม่ เฉพาะบรรทัดที่เปลี่ยน
-      const confirmedLines = P.lines.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, itemId:x.itemId, old:x.oldUnitPrice, new:x.newUnitPrice, ...(x.vatChanged ? _vx(x, x.oldVatRate, x.newVatRate) : {}) }));
-      const proposalLines = req && req.proposal ? (req.proposal.lines || []).map(x => ({ grId:x.grId, lineIdx:x.lineIdx, itemId:x.itemId, old:x.oldUnitPrice, new:x.newUnitPrice, ..._vx(x, x.oldVatRate, x.newVatRate) })) : null;
-      const vatNote = P.lines.filter(x => x.vatChanged).map(x => ` · VAT บรรทัด ${x.lineIdx + 1} ${x.oldVatRate}% → ${x.newVatRate}%`).join('');
-      const hist = { at, by, mode:P.mode, reqId:d.reqId || null, approvalReqId:d.approvalReqId || null, direct:!!gmDirect, reason, proposalBy:proposalBy || null, ...(twoPerson ? { twoPerson:true } : {}),   /* PF-NOREAPPROVE N1 */
+      const confirmedLines = P.lines.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, itemId:x.itemId, old:x.oldUnitPrice, new:x.newUnitPrice, ...(x.vatChanged ? _vx(x, x.oldVatRate, x.newVatRate) : {}), ...(x.discChanged ? { oldDisc:x.oldDiscAmt, newDisc:x.newDiscAmt } : {}) }));
+      const proposalLines = req && req.proposal ? (req.proposal.lines || []).map(x => ({ grId:x.grId, lineIdx:x.lineIdx, itemId:x.itemId, old:x.oldUnitPrice, new:x.newUnitPrice, ..._vx(x, x.oldVatRate, x.newVatRate), ...(x.discChanged ? { oldDisc:x.oldDiscAmt, newDisc:x.newDiscAmt } : {}) })) : null;
+      const vatNote = P.lines.filter(x => x.vatChanged).map(x => ` · VAT บรรทัด ${x.lineIdx + 1} ${x.oldVatRate}% → ${x.newVatRate}%`).join('')
+        + (_pdInv ? ` · ส่วนลด ${P.lines.filter(x => x.discChanged).length} บรรทัด · ส่วนลดรวม ${r2((req.proposal.billDiscs || []).reduce((t, b) => t + (Number(b && b.amount) || 0), 0)).toFixed(2)}` : '');   // 🆕 PFD16
+      const hist = { at, by, mode:P.mode, reqId:d.reqId || null, approvalReqId:d.approvalReqId || null, direct:!!gmDirect, reason, proposalBy:proposalBy || null, ...(twoPerson ? { twoPerson:true } : {}), ...(_pdInv ? { billDiscs:req.proposal.billDiscs || [] } : {}),   /* PF-NOREAPPROVE N1 */
         proposalLines, confirmedLines, supTaxInvNumber:tiNo || null, ...(cashNo ? { cashBillNo:cashNo } : {}), dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet, dInventory:P.dInv, dVariance:P.dVar, jeId:je ? je.id : null, jeNumber:je ? je.jeNumber : null };
       const closeReq = (doc) => (req && doc === reqDoc) ? { priceFixRequest:{ ...req, status:'done', doneAt:at, doneBy:by,
-        history:[...(req.history || []), { at, by, act:'confirm', note:reason, lines:confirmedLines.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, old:x.old, new:x.new, ...(x.newVat != null ? { oldVat:x.oldVat, newVat:x.newVat } : {}) })) }] } } : {};
+        history:[...(req.history || []), { at, by, act:'confirm', note:reason, lines:confirmedLines.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, old:x.old, new:x.new, ...(x.newVat != null ? { oldVat:x.oldVat, newVat:x.newVat } : {}), ...(x.newDisc != null ? { oldDisc:x.oldDisc, newDisc:x.newDisc } : {}) })) }] } } : {};
       const useAp = (doc) => (d.approvalReqId && doc === usedDoc) ? { usedApprovalIds:[...(doc.usedApprovalIds || []), d.approvalReqId] } : {};
       const cp = new Map(P.costPlan.map(c => [c.layerId, c]));
       const fifoLayers = (s1.fifoLayers || []).map(f => {
@@ -24233,14 +24343,24 @@ function _adjustInvPrice(s, a){
       });
       const byGr = new Map();
       for(const x of P.lines){ if(!byGr.has(x.grId)) byGr.set(x.grId, []); byGr.get(x.grId).push(x); }
+      // 🆕 PFD14: ส่วนลดตามใบกำกับ → invDiscFix (บรรทัด) + invBillDiscFix (หัวใบ) · discAmt/billDiscPart ห้ามแตะ
+      const _pdP = (gid, idx) => _pdProp.find(p => p.grId === gid && Number(p.lineIdx) === idx);
+      const _pdFix = (l, amt, p) => ({ amt, line:p ? p.discLine : null, bill:p ? p.discBill : null, ...(p && p.discKeyed ? { keyed:p.discKeyed } : {}),
+        from:(l.invDiscFix && l.invDiscFix.from != null) ? l.invDiscFix.from : (Number(l.discAmt) || 0), at, by, reqId:d.reqId || null });
+      const _pdHead = _pdInv ? { invBillDiscFix:{ discs:req.proposal.billDiscs || [], paper:{ total:req.proposal.paperTotal != null ? req.proposal.paperTotal : null, vat:req.proposal.paperVat != null ? req.proposal.paperVat : null }, at, by, reqId:d.reqId || null } } : {};
+      // บรรทัดข้อเสนอที่ไม่ผ่าน planner พร้อมส่วนลด (ไม่เปลี่ยนมูลค่า) → เขียนร่องรอย invDiscFix อย่างเดียว
+      const _pdTrace = (g, l, idx, x) => { if(!_pdInv || !l || l.isFreebie || (x && x.newDiscAmt != null)) return l; const p = _pdP(g.id, idx);
+        if(!p || p.newDiscAmt == null || Math.abs(E.grLineDiscGr(l) - Number(p.newDiscAmt)) > 0.005) return l; return { ...l, invDiscFix:_pdFix(l, Number(p.newDiscAmt), p) }; };
       const grs = (s1.grs || []).map(g => {
-        const mine = g && byGr.get(g.id); if(!mine) return g;
+        const mine = g && byGr.get(g.id);
+        if(!mine){ if(!g || !_pdInv || !P.grIds.includes(g.id)) return g; return { ...g, lines:(g.lines || []).map((l, idx) => _pdTrace(g, l, idx, null)), ..._pdHead }; }
         const dG = r2(mine.reduce((t, x) => t + x.dAmt, 0)), dI = r2(mine.reduce((t, x) => t + x.dInv, 0)), dR = r2(mine.reduce((t, x) => t + (x.dRet || 0), 0));   // verify 1: ส่วนที่คืนไปแล้ว (RTV) ตรงกับ JE
         // 🆕 PRICE-FIX verify 2: ส่วนลด PI ค้างจากใบที่ยกเลิกแล้ว — แผนคิดจากมุมมองจริง (ไม่หักส่วนลด) → บรรทัดที่ปรับ ล้าง piDiscAlloc ค้าง
         const stalePi = E.grEffective(g, s1.invoices) !== g;
         const lines = (g.lines || []).map((l, idx) => {
-          const x = mine.find(y => y.lineIdx === idx); if(!x) return l;
-          return { ...l, unitPrice:x.newUnitPrice, lineTotal:x.newLineTotal, priceAdjustedFrom:(l.priceAdjustedFrom != null ? l.priceAdjustedFrom : x.oldUnitPrice),
+          const x = mine.find(y => y.lineIdx === idx); if(!x) return _pdTrace(g, l, idx, null);
+          const _dl = x.newDiscAmt != null;   // PFD14: บรรทัดโหมดส่วนลด
+          return { ..._pdTrace(g, l, idx, x), unitPrice:x.newUnitPrice, ...(_dl ? { invDiscFix:_pdFix(l, x.newDiscAmt, _pdP(g.id, idx)), grossTotal:r2(x.newUnitPrice * x.qty) } : {}), lineTotal:x.newLineTotal, priceAdjustedFrom:(l.priceAdjustedFrom != null ? l.priceAdjustedFrom : x.oldUnitPrice),
             // 🆕 PV5-4 + UAT M2: audit แยก field (vatRateFixedAtGr = อัตราแรกก่อนจัดซื้อแก้) — ห้ามใช้ vatRateAdjustedFrom (= "sync กับ INV แล้ว" → override ตอนตั้งหนี้ถูกข้าม)
             ...(x.vatChanged ? { vatRate:x.newVatRate, vatRateFixedAtGr:(l.vatRateFixedAtGr != null ? l.vatRateFixedAtGr : x.oldVatRate) } : {}),
             ...(stalePi && l.piDiscAlloc ? { piDiscAlloc:0 } : {}),
@@ -24251,7 +24371,7 @@ function _adjustInvPrice(s, a){
         return { ...g, lines, ...(g.totalValue != null ? { totalValue:r2((Number(g.totalValue) || 0) + dG) } : {}),
           ...(g.totalValueBeforePiDisc != null ? { totalValueBeforePiDisc:r2((Number(g.totalValueBeforePiDisc) || 0) + dG) } : {}), priceAdjustedAt:at,
           priceAdjustHistory:[...(g.priceAdjustHistory || []), { ...hist, dGoods:dG, dInventory:dI, dReturn:dR, dVariance:r2(mine.reduce((t, x) => t + (x.dVar || 0), 0)), dCapex:r2(mine.reduce((t, x) => t + (x.dCapex || 0), 0)), invTotals:{ dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet } }],   // 🆕 UNDO_PRINCIPLE C5: dVariance = Σ dVar (ทรัพย์สินไม่นับเป็น 5391) + dCapex
-          ...closeReq(g), ...useAp(g) };
+          ..._pdHead, ...closeReq(g), ...useAp(g) };
       });
       let invoices = s1.invoices;
       if(inv){
@@ -24381,7 +24501,7 @@ function reducer(s, a){
       const _old = s.settings || {}, _new = { ..._old, ...(a.data || {}) };
       const _WATCH = ['gmSelfApprove', 'posBackflushPhantomOnly','productionLive','periodLockUntil','futureDateLimit','siRequirePrice','stockValueRoles','allowNegativeStock',
         'weighOrderJobs', 'vatLockUntil', 'capitalizeThreshold',
-        'priceKeyInEnabled', 'priceKeyInTolAbs', 'priceKeyInTolPct', 'priceKeyInBlockPct', 'priceKeyInVolatileTolAbs', 'priceKeyInVolatileTolPct', 'priceKeyInWarnPct', 'lineTrStockHints'];   /* UAT S2: สวิตช์โชว์ยอดที่ไลน์ตอนขอของเข้าไลน์ ลงประวัติ */   // 🆕 PRICE-FIX UAT M2: สวิตช์/เกณฑ์ไม่ต้องอนุมัติ ลงประวัติ (กันขยับเกณฑ์ชั่วคราวแล้วคืนเงียบ) ·   💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · B18 gmSelfApprove · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
+        'priceKeyInEnabled', 'priceKeyInTolAbs', 'priceKeyInTolPct', 'priceKeyInBlockPct', 'priceKeyInVolatileTolAbs', 'priceKeyInVolatileTolPct', 'priceKeyInWarnPct', 'lineTrStockHints', 'priceFixInvDiscEnabled'];   /* UAT S2: สวิตช์โชว์ยอดที่ไลน์ตอนขอของเข้าไลน์ ลงประวัติ */   // 🆕 PRICE-FIX UAT M2: สวิตช์/เกณฑ์ไม่ต้องอนุมัติ ลงประวัติ (กันขยับเกณฑ์ชั่วคราวแล้วคืนเงียบ) ·   💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · B18 gmSelfApprove · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
       const _chg = _WATCH.filter(k => a.data && Object.prototype.hasOwnProperty.call(a.data, k) && JSON.stringify(_old[k]) !== JSON.stringify(a.data[k]));
       if(!_chg.length) return { ...s, settings:_new };
       const _by = (s.currentUser && s.currentUser.username) || (a.data && a.data._by) || 'system', _now = Date.now();
@@ -27045,13 +27165,18 @@ function reducer(s, a){
       if(_og && _ng){
         _ng = { ..._ng };
         const _stale = (_og.priceAdjustHistory || []).length !== (_ng.priceAdjustHistory || []).length;
-        for(const k of ['priceAdjustHistory','priceFixRequest','overRecvDecisions','overRecvAck']){ if(k in _og) _ng[k] = _og[k]; else delete _ng[k]; }   // 📦 OVER_RECEIVE O5: การตัดสินรับเกินแก้ได้เฉพาะ ACK_GR_OVER_RECEIVE
+        for(const k of ['priceAdjustHistory','priceFixRequest','overRecvDecisions','overRecvAck','invBillDiscFix']){ if(k in _og) _ng[k] = _og[k]; else delete _ng[k]; }   // 📦 OVER_RECEIVE O5: การตัดสินรับเกินแก้ได้เฉพาะ ACK_GR_OVER_RECEIVE
         if(_stale && Array.isArray(_og.lines)) _ng.lines = _og.lines;
         // 📦 OVER_RECEIVE verify 1: ผู้รับของ + ส่วนเกินรายบรรทัด (overQty/overPct/overFreeQty) คงตามใบใน state เสมอ — สำเนาเก่า/payload แต่งลบส่วนเกินเพื่อเปิดด่านตั้งหนี้ หรือเปลี่ยนผู้รับเพื่อข้าม SoD ไม่ได้
         for(const k of ['receivedBy','receivedByName']){ if(k in _og) _ng[k] = _og[k]; else delete _ng[k]; }
         if(Array.isArray(_ng.lines) && Array.isArray(_og.lines)){
           _ng.lines = _ng.lines.map((l, i) => { if(!l || typeof l !== 'object') return l; const o = _og.lines[i] || {}, nl = { ...l };
             for(const k of ['overQty','overPct','overFreeQty']){ if(k in o) nl[k] = o[k]; else delete nl[k]; } return nl; });
+        }
+        // 🆕 PRICE_FIX_DISCOUNT PFD15: ส่วนลดตามใบกำกับ (invDiscFix) แก้ได้เฉพาะ ADJUST_INV_PRICE — คงจากใบใน state เสมอ (itemId ตรงเท่านั้น · ไม่ตรง = ไม่แปะ + ทิ้งค่าที่แต่งมา)
+        if(Array.isArray(_ng.lines)){
+          _ng.lines = _ng.lines.map((l, i) => { if(!l || typeof l !== 'object') return l; const o = Array.isArray(_og.lines) ? _og.lines[i] : null, nl = { ...l };
+            if(o && o.itemId === l.itemId && 'invDiscFix' in o) nl.invDiscFix = o.invDiscFix; else delete nl.invDiscFix; return nl; });
         }
         // 🆕 OFF_INV_DISC_ASSET verify 1: การรวมค่าส่งเข้า 💎 (capInto*/noStock + capRev) แก้ได้เฉพาะ CAP_GR_CHARGE_INTO_ASSET
         //   สำเนาเก่าจากเครื่องอื่น replay มาทับ → คงค่าตามใบใน state (กันลบ/คืน capInto ทั้งที่ล็อตสต๊อกถอด/คืนไปแล้ว)
@@ -27899,6 +28024,21 @@ function reducer(s, a){
           const grIds = d.target === 'gr' ? [doc0.id] : ((doc0.grIds && doc0.grIds.length) ? doc0.grIds : (doc0.grId ? [doc0.grId] : []));
           const ls = Array.isArray(d.lines) ? d.lines : [], seen = new Set(), out = [];
           const blockPct = E.priceKeyInSetting(s, 'priceKeyInBlockPct');
+          // 🆕 PRICE_FIX_DISCOUNT PFD3/PFD7/PFD19: โหมด "ใบกำกับมีส่วนลด" — เก็บทุกบรรทัด + ตรวจซ้ำด้วย pfInvDiscCalc + ด่านใบเปลี่ยนระหว่างคีย์
+          const discMode = d.discMode === 'invoice';
+          if(discMode && !E.priceFixInvDiscOn(s)){ alert('⛔ ปิดใช้ส่วนลดตามใบกำกับอยู่ (ตั้งค่า → นโยบาย)'); return s; }
+          if(!discMode && ls.some(w => w && ((w.newDiscAmt != null && w.newDiscAmt !== '') || (w.discLine != null && w.discLine !== '')))){ alert('⛔ ส่วนลดตามใบกำกับต้องส่งในโหมด 🏷️ ใบกำกับมีส่วนลด'); return s; }
+          let dc = null;
+          if(discMode){
+            const _pe = d.priceEntry === 'inc' ? 'inc' : 'ex';
+            dc = E.pfInvDiscCalc(s, d.target === 'gr' ? { mode:'at_gr', grIds, priceEntry:_pe } : { mode:'post_pi', invId:doc0.id, priceEntry:_pe }, ls, d.billDiscs);
+            if(dc.error){ alert('⛔ ' + dc.error); return s; }
+            for(const gid of grIds){
+              const g = (s.grs || []).find(x => x && x.id === gid); if(!g) continue;
+              const miss = (g.lines || []).some((l, i) => l && !l.isFreebie && !ls.some(w => w && w.grId === gid && Number(w.lineIdx) === i));
+              if(miss){ alert('⛔ โหมดใบกำกับมีส่วนลดต้องส่งทุกบรรทัดของ ' + (g.grNumber || gid) + ' (ส่วนลดรวมเกลี่ยทั้งใบ)'); return s; }
+            }
+          }
           for(const w of ls){
             const g = grIds.includes(w && w.grId) ? (s.grs || []).find(x => x && x.id === w.grId) : null;
             const idx = Number(w && w.lineIdx), l = g && Number.isInteger(idx) ? (g.lines || [])[idx] : null;
@@ -27923,16 +28063,34 @@ function reducer(s, a){
                 nRate = vr;
               }
             }
-            if(Math.abs(nu - ou) < 1e-9 && nRate == null) continue;   // ราคาและ VAT เท่าเดิม = ไม่ส่ง
             const km = w.keyedMode === 'inc' ? 'inc' : 'ex', kp = Number(w.keyedPrice);
+            if(discMode){
+              if(l.isFreebie) continue;   // PFD6
+              const row = dc.rows.find(x => x.grId === g.id && x.lineIdx === idx), D0 = E.grLineDiscGr(l);
+              // PFD7 ด่านใบเปลี่ยนระหว่างคีย์ (multiwriter) — ส่วนลด/ยอดที่ฟอร์มเห็นต้องตรงใบสด
+              if(w.oldDiscAmt == null || w.oldLineTotal == null || Math.abs(Number(w.oldDiscAmt) - D0) > 0.005 || Math.abs(Number(w.oldLineTotal) - (Number(l.lineTotal) || 0)) > 0.005){
+                alert('⛔ ใบรับของเปลี่ยนระหว่างคีย์ (คืนของ/แถม/แก้จากเครื่องอื่น) — เปิดฟอร์มใหม่'); return s; }
+              if(!row || w.newDiscAmt == null || w.newDiscAmt === '' || Math.abs(Number(w.newDiscAmt) - row.amt) > 0.005){ alert('⛔ ' + nm + ': ส่วนลดที่ส่งมาไม่ตรงกับที่คำนวณได้ (' + (row ? row.amt.toFixed(2) : '-') + ') — เปิดฟอร์มใหม่'); return s; }
+              const priceChanged = Math.abs(nu - ou) >= 1e-9, discChanged = Math.abs(row.amt - D0) >= 0.005;
+              out.push({ grId:g.id, lineIdx:idx, itemId:l.itemId || null, oldUnitPrice:ou, newUnitPrice:nu,
+                ...(nRate != null ? { oldVatRate:oRate, newVatRate:nRate } : {}), keyedPrice:isFinite(kp) && kp > 0 ? kp : nu, keyedMode:km,
+                oldDiscAmt:D0, newDiscAmt:row.amt, discLine:row.line, discBill:row.bill, discKeyed:row.keyed, priceChanged, discChanged });
+              continue;
+            }
+            if(Math.abs(nu - ou) < 1e-9 && nRate == null) continue;   // ราคาและ VAT เท่าเดิม = ไม่ส่ง
             out.push({ grId:g.id, lineIdx:idx, itemId:l.itemId || null, oldUnitPrice:ou, newUnitPrice:nu,   // P4: ไม่มีจำนวน
               ...(nRate != null ? { oldVatRate:oRate, newVatRate:nRate } : {}), keyedPrice:isFinite(kp) && kp > 0 ? kp : nu, keyedMode:km });
           }
-          if(!out.length){ alert('⛔ ยังไม่มีบรรทัดที่เปลี่ยนราคา/VAT'); return s; }
+          if(!out.length || (discMode && !out.some(x => x.priceChanged || x.discChanged || x.newVatRate != null))){ alert('⛔ ยังไม่มีบรรทัดที่เปลี่ยนราคา/VAT/ส่วนลด'); return s; }
           const priceEntry = d.priceEntry === 'inc' ? 'inc' : 'ex';   // 🆕 PV5-1: วิธีคีย์ราคา (ไม่รวม/รวม VAT)
-          r1 = { ...r0, status:'submitted', proposal:{ lines:out, note, at, by, priceEntry },
-            history:[...(r0.history || []), { at, by, act:'submit', note, round:r0.round || 1, priceEntry,
-              lines:out.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, old:x.oldUnitPrice, new:x.newUnitPrice, ...(x.newVatRate != null ? { oldVat:x.oldVatRate, newVat:x.newVatRate } : {}) })) }] };
+          // 🆕 PFD16: ข้อเสนอ/ประวัติ เก็บส่วนลดรวม + ตัวเลขกระดาษ (ไม่บังคับ)
+          const _num = (v) => (v != null && v !== '' && isFinite(Number(v))) ? Number(v) : null;
+          const pT = discMode ? _num(d.paperTotal) : null, pV = discMode ? _num(d.paperVat) : null;
+          const dx = discMode ? { discMode:'invoice', billDiscs:dc.heads, ...(pT != null ? { paperTotal:pT } : {}), ...(pV != null ? { paperVat:pV } : {}) } : {};
+          r1 = { ...r0, status:'submitted', proposal:{ lines:out, note, at, by, priceEntry, ...dx },
+            history:[...(r0.history || []), { at, by, act:'submit', note, round:r0.round || 1, priceEntry, ...dx,
+              lines:out.map(x => ({ grId:x.grId, lineIdx:x.lineIdx, old:x.oldUnitPrice, new:x.newUnitPrice, ...(x.newVatRate != null ? { oldVat:x.oldVatRate, newVat:x.newVatRate } : {}),
+                ...(x.discChanged ? { oldDisc:x.oldDiscAmt, newDisc:x.newDiscAmt } : {}) })) }] };
           act = 'submit';
         } else if(T === 'RETURN_INV_PRICE_FIX'){
           if(r0.status !== 'submitted'){ alert('⛔ คำขอนี้ไม่ได้รอบัญชียืนยัน (สถานะ ' + r0.status + ')'); return s; }
@@ -76047,15 +76205,49 @@ function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
     const ex = p ? Number(p.newUnitPrice) || 0 : (Number(r.l.unitPrice) || 0);
     const f = 1 + (Number(vat0Of(p, r)) || 0) / 100;
     return [r.key, String(mode0 === 'inc' ? Number((ex * f).toFixed(6)) : ex)]; })));
+  // 🆕 PRICE_FIX_DISCOUNT PFD2/PFD4/PFD5: โหมด 🏷️ ใบกำกับมีส่วนลด (ซ่อนเมื่อสวิตช์ PFD19 ปิด) — ฟื้นจากข้อเสนอรอบก่อนเมื่อถูกส่งกลับ (T18)
+  const discAllowed = global.ERP.priceFixInvDiscOn(state), prop0 = req.proposal || null, propDisc = !!(prop0 && prop0.discMode === 'invoice');
+  // UAT M1 (PFD2): ใบที่เคยแก้ตามส่วนลดใบกำกับแล้ว (invDiscFix/invBillDiscFix) → เปิดโหมดส่วนลด + กล่องส่วนลดรวมฟื้นจาก invBillDiscFix (กันส่วนลดรวมเดิมหายเงียบรอบ 2)
+  const priorFix = !propDisc && rows.some(r => r.l.invDiscFix || r.g.invBillDiscFix);
+  const priorBill = !propDisc ? ((rows.map(r => r.g).find(g => g && g.invBillDiscFix && (g.invBillDiscFix.discs || []).length) || {}).invBillDiscFix || null) : null;
+  const [discOn, setDiscOn] = useState(() => discAllowed && (propDisc || priorFix));
+  const [disc, setDisc] = useState(() => Object.fromEntries(rows.map(r => { const p = prevL(r);
+    if(propDisc && p && p.discKeyed) return [r.key, Number(p.discKeyed.value) > 0 ? String(Number(p.discKeyed.value)) : ''];
+    // verify 1: เคยแก้ตามใบกำกับแล้ว + ยอดที่คีย์ไว้ฐานเดียวกับโหมด → ใช้ยอดที่คีย์เป๊ะ (แปลงกลับจากก่อน VAT เพี้ยน 0.01 → discDiff ปลอม)
+    const kd = r.l.invDiscFix && r.l.invDiscFix.keyed;
+    if(kd && kd.entered === (mode0 === 'inc' ? 'incl' : 'excl') && isFinite(Number(kd.value))) return [r.key, Number(kd.value) > 0 ? String(Number(kd.value)) : ''];
+    // ค่าเริ่ม = ส่วนบรรทัดของส่วนลดเดิม (ก่อน VAT) แปลงตามสวิตช์
+    const d0 = r.l.invDiscFix ? (Number(r.l.invDiscFix.line) || 0) : Math.max(0, (Number(r.l.discAmt) || 0) - (Number(r.l.billDiscPart) || 0));
+    const v = global.ERP.lineDiscFromBasis(d0, nonVat ? 0 : vat0Of(p, r), mode0 === 'inc' ? 'incl' : 'excl', 'exclusive');
+    return [r.key, v > 0 ? String(v) : '']; })));
+  const bdFromHead = (x) => x ? { mode:x.mode === 'pct' ? 'pct' : 'thb', value:Number(x.value) || 0, ...(x.scope && x.scope !== 'all' ? { scope:x.scope } : {}), ...(x.entered === 'incl' && x.mode !== 'pct' ? { entered:'incl' } : {}) } : null;
+  const bdSrc = propDisc ? (prop0.billDiscs || []) : priorBill ? (priorBill.discs || []) : [];
+  const [bd1, setBd1] = useState(() => bdFromHead(bdSrc[0]) || { mode:'thb', value:0, ...(mode0 === 'inc' ? { entered:'incl' } : {}) });
+  const [bd2, setBd2] = useState(() => bdFromHead(bdSrc[1]) || null);
+  const [paperTotal, setPaperTotal] = useState(() => propDisc && prop0.paperTotal != null ? String(prop0.paperTotal) : '');
+  const [paperVat, setPaperVat] = useState(() => propDisc && prop0.paperVat != null ? String(prop0.paperVat) : '');
   const rateOf = (r) => nonVat ? 0 : (Number(vat[r.key]) || 0);
   const exOf = (r) => { const k = Number(price[r.key]); if(!isFinite(k)) return 0; return mode === 'inc' ? k / (1 + rateOf(r) / 100) : k; };   // ทศนิยมเต็ม (×1.07 กลับได้ยอดเดิม)
   const hasRtvLine = (r) => (state.returns || []).some(x => x && x.grId === r.g.id && x.rtvStatus !== 'cancelled'
     && (x.lines || []).some(rl => rl && (rl.grLineIdx != null ? Number(rl.grLineIdx) === r.idx : rl.itemId === r.l.itemId)));   // ตรงกับด่าน SUBMIT_INV_PRICE_FIX
   const vatLockWhy = (r) => entry.target === 'inv' ? 'ตั้งหนี้แล้ว — VAT ผิดให้บัญชีใช้ 🧾 ปรับ VAT ตามใบกำกับ' : hasRtvLine(r) ? 'บรรทัดนี้มีใบคืนของ (RTV) ผูก — แก้ VAT ไม่ได้ ใช้ CN/DN' : null;
+  const discBackRef = useRef({});   // verify 1: ค่ารวม VAT เดิมของช่องส่วนลด (สลับกลับไม่เพี้ยน)
   const switchMode = (m) => { if(m === mode) return;
     setPrice(p => Object.fromEntries(rows.map(r => { const k = Number(p[r.key]), f = 1 + rateOf(r) / 100;
       if(p[r.key] === '' || !isFinite(k)) return [r.key, p[r.key]];
       return [r.key, String(m === 'inc' ? Number((k * f).toFixed(6)) : Number((k / f).toPrecision(15)))]; })));   // inc→ex เก็บทศนิยมเต็ม
+    // 🆕 PFD4: ส่วนลดบรรทัดที่พิมพ์ไว้แปลงด้วยตัวคูณเดียวกับราคา · กล่องส่วนลดรวมที่ยังว่าง → ค่าเริ่ม "ยอดที่กรอก" ตามสวิตช์
+    setDisc(p => Object.fromEntries(rows.map(r => { const k = Number(p[r.key]), f = 1 + rateOf(r) / 100;
+      if(p[r.key] === '' || p[r.key] == null || !isFinite(k)) return [r.key, p[r.key]];
+      // verify 1 (T6): รวม→ไม่รวม VAT ใช้ค่าก่อน VAT ที่ pfInvDiscCalc คิดแล้ว (สูตร §1.5 ข้อ 1 ผูกราคาที่คีย์) — k/1.07 แล้วปัดเองเพี้ยน 0.01
+      //   ex→inc: ช่องยังเป็นค่าที่เราแปลงให้ (ไม่ได้แก้) → คืนยอดรวม VAT ที่พิมพ์ไว้เดิมเป๊ะ (74.77×1.07 ≠ 80)
+      const bk = discBackRef.current[r.key];
+      if(m === 'inc' && bk && bk.ex === p[r.key]) return [r.key, bk.inc];
+      const x = m === 'ex' && f > 1 && typeof dRow === 'function' ? dRow(r) : null;
+      if(x && isFinite(Number(x.line))){ const ev = Number(x.line) > 0 ? String(Number(x.line)) : ''; discBackRef.current[r.key] = { ex:ev, inc:p[r.key] }; return [r.key, ev]; }
+      return [r.key, String(m === 'inc' ? Number((k * f).toFixed(6)) : Number((k / f).toPrecision(15)))]; })));
+    const ent = (b) => { if(!b || Number(b.value) > 0 || b.mode === 'pct') return b; const { entered, ...rest } = b; return m === 'inc' ? { ...rest, entered:'incl' } : rest; };
+    setBd1(ent); setBd2(ent);
     setMode(m); };
   const [note, setNote] = useState('');
   const canKey = isSuperUser(user) || hasPerm(user, 'purchase', 'po', 'edit');
@@ -76065,7 +76257,24 @@ function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
   // 🆕 PV5-2: บรรทัด "เปลี่ยน" = ราคาก่อน VAT ต่าง (เผื่อเศษจากสลับโหมด) หรือ VAT ต่าง
   const vatDiff = (r) => !nonVat && rateOf(r) !== effR(r);
   //   verify 1: บรรทัดราคา 0 เปลี่ยนแค่ VAT = ไม่มีผลเงิน → ไม่นับว่าแก้ (ยังเป็นเหลือง ส่งได้ · reducer ไม่รับราคา 0 อยู่แล้ว)
-  const touched = (r) => Math.abs(exOf(r) - (Number(r.l.unitPrice) || 0)) > 0.00005 || (vatDiff(r) && exOf(r) > 0);
+  const touchedP = (r) => Math.abs(exOf(r) - (Number(r.l.unitPrice) || 0)) > 0.00005 || (vatDiff(r) && exOf(r) > 0);
+  // 🆕 PFD5/PFD8: โหมดส่วนลด — payload ทุกบรรทัด → pfInvDiscCalc (สูตรเดียวกับ SUBMIT) → planInvPriceAdjust พรีวิว (แหล่งตัวเลขเดียวกับบัญชี)
+  const dOn = discAllowed && discOn, E0 = global.ERP;
+  const bdEff = [bd1, ...(bd2 && bd1 && (bd1.scope === 'vat' || bd1.scope === 'novat') ? [{ ...bd2, scope:bd1.scope === 'vat' ? 'novat' : 'vat' }] : [])].filter(b => b && Number(b.value) > 0);
+  const nuOf = (r) => touchedP(r) ? exOf(r) : (Number(r.l.unitPrice) || 0);   // ราคาไม่ได้แก้ = ราคาเดิมเป๊ะ (กันเศษทศนิยมนับว่าเปลี่ยน)
+  const nvOf = (r) => nonVat || entry.target === 'inv' || rateOf(r) === pfLineRate(r.l) ? null : rateOf(r);
+  const dLines = dOn ? rows.map(r => { const nv = nvOf(r), raw = disc[r.key], dl = raw === '' || raw == null ? 0 : Number(raw);
+    return { grId:r.g.id, lineIdx:r.idx, newUnitPrice:nuOf(r), ...(nv != null ? { newVatRate:nv } : {}), keyedPrice:Number(price[r.key]), keyedMode:mode, discLine:isFinite(dl) ? dl : -1 }; }) : [];
+  const dCtx = entry.target === 'gr' ? { mode:'at_gr', grIds:[doc.id] } : { mode:'post_pi', invId:doc.id };
+  const dc = dOn ? E0.pfInvDiscCalc(state, { ...dCtx, priceEntry:mode }, dLines, bdEff) : null;
+  const dRow = (r) => dc ? (dc.rows.find(x => x.key === r.key) || null) : null;
+  const discDiff = (r) => { const x = dRow(r); return !!x && Math.abs(x.amt - E0.grLineDiscGr(r.l)) >= 0.005; };
+  const dPlan = dc && !dc.error && dLines.every(x => x.newUnitPrice > 0) ? E0.planInvPriceAdjust(state, { ...dCtx,
+    lines:dLines.map(x => { const y = dc.rows.find(z => z.grId === x.grId && z.lineIdx === x.lineIdx); return { grId:x.grId, lineIdx:x.lineIdx, newUnitPrice:x.newUnitPrice, ...(x.newVatRate != null ? { newVatRate:x.newVatRate } : {}), newDiscAmt:y ? y.amt : 0 }; }) }) : null;
+  const dPlanOk = !!dPlan && !(dPlan.blocks || []).length;
+  // probe ของ BillDiscountBox: หลังหักส่วนลดบรรทัด (billDiscWeight) · อัตรา VAT ใหม่
+  const bdProbe = rows.map(r => ({ itemId:r.l.itemId, qty:Number(r.l.qty) || 0, unitPrice:nuOf(r), discount:(dRow(r) || {}).line || 0, vatRate:nonVat ? 0 : rateOf(r) }));
+  const touched = (r) => touchedP(r) || (dOn && discDiff(r));
   const changed = rows.filter(r => touched(r) && exOf(r) > 0);
   // 🆕 PV5-3: บรรทัดราคา 0 ที่ไม่ได้แก้ = เตือนเหลือง ส่งได้ (ของแถม) · บรรทัดที่แก้แล้วราคา 0 = บล็อก
   // UAT N2: เลขบรรทัด = ลำดับบรรทัดจริงในใบรับของ (r.idx + 1 นับรวมของแถม) ตรงกับฝั่งบัญชี/ผลต่อต้นทุน/audit
@@ -76080,16 +76289,33 @@ function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
   const blockIdx = rows.map(r => lvlOf(r) === 'block' ? r.idx + 1 : 0).filter(Boolean);
   const warnIdx = rows.map(r => lvlOf(r) === 'warn' ? r.idx + 1 : 0).filter(Boolean);
   // ยอดรายบรรทัด (ก่อน VAT / VAT / รวม) + ส่วนต่างรวม
-  const amtOf = (r) => { const q = Number(r.l.qty) || 0, net = exOf(r) * q, v = net * rateOf(r) / 100; return { net, v, tot:net + v }; };
-  const oldAmt = (r) => { const q = Number(r.l.qty) || 0, net = (Number(r.l.unitPrice) || 0) * q, v = nonVat ? 0 : net * effR(r) / 100; return { net, v, tot:net + v }; };
-  const dSum = changed.reduce((t, r) => { const a = amtOf(r), o = oldAmt(r); return { net:t.net + a.net - o.net, v:t.v + a.v - o.v, tot:t.tot + a.tot - o.tot }; }, { net:0, v:0, tot:0 });
+  //   PFD5 S2-4: โหมดส่วนลด = ยอดหลังส่วนลด (gross − ส่วนลด − ส่วนลด PI · สูตรเดียวกับ planner) เทียบยอดบรรทัดเดิม (lineTotal)
+  const amtOf = (r) => { const q = Number(r.l.qty) || 0, x = dOn ? dRow(r) : null, net = x ? E0.bdR2(x.gross - x.amt - x.pi) : exOf(r) * q, v = net * rateOf(r) / 100; return { net, v, tot:net + v }; };
+  const oldAmt = (r) => { const q = Number(r.l.qty) || 0, net = dOn ? (Number(r.l.lineTotal) || 0) : (Number(r.l.unitPrice) || 0) * q, v = nonVat ? 0 : net * effR(r) / 100; return { net, v, tot:net + v }; };
+  const dSum = dOn && dPlanOk ? { net:dPlan.dGoods, v:dPlan.dVat, tot:dPlan.dNet }
+    : changed.reduce((t, r) => { const a = amtOf(r), o = oldAmt(r); return { net:t.net + a.net - o.net, v:t.v + a.v - o.v, tot:t.tot + a.tot - o.tot }; }, { net:0, v:0, tot:0 });
   const whyOff = !canKey ? 'ต้องเป็นฝ่ายจัดซื้อ (สิทธิ์แก้ไข PO)' : bad ? 'บรรทัด ' + badIdx.join(', ') + ' ราคา 0 — บรรทัดที่แก้ต้องใส่ราคาใหม่ (> 0)'
-    : blockIdx.length ? 'บรรทัด ' + blockIdx.join(', ') + ' ราคาต่างเกิน ' + blockPct + '% — น่าจะคีย์ผิดหน่วย' : !changed.length ? 'ยังไม่มีบรรทัดที่เปลี่ยนราคา/VAT' : null;
+    : blockIdx.length ? 'บรรทัด ' + blockIdx.join(', ') + ' ราคาต่างเกิน ' + blockPct + '% — น่าจะคีย์ผิดหน่วย'
+    : dOn && zeroIdx.length ? 'บรรทัด ' + zeroIdx.join(', ') + ' ราคา 0 — โหมดใบกำกับมีส่วนลดต้องใส่ราคาทุกบรรทัด'
+    : dOn && dc.error ? dc.error
+    : dOn && dPlan && (dPlan.blocks || []).length ? dPlan.blocks[0]   // UAT S1: บัญชียืนยันไม่ได้แน่ ๆ → ไม่ให้ส่ง (กันเสียรอบส่งกลับ)
+    : !changed.length ? 'ยังไม่มีบรรทัดที่เปลี่ยนราคา/VAT/ส่วนลด' : null;
   const submit = () => {
     if(whyOff){ alert('⛔ ' + whyOff); return; }
+    // UAT S2: เปิด 🏷️ แล้วกล่องส่วนลดรวมว่าง แต่ PO มีส่วนลดท้ายบิล (ยังไม่เคยแก้ตามใบกำกับ) → ถามก่อน ส่วนลด PO จะหายทั้งใบ
+    const poBill0 = E0.bdR2(rows.reduce((t, r) => t + (Number(r.l.billDiscPart) || 0), 0));
+    if(dOn && !bdEff.length && poBill0 > 0.005 && !rows.some(r => r.g.invBillDiscFix)
+      && !confirm('ใบกำกับไม่มีส่วนลดรวมจริงใช่ไหม? (PO มีส่วนลดท้ายบิล ' + fmtCur(poBill0) + ' ก่อน VAT)\nกด OK = ส่งโดยไม่มีส่วนลดรวม (ส่วนลด PO จะหาย) · ยกเลิก = กลับไปใส่ในกล่องส่วนลดรวม')) return;
     const exMap = Object.fromEntries(changed.map(r => [r.key, exOf(r)])), vMap = nonVat || entry.target === 'inv' ? null : Object.fromEntries(changed.map(r => [r.key, rateOf(r)]));
     const act = { type:'SUBMIT_INV_PRICE_FIX', data:{ target:entry.target, id:doc.id, reqId:req.id, note:note.trim(), by:user.username, at:Date.now(), priceEntry:mode,
       lines:pfChanged(changed, exMap, vMap).map(x => ({ ...x, keyedPrice:Number(price[x.grId + ':' + x.lineIdx]), keyedMode:mode })) } };   // 🆕 PV5-4
+    // 🆕 PFD2/PFD7/PFD16: โหมดส่วนลด — ส่งทุกบรรทัดไม่ใช่ของแถม + ส่วนลดที่คำนวณ + ส่วนลด/ยอดเดิมที่ฟอร์มเห็น (ด่านใบเปลี่ยนระหว่างคีย์)
+    if(dOn){
+      const num = (v) => String(v == null ? '' : v).trim() !== '' && isFinite(Number(v)) ? Number(v) : null;
+      act.data.lines = dLines.map(x => { const r = rows.find(z => z.g.id === x.grId && z.idx === x.lineIdx), y = dRow(r) || {};
+        return { ...x, newDiscAmt:y.amt, discBill:y.bill, discKeyed:y.keyed, oldDiscAmt:E0.grLineDiscGr(r.l), oldLineTotal:Number(r.l.lineTotal) || 0 }; });
+      Object.assign(act.data, { discMode:'invoice', billDiscs:bdEff, ...(num(paperTotal) != null ? { paperTotal:num(paperTotal) } : {}), ...(num(paperVat) != null && !nonVat ? { paperVat:num(paperVat) } : {}) });
+    }
     const r = _pfQuiet(state, act);   // ตรวจก่อน — ไม่ผ่าน = ฟอร์มค้างไว้ ราคาที่คีย์ไม่หาย
     if(r.next === state){ alert(r.why || '⛔ ส่งไม่สำเร็จ'); return; }
     dispatch(act); onClose();
@@ -76109,16 +76335,27 @@ function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
           className:cls('px-4 py-2 rounded-lg border-2 font-medium min-w-[110px]', mode === k ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-gray-300 text-gray-700'),
           onClick:() => switchMode(k) }, t)),
         mode === 'inc' && h('span', { className:'text-xs text-gray-500' }, 'ระบบแปลงเป็นราคาก่อน VAT ให้ตามอัตรา VAT ของแต่ละบรรทัด')),
+      // 🆕 PFD2: ปุ่มโหมด "ใบกำกับมีส่วนลด" (สวิตช์ PFD19 ปิด = ซ่อน = พฤติกรรมเดิมเป๊ะ)
+      live && discAllowed && h('div', { className:'flex flex-wrap items-center gap-2 text-sm' },
+        h('button', { type:'button', 'data-testid':'pricefix-disc-on', 'aria-pressed':!!discOn, onClick:() => setDiscOn(v => !v),
+          className:cls('px-4 py-2 rounded-lg border-2 font-medium', discOn ? 'bg-rose-600 border-rose-600 text-white' : 'bg-white border-gray-300 text-gray-700') },
+          (discOn ? '✓ ' : '') + '🏷️ ใบกำกับมีส่วนลด'),
+        !discOn && h('span', { className:'text-xs text-gray-500' }, 'กดเมื่อใบกำกับมีส่วนลดรายสินค้า/ส่วนลดรวม — คีย์ตามกระดาษได้เลย')),
+      live && dOn && h('div', { className:'text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded p-1.5', 'data-testid':'pf-disc-replace-note' },
+        // 🆕 verify 3: ใบที่เคยแก้ส่วนลดแล้ว (M1) ยอดนี้คือส่วนลดตามใบกำกับครั้งก่อน ไม่ใช่ของ PO
+        rows.some(r => r.l && r.l.invDiscFix) ? '⚠️ ส่วนลดตามใบกำกับที่แก้ครั้งก่อน รวม ' : '⚠️ ส่วนลดตอนรับของ (จาก PO) รวม ', fmtCur(rows.reduce((t, r) => t + E0.grLineDiscGr(r.l), 0)),
+        ' บาท จะถูกแทนด้วยส่วนลดตามใบกำกับที่คีย์ (ส่วนลดบรรทัดช่องว่าง = 0)'),
       // 🆕 UAT M1: ทั้งใบตั้งไม่มี VAT (ผู้ขายจด VAT) — บอกทางแก้ในฟอร์มนี้
       live && docNonVat && !nonVat && h('div', { className:'text-xs text-blue-900 bg-blue-50 border border-blue-200 rounded p-1.5', 'data-testid':'pricefix-docnonvat-hint' },
         'ℹ️ ใบรับของนี้ทั้งใบตั้งเป็น "ไม่มี VAT" — ถ้าบิล/ใบกำกับมี VAT ให้เปลี่ยนช่อง VAT ของบรรทัดนั้นเป็น 7% (กด [รวม VAT] ถ้าราคาบนบิลรวม VAT แล้ว)'),
+      h('div', { className:'overflow-x-auto', 'data-testid':'pricefix-table-wrap' },   // 🆕 PFD S2: แท็บเล็ต — เลื่อนเฉพาะตาราง ไม่ล้นทั้งหน้า
       h('table', { className:'w-full text-sm' },
         h('thead', null, h('tr', { className:'bg-gray-50 text-left' },
-          ['ใบรับของ', 'สินค้า', 'จำนวน (ล็อก)', 'ราคา GR/หน่วย' + (mode === 'inc' && !nonVat ? ' (รวม VAT)' : ''), 'ราคาใหม่/หน่วย (' + (mode === 'inc' ? 'รวม VAT' : 'ก่อน VAT') + ')', nonVat ? null : 'VAT', nonVat ? 'รวมใหม่' : 'ก่อน VAT / VAT / รวม']
+          ['ใบรับของ', 'สินค้า', 'จำนวน (ล็อก)', 'ราคา GR/หน่วย' + (mode === 'inc' && !nonVat ? ' (รวม VAT)' : ''), 'ราคาใหม่/หน่วย (' + (mode === 'inc' ? 'รวม VAT' : 'ก่อน VAT') + ')' + (dOn ? ' / ส่วนลดทั้งบรรทัด (บาท)' : ''), nonVat ? null : 'VAT', nonVat ? 'รวมใหม่' : 'ก่อน VAT / VAT / รวม']
             .filter(Boolean).map(t => h('th', { key:t, className:'p-1.5' }, t)))),
         h('tbody', null, rows.map(r => {
           const q = Number(r.l.qty) || 0, lv = live ? lvlOf(r) : '', a = amtOf(r), lk = vatLockWhy(r), oR = effR(r);
-          return h('tr', { key:r.key, className:cls('border-t', (lv === 'zero' || lv === 'block') && 'bg-red-50', (lv === 'warn' || lv === 'zero0') && 'bg-yellow-50'), 'data-pf-lvl':lv || undefined },
+          return h('tr', { key:r.key, className:cls('border-t', (lv === 'zero' || lv === 'block' || (dOn && lv === 'zero0')) && 'bg-red-50', (lv === 'warn' || (!dOn && lv === 'zero0')) && 'bg-yellow-50'), 'data-pf-lvl':lv || undefined },
             h('td', { className:'p-1.5 text-xs' }, h('span', { className:'text-gray-400 mr-1', 'data-testid':'pricefix-lineno' }, r.idx + 1, '.'), r.g.grNumber || r.g.id),
             h('td', { className:'p-1.5' }, itemName(r.l.itemId)),
             h('td', { className:'p-1.5 text-gray-600', title:'จำนวนแก้ไม่ได้ (ถ้าจำนวนไม่ตรง ใช้คืนของ/ใบลดหนี้)' }, '🔒 ', fmtNum(q), ' ', r.l.unit || ''),
@@ -76127,8 +76364,13 @@ function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
               ? h('div', null, h('div', null, fmtCur((Number(r.l.unitPrice) || 0) * (1 + oR / 100))), h('div', { className:'text-[10px] text-gray-500' }, 'ก่อน VAT ', fmtCur(Number(r.l.unitPrice) || 0)))
               : fmtCur(Number(r.l.unitPrice) || 0)),
             h('td', { className:'p-1.5' }, live
-              ? h('input', { type:'number', step:'0.0001', min:'0', value:price[r.key], 'data-testid':'pricefix-input', className:'border rounded px-2 py-1 w-28 text-right',
-                  onChange:(e) => setPrice(p => ({ ...p, [r.key]:e.target.value })) })
+              ? h('div', null, h('input', { type:'number', step:'0.0001', min:'0', value:price[r.key], 'data-testid':'pricefix-input', className:'border rounded px-2 py-1 w-28 text-right',
+                  onChange:(e) => setPrice(p => ({ ...p, [r.key]:e.target.value })) }),
+                  // 🆕 PFD4: ส่วนลดบรรทัดตามกระดาษ ใต้ช่องราคา (ฐานตามสวิตช์ [ไม่รวม/รวม VAT] · ป้ายบอกฐานของบรรทัด)
+                  dOn && h('div', { className:'mt-1' },
+                    h('input', { type:'number', step:'0.01', min:'0', value:disc[r.key] == null ? '' : disc[r.key], placeholder:'ส่วนลดทั้งบรรทัด', 'data-testid':'pricefix-disc-input',
+                      className:'border border-rose-300 rounded px-2 py-1 w-28 text-right text-rose-700', onChange:(e) => setDisc(p => ({ ...p, [r.key]:e.target.value })) }),
+                    h('div', { className:'text-[10px] text-gray-500', 'data-testid':'pricefix-disc-vatlbl' }, 'ส่วนลดทั้งบรรทัด (บาท) · ', E0.lineVatLabel({ vatRate:rateOf(r) }, mode === 'inc' ? 'inclusive' : 'exclusive'))))
               : fmtCur(exOf(r))),
             !nonVat && h('td', { className:'p-1.5' }, live
               ? h('div', null,
@@ -76140,12 +76382,22 @@ function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
                   rateOf(r) !== oR && h('div', { className:'text-[10px] text-blue-700' }, 'VAT ', oR, '% → ', rateOf(r), '%'),
                   !(exOf(r) > 0) && h('div', { className:'text-[10px] text-gray-500', 'data-testid':'pricefix-vat-zero-hint' }, 'ราคา 0 — VAT ไม่มีผล'))
               : (rateOf(r) + '%')),
-            h('td', { className:'p-1.5 text-right text-xs whitespace-nowrap', 'data-testid':'pricefix-line-amt' }, nonVat ? fmtCur(a.net)
+            h('td', { className:'p-1.5 text-right text-xs whitespace-nowrap', 'data-testid':'pricefix-line-amt' },
+              // 🆕 PFD S2-4: ส่วนลดตามที่คีย์ (ก่อน VAT · บรรทัด + ส่วนลดรวมที่เกลี่ย) เทียบส่วนลดเดิม
+              dOn && dRow(r) && h('div', { className:'text-rose-700', 'data-testid':'pricefix-line-disc' }, 'ส่วนลด −', fmtCur(dRow(r).amt), ' (เดิม −', fmtCur(E0.grLineDiscGr(r.l)), ')'),
+              nonVat ? fmtCur(a.net)
               : h('div', null, h('div', null, 'ก่อน VAT ', fmtCur(a.net)), h('div', { className:'text-gray-500' }, 'VAT ', fmtCur(a.v)), h('div', { className:'font-semibold' }, 'รวม ', fmtCur(a.tot)))));
-        }))),
+        })))),
+      // 🆕 PFD5: ส่วนลดรวม (เหนือยอด VAT) สูงสุด 2 กล่อง แยกกลุ่ม VAT + คำเตือนคูปอง + กล่องสรุปเทียบกระดาษ (§3)
+      live && dOn && h(PfBillDiscs, { bd1, setBd1, bd2, setBd2, probe:bdProbe, rows, nonVat, E:E0 }),
+      live && dOn && h(PfInvSummary, { plan:dPlan, err:(dc && dc.error) || null, nonVat, heads:(dc && dc.heads) || [], paperTotal, setPaperTotal, paperVat, setPaperVat }),
       live && bad && h('div', { className:'text-xs text-red-700', 'data-testid':'pricefix-zero-bad-note' }, '🔴 บรรทัด ', badIdx.join(', '), ' ราคา 0 — บรรทัดที่แก้ต้องใส่ราคาใหม่ตาม' + pfPaper(pfCash(state, req, entry.target, doc)) + ' (> 0)'),
-      live && zeroIdx.length > 0 && h('div', { className:'text-xs text-yellow-800 bg-yellow-50 border border-yellow-200 rounded p-1.5', 'data-testid':'pricefix-zero-note' },
-        '🟡 บรรทัด ', zeroIdx.join(', '), ' ราคา 0 — ถ้าเป็นของแถมส่งได้ ถ้าไม่ใช่ให้ใส่ราคาตาม' + pfPaper(pfCash(state, req, entry.target, doc))),
+      // verify 2: โหมดส่วนลด = ราคา 0 ส่งไม่ได้ (whyOff บล็อก) → โน้ตแดงบอกทางแก้ · โหมดปกติคงข้อความเหลือง "ส่งได้"
+      live && zeroIdx.length > 0 && (dOn
+        ? h('div', { className:'text-xs text-red-700 bg-red-50 border border-red-200 rounded p-1.5', 'data-testid':'pricefix-zero-note', 'data-pf-zero-block':'1' },
+            '🔴 บรรทัด ', zeroIdx.join(', '), ' ราคา 0 — โหมดใบกำกับมีส่วนลดต้องใส่ราคาทุกบรรทัด (ของแถมให้ปิด 🏷️ หรือใส่ราคาตามใบกำกับ)')
+        : h('div', { className:'text-xs text-yellow-800 bg-yellow-50 border border-yellow-200 rounded p-1.5', 'data-testid':'pricefix-zero-note' },
+            '🟡 บรรทัด ', zeroIdx.join(', '), ' ราคา 0 — ถ้าเป็นของแถมส่งได้ ถ้าไม่ใช่ให้ใส่ราคาตาม' + pfPaper(pfCash(state, req, entry.target, doc)))),
       live && blockIdx.length > 0 && h('div', { className:'text-xs text-red-700', 'data-testid':'pricefix-block-note' }, '🔴 บรรทัด ', blockIdx.join(', '), ' ราคาต่างจากราคาเดิมเกิน ', blockPct, '% — ระบบไม่รับ (น่าจะคีย์ผิดหน่วย)'),
       live && warnIdx.length > 0 && h('div', { className:'text-xs text-yellow-800', 'data-testid':'pricefix-warn-note' }, '🟡 บรรทัด ', warnIdx.join(', '), ' ราคาต่างเกิน ', warnPct, '% — ส่งได้ แต่ตรวจหน่วยให้ดี (บัญชีต้องใส่เหตุผลตอนยืนยัน)'),
       h('div', { className:'text-sm text-right space-x-3', 'data-testid':'pricefix-dsum' }, 'ส่วนต่าง (ประมาณ): ',
@@ -76155,6 +76407,8 @@ function PriceFixKeyModal({ state, dispatch, user, entry, onClose }){
       live && h('div', { className:'text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded p-1.5', 'data-testid':'pricefix-noreapprove-note' },
         'ℹ️ ถ้าบัญชียืนยันตรงตามที่คีย์ ราคามีผลทันที ไม่ต้องอนุมัติราคา (อนุมัติอีกครั้งตอนจ่าย) — ตรวจกับ' + pfPaper(pfCash(state, req, entry.target, doc)) + 'ให้ตรง'),
       live && h('textarea', { className:'w-full border rounded p-2 text-sm', rows:2, placeholder:'หมายเหตุถึงบัญชี (ไม่บังคับ)', value:note, onChange:(e) => setNote(e.target.value) }),
+      // verify 2: เหตุที่ส่งไม่ได้ต้องเห็นบนจอ (แท็บเล็ตไม่มี tooltip ของปุ่มเทา)
+      live && whyOff && h('div', { className:'text-xs text-red-700 bg-red-50 border border-red-200 rounded p-1.5', 'data-testid':'pricefix-whyoff' }, '⛔ ', whyOff),
       h('div', { className:'flex justify-end gap-2' },
         h(Button, { variant:'secondary', onClick:onClose }, 'ปิด'),
         live && h(Button, { variant:'primary', disabled:!!whyOff, onClick:submit, 'data-testid':'pricefix-submit',
@@ -76203,26 +76457,36 @@ function pfRowsOf(state, grIds){
 }
 // 🆕 PV5-2: vat (ไม่บังคับ) = { key: อัตราใหม่ 0/7 } — เปลี่ยน VAT อย่างเดียว (ราคาเท่าเดิม) ก็นับว่าเปลี่ยน · ไม่คีย์ราคา = ใช้ราคาเดิม
 const pfLineRate = (l) => l && l.vatRate !== undefined && l.vatRate !== null ? (Number(l.vatRate) || 0) : 7;
-const pfChanged = (rows, price, vat) => rows.map(r => {
+// 🆕 PFD3/PFD11: disc (ไม่บังคับ) = { key: ส่วนลดใหม่ก่อน VAT } จากข้อเสนอจัดซื้อ (read-only) · มีค่า = ส่ง newDiscAmt เสมอ · ส่วนลดอย่างเดียวก็นับว่าเปลี่ยน
+const pfChanged = (rows, price, vat, disc) => rows.map(r => {
     const raw = price[r.key], v = raw == null || raw === '' ? (Number(r.l.unitPrice) || 0) : Number(raw), ou = Number(r.l.unitPrice) || 0;
     const nv = vat && vat[r.key] != null && vat[r.key] !== '' && Number(vat[r.key]) !== pfLineRate(r.l) ? Number(vat[r.key]) : null;
-    if(!(isFinite(v) && v > 0) || (Math.abs(v - ou) <= 1e-9 && nv == null)) return null;
-    return { grId:r.g.id, lineIdx:r.idx, newUnitPrice:v, ...(nv != null ? { newVatRate:nv } : {}) };
+    const nd = disc && disc[r.key] != null && disc[r.key] !== '' && isFinite(Number(disc[r.key])) ? Number(disc[r.key]) : null;
+    const dCh = nd != null && Math.abs(nd - global.ERP.grLineDiscGr(r.l)) >= 0.005;
+    if(!(isFinite(v) && v > 0) || (Math.abs(v - ou) <= 1e-9 && nv == null && !dCh)) return null;
+    return { grId:r.g.id, lineIdx:r.idx, newUnitPrice:v, ...(nv != null ? { newVatRate:nv } : {}), ...(nd != null ? { newDiscAmt:nd } : {}) };
   }).filter(Boolean);
 // 🆕 PV3-2: GR เสมือน (ราคาใหม่) — ตัวช่วยเดียวที่ CreateINVModal + แถวคิวตั้งหนี้ใช้ (planInvPriceAdjust at_gr · ห้ามเขียนสูตรใหม่)
 function pfVirtualGr(state, grLive, lines){
   const plan = lines && lines.length ? global.ERP.planInvPriceAdjust(state, { mode:'at_gr', grIds:[grLive.id], lines }) : null;
   if(!plan) return { plan:null, gr:grLive };
   return { plan, gr:{ ...grLive, totalValue: global.ERP.bdR2((Number(grLive.totalValue) || 0) + plan.dGoods),
-    lines: (grLive.lines||[]).map((l, i) => { const x = plan.lines.find(y => y.lineIdx === i); return x ? { ...l, unitPrice:x.newUnitPrice, lineTotal:x.newLineTotal, ...(x.vatChanged ? { vatRate:x.newVatRate } : {}) } : l; }) } };   // 🆕 PV5-5: VAT ใหม่
+    lines: (grLive.lines||[]).map((l, i) => { const x = plan.lines.find(y => y.lineIdx === i); return x ? { ...l, unitPrice:x.newUnitPrice, lineTotal:x.newLineTotal, ...(x.vatChanged ? { vatRate:x.newVatRate } : {}),
+      ...(x.newDiscAmt != null ? { invDiscFix:{ ...(l.invDiscFix || {}), amt:x.newDiscAmt }, grossTotal:global.ERP.bdR2(x.newUnitPrice * (Number(l.qty) || 0)) } : {}) } : l; }) } };   // 🆕 PV5-5: VAT ใหม่ · PFD: ส่วนลดตามใบกำกับ
 }
 // ราคาที่จัดซื้อส่งมา (submitted) → บรรทัดที่เปลี่ยนจริง · สวิตช์ปิด / ไม่ใช่ submitted = []
 function pfProposalLines(state, target, doc){
   const r = doc && doc.priceFixRequest;
   if(!pfOn(state) || !r || r.status !== 'submitted' || !global.ERP.priceFixLive(doc)) return [];
   const grIds = target === 'gr' ? [doc.id] : ((doc.grIds && doc.grIds.length) ? doc.grIds : (doc.grId ? [doc.grId] : []));
-  const price = {}, vat = {}; ((r.proposal && r.proposal.lines) || []).forEach(x => { if(x){ price[x.grId + ':' + x.lineIdx] = x.newUnitPrice; if(x.newVatRate != null) vat[x.grId + ':' + x.lineIdx] = x.newVatRate; } });
-  return pfChanged(pfRowsOf(state, grIds).filter(r => (r.key in price)), price, vat);   // PV5: เฉพาะบรรทัดในข้อเสนอ (ไม่คีย์ราคา ≠ ราคาเดิม)
+  const price = {}, vat = {}, disc = {}, dm = r.proposal && r.proposal.discMode === 'invoice';
+  ((r.proposal && r.proposal.lines) || []).forEach(x => { if(x){ price[x.grId + ':' + x.lineIdx] = x.newUnitPrice; if(x.newVatRate != null) vat[x.grId + ':' + x.lineIdx] = x.newVatRate; if(dm && x.newDiscAmt != null) disc[x.grId + ':' + x.lineIdx] = x.newDiscAmt; } });
+  return pfChanged(pfRowsOf(state, grIds).filter(r => (r.key in price)), price, vat, dm ? disc : undefined);   // PV5: เฉพาะบรรทัดในข้อเสนอ (ไม่คีย์ราคา ≠ ราคาเดิม)
+}
+// 🆕 PFD11: ส่วนลดตามใบกำกับจากข้อเสนอจัดซื้อ { key: newDiscAmt } (read-only — บัญชีแก้ไม่ได้) · ข้อเสนอไม่ใช่โหมดส่วนลด = undefined (ผลเดิม)
+function pfPropDisc(req){
+  const p = req && req.proposal; if(!p || p.discMode !== 'invoice') return undefined;
+  const d = {}; (p.lines || []).forEach(x => { if(x && x.newDiscAmt != null) d[x.grId + ':' + x.lineIdx] = Number(x.newDiscAmt); }); return d;
 }
 // แสดงผลอย่างเดียว: GR รอยืนยัน → { plan, gr เสมือน } · null = ไม่มีราคาเสนอ
 function pfProposedGr(state, g){ const ls = pfProposalLines(state, 'gr', g); const v = ls.length ? pfVirtualGr(state, g, ls) : null; return v && v.plan && !(v.plan.blocks || []).length ? v : null; }   /* verify 1: แผนมี blocks (เกณฑ์ % · ไม่พบ lot · ทรัพย์สิน ฯลฯ) = ยืนยันไม่ได้ → ไม่โชว์ยอดรอยืนยัน */
@@ -76284,11 +76548,17 @@ function PriceKeyTable({ rows, price, setPrice, editable, state, user, proposal,
   const shown = (val, r) => { const p = propOf(r), n = Number(val); if(val == null) return '';
     return p && val !== '' && n === Number(p.newUnitPrice) && /\.\d{5,}/.test(String(val)) ? String(Number(n.toFixed(4))) : val; };
   const nm = (id) => ((state.items || []).find(x => x && x.id === id) || {}).name || id;
-  return h('table', { className:'w-full text-xs bg-white border rounded', 'data-testid':'pf-price-table' },
+  const E = global.ERP, dm = !!(proposal && proposal.discMode === 'invoice');   // 🆕 PFD: ข้อเสนอโหมดส่วนลดตามใบกำกับ
+  return h('div', { className:'overflow-x-auto', 'data-testid':'pf-price-table-wrap' },   // UAT S3: คอลัมน์ส่วนลดเพิ่ม → แท็บเล็ตเลื่อนแนวนอนในกล่อง ไม่ล้นหน้า
+    h('table', { className:'w-full text-xs bg-white border rounded', 'data-testid':'pf-price-table' },
     h('thead', null, h('tr', { className:'bg-gray-50 text-left' },
-      ['ใบรับของ', 'สินค้า', 'จำนวน', 'ราคาเดิม/หน่วย', 'ราคาใหม่/หน่วย', 'ส่วนต่าง'].map(t => h('th', { key:t, className:'p-1.5' }, t)))),
+      ['ใบรับของ', 'สินค้า', 'จำนวน', 'ราคาเดิม/หน่วย', 'ราคาใหม่/หน่วย', ...(dm ? ['ส่วนลด เดิม → ใหม่ (ก่อน VAT)'] : []), 'ส่วนต่าง'].map(t => h('th', { key:t, className:'p-1.5' }, t)))),
     h('tbody', null, rows.map(r => {
-      const ou = Number(r.l.unitPrice) || 0, v = Number(price[r.key]), q = Number(r.l.qty) || 0, ch = isFinite(v) && v > 0 && Math.abs(v - ou) > 1e-9;
+      const ou = Number(r.l.unitPrice) || 0, v = Number(price[r.key]), q = Number(r.l.qty) || 0, pc = isFinite(v) && v > 0 && Math.abs(v - ou) > 1e-9;
+      // 🆕 PFD11: ส่วนลดจากข้อเสนอ (read-only) · ส่วนต่าง = ยอดใหม่ (gross − ส่วนลดใหม่ − pi) − ยอดเดิม
+      const pp = dm ? propOf(r) : null, D0 = E.grLineDiscGr(r.l), D1 = pp && pp.newDiscAmt != null ? Number(pp.newDiscAmt) || 0 : null, pi = Number(r.l.piDiscAlloc) || 0;
+      const dch = D1 != null && Math.abs(D1 - D0) >= 0.005, ch = pc || dch;
+      const dAmt = D1 != null ? E.bdR2(E.bdR2((isFinite(v) && v > 0 ? v : ou) * q) - D1 - pi) - (Number(r.l.lineTotal) || 0) : (v - ou) * q;
       return h('tr', { key:r.key, className:cls('border-t', ch && 'bg-yellow-50') },
         h('td', { className:'p-1.5 font-mono' }, r.g.grNumber || r.g.id),
         h('td', { className:'p-1.5' }, nm(r.l.itemId),
@@ -76297,21 +76567,79 @@ function PriceKeyTable({ rows, price, setPrice, editable, state, user, proposal,
             return h('div', { className:cls('text-[10px] rounded px-1 mt-0.5 border', dn ? 'text-red-800 bg-red-50 border-red-200' : 'text-cyan-800 bg-cyan-50 border-cyan-300'),
               'data-testid':dn ? 'pf-capex-deny' : 'pf-capex-badge' }, dn ? '⛔ ' + dn.msg : global.ERP.CAPEX_PF_BADGE); })(),
           (() => { const p = propOf(r); if(!p) return null;
-          const rt = p.newVatRate != null ? Number(p.newVatRate) || 0 : global.ERP.pvLineRate(state, inv || null, r.g, r.l, r.idx), net = (isFinite(v) ? v : ou) * q, vv = net * rt / 100;
+          const rt = p.newVatRate != null ? Number(p.newVatRate) || 0 : global.ERP.pvLineRate(state, inv || null, r.g, r.l, r.idx);
+          const gr0 = (isFinite(v) ? v : ou) * q, dk = dm && p.newDiscAmt != null, net = dk ? gr0 - (Number(p.newDiscAmt) || 0) - (Number(r.l.piDiscAlloc) || 0) : gr0, vv = net * rt / 100;
+          const kd = dk && p.discKeyed, ln = dk ? Number(p.discLine) || 0 : 0, bl = dk ? Number(p.discBill) || 0 : 0;
           return h('div', { className:'text-[11px] text-blue-800 mt-0.5', 'data-testid':'pf-keyed-info' },
             h('div', null, 'จัดซื้อคีย์ ', h('b', null, m(Number(p.keyedPrice != null ? p.keyedPrice : p.newUnitPrice) || 0)), ' (', (p.keyedMode || (proposal && proposal.priceEntry)) === 'inc' ? 'รวม VAT' : 'ไม่รวม VAT', ') · VAT ', rt, '%',
               p.newVatRate != null && p.oldVatRate != null && Number(p.oldVatRate) !== rt ? ' (เดิม ' + Number(p.oldVatRate) + '%)' : ''),
-            h('div', { className:'text-gray-600' }, 'ก่อน VAT ', m(net), ' · VAT ', m(vv), ' · รวม ', h('b', null, m(net + vv)))); })()),
+            dk && (ln > 0.004 || bl > 0.004 || (kd && Number(kd.value) > 0)) && h('div', { className:'text-rose-700', 'data-testid':'pf-keyed-disc' },
+              'ส่วนลดที่จัดซื้อกรอก ', kd && Number(kd.value) > 0 ? h('b', null, m(Number(kd.value))) : '-', kd && Number(kd.value) > 0 ? ' (' + (kd.entered === 'incl' ? 'รวม VAT' : 'ไม่รวม VAT') + ')' : '',
+              ' = ก่อน VAT ', m(ln), bl > 0.004 ? ' + ส่วนลดรวม ' + m(bl) : ''),
+            h('div', { className:'text-gray-600' }, dk ? 'หลังส่วนลด ' : '', 'ก่อน VAT ', m(net), ' · VAT ', m(vv), ' · รวม ', h('b', null, m(net + vv)))); })()),
         h('td', { className:'p-1.5 text-gray-600', title:'จำนวนแก้ไม่ได้ — จำนวนผิดใช้คืนของ (RTV) / ใบลดหนี้' }, '🔒 ', fmtNum(q), ' ', r.l.unit || ''),
         h('td', { className:'p-1.5' }, m(ou)),
         h('td', { className:'p-1.5' }, editable
           ? h('input', { type:'number', step:'0.0001', min:'0', value:shown(price[r.key], r), 'data-testid':'pf-price-input',
               className:'border rounded px-1.5 py-0.5 w-24 text-right', onChange:(e) => { const val = e.target.value; setPrice(p => ({ ...p, [r.key]:val })); } })
           : h('b', null, m(isFinite(v) ? v : ou))),
-        h('td', { className:cls('p-1.5 text-right', ch && (v > ou ? 'text-red-700' : 'text-green-700')) }, ch ? pfSigned(m, (v - ou) * q) : '-'));
-    })));
+        dm && h('td', { className:cls('p-1.5 whitespace-nowrap', dch && 'text-rose-700 font-medium'), 'data-testid':'pf-disc-cell', title:'ส่วนลดคีย์ที่จัดซื้อเท่านั้น — ไม่ตรงให้ ↩️ ส่งกลับจัดซื้อ' },
+          m(D0), ' → ', D1 != null ? h('b', null, m(D1)) : '-'),
+        h('td', { className:cls('p-1.5 text-right', ch && (dAmt > 0 ? 'text-red-700' : 'text-green-700')) }, ch ? pfSigned(m, dAmt) : '-'));
+    }))));
 }
 // กล่องผลต่อต้นทุน (ห้ามซ่อน — R2.7): เหลือในสต๊อก → ต้นทุนล็อต c0→c1 · ใช้ไปแล้ว → ผลต่าง 5391 เดือนนี้ · blocks = เหตุผลที่ทำไม่ได้
+// 🆕 PRICE_FIX_DISCOUNT PFD5: ส่วนลดรวมในฟอร์มจัดซื้อ — BillDiscountBox ×1-2 (กล่องที่ 2 ล็อกกลุ่ม VAT ตรงข้าม) · เกลี่ยด้วย allocBillDiscount ผ่าน poBillDiscApply (สูตรเดียวกับ pfInvDiscCalc)
+function PfBillDiscs({ bd1, setBd1, bd2, setBd2, probe, rows, E }){
+  const s1 = E.billDiscScope(bd1 && bd1.scope), opp = s1 === 'vat' ? 'novat' : 'vat', two = s1 === 'vat' || s1 === 'novat';
+  const b2 = two && bd2 ? { ...bd2, scope:opp } : null;
+  const ap1 = poBillDiscApply(probe, bd1, 'exclusive'), ap2 = b2 ? poBillDiscApply(probe, b2, 'exclusive') : null;
+  const poBill = E.bdR2(rows.reduce((t, r) => t + (Number(r.l.billDiscPart) || 0), 0));   // ส่วนลดท้ายบิล PO ที่ใบรับนี้ใช้ไป (ก่อน VAT)
+  const grpTxt = opp === 'vat' ? 'สินค้ามี VAT' : 'สินค้าไม่มี VAT';
+  return h('div', { className:'border border-rose-200 rounded p-2 space-y-1', 'data-testid':'pf-billdisc-wrap' },
+    h('div', { className:'text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded p-1.5', 'data-testid':'pf-billdisc-coupon-note' },
+      '⚠️ ใส่เฉพาะส่วนลดที่อยู่เหนือยอด VAT ในใบกำกับ — ถ้าเป็นคูปอง/แต้มที่หักหลังยอดรวม VAT ให้บัญชีใช้ 🎟️ ส่วนลดนอกใบกำกับ ตอนตั้งหนี้'),
+    poBill > 0.005 && h('div', { className:'text-xs text-blue-900', 'data-testid':'pf-billdisc-po-hint' },
+      'ℹ️ PO มีส่วนลดท้ายบิล ', fmtCur(poBill), ' (ก่อน VAT) — ถ้าใบกำกับมีส่วนลดรวม ใส่ในกล่องนี้'),
+    h(BillDiscountBox, { billDisc:bd1, setBillDisc:setBd1, bd:ap1, priceMode:'exclusive', totals:{ subtotal:0 }, lines:probe, tid:'pf-billdisc', label:'ส่วนลดรวมตามใบกำกับ' }),
+    two && !b2 && h('button', { type:'button', 'data-testid':'pf-billdisc2-add', className:'text-xs text-blue-700 underline',
+      onClick:() => setBd2({ mode:'thb', value:0, ...(opp === 'vat' && bd1 && bd1.entered === 'incl' ? { entered:'incl' } : {}) }) }, '➕ ส่วนลดรวมอีกกลุ่ม (' + grpTxt + ')'),
+    b2 && h('div', { className:'border-t border-rose-200 pt-1' },
+      h(BillDiscountBox, { billDisc:b2, setBillDisc:(n) => setBd2({ ...n, scope:opp }), bd:ap2, priceMode:'exclusive', totals:{ subtotal:0 }, lines:probe, tid:'pf-billdisc2', label:'ส่วนลดรวม (' + grpTxt + ')', lockScope:true }),
+      h('button', { type:'button', 'data-testid':'pf-billdisc2-remove', className:'text-xs text-gray-500 underline', onClick:() => setBd2(null) }, '✖ เอากล่องนี้ออก')));
+}
+// 🆕 PRICE_FIX_DISCOUNT §3: กล่องสรุปเทียบกระดาษ — ตัวเลขจาก plan.totals (PFD8) เท่านั้น (แหล่งเดียวกับฝั่งบัญชี) · แผนมี blocks = ไม่โชว์ตัวเลขใหม่
+//   setPaperTotal/setPaperVat ไม่ส่ง = อ่านอย่างเดียว (ฝั่งบัญชี) · ยอดรวมต่าง ≤ 1.00 / VAT ต่าง ≤ 0.01 = ✓ · เกิน = 🟡 เตือน ไม่บล็อก
+function PfInvSummary({ plan, err, nonVat, heads, paperTotal, setPaperTotal, paperVat, setPaperVat }){
+  const E = global.ERP, T = plan && plan.totals, blk = (plan && plan.blocks) || [], b = T ? T.before : null, a = T && !blk.length ? T.after : null;
+  const num = (v) => String(v == null ? '' : v).trim() !== '' && isFinite(Number(v)) ? Number(v) : null;
+  const pT = num(paperTotal), pV = num(paperVat);
+  const dT = a && pT != null ? E.bdR2(pT - a.total) : null, dV = a && pV != null ? E.bdR2(pV - a.vat) : null;
+  const defs = nonVat ? [['total', 'รวมทั้งสิ้น']] : [['exempt', 'ยอดสินค้ายกเว้น VAT'], ['vatable', 'ยอดสินค้ามี VAT (ก่อน VAT)'], ['vat', 'VAT 7%'], ['total', 'รวมทั้งสิ้น']];
+  const hd = (heads || []).map(x => (x.scope === 'vat' ? 'สินค้ามี VAT ' : x.scope === 'novat' ? 'สินค้าไม่มี VAT ' : 'ทุกรายการ ') + fmtCur(x.amount) + ' ก่อน VAT'
+    + (x.entered === 'incl' && x.enteredAmount != null ? ' (กรอกรวม VAT ' + fmtCur(x.enteredAmount) + ')' : '')).join(' · ');
+  const field = (v, set, tid) => set
+    ? h('input', { type:'number', step:'0.01', min:'0', value:v == null ? '' : v, placeholder:'ไม่บังคับ', 'data-testid':tid, className:'border rounded px-2 py-1 w-32 text-right', onChange:(e) => set(e.target.value) })
+    : h('b', { 'data-testid':tid }, num(v) == null ? '-' : fmtCur(num(v)));
+  const okTag = (d, tol, tid, warn) => d == null ? null : Math.abs(d) <= tol + 1e-9
+    ? h('span', { className:'text-green-700 text-xs', 'data-testid':tid + '-ok' }, '✓ ตรง' + (Math.abs(d) >= 0.005 ? ' (ต่าง ' + fmtCur(d) + ' จากปัดเศษ)' : ''))
+    : h('span', { className:'text-amber-800 text-xs bg-amber-50 border border-amber-200 rounded px-1', 'data-testid':tid + '-warn' }, warn(d));
+  return h('div', { className:'border rounded p-2 text-sm bg-white space-y-1', 'data-testid':'pf-sum' },
+    h('div', { className:'font-medium' }, '🧮 สรุปเทียบใบกำกับ'),
+    !T ? h('div', { className:'text-xs text-gray-500', 'data-testid':'pf-sum-na' }, err ? '⛔ ' + err : blk.length ? '⛔ ' + blk.join(' · ') : 'ใส่ราคา/ส่วนลดให้ครบก่อน ระบบจึงคำนวณยอดได้')
+    : h('div', { className:'overflow-x-auto' }, h('table', { className:'w-full text-sm' },
+        h('thead', null, h('tr', { className:'text-xs text-gray-500' }, h('th', { className:'text-left font-normal' }, ''),
+          h('th', { className:'text-right font-normal' }, 'เดิม (ตอนรับของ)'), h('th', { className:'text-right font-normal' }, 'ใหม่ (ตามที่คีย์)'))),
+        h('tbody', null, defs.map(([k, t]) => h('tr', { key:k, className:k === 'total' ? 'font-semibold border-t' : '' },
+          h('td', null, t), h('td', { className:'text-right', 'data-testid':'pf-sum-' + k + '-old' }, fmtCur(b[k])),
+          h('td', { className:'text-right', 'data-testid':'pf-sum-' + k + '-new' }, a ? fmtCur(a[k]) : '—')))))),
+    T && blk.length > 0 && h('div', { className:'text-xs text-red-700', 'data-testid':'pf-sum-blocks' }, '⛔ ', blk.join(' · ')),
+    hd && h('div', { className:'text-xs text-rose-700', 'data-testid':'pf-sum-billdisc' }, 'ส่วนลดรวม: ', hd),
+    !nonVat && h('div', { className:'flex flex-wrap items-center gap-2' }, h('span', null, 'VAT ตามใบกำกับ'), field(paperVat, setPaperVat, 'pf-sum-paper-vat'),
+      okTag(dV, 0.01, 'pf-sum-paper-vat', (d) => '🟡 VAT ต่าง ' + fmtCur(d) + ' — ภาษีซื้อต้องเท่าใบกำกับ ตอนตั้งหนี้ใช้ 🧾 ปรับ VAT ตามใบกำกับ')),
+    h('div', { className:'flex flex-wrap items-center gap-2' }, h('span', null, 'ยอดรวมตามใบกำกับ'), field(paperTotal, setPaperTotal, 'pf-sum-paper'),
+      okTag(dT, 1.0, 'pf-sum-paper', (d) => '🟡 ต่าง ' + fmtCur(d) + ' — ตรวจส่วนลด/ราคาอีกครั้ง')));
+}
 function PriceFixImpact({ plan, state, user, ap }){   // ap = priceFixApprovalNeed (PF-NOREAPPROVE N1) · ไม่ส่ง = ป้ายเกณฑ์เดิม
   if(!plan) return null;
   const m = pfMoney(user, state);
@@ -76364,7 +76692,7 @@ function pfRunAdjust({ state, dispatch, user, mode, invId, grIds, lines, req, re
   if(P.blocks.length){ alert('⛔ ปรับราคาไม่ได้ — ' + P.blocks.join('\n• ')); return 'blocked'; }
   const inv = P.inv, doc = inv || (state.grs || []).find(g => g && g.id === P.grIds[0]);
   const data = { mode, ...(inv ? { invId:inv.id, prevAmount:Number(inv.amount) || 0, prevVat:Number(inv.vat) || 0 } : { grIds:P.grIds }),
-    lines:lines.map(x => ({ grId:x.grId, lineIdx:Number(x.lineIdx), newUnitPrice:Number(x.newUnitPrice), ...(x.newVatRate != null ? { newVatRate:Number(x.newVatRate) } : {}) })),   // 🆕 PV5-4
+    lines:lines.map(x => ({ grId:x.grId, lineIdx:Number(x.lineIdx), newUnitPrice:Number(x.newUnitPrice), ...(x.newVatRate != null ? { newVatRate:Number(x.newVatRate) } : {}), ...(x.newDiscAmt != null ? { newDiscAmt:Number(x.newDiscAmt) } : {}) })),   // 🆕 PV5-4 · PFD11 ส่วนลดจากข้อเสนอ
     expect:{ dGoods:P.dGoods, dVat:P.dVat, dNet:P.dNet }, ...(req ? { reqId:req.id } : {}), reason:String(reason).trim(),
     ...(supTaxInvNumber ? { supTaxInvNumber } : {}), ...(cashBillNo ? { cashBillNo } : {}), by:user.username, date:getToday(), at:Date.now() };   // PV2-1: cashBillNo = บิลเงินสด (ไม่มี VAT)
   const act = { type:'ADJUST_INV_PRICE', data };
@@ -76457,8 +76785,8 @@ function PriceFixReviewPanel({ inv, state, dispatch, user }){
   const propOf = (r) => { const p = ((req && req.proposal && req.proposal.lines) || []).find(x => x.grId === r.g.id && x.lineIdx === r.idx); return p ? p.newUnitPrice : Number(r.l.unitPrice) || 0; };
   const [price, setPrice] = useState(() => Object.fromEntries(rows.map(r => [r.key, String(propOf(r))])));
   const canAcct = pfCanAcct(user) && pfOn(state);   // สวิตช์ปิด = ดูอย่างเดียว
-  const lines = pfChanged(rows, price);
   const sub = !!req && req.status === 'submitted';
+  const lines = pfChanged(rows, price, undefined, sub ? pfPropDisc(req) : undefined);   // PFD11: ส่วนลดติดจากข้อเสนอเสมอ
   const plan = sub && lines.length ? global.ERP.planInvPriceAdjust(state, { mode:'post_pi', invId:inv.id, lines }) : null;
   const ap = plan ? global.ERP.priceFixApprovalNeed(state, plan, req, lines, user && user.username) : null;   // 🆕 PF-NOREAPPROVE N1
   // คำขออนุมัติที่ค้างจากกติกาเดิม (ก่อน 2026-10-19) — ผู้ขอยกเลิกได้ (🔔) แล้วยืนยันใหม่ทางสองคน
@@ -76481,6 +76809,7 @@ function PriceFixReviewPanel({ inv, state, dispatch, user }){
         ' → ', h('b', { className:'text-blue-800' }, m(pp.newNet)), h('span', { className:'text-xs text-blue-700' }, ' (รอยืนยัน)')) : null; })(),
     att && h('a', { href:att.dataUrl, target:'_blank', rel:'noopener', className:'inline-block' }, h('img', { src:att.dataUrl, className:'h-24 border rounded', alt:req.cashBillNo ? 'บิล' : 'ใบกำกับ', 'data-testid':'pf-photo' })),
     sub && h(PriceKeyTable, { rows, price, setPrice, editable:canAcct, state, user, proposal:req.proposal, inv }),
+    sub && pfPropDisc(req) && h(PfInvSummary, { plan, nonVat:global.ERP.priceFixNonVat(state, 'inv', inv), heads:req.proposal.billDiscs, paperTotal:req.proposal.paperTotal, paperVat:req.proposal.paperVat }),   // 🆕 §3 อ่านอย่างเดียว
     sub && h(PriceFixImpact, { plan, state, user, ap }),
     legacyAp && h(PfLegacyApBox, { ap:legacyAp }),
     !pfOn(state) ? h('div', { className:'text-xs text-gray-700', 'data-testid':'pf-switch-off-note' }, 'ปิดการปรับราคาตามใบกำกับแล้ว — คำขอนี้ไม่กันขอจ่ายอีก · กด ✖ ยกเลิกคำขอ เพื่อเก็บกวาด')
@@ -76511,6 +76840,7 @@ function CreateInvPricePanel({ state, dispatch, user, grLive, pfReq, pfSub, pfSh
       ((pfReq.attachments || [])[0]) && h('a', { href:pfReq.attachments[0].dataUrl, target:'_blank', rel:'noopener', className:'ml-2 text-blue-700 underline' }, '🖼️ ดูรูป' + pfPaper(pfCash(state, pfReq, 'gr', grLive)))),
     !pfSub && h('div', { className:'text-xs text-amber-900' }, 'จำนวนแก้ไม่ได้ · ราคาขึ้นที่บัญชีคีย์เอง = ต้องอนุมัติก่อนตั้งหนี้ (ไม่อยากรอ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา)'),
     h(PriceKeyTable, { rows:pfRows, price:pfPrice, setPrice:setPfPrice, editable:true, state, user, proposal:pfSub ? pfReq.proposal : null }),
+    pfSub && pfPropDisc(pfReq) && h(PfInvSummary, { plan:pfPlan, nonVat:global.ERP.priceFixNonVat(state, 'gr', grLive), heads:pfReq.proposal.billDiscs, paperTotal:pfReq.proposal.paperTotal, paperVat:pfReq.proposal.paperVat }),   // 🆕 §3 อ่านอย่างเดียว
     h(PriceFixImpact, { plan:pfPlan, state, user, ap:pfAp }),
     pfLegacyAp && h(PfLegacyApBox, { ap:pfLegacyAp }),
     !pfSub && h('input', { className:'w-full border rounded px-2 py-1 text-sm', placeholder:'เหตุผลที่แก้ราคา (บังคับ)', value:pfReason, 'data-testid':'inv-pf-reason', onChange:(e) => setPfReason(e.target.value) }),
@@ -77817,7 +78147,7 @@ function billDiscSaveErr(bd, priceMode){
     ? '❌ ส่วนลดท้ายบิล: ไม่มีรายการในกลุ่มที่เลือก (ใช้กับ) — เปลี่ยนกลุ่มหรือลบส่วนลดก่อนบันทึก'
     : '❌ ส่วนลดท้ายบิล: ' + billDiscErrorText(bd, priceMode) + ' — แก้ก่อนบันทึก';   // 🆕 verify #5/#7
 }
-function BillDiscountBox({ billDisc, setBillDisc, bd, priceMode, totals, disabled, lines, tid, label }){
+function BillDiscountBox({ billDisc, setBillDisc, bd, priceMode, totals, disabled, lines, tid, label, lockScope }){   // 🆕 PFD5: lockScope = ล็อกกลุ่ม (กล่องที่ 2 ของฟอร์มแก้ราคา)
   const T = tid || 'po-billdisc';
   const E = global.ERP;
   const mode = billDisc?.mode === 'pct' ? 'pct' : 'thb';
@@ -77854,7 +78184,7 @@ function BillDiscountBox({ billDisc, setBillDisc, bd, priceMode, totals, disable
     // 🆕 §V: ใช้กับกลุ่มไหน + ยอดที่กรอกก่อน/รวม VAT
     (hasVat && hasNoVat || scope !== 'all' || showEntered) && h('div', { className:'flex items-center justify-end gap-2 flex-wrap text-xs' },
       h('label', { className:'flex items-center gap-1' }, 'ใช้กับ',
-        h('select', { 'data-testid':T+'-scope', value: scope, disabled,
+        h('select', { 'data-testid':T+'-scope', value: scope, disabled: disabled || !!lockScope,
           onChange:e=>upd({ scope: e.target.value }), className:'px-1 py-0.5 border rounded text-xs' },
           h('option', { value:'all' }, 'ทุกรายการ'),
           h('option', { value:'vat' }, 'เฉพาะรายการมี VAT'),
@@ -81874,7 +82204,8 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   const pfShow = pfSw && pfCanAcct(user) && (pfSub || (pfKeyOpen && !pfReq));
   // 🆕 PV5-5: VAT รายบรรทัดที่จัดซื้อแก้ (ข้อเสนอ submitted) → ส่งต่อให้แผน/ยืนยัน · บัญชีคีย์เอง (ไม่มีคำขอ) = ไม่แก้ VAT
   const pfVat = Object.fromEntries(((pfSub && pfReq.proposal && pfReq.proposal.lines) || []).filter(x => x && x.newVatRate != null).map(x => [x.grId + ':' + x.lineIdx, x.newVatRate]));
-  const pfLines = pfShow ? pfChanged(pfRows, pfPrice, pfVat) : [];
+  const pfDisc = pfSub ? pfPropDisc(pfReq) : undefined;   // 🆕 PFD11: ส่วนลดตามใบกำกับจากข้อเสนอ (read-only)
+  const pfLines = pfShow ? pfChanged(pfRows, pfPrice, pfVat, pfDisc) : [];
   const { plan:pfPlan, gr } = pfVirtualGr(state, grLive, pfLines);   // 🆕 PV3-2: ตัวช่วยเดียวกับแถวคิวตั้งหนี้
   const pfAp = pfPlan ? global.ERP.priceFixApprovalNeed(state, pfPlan, pfSub ? pfReq : null, pfLines, user && user.username) : null;   // 🆕 PF-NOREAPPROVE N1: ตัวตัดสินเดียวกับ reducer
   const pfKeyed = !!pfPlan;
@@ -82014,7 +82345,12 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   });
   const piDiscPrefilled = !!gr.piBillDiscount && !!piDisc;
   const _piPm = gr.priceMode || po?.priceMode || 'exclusive';
+  // 🆕 PFD15: ใส่ส่วนลดตามใบกำกับไว้แล้วตอนแก้ราคา (GR ที่บันทึกแล้ว หรือข้อเสนอที่จะยืนยันพร้อมตั้งหนี้) → ปิดส่วนลดรวม PI กันใส่ซ้ำ
+  const pfDiscFixed = !!(gr.invBillDiscFix || (gr.lines || []).some(l => l && l.invDiscFix) || (pfShow && pfDisc));
+  const pfPaperVat = gr.invBillDiscFix && gr.invBillDiscFix.paper && gr.invBillDiscFix.paper.vat != null ? Number(gr.invBillDiscFix.paper.vat)
+    : (pfShow && pfDisc && pfReq.proposal.paperVat != null && pfReq.proposal.paperVat !== '' ? Number(pfReq.proposal.paperVat) : null);
   const piDiscDisabledWhy = splitByWHT ? 'แยก INV ตามหมวด WHT — ใส่ส่วนลดไม่ได้ (ใช้ตั้งหนี้ใบเดียว)'
+    : pfDiscFixed ? 'ใส่ส่วนลดตามใบกำกับไว้แล้วตอนแก้ราคา — ส่วนลดเพิ่มให้ ↩️ ส่งจัดซื้อแก้ราคาอีกรอบ'
     : (rtvDeduct > 0 && rtvMode === 'deduct') ? 'มีของคืน (RTV) หักในยอดแล้ว — แก้ยอดที่ช่อง "มูลค่า" แทน'
     : gr.linkedAdvanceInv ? 'GR ผูกกับ INV จ่ายล่วงหน้าแล้ว'
     : !((grB.totalValue||0) > 0) ? 'ยอด GR = 0' : '';
@@ -82963,11 +83299,16 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
               !xbrPick.hasOwnProperty(x.i) && v && h('span', { className:'text-[10px] text-gray-500' }, (sup && sup.defaultCostBranch) ? '(สาขาประจำผู้ขาย)' : '(สาขาที่รับของ)')); }))); })(),
       // 🆕 BILL-DISC §B5 + §V: ส่วนลดท้ายบิลตามใบกำกับ (ผู้ขายให้เพิ่มจาก PO) — เกลี่ยลงบรรทัด GR แล้วคิด VAT ใหม่ราย line
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 space-y-1', 'data-testid':'pi-billdisc-box' },
-        poBillDiscAmt > 0 && h('div', { className:'text-xs font-medium text-rose-800 bg-rose-50 border border-rose-300 rounded p-1.5', 'data-testid':'pi-billdisc-po-note' },
+        poBillDiscAmt > 0 && !pfDiscFixed && h('div', { className:'text-xs font-medium text-rose-800 bg-rose-50 border border-rose-300 rounded p-1.5', 'data-testid':'pi-billdisc-po-note' },
           `ℹ️ PO นี้หักส่วนลดท้ายบิลแล้ว ${fmtCur(poBillDiscAmt)} ในยอด GR — กรอกเฉพาะส่วนที่ผู้ขายลดเพิ่ม`),
         piDiscDisabledWhy
           ? h('div', { className:'text-xs text-gray-500', 'data-testid':'pi-billdisc-disabled' },
               '🏷️ ส่วนลดท้ายบิลตามใบกำกับ: ใช้ไม่ได้ — ', piDiscDisabledWhy)
+          : null,
+        // 🆕 PFD15: VAT ตามใบกำกับที่จัดซื้อคีย์ ≠ VAT ที่ระบบคิด → เตือน (ไม่เติม supTaxInvVat เอง)
+        pfPaperVat != null && isFinite(pfPaperVat) && Math.abs(pfPaperVat - (Number(vat) || 0)) > 0.01 + 1e-9 && h('div', { className:'text-xs text-amber-900 bg-amber-50 border border-amber-300 rounded p-1.5', 'data-testid':'pi-pfdisc-paper-vat' },
+          '🟡 VAT ตามใบกำกับที่จัดซื้อคีย์ ', fmtCur(pfPaperVat), ' · ระบบคิดได้ ', fmtCur(Number(vat) || 0), ' — ตั้งหนี้แล้วใช้ 🧾 ปรับ VAT ตามใบกำกับ'),
+        piDiscDisabledWhy ? null
           : h(BillDiscountBox, { billDisc: piDisc, setBillDisc: setPiDisc, priceMode: _piPm, lines: _piProbe,
               bd: piBd, totals: { subtotal: vb.amountExVat }, tid: 'pi-billdisc', label: 'ส่วนลดท้ายบิลตามใบกำกับ' }),
         piDiscPrefilled && !piDiscDisabledWhy && h('div', { className:'text-[11px] text-amber-800', 'data-testid':'pi-billdisc-prefill' },
@@ -82981,7 +83322,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
 
       // 🆕 VAT-FIX: ตาราง VAT ราย line — บัญชีปรับอัตรา 0/7 ต่อ line ให้ตรงใบกำกับ supplier ได้โดยไม่ต้องย้อน PO/GR
       hasMixedVat && h(PIVatLineTable, { vb, state, fromLabel:'PO/GR',
-        discs: (grV.lines||[]).map((l, i) => global.ERP.bdR2((Number(l && l.discAmt)||0) + (piAllocs[i]||0))),   // 🆕 BILL-DISC §V2
+        discs: (grV.lines||[]).map((l, i) => global.ERP.bdR2((l ? global.ERP.grLineDiscGr(l) : 0) + (piAllocs[i]||0))),   // 🆕 BILL-DISC §V2 · PFD1: ส่วนลดตามใบกำกับแทนส่วนลด PO
         onChange: setLineVat,
         onReset: () => { setVatLineOverrides({}); setVatOverride(null); },
         reason: vatAdjustReason, setReason: setVatAdjustReason,
@@ -89317,6 +89658,13 @@ function printPO(po, state){
 }
 
 // PRINT GR — ใบรับของ
+// 🆕 PFD18: ส่วนลดรวมตามใบกำกับ (แก้ราคา) แยกกลุ่ม VAT — รวม invDiscFix.bill ตามอัตรา VAT ของบรรทัด (ทุก scope · Σ allocs = ยอดกล่อง)
+function pfBillDiscByVat(grs){
+  const o = { vat:0, novat:0, has:false };
+  (grs || []).forEach(g => { if(!g || !g.invBillDiscFix) return; o.has = true;
+    (g.lines || []).forEach(l => { const b = l && !l.isFreebie && l.invDiscFix ? Number(l.invDiscFix.bill) || 0 : 0; if(b > 0) o[pfLineRate(l) > 0 ? 'vat' : 'novat'] += b; }); });
+  o.vat = global.ERP.bdR2(o.vat); o.novat = global.ERP.bdR2(o.novat); return o;
+}
 function printGR(gr, state){
   const sup = state.suppliers.find(s => s.id === gr.supplierId);
   const branch = state.branches.find(b => b.id === gr.branch);
@@ -89328,6 +89676,9 @@ function printGR(gr, state){
       ? `<img src="${u.signature.dataUrl}" style="max-height:40px;max-width:140px;display:block;margin:0 auto -2px"/>` : '';
   };
 
+  // 🆕 PFD18: คอลัมน์ส่วนลด (grLineDiscEff = ส่วนลดตามใบกำกับถ้าแก้แล้ว ไม่งั้นส่วนลด PO + ส่วนลด PI) เมื่อมีบรรทัด > 0
+  const _grDisc = (l) => Number(global.ERP.grLineDiscEff(l).toFixed(2));
+  const _grDiscCol = (gr.lines || []).some(l => l && _grDisc(l) > 0);
   const rows = (gr.lines||[]).map((l,i) => {
     const it = state.items.find(x => x.id === l.itemId);
     return `<tr>
@@ -89335,9 +89686,14 @@ function printGR(gr, state){
       <td>${it?.name||l.itemId}<br/><span style="font-size:8pt;color:#666">${it?.code||''}</span></td>
       <td style="text-align:right;width:24mm">${fmtAmt(l.qty||l.receivedQty||0)} ${l.unit||''}</td>
       <td style="text-align:right;width:24mm">${fmtAmt(l.unitPrice||l.unitCost||0)}</td>
+      ${_grDiscCol ? `<td style="text-align:right;width:22mm;color:#b91c1c">${_grDisc(l) > 0 ? '−' + fmtAmt(_grDisc(l)) : ''}</td>` : ''}
       <td style="text-align:right;width:28mm">${fmtAmt(l.lineTotal||l.totalCost||0)}</td>
     </tr>`;
   }).join('');
+  // 🆕 PFD18: แถวส่วนลดรวมตามใบกำกับ (หักในรายการแล้ว) แยกสินค้ามี VAT / ไม่มี VAT
+  const _gbd = pfBillDiscByVat([gr]);
+  const _gbdRow = (lbl, amt) => amt > 0.004 ? `<div class="row" style="color:#b91c1c"><span>ส่วนลดรวมตามใบกำกับ${lbl} (หักในรายการแล้ว):</span><span>−${fmtAmt(amt)}</span></div>` : '';
+  const _gbdHtml = _gbd.has ? _gbdRow(' (สินค้ามี VAT)', _gbd.vat) + _gbdRow(' (สินค้าไม่มี VAT)', _gbd.novat) : '';
 
   const body = `<div class="sheet">
   <h1>ใบรับของ / Goods Receipt</h1>
@@ -89359,11 +89715,12 @@ function printGR(gr, state){
   </div>
   <table class="items">
     <thead><tr>
-      <th>#</th><th>รายการ</th><th>จำนวน</th><th>ต้นทุน/หน่วย</th><th>รวม (บาท)</th>
+      <th>#</th><th>รายการ</th><th>จำนวน</th><th>ต้นทุน/หน่วย</th>${_grDiscCol ? '<th>ส่วนลด</th>' : ''}<th>รวม (บาท)</th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>
   <div class="totals">
+    ${_gbdHtml}
     <div class="row final"><span>มูลค่ารวม:</span><span>${fmtAmt(gr.totalValue||gr.totalCost||0)}</span></div>
   </div>
   ${gr.note ? `<div style="margin-top:4mm;font-size:9pt"><b>หมายเหตุ:</b> ${gr.note}</div>` : ''}
@@ -89405,7 +89762,7 @@ function printPI(inv, state, popts){   // PRINT-MARK: popts.onPrinted (แท็
   const _esc = v => String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const _brName = id => (state.branches||[]).find(b => b.id === id)?.name || '';
   // 🆕 BILL-DISC §B7: คอลัมน์ "ส่วนลด" เมื่อ GR line มีส่วนลด (GR หัก + ส่วนลด PI) · ใบอื่น HTML เหมือนเดิม
-  const _discOf = l => l.isFreebie ? 0 : Number(((Number(l.discAmt)||0) + (Number(l.piDiscAlloc)||0)).toFixed(2));
+  const _discOf = l => l.isFreebie ? 0 : Number(global.ERP.grLineDiscEff(l).toFixed(2));   // 🆕 PFD18: ส่วนลดตามใบกำกับ (แก้ราคา) แทนส่วนลด PO
   const hasDiscCol = !isExpLines && !(inv.lines && inv.lines.length > 0) && lines.some(l => _discOf(l) > 0);
   const rows = isExpLines
     ? lines.map((l, i) => {
@@ -89454,7 +89811,11 @@ function printPI(inv, state, popts){   // PRINT-MARK: popts.onPrinted (แท็
   const _pbdPct = _pbd && _pbd.mode === 'pct' ? ' (' + fmtAmt(_pbd.value) + '%)' : '';
   const _pbdOne = (lbl, amt) => `
     <div class="row" style="color:#b91c1c" data-pi-billdisc="1"><span>ส่วนลดท้ายบิลตามใบกำกับ${lbl}${_pbdPct} (หักในยอดแล้ว):</span><span>−${fmtAmt(amt)}</span></div>`;
-  const _piBdRow = !_pbd ? ''
+  // 🆕 PFD18: ไม่มีส่วนลด PI แต่ GR มีส่วนลดรวมตามใบกำกับ (แก้ราคา) → แถวแยกกลุ่ม VAT
+  const _pfbd = !_pbd && !isExpLines && !(inv.lines && inv.lines.length > 0) ? pfBillDiscByVat(grs) : { has:false };
+  const _pfbdOne = (lbl, amt) => amt > 0.004 ? `
+    <div class="row" style="color:#b91c1c" data-pi-pfbilldisc="1"><span>ส่วนลดรวมตามใบกำกับ (แก้ราคา)${lbl} (หักในยอดแล้ว):</span><span>−${fmtAmt(amt)}</span></div>` : '';
+  const _piBdRow = !_pbd ? (_pfbd.has ? _pfbdOne(' (สินค้ามี VAT)', _pfbd.vat) + _pfbdOne(' (สินค้าไม่มี VAT)', _pfbd.novat) : '')
     : (_pbdSplit.vat > 0 && _pbdSplit.novat > 0) ? _pbdOne(' (สินค้ามี VAT)', _pbdSplit.vat) + _pbdOne(' (สินค้าไม่มี VAT)', _pbdSplit.novat)
     : _pbdOne(_pbd.scope === 'novat' ? ' (สินค้าไม่มี VAT)' : _pbd.scope === 'vat' ? ' (สินค้ามี VAT)' : '', _pbd.amount);
 
@@ -94707,6 +95068,7 @@ global.ERP.registerModule('purchase', {
   resolveVatableBase,           // 🆕 VAT-FIX §7: ฐาน VAT เมื่อ override ยอด VAT
   getLastConfirmedVatRate,      // 🆕 VAT-FIX R15: อัตรา VAT ที่ใบกำกับยืนยันล่าสุด (supplier+item) — default ให้ PO ใบถัดไป
   PriceFixRequestModal, AdjustInvPriceModal, PriceFixReviewPanel, PriceFixReqActions, PriceFixBadge, priceFixBadgeOf, pfOn, pfCanAcct, pfProposedGr, pfProposedInv,   // 🆕 PRICE-FIX ขั้น 4 (หน้าเจ้าหนี้)
+  pfChanged, pfProposalLines, pfPropDisc, pfBillDiscByVat,   // 🆕 PRICE_FIX_DISCOUNT S3 (เทส)
   collectVatAdjustInfo,         // 🆕 VAT-FIX R15: สรุป "บัญชีปรับ VAT ให้ตรงใบกำกับ" ของ INV/GR ที่ผูก (แบนเนอร์ PO/GR)
   INV_STATUS,
   PAY_METHODS, PAY_INTENT_METHODS,
@@ -115175,7 +115537,14 @@ function SystemPolicyToggles({ state, dispatch }){
           h('label', { className:'flex items-center gap-1' }, 'และ ≤ ', num('priceKeyInTolPct'), ' %'),
           h('label', { className:'flex items-center gap-1' }, 'บล็อกราคาที่ต่างจากเดิมเกิน ', num('priceKeyInBlockPct'), ' %'),
           !_top && h('span', { className:'text-xs text-gray-600', 'data-testid':'policy-price-keyin-gm-note' }, '🔒 เกณฑ์แก้ได้เฉพาะ GM/เจ้าของ')),
-        h('div', { className:'text-[11px] text-orange-700 pl-8' }, 'เกินเกณฑ์ = ผจก.บัญชี/GM อนุมัติ (ราคาขึ้น 2 ขั้น) · บัญชีคีย์เองแล้วราคาขึ้น = ต้องอนุมัติทุกครั้ง · ผู้คีย์ราคาอนุมัติ/ยืนยันเองไม่ได้'));
+        h('div', { className:'text-[11px] text-orange-700 pl-8' }, 'เกินเกณฑ์ = ผจก.บัญชี/GM อนุมัติ (ราคาขึ้น 2 ขั้น) · บัญชีคีย์เองแล้วราคาขึ้น = ต้องอนุมัติทุกครั้ง · ผู้คีย์ราคาอนุมัติ/ยืนยันเองไม่ได้'),
+        // 🆕 PRICE_FIX_DISCOUNT PFD19: สวิตช์ปิดฉุกเฉิน (ไม่มีค่า = เปิด) — ปิดแทนการย้อนโค้ด
+        h('label', { className:'flex items-center gap-3 cursor-pointer pl-8 pt-1 border-t border-orange-200' },
+          h('input', { type:'checkbox', checked: st.priceFixInvDiscEnabled !== false, className:'w-4 h-4', 'data-testid':'toggle-pricefix-invdisc',
+            onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ priceFixInvDiscEnabled: e.target.checked ? true : false } }) }),
+          h('div', null,
+            h('div', { className:'font-bold text-sm text-orange-900' }, '🏷️ ให้จัดซื้อใส่ส่วนลดตามใบกำกับตอนแก้ราคา (ส่วนลดรายสินค้า + ส่วนลดรวม แยก VAT/ไม่มี VAT)'),
+            h('div', { className:'text-[11px] text-orange-700' }, 'ปิด = ปุ่ม 🏷️ ใบกำกับมีส่วนลด หายจากฟอร์มแก้ราคา (คำขอที่ส่งมาแล้วยังยืนยันได้ · ต้นทุนที่แก้ไปแล้วยังถูก) · ใช้ปิดเมื่อมีปัญหา'))));
     })(),
 
     // 🆕 MULTI-TAXINV (D-3): ใบตั้งหนี้ 1 ใบใส่ใบกำกับภาษีซื้อได้หลายใบ — default ปิด · เปิดเมื่อทุกเครื่องรีโหลดรุ่นนี้แล้ว (≥ 1 วันทำการหลัง deploy) · settings.multiTaxInvOn
