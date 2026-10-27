@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="45f1c89ecfbc";window.__ERP_BUILT_AT__="2026-10-27T09:07:43";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="95e80888a61a";window.__ERP_BUILT_AT__="2026-10-27T10:06:20";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -1051,6 +1051,13 @@ function suggestBomOutputLocation(state, bom, branchId){
   return { locId: loc.id, reason: 'คลังของไลน์ที่ผลิต' + (line ? ' (' + (line.name || line.id) + ')' : '') };
 }
 
+// 🆕 COST_FORGE_GUARD A4: ล็อตจาก "ใบรับของผู้ขาย" — เกณฑ์ของ itemRefCost 1a (รับของล่าสุด) · negUnitCost คงเกณฑ์เดิม (ดูในฟังก์ชัน)
+//   มี sourcePO + grRef (ไม่ใช่ OPENING / VOID- / CANCEL-) · ไม่ใช่ของแถม/ติดลบ · qty > 0 · ต้นทุน > 0 — sourcePO ตั้งได้ทาง RECEIVE_PO เท่านั้น
+function isBuyLayer(l){
+  if(!l || !l.sourcePO || l.isFreebie || l.isNegative || !(Number(l.qty) > 0) || !(Number(l.unitCost) > 0)) return false;
+  const ref = String(l.grRef || '');
+  return !!ref && ref !== 'OPENING' && ref.indexOf('VOID-') !== 0 && ref.indexOf('CANCEL-') !== 0;
+}
 // ต้นทุนต่อหน่วยฐานของส่วนที่ติดลบ → { unitCost, estimated }
 //   costPrice>0 → ราคาต้นทุนล่าสุดของ layer บวก (สาขานี้ก่อน แล้วสาขาใดก็ได้) → ต้นทุนสูตร ÷ ผลผลิต (ของที่ผลิตเอง) → 0
 function negUnitCost(state, itemId, branchId){
@@ -1064,7 +1071,11 @@ function negUnitCost(state, itemId, branchId){
   //   ไม่หยิบตัวท้ายอาร์เรย์ (ลำดับอาร์เรย์ไม่ใช่ลำดับวันที่ — รับย้อนวัน/smart-merge) · ไม่มีใบซื้อ → layer อื่นเรียงวันที่เหมือนกัน
   const _ts = (l) => String(l.date || '') + '|' + String(Number(l.createdAt) || 0).padStart(15, '0');
   const last = (arr) => arr.length ? arr.slice().sort((a, c) => _ts(a) < _ts(c) ? -1 : _ts(a) > _ts(c) ? 1 : 0)[arr.length - 1] : null;
-  const buy = pos.filter(l => (l.grRef || l.sourcePO) && !l.isFreebie);
+  //   🆕 COST_FORGE_GUARD A4 (UAT ผลิต/จัดซื้อ/บัญชี): คงเกณฑ์เดิม (grRef หรือ sourcePO) — เปลี่ยนแล้วต้นทุน NEG ของวัตถุดิบในไลน์ (ล็อต GRT รับโอน/OPENING) ขยับ
+  //   กันปลอมที่ทางเข้าแทน: ADD_FIFO_LAYER/ADD_OPENING_STOCK ปิด · ADD_TO_GR/ผลิต ตัด grRef+sourcePO · RECEIVE_PO/ของชดเชย/ยกเลิกใบคืน ผูก grRef กับเอกสารของตัวเอง
+  //   ยกเว้นล็อตที่ต้นทุน/วันที่มาจากหน้าจอของเอกสารคืนของ: ของชดเชย RTV (fromReplacement) · ยกเลิกใบคืน (fromRtvCancel) — reducer ประทับเอง · มีน้อย
+  //   (verify บัญชี: ไม่ใช้ prefix CANCEL- เพราะล็อตคืนจากยกเลิก TO ก็ขึ้นต้น CANCEL- และเป็นของระบบ)
+  const buy = pos.filter(l => (l.grRef || l.sourcePO) && !l.isFreebie && !l.fromReplacement && !l.fromRtvCancel);
   const hit = last(buy.filter(l => l.branch === branchId)) || last(buy) || last(pos.filter(l => l.branch === branchId)) || last(pos);
   if(hit) return { unitCost: Number(hit.unitCost), estimated:true, source:'layer', ref: hit.grRef || hit.sourceRef || hit.lot || undefined };
   const bom = findBomForOutput(state, itemId, branchId);
@@ -3121,10 +3132,9 @@ function _ifRefCostFeed(layers, grs, onlyId){
       const e = ent(l.itemId); const a = e.avg.byBranch[b] || (e.avg.byBranch[b] = { q:0, v:0 });
       a.q += rem; a.v += rem * uc; e.avg.all.q += rem; e.avg.all.v += rem * uc;
     }
-    // 1a: layer จากใบรับของผู้ขาย (นับ remaining 0 ด้วย) · ข้ามของแถม/ติดลบ/VOID-/CANCEL-/OPENING/ชดเชย RTV (ไม่มี sourcePO)
+    // 1a: layer จากใบรับของผู้ขาย (นับ remaining 0 ด้วย) · ข้ามของแถม/ติดลบ/VOID-/CANCEL-/OPENING/ชดเชย RTV (ไม่มี sourcePO) — isBuyLayer (ใช้ร่วม negUnitCost)
+    if(!isBuyLayer(l)) continue;
     const ref = String(l.grRef || '');
-    if(!l.sourcePO || !ref || l.isFreebie || l.isNegative || !(Number(l.qty) > 0) || !(uc > 0)) continue;
-    if(ref === 'OPENING' || ref.indexOf('VOID-') === 0 || ref.indexOf('CANCEL-') === 0) continue;
     const g = grByNo.get(ref);
     put(ent(l.itemId).lastGr, b, { key: String(l.date || '') + '|' + _ifPad(g && g.createdAt) + '|' + ref + '|' + String(l.id || ''),
       unitCost: uc, ref, date: l.date || (g && g.grDate) || null, supplierId: (g && g.supplierId) || null, branch: l.branch || null,
@@ -10415,7 +10425,7 @@ Object.assign(_ACT_LABEL, {
   SET_ITEM_FAVORITES:'ตั้งรายการโปรด', SET_ITEM_PRICE_FIELDS:'ตั้งราคา/ต้นทุนสินค้า', SET_ITEM_SHELVES:'นำเข้าตำแหน่งเก็บสินค้า',
   ADD_UNIT_PRESET:'เพิ่มหน่วยนับสำเร็จรูป', UPDATE_UNIT_PRESET:'แก้หน่วยนับสำเร็จรูป', DELETE_UNIT_PRESET:'ลบหน่วยนับสำเร็จรูป',
   ADD_OPENING_STOCK:'ตั้งสต๊อกยกมา', UPDATE_STOCK:'แก้ยอดสต๊อก', RECONCILE_STOCK_FROM_FIFO:'กระทบยอดสต๊อกกับต้นทุน FIFO',
-  ADD_FIFO_LAYER:'เพิ่มชั้นต้นทุน FIFO', UPDATE_FIFO_LAYER:'แก้ชั้นต้นทุน FIFO', SPLIT_FIFO_LAYER:'แยกชั้นต้นทุน FIFO',
+  ADD_FIFO_LAYER:'เพิ่มชั้นต้นทุน FIFO', RETURN_TO_SHORT:'คืนของขาดเข้าต้นทาง (TO)', UPDATE_FIFO_LAYER:'แก้ชั้นต้นทุน FIFO', SPLIT_FIFO_LAYER:'แยกชั้นต้นทุน FIFO',
   ADD_LOT_GENEALOGY:'บันทึกที่มาของล็อต',
   // คู่ค้า ผังบัญชี ธนาคาร ผู้ใช้ องค์กร
   ADD_SUPPLIER:'เพิ่มผู้ขาย', UPDATE_SUPPLIER:'แก้ข้อมูลผู้ขาย', DELETE_SUPPLIER:'ลบผู้ขาย', IMPORT_SUPPLIERS:'นำเข้าผู้ขายจากไฟล์',
@@ -10569,7 +10579,7 @@ const _TYPE_KEYNAV = [
   [/WEIGH/, 'production.weigh'], [/QUICK_ISSUE|MATERIAL_ISSUE|PROD_WORKFLOW_STEP/, 'production.issue'], [/PETTY|STAFF_ADVANCE|REIMBURSE/, 'accounting.petty'],
   [/STOCK_COUNT/, 'stock.count'], [/SALES_LIGHT/, 'sales-light.today'], [/POS_IMPORT/, 'production.posimport'], [/^(RECEIVE_PO|ADD_GR|ADD_REPLACEMENT_GR)$/, 'stock.incoming'],
   [/^(ADD_INV|ADD_COMBINED_INV)$/, 'accounting.invQueue'], [/^(ADD_PAY|CANCEL_PAY_REQUEST)$/, 'accounting.payment'], [/SCRAP/, 'stock.scrap'],
-  [/ADJUST_STOCK|ADJUST_BRANCH_STOCK|REVERSE_ADJUST|ADD_MOVEMENT/, 'stock.adjust'], [/^ADD_TO_GR$|RECEIVE_INTRA_TO/, 'transfer.to'],
+  [/ADJUST_STOCK|ADJUST_BRANCH_STOCK|REVERSE_ADJUST|ADD_MOVEMENT/, 'stock.adjust'], [/^ADD_TO_GR$|RECEIVE_INTRA_TO|RETURN_TO_SHORT/, 'transfer.to'],
   [/SALES_PAY/, 'sales-full.receive'], [/VAT/, 'accounting.vatClaims'], [/WHT/, 'accounting.wht'], [/APPROVAL/, 'accounting.approvals'],
   [/PROD_ORDER|PRODUCTION|PRODUCE_FG/, 'production.orders'], [/BOM/, 'production.bom'], [/_ITEM|ITEMS/, 'settings.itemList'],
 ];
@@ -11537,7 +11547,7 @@ function needsApproval(state, action, context){
 
 // 🆕 UNDO_PRINCIPLE §2.1 (เจ้าของ 2026-10-19): หลักการย้อนขั้นตอน — ขาไปไม่ต้องอนุมัติ = ย้อนเองได้ · ขาไป/ขั้นต่อมาผ่านอนุมัติ = ขออนุมัติ (ยกเว้นผู้อนุมัติเอง)
 //   ฟังก์ชันบริสุทธิ์ (ไม่เรียก Date.now/alert) · หน้าจอ (voidInvViaApproval) + reducer VOID_INV ใช้ตัวเดียวกัน · รอบนี้ delete_inv ตัวเดียว (U10)
-const UNDO_POLICY_ACTIONS = Object.freeze(['delete_inv']);
+const UNDO_POLICY_ACTIONS = Object.freeze(['delete_inv', 'reverse_adjust']);   // 🆕 COST_FORGE_GUARD B2: + ยกเลิกการปรับสต๊อก
 // payment นี้อ้างใบ id ไหม (invId | invoiceId | invoiceIds[] | allocations[].invoiceId) — ตรรกะเดียวกับ _payRefsInv (01-state)
 function payRefsInv(p, id){ return !!p && !!id && (p.invId === id || p.invoiceId === id || (p.invoiceIds || []).includes(id) || (p.allocations || []).some(x => x && x.invoiceId === id)); }
 // U4: เคยจ่าย = paidAmount > 0 หรือมี payment ที่อนุมัติแล้วผูกใบ (รวมที่กลับรายการไปแล้ว)
@@ -11730,9 +11740,51 @@ function invUndoFacts(state, inv, ctxToday){
   return out;
 }
 // → { mode:'direct'|'approval'|'deny', basis:'flow'|'approver'|null, why, ctx:{ wasPaid } } · ผู้ใช้ = แถวสดใน state.users (U3/U8)
+// 🆕 COST_FORGE_GUARD B2/B3 (เจ้าของ 2026-10-26 Q2): ยกเลิกการปรับสต๊อก — ขาไป (ADJUST_STOCK) ต้องอนุมัติเสมอ (r_adjust_stock ไม่มีเงื่อนไข + fail-closed)
+//   → direct (basis approver) เฉพาะ "ผู้อนุมัติ" ของขั้นปรับสต๊อก (U3) ที่ไม่ใช่ผู้ขอ/ผู้ทำขาไป · นอกนั้น approval (GM 👑 = ทางเดิมใน requestApprovalIfNeeded)
+//   ยอด = reverseAdjAmount(mv) (ไม่ขยับหลังเกิด) · ด่านอิง movement/คำขอขาไป/ผู้ใช้/กฎ เท่านั้น (rebase ไม่พลิก)
+function reverseAdjAmount(mv){ return Math.abs(Number(mv && (mv.fifoCost != null ? mv.fifoCost : mv.cost)) || 0); }
+// ยกเลิกได้เฉพาะ movement ที่ ADJUST_STOCK สร้าง → null = ได้ · ข้อความ = เหตุผลที่ยกเลิกไม่ได้
+function reverseAdjOriginDeny(mv){
+  if(!mv) return 'ไม่พบรายการเคลื่อนไหว';
+  if(mv.reversed) return 'การปรับนี้ยกเลิกไปแล้ว';
+  if(!['adjust', 'adjust_in', 'adjust_out'].includes(mv.type)) return 'ยกเลิกได้เฉพาะรายการปรับ/นับสต๊อก';
+  // UAT ครัว/ผลิต: เอกสารต้นทางถูกยกเลิกไปแล้ว (ยกเลิกซ้ำไม่ได้) → บอกทางที่ทำได้จริง
+  if(mv.weighLogKey || String(mv.id || '').indexOf('mv_wv_') === 0) return 'รายการนี้คืนวัตถุดิบจากการยกเลิกผลชั่ง' + (mv.ref ? ' (' + mv.ref + ')' : '') + ' — ยกเลิกซ้ำไม่ได้ · ถ้ายกเลิกผิด ให้ชั่งใหม่ (⚖️) · ของไม่ตรงให้นับสต๊อก';
+  if(String(mv.ref || '').indexOf('VOID-') === 0) return 'รายการนี้คืนของจากการยกเลิกใบเบิก ' + mv.ref + ' — ยกเลิกซ้ำไม่ได้ · ถ้ายกเลิกผิด ให้เบิกใหม่ · ของไม่ตรงให้นับสต๊อก';
+  return null;
+}
+function _undoPolicyRevAdj(st, user, ctx, R){
+  const mv = (st.movements || []).find(m => m && m.id === (ctx && ctx.movementId));
+  const od = reverseAdjOriginDeny(mv);
+  if(od) return R('deny', null, od, false);
+  const uname = user && (user.username || user);
+  const u = (st.users || []).find(x => x && x.username === uname);
+  if(!u || u.active === false || !(isSuperUser(u) || hasPerm(u, 'stock', 'list', 'adjust'))) return R('deny', null, 'ไม่มีสิทธิ์ยกเลิกการปรับสต๊อก', false);
+  const NEED = 'การปรับ/นับสต๊อกต้องผ่านการอนุมัติ — ยกเลิกต้องส่งคำขอ';
+  // UAT ตรวจสอบภายใน S4: ทำคนเดียวได้ = อำนาจคนเดียว (แบบ 👑/ACO) → ไม่รวมบทบาทแอดมิน (ตำแหน่ง admin ผ่านขั้น GM ในการ "อนุมัติคำขอคนอื่น" ได้ตามเดิม)
+  if(u.role === 'admin' && !isTopAuthority(u)) return R('approval', null, 'แอดมินยกเลิกเองไม่ได้ — ' + NEED, false);
+  // UAT ผจก.คลัง S1: รายการในงวดที่ปิดแล้ว → ต้องส่งคำขอ (อีกคนดู)
+  { const lk = st.settings && st.settings.periodLockUntil;
+    if(lk && String(mv.date || '') <= String(lk)) return R('approval', null, 'รายการนี้อยู่ในงวดที่ปิดแล้ว (≤ ' + lk + ') — ' + NEED, false); }
+  // คำขอขาไป = movement.ref ชี้คำขอ adjust_stock (ตัวทำคำขอตั้ง ref = id คำขอ · ผู้ขอไม่เปลี่ยน → ไม่ดูสถานะ = rebase ไม่พลิก) · ไม่มี = GM 👑 ทำเอง/ข้อมูลเก่า → ผู้ทำขาไป = mv.by
+  const fwd = mv.ref ? (st.approvalRequests || []).find(r => r && r.id === mv.ref && r.action === 'adjust_stock') : null;
+  const doer = fwd ? fwd.requestedBy : mv.by;
+  if(doer && doer === u.username) return R('approval', null, (fwd ? 'คุณเป็นผู้ขอการปรับครั้งนี้เอง' : 'คุณเป็นผู้ทำการปรับครั้งนี้เอง') + ' — ' + NEED, false);
+  const amt = reverseAdjAmount(mv);
+  const fSteps = fwd ? (fwd.steps || []) : approvalMergeSteps(findApprovalRules(st, 'adjust_stock', { scope:'warehouse', amount:amt }));
+  const fScope = (fwd && fwd.entityScope) || 'warehouse';
+  const rSteps = approvalMergeSteps(findApprovalRules(st, 'reverse_adjust', { scope:'warehouse', amount:amt }));
+  // ตรวจแบบเดียวกับ _approvalGate (approvalCanDecide: ขั้น + สิทธิ์เสริม + admin ไม่นับเป็น GM ยอดสูง)
+  const fReq = { action:'adjust_stock', entityScope:fScope, amount:amt }, rReq = { action:'reverse_adjust', entityScope:'warehouse', amount:amt };
+  const ok = fSteps.length > 0 && rSteps.length === 1 && fSteps.every(x => x && approvalCanDecide(fReq, x, u)) && approvalCanDecide(rReq, rSteps[0], u);
+  if(ok) return R('direct', 'approver', 'คุณเป็นผู้อนุมัติขั้นปรับสต๊อก (ไม่ใช่ผู้ขอ/ผู้ทำ)', false);
+  return R('approval', null, NEED, false);
+}
 function undoPolicy(state, user, action, ctx){
   const st = state || {}, R = (mode, basis, why, wasPaid) => ({ mode, basis:basis || null, why, ctx:{ wasPaid:!!wasPaid } });
   if(!UNDO_POLICY_ACTIONS.includes(action)) return R('approval', null, 'ใช้สายอนุมัติเดิม', false);
+  if(action === 'reverse_adjust') return _undoPolicyRevAdj(st, user, ctx, R);
   const inv = (st.invoices || []).find(i => i && i.id === (ctx && ctx.invId));
   if(!inv || inv.voided) return R('deny', null, 'ใบนี้ถูกยกเลิกแล้ว/ไม่พบ', false);
   const uname = user && (user.username || user);
@@ -15346,7 +15398,7 @@ Object.assign(global.ERP, {
   VAT_AP_ACTIONS, vatApBuiltinRule, vatApprovalMode, vatApPending, vatApPendingLive, vatApPendingLabel, vatApPendingForYm, vatApStale, vatApLastWindowLoss,   // 🆕 VAT-DEFER D2
   countPendingForUser, buildApprovalRequest,
   invVatAdjusted, pendingInvChangeReq,
-  APPROVAL_BUILTIN_RULES, APPROVAL_FAIL_CLOSED, effectiveApprovalRules, approvalBuiltinRule, approvalRuleLoosening, approvalSeedRule, UNDO_POLICY_ACTIONS, payRefsInv, invEverPaid, invUndoFacts, undoPolicy, invUsedDepositOrCredit, invRtvLinked, whtCertIssued, invVatEarlierMonth, invUndoGrIds,   // 🆕 UNDO_PRINCIPLE
+  APPROVAL_BUILTIN_RULES, APPROVAL_FAIL_CLOSED, effectiveApprovalRules, approvalBuiltinRule, approvalRuleLoosening, approvalSeedRule, UNDO_POLICY_ACTIONS, payRefsInv, invEverPaid, invUndoFacts, undoPolicy, reverseAdjAmount, reverseAdjOriginDeny, isBuyLayer, invUsedDepositOrCredit, invRtvLinked, whtCertIssued, invVatEarlierMonth, invUndoGrIds,   // 🆕 UNDO_PRINCIPLE
   invUndoExcluded, invUndoGateRow, invUndoGateFlip, invEarliestDate, invTaxMonthMove, invFieldTh, ymThShort,   // 🆕 UNDO_FIELD_GUARD G5/G6 + UAT
    approvalStableJson:_apStable, poApproveDeny, poSelfApproved, poSelfBy, SELF_APPROVE_PERM, SELF_APPROVE_GROUPS, SELF_APPROVE_PO_CAP, SELF_APPROVE_PO_CAP_MSG, selfApprovePoCapOf, selfApprovePoCapMsg, selfCapSelfEditOk, selfApproveCapMsgFor, selfApprovePoCapped, poCapAmount, selfApproveReqPoTotal, selfApproveReqCapped, selfApproveDenyTail, SELF_APPROVE_STOCK_ACTIONS, SELF_APPROVE_NEVER, selfApproveKind, selfApproveUser, selfApproveReqUser, selfApproveHint, SELF_APPROVE_LABEL, PERM_NO_WILDCARD, gmSelfPolicyOn, isTopAuthority, canOverrideAdjCost, gmSelfUser, invNeedsTwoEye, gmSelfBlockReason, approvalStaleReason, grDateEditTargets, grDateEditJeBlock, grDateEditFixedDeny, grDateEditDeny, grDateEditWarn, grDateEditWarnList, pendingGrDateReq, PO_PAYMODE_LABEL, poPaymodeOf, poPaymodeDeny, pendingPoPaymodeReq, APPROVAL_EXTRA_PERM, approvalExtraPermOk, approvalAdminBlocked, APPROVAL_NO_ADMIN_HI, approvalCanDecide, approvalStuckStep, approvalPredeployCheck, approvalMergeSteps, approvalUserCanDecide,   // 🆕 APPROVAL ขั้น 1
 });
@@ -22428,6 +22480,8 @@ function _siPrvMerged(si, d){
 }
 const _dupTiView = (s, d) => { const i = d && (s.invoices || []).find(x => x && x.id === d.invId); return i && d.tiId ? global.ERP.invTaxInvViewOf(i, d.tiId) : i; };
 const _ADD_DUP = {
+  // 🆕 COST_FORGE_GUARD A1: คืนส่วนขาด TO ไปแล้ว = ซ้ำ (rebase ข้าม ไม่ตกงานค้าง)
+  RETURN_TO_SHORT:      (s, d) => !!(d && d.toId) && _toShortReturned(s, (s.transferOrders || []).find(t => t && t.id === d.toId)),
   // 🆕 SP12: log พิมพ์ at+by+kind เดิมอยู่บนใบแล้ว = ส่งซ้ำ · SP13: ใบแทน at เดิม = ซ้ำ
   // 🆕 SI_EDIT §13: แก้ใบ at+by เดิมอยู่ใน editLog แล้ว = ส่งซ้ำ · ack ของ (rev, kind) at+by เดิม = ซ้ำ
   EDIT_SALES_INV:       (s, d) => { const i = d && (s.salesInvoices || []).find(x => x && x.id === d.siId);
@@ -22452,7 +22506,6 @@ const _ADD_DUP = {
   ADD_PRODUCTION_LINE:  _dupInBranch('productionLines', d => d.line && d.line.id),
   ADD_LOCATION:         _dupInBranch('locations', d => d.location && d.location.id),
   ADD_ITEM:             _dupById('items', d => d.id),
-  ADD_FIFO_LAYER:       _dupById('fifoLayers', d => d.id),
   ADD_MOVEMENT:         _dupById('movements', d => d.id),
   ADD_AUDIT_LOG:        _dupById('auditLog', d => d.id),
   ADD_USER:             _dupById('users', d => d.id),
@@ -23580,6 +23633,13 @@ function _intraShipOut(s, o){
   return { layers, items, lines, movements, totalCost: total };
 }
 // ก้อนของบรรทัด TO (ตามลำดับที่ตัด) · ส่วนที่ breakdown ไม่ครอบ (ใบเก่าที่ต้นทางติดลบตอนส่ง) = ก้อนต้นทุนเฉลี่ยของบรรทัด
+// 🆕 COST_FORGE_GUARD (UAT สถาปัตย์/บัญชี): TO นี้คืนส่วนขาดเข้าต้นทางไปแล้ว — ประทับ shortReturnedAt · มี movement คืน (ทางใหม่ mv_toret_ / ทางเดิมก่อน deploy transfer_return ref = เลข TO)
+function _toShortReturned(s, to){
+  if(!to) return false;
+  if(to.shortReturnedAt) return true;
+  const pre = 'mv_toret_' + _sanId(to.id) + '_';
+  return (s.movements || []).some(m => m && (String(m.id || '').indexOf(pre) === 0 || (m.type === 'transfer_return' && m.ref === to.toNumber && m.branch === to.fromBranch)));
+}
 function _toLinePieces(tl, to){
   const out = []; let sum = 0;
   for(const b of ((tl && tl.breakdown) || [])){ const q = Number(b && b.qty) || 0; if(q <= 0) continue; out.push({ ...b, qty:q, unitCost:Number(b.unitCost) || 0 }); sum += q; }
@@ -24416,7 +24476,29 @@ function _adjustInvPrice(s, a){
             note:E.PRICE_FIX_TWO_PERSON_NOTE + ' · จัดซื้อคีย์ ' + proposalBy + ' · บัญชียืนยัน ' + by + ' · สินค้า ' + (P.dGoods > 0 ? '+' : '') + P.dGoods.toFixed(2) + ' · VAT ' + P.dVat.toFixed(2) + ' · ยอดสุทธิ ' + (P.dNet > 0 ? '+' : '') + P.dNet.toFixed(2) }] : [])] };
 }
 
+// 🆕 COST_FORGE_GUARD (UAT ตรวจสอบภายใน/สถาปัตย์ 🔴): movement ประเภทปรับสต๊อก/ยอดยกมา สร้างได้เฉพาะ reducer ที่ประกอบเองจากข้อมูลระบบ
+//   reducer อื่นที่ต่อท้าย movements จาก payload (ADD_TO_GR · RECEIVE_PO · ADD_MATERIAL_ISSUE · ADD_SCRAP ฯลฯ) แนบประเภทนี้มา = ปฏิเสธทั้ง action
+//   เหตุ: REVERSE_ADJUST เชื่อ movement ประเภทนี้ → ปลอมไว้แล้ว "ยกเลิก" ได้ล็อต/สต๊อกฟรี · ตรวจจาก payload ล้วน (rebase ไม่พลิก) · ทางปกติไม่เคยส่งประเภทนี้
+const _ADJ_MV_TYPES = Object.freeze(['adjust', 'adjust_in', 'adjust_out', 'adjust_reverse', 'opening']);
+const _ADJ_MV_MAKERS = new Set(['ADJUST_STOCK', 'REVERSE_ADJUST', 'VOID_QUICK_ISSUE', 'VOID_WEIGH_LOG_STOCK', 'REVIEW_WEIGH_LOG',
+  'IMPORT_STATE', 'MERGE_IMPORT', 'RESET_STATE', 'MIGRATION_WIPE', 'CLEAR_TRANSACTIONS']);
 function reducer(s, a){
+  const n = _reducerCore(s, a);
+  if(n === s || !n || !s || !a || _ADJ_MV_MAKERS.has(a.type)) return n;
+  const m0 = Array.isArray(s.movements) ? s.movements : [], m1 = n.movements;
+  if(m1 === m0 || !Array.isArray(m1)) return n;
+  const k = m0.length, prefixOk = m1.length >= k && (k === 0 || m1[k - 1] === m0[k - 1]);
+  const old = prefixOk ? null : new Set(m0.map(m => m && m.id));
+  for(let i = prefixOk ? k : 0; i < m1.length; i++){
+    const m = m1[i];
+    if(m && _ADJ_MV_TYPES.includes(m.type) && (prefixOk || !old.has(m.id))){
+      try { alert('⛔ บันทึกการปรับสต๊อก/ยอดยกมาต้องผ่านหน้าปรับ/นับสต๊อกเท่านั้น'); } catch(_e){}
+      return s;
+    }
+  }
+  return n;
+}
+function _reducerCore(s, a){
   // MW-T3: เอกสาร id เดิมมีอยู่แล้ว → คืน state เดิม (object เดิม = ไม่มีอะไรเปลี่ยน ไม่ push)
   if(_isDupAdd(s, a)){
     try { console.warn('[ERP] ข้าม ' + a.type + ' — id ' + ((a.data && (a.data.id || (a.data.issue||a.data.rtv||a.data.gr||a.data.inv||a.data.scrap||a.data.posImport||a.data.inspection||a.data.line||a.data.location||{}).id)) || '?') + ' มีอยู่แล้ว (ส่งซ้ำ)'); } catch(_e){}
@@ -24926,32 +25008,17 @@ function reducer(s, a){
 
     // ---------- FIFO ----------
     case 'ADD_FIFO_LAYER': {
-      // 🆕 Y4: หักล้าง negative layer (สต๊อกติดลบจากผลิตเกิน) ด้วย layer ที่รับเข้าใหม่ก่อน
-      const negLayers = s.fifoLayers.map(l => ({ ...l }));
-      const netted = netNegativeLayers(negLayers, a.data);
-      return { ...s, fifoLayers: [...negLayers, netted] };
+      // 🆕 COST_FORGE_GUARD A1: ปิด — เดิมเชื่อล็อตทั้งก้อน (ต้นทุน/จำนวน/วันที่/ป้ายใบรับ) ไม่แตะสต๊อก ไม่ลง JE → ปลอม "รับของล่าสุด" ได้
+      //   ผู้เรียกจริงตัวเดียว (รับ TO ข้ามสาขา ตัดปิดคืนต้นทาง) ย้ายไป RETURN_TO_SHORT · __dispatch บล็อกด้วย
+      try { alert('⛔ เพิ่มล็อตต้นทุนตรงไม่ได้ — ใช้รับของ / รับโอน / นับสต๊อก\n(งานค้างจากแท็บเก่า "รับ TO คืนต้นทาง" → ให้ ผจก.คลัง นับสต๊อกต้นทางแทน)'); } catch(_e){}
+      return s;
     }
-    // 🆕 GL-4: นำเข้าสต๊อกตั้งต้น (opening balance) แบบ atomic + shape-safe สำหรับ multi-warehouse
-    //   a.data = { itemId, branch, locId?, qty, unitCost, lot?, date? }
-    //   แก้บั๊ก: เดิม import opening ใช้ UPDATE_STOCK (cur+qty) แบบ flat → ครัวกลาง (multi) ได้ object+number = พัง
+    // GL-4 (เดิม): นำเข้าสต๊อกตั้งต้นจาก CSV — ปิดแล้ว (COST_FORGE_GUARD A2)
     case 'ADD_OPENING_STOCK': {
-      const { itemId, branch, locId, qty, unitCost, lot, date } = a.data;
-      const q = Number(qty)||0;
-      const cost = Number(unitCost)||0;
-      const items = s.items.map(it => it.id === itemId
-        ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, branch, locId||null, q) } : it);
-      const layer = {
-        id: 'fl_open_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
-        itemId, branch, locId: locId||null, qty:q, remaining:q,
-        unitCost: cost, totalCost: q*cost, date: date||getToday(),
-        lot: lot||('OPEN-'+(date||getToday())), note:'Opening balance import', sourceOpening:true,
-      };
-      const movement = {
-        id: 'mv_open_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
-        type:'opening', itemId, qty:q, branch, locId: locId||null,
-        date: date||getToday(), ref:'OPEN', note:'Opening balance', by:'import',
-      };
-      return { ...s, items, fifoLayers:[...s.fifoLayers, layer], movements:[...s.movements, movement] };
+      // 🆕 COST_FORGE_GUARD A2 (เจ้าของ 2026-10-26 Q1 "ปิดนำเข้าสต๊อกตั้งต้น"): ยอดยกมา 1 ต.ค. 2569 ทำด้วยการนับสต๊อกแล้ว
+      //   เดิมไม่ตรวจสิทธิ์ · ต้นทุน/จำนวน/วันที่จาก client · ไม่ลง JE → ปิด · ล็อต sourceOpening เดิมคงอยู่ (⚖️ ตั้งยอดยกมายังอ่านได้)
+      try { alert('⛔ ตั้งสต๊อกยกมาปิดแล้ว (ยกมา 1 ต.ค. ทำด้วยการนับ) — ของที่มีจริงแต่ไม่อยู่ในระบบ ให้นับสต๊อก'); } catch(_e){}
+      return s;
     }
     case 'UPDATE_FIFO_LAYER': {
       // a.data: { id, patch:{ lot?, expiryDate?, locId? }, at?, by? }
@@ -25246,7 +25313,12 @@ function reducer(s, a){
     }
 
     // ---------- Movements ----------
-    case 'ADD_MOVEMENT': return { ...s, movements:[...s.movements, a.data] };
+    case 'ADD_MOVEMENT': {
+      // 🆕 COST_FORGE_GUARD B3: ห้ามสร้าง movement ปรับสต๊อก/ยอดยกมาทางนี้ (REVERSE_ADJUST เชื่อ movement ประเภทนี้) — ผู้เรียกจริงส่งแค่ขายออก/โอนออก
+      if(a.data && ['adjust', 'adjust_in', 'adjust_out', 'adjust_reverse', 'opening'].includes(a.data.type)){
+        try { alert('⛔ บันทึกการปรับสต๊อกต้องผ่านหน้าปรับ/นับสต๊อก'); } catch(_e){} return s; }
+      return { ...s, movements:[...s.movements, a.data] };
+    }
     // 🆕 generic audit-log append (ใช้กับ qc_override ตอนกดข้าม QC gate ขาย/โอน — ให้สอบย้อนได้ว่าใครปล่อย)
     case 'ADD_AUDIT_LOG': {
       const _e = a.data || {};
@@ -25386,7 +25458,7 @@ function reducer(s, a){
             id:'je_adj_'+(movement?.id||genId('je')), jeNumber:_jeNo, date: movement?.date || getToday(),
             description:(_clearNegVal > 0.001 ? '[ล้างยอดติดลบ] ' : '')+'ปรับ/นับสต๊อก '+(movement?.note||''), source:'adjust_stock', clearsNegative: _clearNegVal > 0.001 || undefined, sourceId: movement?.id,
             branchId: branch,  // 🆕 B2: per-branch P&L · 🆕 ADJ_IN_COST_GUARD UAT: สาขาของ action (ไม่ใช่ movement.branch จาก client)
-            refType:'adjust', refId: itemId, status:'posted', postedBy: movement?.by||'system', postedAt: Date.now(),
+            refType:'adjust', refId: itemId, status:'posted', postedBy: (s.currentUser && s.currentUser.username) || movement?.by || 'system', postedAt: Date.now(),
             lines: _gain
               ? [ { accountId:_ivAcc.id, accountCode:'1300', accountName:_ivAcc.name, debit:_amt, credit:0, description:'สต๊อกเกิน (นับได้เพิ่ม)' },
                   ...((_clearNegVal > 0.001 && _amt - _clearNegVal > 0.001) ? [
@@ -25405,6 +25477,8 @@ function reducer(s, a){
         const m = { id: movement.id, type: movement.type === 'adjust' ? 'adjust' : (delta > 0 ? 'adjust_in' : 'adjust_out'), itemId, qty: delta, branch };
         if(_locId) m.locId = _locId; else if('locId' in movement) m.locId = null;
         for(const k of ['date', 'ref', 'note', 'by']) if(movement[k] != null) m[k] = movement[k];
+        // 🆕 COST_FORGE_GUARD (UAT ตรวจสอบภายใน S3): ผู้ทำ = ผู้ล็อกอินจริง (undoPolicy ใช้ "ไม่ใช่ผู้ทำขาไป") · by ไม่ตรง = เก็บ claimedBy
+        { const _cu = s.currentUser && s.currentUser.username; if(_cu){ if(m.by && m.by !== _cu) m.claimedBy = m.by; m.by = _cu; } }
         if('delta' in movement) m.delta = delta;
         if(movement.newQty != null) m.newQty = movement.newQty;
         if(delta > 0){ m.unitCost = _inUc; m.cost = _inUc * delta; if(_inRecalc) m.costRecalc = _inRecalc; }
@@ -27147,7 +27221,9 @@ function reducer(s, a){
       const _agD = (((s.pos||[]).find(p => p && a.data && p.id === a.data.poId)) || {}).destinationBranch || null;
       if(s.currentUser && _agD && a.data && a.data.branch && a.data.branch !== _agD){ try { alert('⛔ บันทึกใบรับไม่สำเร็จ — PO นี้ส่งตรงสาขาอื่น'); } catch(_e){} return s; }
       for(const _b of [...new Set([a.data && a.data.branch, _agD].filter(Boolean))]){ const _rd = _recvBranchDeny(s, _b); if(_rd){ try { alert(_rd); } catch(_e){} return s; } }
-      return { ...s, grs:[...s.grs, a.data], seq:{ ...s.seq, gr:s.seq.gr+1 } };
+      // 🆕 COST_FORGE_GUARD verify (เจาะระบบ V3): ใบใหม่ไม่มีล็อตที่ถอดไว้ (capIntoLayers/reclassLayers ฯลฯ ประทับได้เฉพาะ CAP_GR_CHARGE_INTO_ASSET/RECLASS_STOCK_TO_ASSET)
+      const _agG = _grStripStash(a.data);
+      return { ...s, grs:[...s.grs, _agG], seq:{ ...s.seq, gr:s.seq.gr+1 } };
     }
     case 'UPDATE_GR': {
       // 🆕 DEPOSIT-VAT UAT (กันชั้นสุดท้าย): ผูก GR กับใบตั้งหนี้ที่ "ไม่มีอยู่จริง" (ADD_INV ก่อนหน้าถูกปฏิเสธ) → ปฏิเสธ · ไม่งั้น GR หายจากคิวรอตั้งหนี้เงียบ ๆ
@@ -27194,6 +27270,8 @@ function reducer(s, a){
           });
           // 🆕 STOCK_TO_ASSET S1: การย้ายสต๊อกเป็นทรัพย์สิน (reclass*/capIntoRef + isAsset/noStock/หมวด) แก้ได้เฉพาะ RECLASS_STOCK_TO_ASSET
           //   สำเนาเก่าจากแท็บอื่นทับ → คงค่าตามใบใน state (กันลบ stamp ทั้งที่ล็อตถอด/JE ย้ายลงแล้ว · กันแต่ง stamp ปลอม)
+          // 🆕 COST_FORGE_GUARD verify (เจาะระบบ V3): บรรทัดที่ไม่มีคู่ในใบเดิม (ต่อท้าย/สลับสินค้า) ห้ามพกล็อตที่ถอดไว้ — undo จะคืนล็อตปลอม
+          _ng.lines = _ng.lines.map((l, i) => { const o = _og.lines[i]; return (!o || !l || l.itemId !== o.itemId) ? _dropGrLineStash(l) : l; });
           const _RK = ['reclassToAsset', 'reclassPrev', 'reclassLayers', 'capIntoRef', 'isAsset', 'noStock', 'assetCategoryId'];
           _ng.lines = _ng.lines.map((l, i) => {
             const o = _og.lines[i];
@@ -30093,8 +30171,12 @@ function reducer(s, a){
         const bq = Number(f.qty) || 0, up = Number(l.unitPrice) || 0;
         return { ...f, unitCost: bq > 0 ? (up * (Number(l.qty)||0)) / bq : up };
       });
+      // 🆕 COST_FORGE_GUARD A4: ล็อตคืนจากยกเลิกใบคืน — ตัด sourcePO · grRef = CANCEL-<ใบคืน> · วันที่ = วันนี้
+      const _cxToday = getToday();
+      const _cxTag = _cxFifo.map(f => (f && typeof f === 'object') ? { ..._dropBuyTag(f, true), grRef: 'CANCEL-' + rtv.rtvNumber, fromRtvCancel: true,
+        date: (typeof f.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(f.date) && f.date <= _cxToday) ? f.date : _cxToday } : f);   // UAT จัดซื้อ: วันเดียวกับ movement ที่ส่งมา (ไม่เกินวันนี้)
       return { ...s, items,
-        fifoLayers: [...s.fifoLayers, ..._cxFifo],
+        fifoLayers: [...s.fifoLayers, ..._cxTag],
         invoices, journalEntries, supplierMemos,
         movements: [...s.movements, ...(movements||[])],
         returns: (s.returns||[]).map(r => r.id === rtvId
@@ -30219,9 +30301,11 @@ function reducer(s, a){
       }
       return {
         ...s, items, invoices,
-        grs: [...s.grs, grFinal],
+        grs: [...s.grs, _grStripStash(grFinal)],   // COST_FORGE_GUARD re-verify W2
         seq: { ...s.seq, gr: s.seq.gr+1, je: rgSeqJe },
-        fifoLayers: [...s.fifoLayers, ...(fifoLayers||[])],
+        // 🆕 COST_FORGE_GUARD A4: ของชดเชย RTV ไม่ใช่ใบรับจาก PO — ตัด sourcePO · grRef = ใบชดเชยนี้ (VOID_GR หาล็อตเจอ)
+        //   fromReplacement = reducer ประทับเอง (payload ลบไม่ได้) → negUnitCost ไม่นับเป็น "ราคาซื้อล่าสุด" (ต้นทุน/วันที่ของใบชดเชยมาจากหน้าจอ · UAT A5)
+        fifoLayers: [...s.fifoLayers, ...(fifoLayers||[]).map(l => (l && typeof l === 'object') ? { ..._dropBuyTag(l, true), grRef: grFinal.grNumber, fromReplacement: true } : l)],
         movements: [...s.movements, ...(movements||[])],
         journalEntries: rgJEs,
         supplierMemos: rgMemos,
@@ -30443,14 +30527,41 @@ function reducer(s, a){
     }
 
     // 🆕 REVERSE_ADJUST — ยกเลิก stock adjust ด้วย counter-movement
-    // a.data: { movementId, reason, by }
+    // a.data: { movementId, reason, by, approvalReqId? (ตัวทำคำขอ · _execGated), directUndo? ('approver'), at? }
+    //   🆕 COST_FORGE_GUARD B1-B5: ผู้ทำ = ผู้ล็อกอินจริง · ต้องผ่าน (ก) คำขอที่อนุมัติ / (ข) ผู้อนุมัติขั้นปรับสต๊อก (undoPolicy) / (ค) GM 👑
+    //   ยกเลิกได้เฉพาะ movement ที่ ADJUST_STOCK สร้าง · มูลค่าจากข้อมูลที่ reducer สร้าง · วันที่ = วันนี้ + ด่านงวดปิด · id ตายตัว
+    //   ด่านอิง payload / movement-JE-คำขอขาไป (ไม่ขยับหลังเกิด) / หมวดคุม → rebase ไม่ตีกลับงานถูก
     case 'REVERSE_ADJUST': {
-      const { movementId, reason, by } = a.data;
-      const mv = (s.movements||[]).find(m => m.id === movementId);
-      if(!mv){ alert('ไม่พบ movement'); return s; }
-      if(mv.reversed){ alert('การปรับนี้ยกเลิกไปแล้ว'); return s; }
-      if(!['adjust','adjust_in','adjust_out'].includes(mv.type)){
-        alert('ยกเลิกได้เฉพาะ movement ประเภท adjust'); return s; }
+      const d = a.data || {}, E = global.ERP;
+      const { movementId } = d;
+      const reason = String(d.reason || '').trim();
+      const mv = (s.movements||[]).find(m => m && m.id === movementId);
+      { const od = E.reverseAdjOriginDeny(mv); if(od){ alert('⛔ ' + od); return s; } }
+      if(!reason){ alert('ใส่เหตุผลที่ยกเลิกการปรับสต๊อก'); return s; }
+      // B1: ผู้ทำ = แถวสดของผู้ล็อกอิน (by ใน payload ไม่ตรง = เก็บ claimedBy)
+      const _act0 = _actorOf(s, d.by);
+      const _au = _act0 ? (_userByRef(s, _act0.username) || null) : null;
+      if(!_au || _au.active === false){ alert('⛔ ไม่พบผู้ใช้ที่ทำรายการ'); return s; }
+      const by = _au.username;
+      const _claim = (d.by && String(d.by) !== by) ? { claimedBy: String(d.by) } : {};
+      // B2: ใครยกเลิกได้ (กฎย้อนของเจ้าของ · ขาไปต้องอนุมัติเสมอ)
+      const _amt = E.reverseAdjAmount(mv), _ctx = { scope:'warehouse', amount:_amt };
+      let _basis = null, _apId = null, _why = '';
+      if(d.approvalReqId){
+        const g = _approvalGate(s, d.approvalReqId, 'reverse_adjust', _ctx, ap => String((ap.payload || {}).movementId || '') === mv.id);
+        if(g.deny){ alert('⛔ ยกเลิกการปรับสต๊อก: ' + g.deny); return s; }
+        _basis = 'approval'; _apId = (g.ap && g.ap.id) || d.approvalReqId;
+      } else if(d.directUndo){
+        const pol = E.undoPolicy(s, _au, 'reverse_adjust', { movementId: mv.id });
+        if(pol.mode !== 'direct' || pol.basis !== d.directUndo){ alert('⛔ ' + (pol.mode === 'deny' ? pol.why : 'ยกเลิกเองไม่ได้ — ' + (pol.why || 'ต้องส่งคำขออนุมัติ'))); return s; }
+        _basis = pol.basis; _why = pol.why || '';
+      } else if(E.gmSelfUser(s, by) && E.findApprovalRules(s, 'reverse_adjust', _ctx).length){
+        _basis = 'gm';   // GM/เจ้าของ 👑 (กฎถูกปิดหมด = fail-closed บล็อกทุกคนเหมือนหน้าจอ)
+      } else { alert('⛔ ยกเลิกการปรับสต๊อกต้องผ่านการอนุมัติ — กด 🔄 แล้วส่งคำขอ'); return s; }
+      if(_basis !== 'approval' && !(E.isSuperUser(_au) || E.hasPerm(_au, 'stock', 'list', 'adjust'))){ alert('⛔ ไม่มีสิทธิ์ยกเลิกการปรับสต๊อก (stock.list.adjust)'); return s; }
+      // B5: วันที่ = วันนี้ (ไม่รับ data.date) + ด่านงวดปิด
+      const _rDate = getToday();
+      { const locked = _checkDateLock(s, _rDate, 'ยกเลิกการปรับสต๊อก'); if(locked) return locked; }
       const delta = -(Number(mv.qty)||0);
       let items = s.items;
       if(mv.itemId && mv.branch != null){
@@ -30460,7 +30571,13 @@ function reducer(s, a){
       // 🆕 BUGFIX #9: คืน FIFO layer ให้ตรงกับ stockByBranch (เดิมแตะแค่ stockByBranch → FIFO desync, มูลค่าคงเหลือเพี้ยน)
       let fifoLayers = s.fifoLayers.map(l => ({...l}));
       // 🆕 verify S8: หา JE เดิมก่อน — ใช้ตีต้นทุน layer ที่คืน (movement เก่าก่อน S8 ไม่มี fifoUnitCost)
-      const _jeOrig = (s.journalEntries||[]).find(j => j.id === 'je_adj_' + mv.id && j.status === 'posted');
+      // 🆕 COST_FORGE_GUARD (UAT บัญชี/ตรวจสอบภายใน/สถาปัตย์): _jeAny = JE ผลต่างที่ ADJUST_STOCK สร้าง (ปลอมผ่าน ADD_JE ไม่ได้) = หลักฐานมูลค่าเดียวที่เชื่อ
+      //   _jeOrig = ยังมีผล (posted ไม่ถูก void) — JE ที่บัญชี void ไปแล้ว ห้ามกลับซ้ำ (GL กลับไปแล้ว)
+      //   verify (เจาะระบบ V4): JE ต้องเป็นของสินค้า/สาขาเดียวกับ movement (movement id ซ้ำ = ไม่ยืม JE ของอีกรายการ)
+      const _jeAny = (s.journalEntries||[]).find(j => j && j.id === 'je_adj_' + mv.id && j.source === 'adjust_stock'
+        && (j.refId == null || j.refId === mv.itemId) && (j.branchId == null || String(j.branchId) === String(mv.branch))) || null;
+      const _jeOrig = (_jeAny && _jeAny.status === 'posted' && !_jeAny.voided) ? _jeAny : null;
+      const _origVal = Math.abs(Number(mv.cost) || 0) || Math.abs((Number(mv.unitCost) || 0) * (Number(mv.qty) || 0));   // มูลค่าที่การปรับนี้ลงตอนทำ (ไม่มี JE ที่มีผล = ส่วนที่ GL ไม่เคยรับ/ถูกกลับแล้ว)
       let _raCut = null; let _raShort = 0;  // 🆕 UAT S8 S2: มูลค่า FIFO ที่ตัดจริงตอนกลับ adjust_in (null = ไม่ใช่กรณีนี้)
       if(delta < 0){
         // กลับ adjust_in (เดิมเพิ่มของ) → ตัด FIFO ออกตามจำนวน
@@ -30489,40 +30606,49 @@ function reducer(s, a){
         const _resRa = _need > 0.0001 ? deductFIFO(fifoLayers, mv.itemId, _need, mv.branch, mv.locId||null) : { cost:0, shortage:0 };
         _cutCost += (_resRa && _resRa.cost) || 0;
         // ส่วนขาด (ของถูกใช้ไปแล้ว) คิด @ต้นทุนเดิมของการปรับ (JE ไม่ต่ำกว่าจริง) + บันทึก auditLog (เดิมแค่ console.warn)
-        const _ucOrig = Number(mv.unitCost) || (mv.cost && mv.qty ? Math.abs(Number(mv.cost)/Number(mv.qty)) : 0);
+        //   🆕 COST_FORGE_GUARD B4: ไม่มี JE เดิม = การปรับนี้ไม่เคยลงมูลค่า → ส่วนขาดคิด 0
+        const _ucOrig = !_jeOrig ? 0 : (Number(mv.unitCost) || (mv.cost && mv.qty ? Math.abs(Number(mv.cost)/Number(mv.qty)) : 0));
         if(_resRa && _resRa.shortage > 0.0001){
           _cutCost += _resRa.shortage * _ucOrig; _raShort = _resRa.shortage;
-          try { console.warn('⚠️ REVERSE_ADJUST: FIFO ขาด '+_resRa.shortage+' หน่วย (item '+mv.itemId+') — FIFO≠stockByBranch ควร Reconcile'); } catch(_e){}
+          // 🆕 COST_FORGE_GUARD (UAT ผจก.คลัง S2): ของถูกใช้ไปแล้ว → ส่วนขาด = NEG layer (สต๊อกติดลบเท่าไร FIFO ติดลบเท่านั้น · ล้างเองเมื่อของเข้า)
+          fifoLayers.push({ id:'fl_revadj_short_' + mv.id, itemId: mv.itemId, branch: mv.branch, locId: mv.locId || null,
+            qty: -_resRa.shortage, remaining: -_resRa.shortage, unitCost: _ucOrig, cost: -_resRa.shortage * _ucOrig, totalCost: -_resRa.shortage * _ucOrig, date: _rDate,
+            lot:'NEG', isNegative:true, ref:'REV-'+(mv.ref||mv.id), source:'adjust_reverse', note:'ติดลบ: ยกเลิกการปรับเพิ่มที่ของถูกใช้ไปแล้ว' });
         }
         _raCut = _cutCost;
       } else if(delta > 0){
         // กลับ adjust_out (เดิมตัดของ) → ดัน layer กลับ @ ต้นทุนเดิม (fallback costPrice)
-        const _itRa = s.items.find(x => x.id === mv.itemId);
         // 🆕 S8a (B5.1 ก): ต้นทุน FIFO ที่ตัดจริง (mv.fifoUnitCost) ก่อน → ตรงกับ JE ที่กลับ · movement เก่าไม่มีช่องนี้ = ลำดับเดิม
         //   🆕 verify S8: movement เก่าไม่มี fifoUnitCost แต่มี JE เดิม (posted @FIFO จริง) → ต้นทุนต่อหน่วย = ยอด JE ÷ จำนวน (มูลค่า layer = JE ที่กลับ)
         const _aqRa = Math.abs(Number(mv.qty) || 0);
-        const _unitRa = (mv.fifoUnitCost != null && isFinite(Number(mv.fifoUnitCost))) ? (Number(mv.fifoUnitCost) || 0)
-          : (_jeOrig && _aqRa > 0 && (Number(_jeOrig.totalDebit) || 0) > 0.001) ? (Number(_jeOrig.totalDebit) / _aqRa)
-          : (Number(mv.unitCost) || (mv.cost && mv.qty ? Math.abs(Number(mv.cost)/Number(mv.qty)) : 0) || Number(_itRa && _itRa.costPrice) || 0);
-        fifoLayers.push({
-          id:'fl_revadj_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+        //   🆕 COST_FORGE_GUARD B4 (UAT ตรวจสอบภายใน/สถาปัตย์): มูลค่าคืน = JE ผลต่างที่ ADJUST_STOCK สร้าง ÷ จำนวน (= fifoUnitCost ของทางปกติทุกตัวอักษร)
+        //   ไม่เชื่อ fifoUnitCost/unitCost บน movement (ช่องที่ payload ปลอมได้) · ไม่มี JE = ไม่เคยลงมูลค่า → @0 · JE ถูก void = ยังใช้ยอดเดิม (ของจริงกลับ · GL ไม่กลับซ้ำ)
+        const _unitRa = (_jeAny && _aqRa > 0 && (Number(_jeAny.totalDebit) || 0) > 0.001) ? (Number(_jeAny.totalDebit) / _aqRa) : 0;
+        // UAT ผจก.คลัง S3: ล้าง NEG ที่เกิดระหว่างนั้นแบบเดียวกับ ADJUST_STOCK/รับของ
+        fifoLayers = _netIncomingLayers(fifoLayers, [{
+          id:'fl_revadj_' + mv.id,   // COST_FORGE_GUARD B5: id ตายตัว (เล่นซ้ำได้ผลเดิม)
           itemId: mv.itemId, branch: mv.branch, locId: mv.locId||null,
           qty: delta, remaining: delta, unitCost: _unitRa, cost: _unitRa*delta,
-          date: getToday(), ref:'REV-'+(mv.ref||mv.id), source:'adjust_reverse',
-        });
+          date: _rDate, ref:'REV-'+(mv.ref||mv.id), source:'adjust_reverse',
+        }]);
       }
+      const _at = Number(d.at) || Date.now();
       const counterMv = {
-        id: 'mv_revadj_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
-        type:'adjust_reverse', itemId:mv.itemId, qty:delta, branch:mv.branch,
-        date:getToday(), ref:mv.ref||mv.id,
-        note:`ยกเลิกการปรับสต๊อก ${mv.ref||''} — ${reason||'-'}`, by,
+        id: 'mv_revadj_' + mv.id,   // COST_FORGE_GUARD B5: id ตายตัว
+        type:'adjust_reverse', itemId:mv.itemId, qty:delta, branch:mv.branch, ...(mv.locId ? { locId:mv.locId } : {}),
+        date:_rDate, ref:mv.ref||mv.id,
+        note:`ยกเลิกการปรับสต๊อก ${mv.ref||''} — ${reason}`, by, ..._claim,
       };
       const movements = [...(s.movements||[]).map(m => m.id === movementId
-        ? { ...m, reversed:true, reversedAt:Date.now(), reversedBy:by, reverseReason:reason } : m),
+        ? { ...m, reversed:true, reversedAt:_at, reversedBy:by, reverseReason:reason } : m),
         counterMv];
-      const auditLog = [...(s.auditLog||[]), { id:'al_'+Date.now().toString(36),
-        ts:Date.now(), type:'adjust_reverse', by, entityId:movementId,
-        entityRef:mv.ref||mv.id, amount:mv.qty||0, note:reason||'' }];
+      const auditLog = [...(s.auditLog||[]), { id:'al_revadj_' + mv.id,
+        ts:_at, type:'adjust_reverse', by, ..._claim, entityId:movementId,
+        entityRef:mv.ref||mv.id, amount:mv.qty||0, note:reason, basis:_basis, ...(_apId ? { approvalReqId:_apId } : {}) },
+        // COST_FORGE_GUARD B2 (ข) / UNDO_PRINCIPLE U9: ยกเลิกเองโดยผู้อนุมัติ → ขึ้น ↩️ ตรวจย้อนหลัง
+        ...(_basis === 'approver' ? [{ id:'al_undo_revadj_' + mv.id, ts:_at, type:'undo_direct', action:'reverse_adjust', basis:'approver', by,
+          entityType:'movement', entityId:movementId, entityRef:(() => { const _it = (s.items||[]).find(x => x && x.id === mv.itemId); const nm = _it ? ((_it.code || '') + ' ' + (_it.name || '')).trim() : '';
+            return (nm ? nm + ' · ' : '') + (mv.ref || mv.id); })(), itemId:mv.itemId, amount:_amt, note:reason, why:_why }] : [])];
       // 🆕 S8a (B5.1 ข): กลับ JE ผลต่างของการปรับนี้ (je_adj_<mv.id> ที่ posted) — สลับ debit/credit ทุกบรรทัด
       //   · ไม่มี JE เดิม (มูลค่า 0 / flow ไม่ post) = ไม่ทำ JE · มี je_revadj_<mv.id> แล้ว = ไม่กลับซ้ำ
       let journalEntries = s.journalEntries; let _seqRa = s.seq?.je || 0;
@@ -30540,23 +30666,58 @@ function reducer(s, a){
         return ls.filter(l => l.debit > 0.0001 || l.credit > 0.0001);
       })();
       const _revAmt = Math.abs(_ratio - 1) > 0.00001 ? _r2(_revLines.reduce((t,l) => t + l.debit, 0)) : (_jeOrig ? Number(_jeOrig.totalDebit)||0 : 0);
-      if(_raCut != null && (_raShort > 0.0001 || (_jeOrig && Math.abs(_revAmt - _origAmt) > 0.01))){
+      // 🆕 COST_FORGE_GUARD B4: ไม่มี JE ที่มีผล → ลง JE เฉพาะส่วนที่ตัด FIFO เกินมูลค่าที่การปรับนี้เคยลง (UAT บัญชี/สถาปัตย์: ของเก่ามีมูลค่าแต่ไม่มี JE / JE ถูก void = ไม่ลงซ้ำ)
+      const _b4Amt = (!_jeOrig && _raCut != null) ? _r2(Math.max(0, _raCut - _origVal)) : 0;
+      if(_raCut != null && (_raShort > 0.0001 || _b4Amt > 0.005 || (_jeOrig && Math.abs(_revAmt - _origAmt) > 0.01))){
         auditLog.push({ id:'al_revadj_cost_'+mv.id, ts:Date.now(), type:'adjust_reverse_cost_diff', by, entityId:movementId, entityRef:mv.ref||mv.id,
-          amount: _revAmt, note: 'ยกเลิกการปรับเพิ่ม: JE เดิม ' + _r2(_origAmt) + ' · ตัด FIFO จริง ' + _r2(_raCut) + (_raShort > 0.0001 ? (' · FIFO ขาด ' + _raShort + ' หน่วย (คิด @ต้นทุนเดิม · ควร Reconcile)') : '') });
+          amount: _jeOrig ? _revAmt : _b4Amt, note: 'ยกเลิกการปรับเพิ่ม: ' + (_jeOrig ? 'JE เดิม ' + _r2(_origAmt) : 'ไม่มี JE ที่มีผล (มูลค่าเดิม ' + _r2(_origVal) + ')') + ' · ตัด FIFO จริง ' + _r2(_raCut)
+            + (_b4Amt > 0.005 ? ' · ลง JE ปรับปรุง ' + _b4Amt : '') + (_raShort > 0.0001 ? (' · ของถูกใช้ไปแล้ว ' + _raShort + ' หน่วย → ติดลบ (NEG @ต้นทุนเดิม · ควร Reconcile ตอนนับ)') : '') });
       }
       if(_jeOrig && _revAmt > 0.001 && !(s.journalEntries||[]).some(j => j.id === _revId)){
         _seqRa += 1;
         const _d = new Date();
         const _jeNo = `JE-${_d.getFullYear()}-${String(_d.getMonth()+1).padStart(2,'0')}-${String(_seqRa).padStart(4,'0')}`;
         journalEntries = [...(s.journalEntries||[]), {
-          id:_revId, jeNumber:_jeNo, date: a.data.date || counterMv.date,
+          id:_revId, jeNumber:_jeNo, date: counterMv.date,   // COST_FORGE_GUARD B5: ไม่รับวันที่จาก payload
           description:'[กลับรายการ] ยกเลิกการปรับสต๊อก ' + (mv.ref||'') + ' — ' + (reason||'-'),
           source:'adjust_reverse', sourceId: mv.id, reversesJeId: _jeOrig.id,  // sourceId = movement เดิม (deterministic · counterMv.id สุ่ม)
           branchId: _jeOrig.branchId, refType:'adjust', refId: mv.itemId, status:'posted', postedBy: by||'system', postedAt: Date.now(),
           lines: _revLines, totalDebit: _revAmt, totalCredit: _revAmt,
           ...(Math.abs(_ratio - 1) > 0.00001 ? { origAmount: _r2(_origAmt) } : {}) }];
+      } else if(!_jeOrig && _b4Amt > 0.005 && !(s.journalEntries||[]).some(j => j.id === _revId)){
+        // 🆕 COST_FORGE_GUARD B4: การปรับเพิ่มเดิมไม่มี JE (มูลค่า 0) แต่ของถูกใช้ไปแล้ว → ตัดล็อตอื่นที่มีต้นทุนออก → ลง JE ตามมูลค่าที่ตัดจริง (เดิมไม่ลง = สต๊อกหายแต่ GL ไม่ตาม)
+        const _vA = (s.chartOfAccounts||[]).find(x => x && x.code === '5385'), _iA = (s.chartOfAccounts||[]).find(x => x && x.code === '1300');
+        if(_vA && _iA){
+          const _amt2 = _b4Amt;
+          _seqRa += 1;
+          const _d = new Date();
+          const _jeNo = `JE-${_d.getFullYear()}-${String(_d.getMonth()+1).padStart(2,'0')}-${String(_seqRa).padStart(4,'0')}`;
+          journalEntries = [...(s.journalEntries||[]), {
+            id:_revId, jeNumber:_jeNo, date: counterMv.date,
+            description:'[ปรับปรุง] ยกเลิกการปรับสต๊อก ' + (mv.ref||'') + ' — ' + reason + ' (การปรับเดิมไม่มี JE · ของถูกใช้แล้ว ตัดล็อตอื่น)',
+            source:'adjust_reverse', sourceId: mv.id, branchId: mv.branch, refType:'adjust', refId: mv.itemId, status:'posted', postedBy: by, postedAt: Date.now(),
+            lines:[ { accountId:_vA.id, accountCode:'5385', accountName:_vA.name, debit:_amt2, credit:0, description:'ยกเลิกการปรับเพิ่ม (ของถูกใช้ไปแล้ว)' },
+                    { accountId:_iA.id, accountCode:'1300', accountName:_iA.name, debit:0, credit:_amt2, description:'ลดสินค้าคงเหลือ' } ],
+            totalDebit:_amt2, totalCredit:_amt2 }];
+        }
       }
-      return { ...s, items, fifoLayers, movements, auditLog,
+      // 🆕 COST_FORGE_GUARD (UAT พนักงานบัญชี): audit บอกทางที่ใช้ + JE ที่ลง · ปิดคำขอยกเลิกที่ค้างของรายการนี้ (UAT ผจก.สาขา/คลัง)
+      { const _je = journalEntries !== s.journalEntries ? journalEntries[journalEntries.length - 1] : null;
+        const _it = (s.items||[]).find(x => x && x.id === mv.itemId);
+        const _nm = _it ? ((_it.code || '') + ' ' + (_it.name || '')).trim() : (mv.itemId || '');
+        const _rq = _apId ? (s.approvalRequests||[]).find(r => r && r.id === _apId) : null;
+        const _how = _basis === 'approval' ? 'ผ่านคำขอ ' + _apId + (_rq && _rq.requestedBy ? ' (ผู้ขอ ' + _rq.requestedBy + ')' : '')
+          : _basis === 'approver' ? 'ผู้อนุมัติยกเลิกเอง' : '👑 GM/เจ้าของ ทำเอง';
+        const _jeTag = _je ? { jeId:_je.id, jeNumber:_je.jeNumber, jeAmount:Number(_je.totalDebit) || 0 } : {};
+        auditLog.forEach((e, i) => { if(e && (e.id === 'al_revadj_' + mv.id || e.id === 'al_undo_revadj_' + mv.id))
+          auditLog[i] = { ...e, ..._jeTag, qty: Number(mv.qty) || 0, branch: mv.branch,
+            ...(e.type === 'adjust_reverse' ? { summary:'ยกเลิกการปรับสต๊อก ' + _nm + ' ' + (Number(mv.qty) || 0) + ' (' + (mv.ref || mv.id) + ') — ' + _how + ' · ' + reason + (_je ? ' · ' + _je.jeNumber : '') } : {}) }; }); }
+      const _reqs0 = s.approvalRequests || [];
+      const approvalRequests = _reqs0.some(r => r && r.action === 'reverse_adjust' && r.id !== _apId && (r.status || 'pending') === 'pending' && String((r.payload || {}).movementId || '') === mv.id)
+        ? _reqs0.map(r => (r && r.action === 'reverse_adjust' && r.id !== _apId && (r.status || 'pending') === 'pending' && String((r.payload || {}).movementId || '') === mv.id)
+          ? { ...r, status:'cancelled', cancelledBy:by, cancelledAt:_at, cancelReason:'ยกเลิกการปรับนี้ไปแล้ว (' + (_basis === 'approval' ? 'ผ่านคำขออื่น' : _basis === 'approver' ? 'ผู้อนุมัติยกเลิกเอง' : 'GM/เจ้าของ ทำเอง') + ')' } : r)
+        : null;
+      return { ...s, items, fifoLayers, movements, auditLog, ...(approvalRequests ? { approvalRequests } : {}),
         ...(journalEntries !== s.journalEntries ? { journalEntries, seq: { ...s.seq, je: _seqRa } } : {}) };
     }
 
@@ -30831,6 +30992,23 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       //   verify 1: สาขาใบรับ = gr.branch หรือ (ไม่ส่งมา) ปลายทางของ PO จริง · ตรวจทุกสาขาที่แตะ (ใบ/PO/แถวสต๊อก/ล็อต/movement) — กันคำขอแต่งตัด gr.branch ทิ้งเพื่อข้ามด่าน
       const _livePO = (s.pos||[]).find(p => p && updatedPO && p.id === updatedPO.id) || null;
       const _poD = (_livePO || updatedPO || {}).destinationBranch || null;
+      // 🆕 COST_FORGE_GUARD A3: ป้ายใบรับบนล็อต = ใบนี้เสมอ (grRef = เลข GR · sourcePO = เลข PO · วันที่ = วันที่รับ) — ทับค่า ไม่ปฏิเสธ (หน้าจอส่งค่านี้อยู่แล้ว)
+      //   กันล็อตอ้างใบรับอื่น/วันที่ล่วงหน้า กลายเป็น "รับของล่าสุด" · ไม่มีใบ/เลข PO = ตัดป้าย
+      { const _poNo = (_livePO || updatedPO || {}).poNumber || '';
+        fifoLayers = (fifoLayers||[]).map(l => (!l || typeof l !== 'object') ? l
+          : (gr && gr.grNumber && _poNo) ? { ..._dropBuyTag(l, true), grRef: gr.grNumber, sourcePO: _poNo, ...(gr.grDate ? { date: gr.grDate } : {}) }
+          : { ..._dropBuyTag(l, true), ...(gr && gr.grNumber ? { grRef: gr.grNumber } : {}) });   // UAT จัดซื้อ/QC: ไม่มีเลข PO = ตัดแค่ sourcePO (คง grRef/ของแถม ให้ยกเลิกใบ/แก้ราคาหาเจอ)
+        // 🆕 COST_FORGE_GUARD (UAT ตรวจสอบภายใน S2): ล็อตต้องมาจากบรรทัดใบรับ — สินค้าไม่อยู่ในใบ / จำนวนรวมเกินบรรทัด = ปฏิเสธ (ตรวจจาก payload · ทางปกติ 1 บรรทัด = 1 ล็อต)
+        //   verify (เจาะระบบ V2/V2b): มีล็อตแต่ไม่มีใบ/บรรทัด = ปฏิเสธ · ล็อตจำนวน ≤ 0 = ปฏิเสธ (ไม่งั้นบวก-ลบหักกันผ่านเพดาน)
+        if((fifoLayers||[]).length && (!gr || !Array.isArray(gr.lines) || (fifoLayers||[]).some(l => !l || typeof l !== 'object' || !(Number(l.qty) > 0) || !isFinite(Number(l.qty))))){
+          try { alert('⛔ รับของไม่สำเร็จ — ล็อตรับเข้าไม่ตรงกับบรรทัดใบรับ'); } catch(_e){} return s; }
+        if(gr && Array.isArray(gr.lines)){
+          const _cap = new Map();
+          gr.lines.forEach(ln => { if(ln && ln.itemId && !ln.noStock) _cap.set(ln.itemId, (_cap.get(ln.itemId) || 0) + (Number(ln.baseQty != null ? ln.baseQty : ln.qty) || 0)); });
+          const _got = new Map();
+          for(const l of (fifoLayers||[])){ if(!l || typeof l !== 'object') continue; _got.set(l.itemId, (_got.get(l.itemId) || 0) + (Number(l.qty) || 0)); }
+          for(const [it, q] of _got){ if(!_cap.has(it) || q > _cap.get(it) + 1e-6){ try { alert('⛔ รับของไม่สำเร็จ — ล็อตรับเข้าไม่ตรงกับบรรทัดใบรับ'); } catch(_e){} return s; } }
+        } }
       const _bid = (gr && gr.branch) || _poD || null;
       const _rows = [...(stockUpdates||[]), ...(fifoLayers||[]), ...(movements||[])].filter(Boolean);
       if(s.currentUser){
@@ -30905,7 +31083,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
         ...s,
         items,
         auditLog: _al,
-        grs: [...s.grs, _gr],
+        grs: [...s.grs, _grStripStash(_gr)],   // COST_FORGE_GUARD re-verify: ใบรับใหม่ไม่มีล็อตที่ถอดไว้
         seq: { ...s.seq, gr: s.seq.gr+1 },
         pos: s.pos.map(p => p.id === updatedPO.id ? _poKeepSvc(s, p, { ..._docTagKeep(s, p, updatedPO, null),   // UAT M1 (DOC-TAGS): แท็กคงจาก PO จริง · 🔧 B18.10-1 คงการยืนยันงานบริการ
           destinationBranch: p.destinationBranch, supplierId: p.supplierId }) : p),   // verify 1 (RECV-ONBEHALF): ปลายทาง/ผู้ขายคงจาก PO จริง (รับของแก้ไม่ได้)
@@ -31663,11 +31841,49 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       return {
         ...s,
         items,
-        grs: gr ? [...s.grs, gr] : s.grs,
+        grs: gr ? [...s.grs, _grStripStash(gr)] : s.grs,   // COST_FORGE_GUARD re-verify W1
         movements: [...s.movements, ...(movements||[])],
         // 🆕 GO-LIVE UAT: รับ TO ที่ปลายทางก็หักล้าง NEG layer ของสาขานั้นเหมือน GR (ดู RECEIVE_PO)
-        fifoLayers: fifoLayer ? _netIncomingLayers(s.fifoLayers, Array.isArray(fifoLayer)?fifoLayer:[fifoLayer]) : s.fifoLayers,
+        fifoLayers: fifoLayer ? _netIncomingLayers(s.fifoLayers, (Array.isArray(fifoLayer)?fifoLayer:[fifoLayer]).map(l => _dropBuyTag(l))) : s.fifoLayers,   // 🆕 COST_FORGE_GUARD A4: ล็อตรับโอนไม่มีป้ายใบรับ
       };
+    }
+
+    // 🆕 COST_FORGE_GUARD A1: รับ TO ข้ามสาขา ตัดปิด "↩️ ของยังอยู่ต้นทาง" — คืนส่วนที่ขาดเข้าต้นทางก้อนเดียว (แทน ADJUST_BRANCH_STOCK + ADD_FIFO_LAYER + ADD_MOVEMENT)
+    //   a.data = { toId, by } · reducer คิดเองจาก TO (ตัดปิดแล้ว · shortAction 'return'): ส่วนขาด = qty − finalQty (หน่วยฐาน)
+    //   ต้นทุน = line.unitCost ของ TO (ค่าเดียวกับที่ปลายทางรับ) · ล็อตไม่มีป้ายใบรับ · สต๊อกลงคลังเดียวกับล็อต · id ตายตัว · คืนแล้ว = ไม่ทำซ้ำ
+    case 'RETURN_TO_SHORT': {
+      const d = a.data || {};
+      const to = (s.transferOrders||[]).find(t => t && t.id === d.toId);
+      if(!to){ alert('ไม่พบ TO'); return s; }
+      if(_toShortReturned(s, to)) return s;   // คืนไปแล้ว (เล่นซ้ำ/กดซ้ำ/คืนทางเดิมก่อน deploy) = ไม่ทำ · _ADD_DUP ให้ rebase ข้าม
+      if(_isIntraDoc(to)){ alert('ใบภายในสาขา — คืนต้นทางผ่านหน้ารับของภายในสาขา'); return s; }
+      if(!to.closedShort || to.shortAction !== 'return'){ alert(`⛔ TO ${to.toNumber} ไม่ได้ตัดปิดแบบ "คืนต้นทาง"`); return s; }
+      const u = _actorOf(s, d.by);
+      if(!u){ alert('⛔ ไม่พบผู้ใช้ที่ทำรายการ'); return s; }
+      const date = getToday();
+      { const locked = _checkDateLock(s, date, 'คืนของเข้าต้นทาง'); if(locked) return locked; }
+      const sid = _sanId(to.id), locId = to.fromLocId || null, incoming = [], movements = [];
+      let items = s.items;
+      (to.lines||[]).forEach((l, i) => {
+        if(!l || !l.itemId || l.finalQty == null) return;
+        const q = Number(((Number(l.qty)||0) - (Number(l.finalQty)||0)).toFixed(4));
+        if(!(q > 0)) return;
+        const uc = Number(l.unitCost) || 0;
+        const f = (l.displayQty != null && l.displayUnit && Number(l.displayQty) > 0) ? (Number(l.qty)||0) / Number(l.displayQty) : 1;
+        // 🆕 UAT QC: ของที่คืน = ล็อตเดิมต้นทาง (breakdown ตอนส่ง) → คงล็อต/วันหมดอายุ/ใบสั่งผลิต/คลัง · ต้นทุน = บรรทัด TO เหมือนเดิม · ไม่มี breakdown = ล็อต RET-
+        _slicePieces(_toLinePieces(l, to), Number(l.finalQty) || 0, q).forEach((p, j) => {
+          const sfx = sid + '_' + i + (j ? '_' + j : ''), pl = p.locId || locId;
+          incoming.push({ id:'fl_toret_' + sfx, itemId:l.itemId, branch:to.fromBranch, locId:pl, qty:p.qty, remaining:p.qty, unitCost:uc, totalCost:p.qty * uc, date,
+            lot: p.neg ? `RET-${to.toNumber}-${String(l.itemId).slice(-3)}` : p.lot, ...(p.expiryDate ? { expiryDate:p.expiryDate } : {}), ...(p.prodRef ? { prodRef:p.prodRef } : {}),
+            sourceBranch:to.toBranch, sourceRef:to.toNumber + '·return', toRef:to.toNumber });
+          if(!to.isIntraBranch) items = items.map(it => it.id === l.itemId ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, to.fromBranch, pl, p.qty) } : it);
+          movements.push({ id:'mv_toret_' + sfx, type:'transfer_return', itemId:l.itemId, qty:p.qty, branch:to.fromBranch, locId:pl, date, ref:to.toNumber,
+            note:`คืนต้นทาง: TO ${to.toNumber} ของยังอยู่ครบ (ปลายทางรับไม่ครบ ${Number((q / (f || 1)).toFixed(3))} ${(f !== 1 ? l.displayUnit : l.unit) || ''})`, by:u.username });
+        });
+      });
+      if(!incoming.length) return s;
+      return { ...s, items, fifoLayers:_netIncomingLayers(s.fifoLayers, incoming), movements:[...(s.movements||[]), ...movements],
+        transferOrders:(s.transferOrders||[]).map(t => t.id === to.id ? { ...t, shortReturnedAt:date, shortReturnedBy:u.username } : t) };
     }
 
     // 🆕 PRODUCTION-LIVE คลื่น 1 (B3.14): คนดูแลคลังต้นทางกด "✅ อนุมัติ + ส่งของ" ตาม TR ภายในสาขา → TO + ตัดของที่ต้นทาง (atomic)
@@ -32189,6 +32405,8 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
     // a.data: { issue, locMoves:[{itemId,branch,fromLoc,toLoc,qty}], movements:[...] }
     case 'ADD_MATERIAL_ISSUE': {
       const { issue, locMoves, movements } = a.data;
+      // 🆕 COST_FORGE_GUARD verify (เจาะระบบ V1): ใบเบิกแบบบันทึกอย่างเดียว (source quick) สร้างได้ทาง ADD_QUICK_ISSUE เท่านั้น — ใบปลอมแล้ว VOID_QUICK_ISSUE = ล็อตฟรี
+      if(issue && issue.source === 'quick'){ try { alert('⛔ ใบเบิกด่วนสร้างผ่านหน้าเบิกวัตถุดิบเท่านั้น'); } catch(_e){} return s; }
       let items = s.items;
       (locMoves||[]).forEach(m => {
         items = items.map(it => {
@@ -32213,8 +32431,12 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
         movements: [...s.movements, ...(movements||[])],
       };
     }
-    case 'UPDATE_MATERIAL_ISSUE':
+    case 'UPDATE_MATERIAL_ISSUE': {
+      // 🆕 COST_FORGE_GUARD verify (เจาะระบบ V1): แก้ใบเบิกด่วน (จำนวน/ต้นทุนที่ VOID_QUICK_ISSUE คืน) ทางนี้ไม่ได้ · ไม่มีหน้าจอเรียก
+      const _om = (s.materialIssues||[]).find(m => m && a.data && m.id === a.data.id);
+      if((a.data && a.data.source === 'quick') || (_om && _om.source === 'quick')){ try { alert('⛔ แก้ใบเบิกด่วนไม่ได้ — ยกเลิกแล้วเบิกใหม่'); } catch(_e){} return s; }
       return { ...s, materialIssues:(s.materialIssues||[]).map(m => m.id===a.data.id ? a.data : m) };
+    }
 
     // ---------- Station Types (master list) ----------
     case 'ADD_STATION_TYPE':    return { ...s, stationTypes:[...(s.stationTypes||[]), a.data] };
@@ -33330,6 +33552,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
     // a.data: { order, items?, locMoves?, fifoLayers?, movements?, fgLayer?, materialIssue? }
     case 'PROD_WORKFLOW_STEP': {
       const { order, locMoves, fifoLayers, movements, fgLayer, materialIssue } = a.data;
+      if(materialIssue && materialIssue.source === 'quick'){ try { alert('⛔ ใบเบิกด่วนสร้างผ่านหน้าเบิกวัตถุดิบเท่านั้น'); } catch(_e){} return s; }   // COST_FORGE_GUARD verify V1
       let items = s.items;
 
       // Apply location moves (same branch)
@@ -33363,7 +33586,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       // Deduct or add FIFO
       (fifoLayers||[]).forEach(fl => {
         if(fl._deduct){ deductFIFO(layers, fl.itemId, fl.qty, fl.branch); }
-        else { layers.push(fl); }
+        else { layers.push(_dropBuyTag(fl)); }   // 🆕 COST_FORGE_GUARD A4
       });
 
       const orders = (s.productionOrders||[]).map(o => o.id === order.id ? order : o);
@@ -33402,7 +33625,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       let layers = s.fifoLayers.map(l => ({...l}));
       for(const md of materialDeducts) deductFIFO(layers, md.itemId, md.qty, md.branch);
       // 4) add FG FIFO layer
-      if(fgLayer) layers = [...layers, fgLayer];
+      if(fgLayer) layers = [...layers, _dropBuyTag(fgLayer)];   // 🆕 COST_FORGE_GUARD A4
       // 5) movements
       const newMovements = [...s.movements, ...(movements||[])];
       // 6) update order
@@ -33943,6 +34166,9 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
     // 🆕 ADD_JE: reducer assigns monotonic jeNumber จาก seq.je (กัน collision หลัง delete/void)
     //    + period lock guard (กัน post JE ในงวดปิดแล้ว)
     case 'ADD_JE': {
+      // 🆕 COST_FORGE_GUARD B3: JE ผลต่างปรับสต๊อก/กลับรายการ สร้างได้ใน reducer ADJUST_STOCK / REVERSE_ADJUST เท่านั้น (REVERSE_ADJUST เชื่อ je_adj_<movement>)
+      if(a.data && (/^je_(adj|revadj)_/.test(String(a.data.id || '')) || ['adjust_stock', 'adjust_reverse'].includes(a.data.source))){
+        try { alert('⛔ รายการบัญชีผลต่างปรับสต๊อกสร้างจากหน้าปรับ/นับสต๊อกเท่านั้น'); } catch(_e){} return s; }
       // 🆕 UAT verify (audit): JE ตัดปิดของหาย 1 ใบ TO ลงได้ครั้งเดียว — กันอนุมัติคำขอซ้ำจาก 2 เครื่อง (ตรวจกับ state ล่าสุดใน reducer)
       if(a.data && a.data.source === 'transfer_loss' && a.data.sourceId && (s.journalEntries||[]).some(j => j && j.source === 'transfer_loss'
           && j.sourceId === a.data.sourceId && j.status !== 'void' && j.status !== 'voided' && !j.reversed && !j.voidedReversal)){
@@ -34598,6 +34824,28 @@ function adjustBranchStock(stockByBranch, branch, locId, delta){
 //   คืน layer ที่เหลือ (qty ลดลงตามที่ใช้ล้าง neg) + mutate layersArr ใน-place (ลด remaining ของ neg)
 //   ถ้าไม่มี neg ค้าง → คืน layer เดิมไม่เปลี่ยน
 // 🆕 GO-LIVE UAT: รับ layer ใหม่หลายใบเข้า state — clone ของเดิม แล้วหักล้าง NEG ทีละใบ (คืน array ใหม่พร้อม layer ใหม่ที่ติด nettedQty)
+// 🆕 COST_FORGE_GUARD verify (เจาะระบบ V3): ช่องบนบรรทัด GR ที่เก็บล็อต/สถานะที่ถอดไว้ (undo คืนล็อตจากช่องนี้) — ตั้งได้เฉพาะ reducer ที่ถอดจริง
+const _GR_LINE_STASH = ['capInto', 'capIntoAt', 'capIntoBy', 'capIntoId', 'capIntoLayers', 'capIntoPrevNoStock', 'reclassToAsset', 'reclassPrev', 'reclassLayers', 'capIntoRef'];
+// ใบรับใหม่จาก payload (ADD_GR · RECEIVE_PO · ADD_TO_GR · ADD_REPLACEMENT_GR) — ตัดช่องล็อตที่ถอดไว้ทุกบรรทัด (re-verify W1/W2)
+function _grStripStash(g){
+  if(!g || typeof g !== 'object' || !Array.isArray(g.lines) || !g.lines.some(l => l && typeof l === 'object' && _GR_LINE_STASH.some(k => k in l))) return g;
+  return { ...g, lines: g.lines.map(l => _dropGrLineStash(l)) };
+}
+function _dropGrLineStash(l){
+  if(!l || typeof l !== 'object' || Array.isArray(l) || !_GR_LINE_STASH.some(k => k in l)) return l;
+  const o = { ...l }; for(const k of _GR_LINE_STASH) delete o[k]; return o;
+}
+// 🆕 COST_FORGE_GUARD A4: ล็อตจากทางเข้าที่ไม่ใช่ "ใบรับของผู้ขาย" — ตัดป้ายที่ทำให้ดูเหมือนรับของจาก PO + ช่องที่ reducer ประทับเอง (ไม่เชื่อ payload)
+//   keepGrRef = เก็บ grRef ไว้ (ของชดเชย/ยกเลิกใบคืน — VOID_GR/ตามล็อตใช้) · ไม่ส่ง = ตัด grRef/poId/isFreebie ด้วย (ADD_TO_GR/ผลิต — ทางปกติไม่ส่งช่องพวกนี้)
+//   sourcePO ตั้งได้ทาง RECEIVE_PO เท่านั้น (A3 ผูกกับใบนั้น) → itemRefCost 1a / negUnitCost (isBuyLayer) ไม่เจอล็อตปลอม
+const _BUY_TAG_KEYS = ['sourcePO', 'nettedQty', 'negNetCost', 'negPriceDiff', 'negDiffBooked', 'adjReqId', 'sourceOpening'];
+function _dropBuyTag(l, keepGrRef){
+  if(!l || typeof l !== 'object' || Array.isArray(l)) return l;
+  const o = { ...l };
+  for(const k of _BUY_TAG_KEYS) delete o[k];
+  if(!keepGrRef){ delete o.grRef; delete o.poId; delete o.isFreebie; }
+  return o;
+}
 function _netIncomingLayers(existing, incoming){
   const layers = (existing||[]).map(l => ({ ...l }));
   for(const L of (incoming||[])){
@@ -35370,7 +35618,7 @@ const ACTION_MERGE = Object.freeze({
   ADD_DEPOSIT: { kind:'add' },
   ADD_EXPENSE_CAT: { kind:'add' },
   ADD_EXPENSE_ITEM: { kind:'add' },
-  ADD_FIFO_LAYER: { kind:'add' },
+  ADD_FIFO_LAYER: { kind:'deny' },   // 🆕 COST_FORGE_GUARD A1: ปิดแล้ว (reducer ปฏิเสธเสมอ)
   ADD_GR: { kind:'add' },
   ADD_HANDOVER_TO: { kind:'add' },   // 🆕 PRODUCTION-LIVE (B11) ใบส่งมอบไลน์→คลัง FG · id จาก payload · เลข TO ออกใน reducer
   ADD_INV: { kind:'add' },
@@ -35518,6 +35766,7 @@ const ACTION_MERGE = Object.freeze({
   REORDER_PRODUCTION: { kind:'delta' },
   RESET_STATE: { kind:'deny' },
   REVERSE_ADJUST: { kind:'delta' },
+  RETURN_TO_SHORT: { kind:'delta' },   // 🆕 COST_FORGE_GUARD A1: คิดจาก TO สด · id ตายตัว · คืนแล้ว = ไม่ทำซ้ำ
   REVERSE_PAYMENT: { kind:'delta' },
   REVERSE_PETTY_TOPUP: { kind:'delta' },
   REVERT_CN_TO_DELIVERY: { kind:'replace', coll:'pos', id: d => d && d.poId },
@@ -35704,9 +35953,8 @@ const ACTION_READS = Object.freeze({
   ADD_MATERIAL_ISSUE: ['items','materialIssues','movements'],
   ADD_MOVEMENT: ['movements'],
   DEDUCT_FIFO_LAYERS: ['boms','fifoLayers','items'],
-  ADD_FIFO_LAYER: ['fifoLayers'],
   ADJUST_STOCK: ['approvalRequests','auditLog','boms','expenseItems','fifoLayers','grs','items','journalEntries','movements'],   // 🆕 ADJ-COST: (users = หมวดคุม MERGE_GUARD_KEYS ไม่ใส่) · approvalRequests = ต้นทุนที่แก้มาจากคำขอที่อนุมัติ · 🆕 ADJ_IN_COST_GUARD: grs = reducer คิดต้นทุนปรับเพิ่มเอง (รับของล่าสุด)
-  REVERSE_ADJUST: ['auditLog','fifoLayers','items','journalEntries','movements'],  // 🆕 S8a: กลับ JE je_adj_<mv.id>
+  REVERSE_ADJUST: ['approvalRequests','auditLog','fifoLayers','items','journalEntries','movements'],  // 🆕 S8a: กลับ JE je_adj_<mv.id> · 🆕 COST_FORGE_GUARD B2: approvalRequests = คำขอย้อน (_approvalGate) + คำขอขาไป (undoPolicy)
   ADJUST_BRANCH_STOCK: ['items'],
   ADD_WEIGH_LOG: ['boms','fgDispatchKeys','fifoLayers','items','movements','productionOrders','weighLogs'],   // 🆕 WEIGH_FREE_STOCK: ชั่งอิสระตัด/รับของ (_consumeLineOnly + PRODUCE_FG_TO_LOCATION)
   REVIEW_WEIGH_LOG: ['auditLog','boms','fifoLayers','items','movements','productionOrders','weighLogs'], MARK_WEIGH_REPRINT: ['auditLog','weighLogs'],   // 🆕 WEIGH_FREE_STOCK FW5: คัดทิ้งชั่งอิสระ = ตัดผลผลิตเป็นของเสีย
@@ -35725,6 +35973,7 @@ const ACTION_READS = Object.freeze({
   CLOSE_CONTRACT: ['auditLog','contracts','invoices'],
   ADD_TO: ['expenseItems','items','transferOrders'], UPDATE_TO: ['transferOrders'],   // FREIGHT_EXPENSE verify 2: ADD_TR/ADD_TO อ่านธงไม่นับสต๊อก
   ADD_TO_GR: ['fifoLayers','grs','items','movements'],
+  RETURN_TO_SHORT: ['fifoLayers','items','movements','transferOrders'],   // 🆕 COST_FORGE_GUARD A1
   ADD_SALES_LIGHT: ['salesLight'],
   VOID_SALES_LIGHT: ['auditLog','fifoLayers','items','journalEntries','movements','salesLight'],
   ADD_SALES_INV: ['auditLog','salesInvoices','vatFilings'],   // 🆕 DOC-NUMBER UAT S1: ด่านงวด ภ.พ.30 (settings = หมวดคุม) · verify 1: ต่อท้าย si_filed_period
@@ -37634,7 +37883,7 @@ function MainShell(){
     // เฉพาะผู้ดูแลระบบ (gm/admin) — ไม่งั้น user ทั่วไปข้ามทุก gate ฝั่ง UI ได้จาก console
     if(!state.currentUser || !global.ERP.isSuperUser(state.currentUser)){ global.ERP.__dispatch = null; return; }
     // 🆕 DEPOSIT-VAT verify: + ADD_INV/ADD_COMBINED_INV — ข้อยกเว้นใบกำกับซ้ำ (splitGroup/createdAt) เชื่อ payload → สร้าง PI ผ่านหน้าจอเท่านั้น
-    const BLOCKED = ['IMPORT_STATE','RESET_STATE','CLEAR_TRANSACTIONS','ADD_INV','ADD_COMBINED_INV','MERGE_IMPORT','MIGRATION_WIPE','UPDATE_FIFO_LAYER','SPLIT_FIFO_LAYER'];   // 🆕 PRICE-FIX ขั้น 1: ล็อต/ต้นทุน FIFO แก้ผ่านหน้าคลังเท่านั้น   // 🧹 M1: ล้างข้อมูลต้องผ่านหน้าตั้งค่า (สำรอง + พิมพ์ยืนยัน)   // 🆕 VAT-CLAIM V3b: นำเข้าบางส่วนต้องผ่านเมนูนำเข้า (snapshot + ยืนยัน)
+    const BLOCKED = ['IMPORT_STATE','RESET_STATE','CLEAR_TRANSACTIONS','ADD_INV','ADD_COMBINED_INV','MERGE_IMPORT','MIGRATION_WIPE','UPDATE_FIFO_LAYER','SPLIT_FIFO_LAYER','ADD_FIFO_LAYER','ADD_OPENING_STOCK'];   // 🆕 COST_FORGE_GUARD: เพิ่มล็อต/ยอดยกมาตรงปิดแล้ว (reducer ปฏิเสธด้วย)   // 🆕 PRICE-FIX ขั้น 1: ล็อต/ต้นทุน FIFO แก้ผ่านหน้าคลังเท่านั้น   // 🧹 M1: ล้างข้อมูลต้องผ่านหน้าตั้งค่า (สำรอง + พิมพ์ยืนยัน)   // 🆕 VAT-CLAIM V3b: นำเข้าบางส่วนต้องผ่านเมนูนำเข้า (snapshot + ยืนยัน)
     global.ERP.__dispatch = (action) => {
       const t = (action && action.type) || '';
       if(BLOCKED.includes(t) || t.indexOf('DELETE_') === 0){
@@ -39175,9 +39424,10 @@ function executeApprovedAction(req, state, dispatch, user){
       break;
     }
     case 'reverse_adjust': {
-      if(!p.movementId) break;
-      dispatch({ type:'REVERSE_ADJUST', data:{ movementId: p.movementId,
-        reason: p.reason || req.reason || '-', by: user.username } });
+      // 🆕 COST_FORGE_GUARD B6: reducer ตรวจคำขอที่อนุมัติ (approvalReqId) — บันทึกขั้นอนุมัติก่อนแล้วค่อยสั่ง (_execGated ลองก่อน ไม่ผ่าน = blocked ไม่ใช่ executed)
+      if(!p.movementId){ executeApprovedAction.lastDeny = 'คำขอไม่มีรายการที่จะยกเลิก'; alert('⛔ ' + executeApprovedAction.lastDeny); return false; }
+      if(!_execGated(req, state, dispatch, user, { type:'REVERSE_ADJUST', data:{ movementId: p.movementId,
+        reason: p.reason || req.reason || '-', by: user.username, approvalReqId: req.id, at: Date.now() } }, 'ยกเลิกการปรับสต๊อก')) return false;
       break;
     }
     // 🆕 PRODUCTION-LIVE UAT: ตัดปิดของขาดใบภายในสาขาเป็น "ของหาย" (ผู้อนุมัติ = ผจก./GM เป็นคนปิด · ผู้ขอรับตามที่นับไปแล้ว)
@@ -43717,6 +43967,8 @@ function ReceiveFromTOModal({ to, state, dispatch, user, onClose }){
       return alert('⛔ รับเกินที่ส่งมาเกิน 10% — ต้องให้ผู้จัดการ/GM เป็นคนกดรับ\n' + overCap.map(l => `• ${(state.items.find(x => x.id === l.itemId)||{}).name || l.itemId}`).join('\n'));
     if(receiving.length === 0 && !(isCloseShort && hasShort)) return alert('ไม่มีรายการที่จะรับ');
     // ⚠️ ถ้า closeShort + มีของขาด — ขอยืนยัน (พร้อม sub-action ที่เลือก)
+    // 🆕 COST_FORGE_GUARD (verify หน้าจอ): คืนต้นทางลงวันนี้ — งวดปิดแล้วบอกก่อนให้ยืนยัน
+    if(isCloseShort && hasShort && shortAction === 'return' && !isIntra && global.ERP.dateLockReason){ const _lk0 = global.ERP.dateLockReason(state, getToday(), 'คืนของเข้าต้นทาง'); if(_lk0) return alert(_lk0); }
     if(isCloseShort && hasShort){
       const shortLines = rcvLines.filter(_isShortLine);
       const summary = shortLines.map(l => {
@@ -43800,6 +44052,8 @@ function ReceiveFromTOModal({ to, state, dispatch, user, onClose }){
     const effClose = isCloseShort && !lossReq;          // ปิดใบจริงในรอบนี้
     const effShort = effClose && hasShort;
     if(receiving.length === 0 && lossReq){ alert('📋 ส่งคำขออนุมัติตัดปิดของหายแล้ว — ใบยังค้างรับจนกว่าผู้อนุมัติจะกด'); onClose(); return; }
+    // 🆕 COST_FORGE_GUARD (UAT สาขา/สถาปัตย์): คืนต้นทางลงวันนี้ — งวดปิดแล้วหยุดก่อนรับ/ปิดใบ (ไม่งั้นใบปิดแต่ของไม่คืน)
+    if(effShort && shortAction === 'return' && global.ERP.dateLockReason){ const _lk = global.ERP.dateLockReason(state, getToday(), 'คืนของเข้าต้นทาง'); if(_lk) return alert(_lk); }   // กันชั้นสอง (ก่อนบันทึก)
     const grNumber = global.ERP.genDocNumber('GRT', getToday(), state.grs||[], 'grNumber');
     // 🆕 detect intra-branch
     const isIntraBranch = !!to.isIntraBranch;
@@ -43931,32 +44185,8 @@ function ReceiveFromTOModal({ to, state, dispatch, user, onClose }){
           }});
         }
       } else if(shortAction === 'return'){
-        // ↩️ คืนต้นทาง: ADJUST_BRANCH_STOCK + ADD_FIFO_LAYER (original cost) + ADD_MOVEMENT
-        shortLines.forEach(x => {
-          if(x.shortBase <= 0) return;
-          // คืน stock ฝั่งต้นทาง (เฉพาะ cross-branch · intra-branch ไม่ต้อง แค่ FIFO layer)
-          if(!isIntraBranch){
-            dispatch({ type:'ADJUST_BRANCH_STOCK', data:{
-              id: x.itemId, branch: to.fromBranch, delta: x.shortBase } });
-          }
-          // FIFO layer ที่ต้นทาง — ใช้ unitCost เดิม
-          dispatch({ type:'ADD_FIFO_LAYER', data:{
-            id: genId('fl'), itemId: x.itemId, branch: to.fromBranch,
-            locId: to.fromLocId || null,
-            qty: x.shortBase, remaining: x.shortBase, unitCost: x.unitCost||0,
-            date: getToday(), lot: `RET-${to.toNumber}-${x.itemId.slice(-3)}`,
-            sourceBranch: to.toBranch, sourceRef: to.toNumber + '·return',
-          }});
-          // movement
-          dispatch({ type:'ADD_MOVEMENT', data:{
-            id: genId('mv'), type: 'transfer_return',
-            itemId: x.itemId, qty: x.shortBase,
-            branch: to.fromBranch, locId: to.fromLocId || null,
-            date: getToday(), ref: to.toNumber,
-            note: `คืนต้นทาง: TO ${to.toNumber} ของยังอยู่ครบ (ปลายทางรับไม่ครบ ${fmtNum(x.shortOrder)} ${x.displayUnit||x.unit||''})`,
-            by: user.username,
-          }});
-        });
+        // ↩️ คืนต้นทาง — 🆕 COST_FORGE_GUARD A1: ก้อนเดียว RETURN_TO_SHORT (reducer คิดส่วนขาด/ต้นทุนจาก TO ที่ตัดปิดแล้ว · เดิม ADJUST_BRANCH_STOCK + ADD_FIFO_LAYER + ADD_MOVEMENT)
+        if(shortLines.some(x => x.shortBase > 0)) dispatch({ type:'RETURN_TO_SHORT', data:{ toId: to.id, by: user.username } });
       }
       // shortAction === 'defer' → no follow-up dispatch · TO บันทึก shortAction='defer' ไว้ให้บัญชีตามภายหลัง
     }
@@ -44926,6 +45156,7 @@ const MOVE_TYPE_LABEL = {
   asset_reclass_out: ['💎 ย้ายสต๊อกเป็นทรัพย์สิน', 'bg-indigo-100 text-indigo-800'],   // 🆕 STOCK_TO_ASSET RECLASS_STOCK_TO_ASSET
   asset_reclass_undo: ['↩️ ยกเลิกย้ายเป็นทรัพย์สิน', 'bg-indigo-100 text-indigo-800'],
   transfer_out: ['โอนออก', 'bg-orange-100 text-orange-700'],
+  transfer_return: ['คืนต้นทาง', 'bg-cyan-100 text-cyan-700'],   // 🆕 COST_FORGE_GUARD (UAT สาขา): RETURN_TO_SHORT
   transfer_in: ['โอนเข้า', 'bg-blue-100 text-blue-700'],
   mi_out: ['โอนภายใน-ออก', 'bg-amber-100 text-amber-700'],
   mi_in: ['โอนภายใน-เข้า', 'bg-cyan-100 text-cyan-700'],
@@ -44945,6 +45176,10 @@ function MovementsTab({ state, user, dispatch }){
   const [search, setSearch] = useState('');
   const dr = useDateRange(7);
   const canReverseAdj = user && (isSuperUser(user) || hasPerm(user,'stock','list','adjust'));
+  const canSeeVal = !global.ERP.canSeeStockValue || global.ERP.canSeeStockValue(user, state);
+  // 🆕 COST_FORGE_GUARD (UAT ผจก.คลัง/สาขา): คำขอยกเลิกที่ค้างของแต่ละรายการ → ป้าย ⏳ + กันส่งซ้ำ
+  const pendRev = useMemo(() => { const st = new Set(); (state.approvalRequests || []).forEach(r => { if(r && r.action === 'reverse_adjust' && (r.status || 'pending') === 'pending' && r.payload && r.payload.movementId) st.add(r.payload.movementId); }); return st; }, [state.approvalRequests]);
+  const userName = (u) => ((state.users || []).find(x => x && x.username === u) || {}).name || u || '-';
 
   const rows = useMemo(() => {
     let list = (state.movements || []).filter(m => inDateRange(m.date, dr.startDate, dr.endDate));
@@ -45010,7 +45245,8 @@ function MovementsTab({ state, user, dispatch }){
                     h('td', { className:'px-3 py-2 text-xs text-gray-600' }, fmtDate(m.date)),
                     h('td', { className:'px-3 py-2' },
                       h('span', { className: cls('px-1.5 py-0.5 rounded text-xs', typeClr) }, typeLabel),
-                      m.reversed && h('span', { className:'ml-1 text-[10px] text-red-600 no-underline' }, '✗ reversed')
+                      m.reversed && h('span', { className:'ml-1 text-[10px] text-red-600 no-underline', title:'ยกเลิกโดย ' + userName(m.reversedBy) + (m.reverseReason ? ' · ' + m.reverseReason : '') },
+                        '✗ ยกเลิกแล้ว' + (m.reversedBy ? ' · ' + userName(m.reversedBy) : ''))   // UAT ผจก.สาขา: บอกว่าใครยกเลิก/เพราะอะไร
                     ),
                     h('td', { className:'px-3 py-2' }, item?.name || m.itemId),
                     h('td', { className: cls('px-3 py-2 text-right font-medium',
@@ -45021,11 +45257,33 @@ function MovementsTab({ state, user, dispatch }){
                     h('td', { className:'px-3 py-2 font-mono text-xs text-blue-700' }, m.ref||'-'),
                     h('td', { className:'px-3 py-2 text-xs text-gray-600' }, m.note||'', (m.costOverride && h(AcoBadge, { m, state, user })), (m.costRecalc && h(RecalcBadge, { m, state, user }))),
                     h('td', { className:'px-3 py-2 text-center no-underline' },
-                      isAdjust && !m.reversed && canReverseAdj && h('button', {
+                      // 🆕 COST_FORGE_GUARD (UAT ครัว/ผลิต): แถวคืนของจากยกเลิกเอกสาร → บอกเหตุแทนการซ่อนปุ่มเฉย ๆ
+                      isAdjust && !m.reversed && global.ERP.reverseAdjOriginDeny && global.ERP.reverseAdjOriginDeny(m) && h('span', { className:'text-[11px] text-gray-400', title: global.ERP.reverseAdjOriginDeny(m), 'data-cfg':'sys-return' }, '🔒 คืนจากยกเลิกเอกสาร'),
+                      isAdjust && !m.reversed && pendRev.has(m.id) && h('div', { className:'text-[10px] text-amber-700 mb-0.5', 'data-cfg':'rev-pending' }, '⏳ รออนุมัติยกเลิก'),
+                      isAdjust && !m.reversed && canReverseAdj && !(global.ERP.reverseAdjOriginDeny && global.ERP.reverseAdjOriginDeny(m)) && h('button', {
                         onClick:()=>{
-                          const reason = prompt(`ยกเลิกการปรับสต๊อก ${fmtNum(m.qty)} (${item?.name||m.itemId})?\n\nระบบจะคืนสต๊อกและกลับรายการบัญชีส่วนต่างของการปรับนี้\n(ถ้าของที่ปรับเพิ่มถูกใช้ไปแล้ว ยอดที่กลับอาจไม่เท่ายอดเดิม — ระบบตีตามต้นทุนล็อตที่ตัดจริง)\n\nเหตุผล:`, '');
+                          // 🆕 COST_FORGE_GUARD B6: ผู้อนุมัติขั้นปรับสต๊อก (ไม่ใช่คนนับ/ผู้ขอ) ยกเลิกได้ทันที · นอกนั้นส่งคำขอ (GM 👑 ทางเดิม) — reducer ตรวจซ้ำ
+                          const _pol = global.ERP.undoPolicy ? global.ERP.undoPolicy(state, user, 'reverse_adjust', { movementId:m.id }) : { mode:'approval' };
+                          if(_pol.mode === 'deny') return alert('⛔ ' + _pol.why);
+                          const _isGm = !!(global.ERP.gmSelfUser && global.ERP.gmSelfUser(state, user.username));
+                          if(_pol.mode !== 'direct' && !_isGm && pendRev.has(m.id)) return alert('⏳ มีคำขอยกเลิกรายการนี้รออนุมัติอยู่แล้ว — รอผู้อนุมัติ');
+                          // UAT ผจก.คลัง S1/S2 · ผจก.สาขา · พนักงานคลัง: บอกทางที่จะเกิด + วันที่/มูลค่า + ยอดคงเหลือหลังยกเลิก (ติดลบ = ของถูกใช้ไปแล้ว)
+                          const _sb = item && item.stockByBranch ? item.stockByBranch[m.branch] : 0;
+                          const _cur = (_sb && typeof _sb === 'object') ? (Number(_sb._total) || 0) : (Number(_sb) || 0), _after = _cur - (Number(m.qty) || 0);
+                          const _head = _pol.mode === 'direct' ? '↩️ ' + _pol.why + ' — ยกเลิกได้ทันที ไม่ต้องส่งคำขอ' : _isGm ? '👑 GM/เจ้าของ ยกเลิกเองได้' : '📋 จะส่งคำขออนุมัติยกเลิก (' + (String(_pol.why || 'รอผู้อนุมัติ').split(' — ')[0]) + ')';   // verify หน้าจอ: เหตุแรกพอ
+                          const _info = 'รายการวันที่ ' + fmtDate(m.date) + (canSeeVal ? ' · มูลค่า ' + fmtCur(global.ERP.reverseAdjAmount ? global.ERP.reverseAdjAmount(m) : 0) : '')
+                            + '\nคงเหลือ (' + (branch?.name || m.branch) + ') ตอนนี้ ' + fmtNum(_cur) + ' → หลังยกเลิก ' + fmtNum(_after) + (_after < -1e-9 ? '  ⚠️ ติดลบ (ของถูกใช้ไปแล้ว)' : '');
+                          const reason = prompt(_head + '\n' + _info + '\n\n' + `ยกเลิกการปรับสต๊อก ${fmtNum(m.qty)} (${item?.name||m.itemId})?\n\n${(_pol.mode === 'direct' || _isGm) ? 'ระบบจะ' : 'เมื่ออนุมัติแล้ว ระบบจะ'}คืนสต๊อกและกลับรายการบัญชีส่วนต่างของการปรับนี้\n(ถ้าของที่ปรับเพิ่มถูกใช้ไปแล้ว ยอดที่กลับอาจไม่เท่ายอดเดิม — ระบบตีตามต้นทุนล็อตที่ตัดจริง)\n\nเหตุผล:`, '');
                           if(reason === null) return;
                           if(!reason.trim()) return alert('ใส่เหตุผลด้วย');
+                          if(_pol.mode === 'direct'){
+                            if(!confirm(`↩️ ${_pol.why} — ยกเลิกได้ทันทีโดยไม่ต้องส่งคำขอ\n${_info}\n(บันทึกไว้ให้ GM/บัญชีตรวจย้อนหลัง)\n\nยืนยันยกเลิกการปรับนี้?`)) return;
+                            const dAct = { type:'REVERSE_ADJUST', data:{ movementId:m.id, reason:reason.trim(), by:user.username, directUndo:_pol.basis, at:Date.now() } };
+                            const _cs = { ...state, currentUser:state.currentUser || user };
+                            if(global.ERP.reducer(_cs, dAct) === _cs) return;   // reducer แจ้งเหตุผลแล้ว
+                            dispatch(dAct);
+                            return alert('✅ ยกเลิกการปรับแล้ว · คืนสต๊อก + กลับรายการบัญชี\n↩️ ยกเลิกเองในฐานะผู้อนุมัติ (บันทึกให้ตรวจย้อนหลัง)');
+                          }
                           const revAct = { type:'REVERSE_ADJUST', data:{ movementId:m.id, reason:reason.trim(), by:user.username } };
                           const queued = global.ERP.requestApprovalIfNeeded({ direct:true, directAct:revAct,   // UAT M1: GM ลองก่อนประทับ 👑
                             // 🆕 ITEM-FORM S8b: ยอดอนุมัติ = มูลค่าที่ลงบัญชีตอนปรับ (fifoCost ของลด · cost ของเพิ่ม)
@@ -98222,7 +98480,7 @@ function GmSelfReviewList({ state, startDate, endDate, kind, F }){
   const rows = gmSelfAuditRows(state, startDate, endDate, kind).filter(e => !_fx || _fx.fr.isHL(e.id));
   const nm = (u) => ((state.users || []).find(x => x && x.username === u) || {}).name || u || '-';
   if(kind === 'perm') return h(SelfPermReviewList, { state, rows, nm });
-  if(kind === 'undo') return h(SelfUndoReviewList, { rows, nm });   // UNDO_PRINCIPLE §2.8   // UAT S1: ✋ แยกตารางจาก 👑
+  if(kind === 'undo') return h(SelfUndoReviewList, { rows, nm, bn: (b) => ((state.branches || []).find(x => x && x.id === b) || {}).name || b });   // UNDO_PRINCIPLE §2.8   // UAT S1: ✋ แยกตารางจาก 👑
   if(!rows.length) return h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500', 'data-testid':'gm-self-list' }, 'ไม่มีรายการที่ GM/เจ้าของ ทำโดยไม่ผ่านอนุมัติ / แก้ต้นทุนปรับสต๊อก ในช่วงนี้');
   return h('div', { className:'bg-white rounded-lg shadow overflow-x-auto', 'data-testid':'gm-self-list' },
     h('div', { className:'p-3 text-sm text-amber-800 bg-amber-50 border-b' }, '👑 รายการที่ GM/เจ้าของ ทำโดยไม่ผ่านอนุมัติ / แก้ต้นทุนปรับสต๊อก ', h('b', null, rows.length), ' รายการ — ให้ผู้ตรวจสอบดูย้อนหลัง (ปิดสวิตช์ได้ที่ ⚙️ ตั้งค่า → นโยบาย)'),
@@ -98259,25 +98517,27 @@ function SelfPermReviewList({ state, rows, nm }){
 }
 // 🆕 UNDO_PRINCIPLE §2.8 (U9): รายการย้อนเอง (ไม่ต้องอนุมัติ) — ให้ GM/บัญชีตรวจย้อนหลัง · basis flow = ขั้นปกติ · approver = ผู้อนุมัติย้อนเอง
 const _UNDO_BASIS_LABEL = { flow:'ขั้นปกติ', approver:'ผู้อนุมัติย้อนเอง' };
-function SelfUndoReviewList({ rows, nm }){
+function SelfUndoReviewList({ rows, nm, bn }){
   if(!rows.length) return h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500', 'data-testid':'self-undo-list' }, 'ไม่มีรายการย้อนเองในช่วงนี้');
   return h('div', { className:'bg-white rounded-lg shadow overflow-x-auto', 'data-testid':'self-undo-list' },
     h('div', { className:'p-3 text-sm text-sky-800 bg-sky-50 border-b' }, '↩️ รายการที่ย้อนเองโดยไม่ต้องขออนุมัติ ', h('b', null, rows.length),
-      ' รายการ — ขาไปไม่ต้องอนุมัติ (ยังไม่จ่าย) หรือผู้ย้อนเป็นผู้อนุมัติเอง · ให้ GM/ผู้ตรวจสอบดูย้อนหลัง'),
+      ' รายการ — ขาไปไม่ต้องอนุมัติ (เช่น ใบตั้งหนี้ที่ยังไม่จ่าย) หรือผู้ย้อนเป็นผู้อนุมัติขั้นนั้นเอง (เช่น ยกเลิกการปรับสต๊อก) · ให้ GM/ผู้ตรวจสอบดูย้อนหลัง'),
     h('table', { className:'w-full text-sm' },
       h('thead', { className:'bg-gray-50 text-xs text-gray-600' }, h('tr', null,
         ['เวลา', 'ผู้ทำ', 'เรื่อง', 'เอกสาร', 'ยอด', 'เหตุที่ทำได้เลย', 'หมายเหตุ'].map(x => h('th', { key:x, className:'px-2 py-1.5 text-left' }, x)))),
       h('tbody', null, rows.map(e => h('tr', { key:e.id, className:'border-t', 'data-self-undo-row':e.type },
         h('td', { className:'px-2 py-1.5 whitespace-nowrap' }, e.ts ? new Date(e.ts).toLocaleString('th-TH') : '-'),
         h('td', { className:'px-2 py-1.5' }, nm(e.by)),
-        h('td', { className:'px-2 py-1.5' }, e.type === 'pay_request_cancel' ? '✖ ยกเลิกคำขอจ่าย' : e.type === 'inv_undo_gate_edit' ? '✏️ แก้ใบแล้ว — ย้อนต้องขออนุมัติ' : '↩️ ย้อนไปตั้งหนี้'),
+        h('td', { className:'px-2 py-1.5' }, e.type === 'pay_request_cancel' ? '✖ ยกเลิกคำขอจ่าย' : e.type === 'inv_undo_gate_edit' ? '✏️ แก้ใบแล้ว — ย้อนต้องขออนุมัติ' : e.action === 'reverse_adjust' ? '🔄 ยกเลิกการปรับสต๊อก' : '↩️ ย้อนไปตั้งหนี้'),   // 🆕 COST_FORGE_GUARD B2
         h('td', { className:'px-2 py-1.5 font-mono text-xs' }, e.entityRef || e.entityId || '-'),
         h('td', { className:'px-2 py-1.5 text-right' }, (Number(e.amount) || 0) > 0 ? fmtCur(e.amount) : '-'),
         h('td', { className:'px-2 py-1.5 text-xs', 'data-undo-basis':e.basis || '' }, e.type === 'pay_request_cancel'
           ? 'ขั้นปกติ' + (e.partiallyApproved ? ' (มีผู้อนุมัติขั้นแรกแล้ว)' : '')
           : e.type === 'inv_undo_gate_edit' ? h('span', { className:'text-amber-700 font-medium' }, '🔒 ต่อจากนี้ ↩️ ต้องขออนุมัติ')   // UNDO_FIELD_GUARD G6
           : (_UNDO_BASIS_LABEL[e.basis] || e.basis || '-')),
-        h('td', { className:'px-2 py-1.5 text-xs text-gray-600' }, e.note || '-'))))));
+        h('td', { className:'px-2 py-1.5 text-xs text-gray-600' }, e.note || '-',
+          e.action === 'reverse_adjust' && h('div', { className:'text-[11px] text-gray-500', 'data-undo-je':e.jeNumber || '' },   // 🆕 COST_FORGE_GUARD (UAT พนักงานบัญชี): จำนวน/สาขา + JE ที่ลง
+            'จำนวน ' + (Number(e.qty) || 0) + (e.branch ? ' · ' + (bn ? bn(e.branch) : e.branch) : '') + (e.jeNumber ? ' · ' + e.jeNumber + (Number(e.jeAmount) > 0 ? ' ' + fmtCur(e.jeAmount) : '') : ' · ไม่มี JE (มูลค่า 0)'))))))));
 }
 // 🆕 UAT S1: ผลของคำขอที่ผูกกับแถว 👑 — บันทึกลงก่อนสั่งงาน → ต้องดูสถานะคำขอจริง (ทำแล้ว/ทำไม่ได้) · ไม่มีคำขอ (อนุมัติ PO/จ่ายของตัวเองตรง) = ทำแล้ว
 function gmSelfRowStatus(state, e){
@@ -101485,7 +101745,7 @@ function OpeningBalanceModal({ state, dispatch, user, onClose }){
     h('div', { className:'space-y-4' },
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-800' },
         h('div', null, 'ใส่ยอด', h('b',null,'รวม'), 'แต่ละบัญชี ณ วันเริ่มระบบ (ระดับ GL/งบดุล) — ระบบสร้าง JE ก้อนเดียว ส่วนต่างเข้า "3900 ยอดยกมา" อัตโนมัติให้สมดุล'),
-        h('div', { className:'mt-1' }, '⚠️ ', h('b',null,'ต้องใส่ช่อง 1300 (สินค้าคงเหลือ) ด้วย'), ' = ยอดรวมมูลค่าสต๊อกตั้งต้น (ดูตัวเลขแนะนำด้านล่าง) · ', 'รายละเอียดรายตัว (สต๊อกแต่ละ SKU / เจ้าหนี้แต่ละใบ) นำเข้าแยกที่เมนูนำเข้า — ', h('b',null,'ยอดรวมทั้งสองทางต้องตรงกัน'))),
+        h('div', { className:'mt-1' }, '⚠️ ', h('b',null,'ต้องใส่ช่อง 1300 (สินค้าคงเหลือ) ด้วย'), ' = ยอดรวมมูลค่าสต๊อกตั้งต้น (ดูตัวเลขแนะนำด้านล่าง) · ', 'รายละเอียดรายตัว: สต๊อกแต่ละ SKU = นับสต๊อก (นำเข้าสต๊อกตั้งต้นปิดแล้ว) · เจ้าหนี้แต่ละใบ = นำเข้าแยกที่เมนูนำเข้า — ', h('b',null,'ยอดรวมทั้งสองทางต้องตรงกัน'))),
       already && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-800' },
         '⚠️ มี JE ยอดยกมาในระบบแล้ว — ตั้งซ้ำจะเบิ้ลยอด'),
       h('div', { className:'grid grid-cols-2 gap-3' },
@@ -122047,13 +122307,7 @@ const IMPORT_TYPES = {
       credit: Number(row.credit) || 0,
     }),
   },
-  openingStock: {
-    label:'📊 Opening Stock (สต๊อกตั้งต้น)',
-    fields:['itemCode','branchId','qty','unitCost'],
-    required:['itemCode','branchId','qty'],
-    addAction:'ADD_OPENING_STOCK',  // pseudo — handle below
-    transform: () => null,  // custom handle
-  },
+  // 🆕 COST_FORGE_GUARD A2 (เจ้าของ 2026-10-26): "📊 Opening Stock (สต๊อกตั้งต้น)" ปิดแล้ว — ของที่มีจริงแต่ไม่อยู่ในระบบ ให้นับสต๊อก
   branches: {
     label:'🏢 Branches (สาขา)',
     fields:['id','name','branchType','branchCode','address','phone'],
@@ -122269,21 +122523,7 @@ function ImportCSVTab({ state, dispatch }){
     if(!preview || preview.rows.length === 0) return alert('ไม่มีข้อมูลที่ valid');
     if(!confirm(`Import ${preview.rows.length} แถวเข้า ${cfg.label}?`)) return;
 
-    if(type === 'openingStock'){
-      // Handle opening stock specially: update item.stockByBranch + create FIFO layer + movement
-      let added = 0;
-      for(const row of preview.rows){
-        const item = (state.items||[]).find(i => i.code === row.itemCode);
-        if(!item){ console.warn('item not found:', row.itemCode); continue; }
-        const qty = csvNum(row.qty);   // 🆕 A6: ตัด comma ก่อน parse
-        const cost = row.unitCost ? csvNum(row.unitCost) : (item.costPrice||0);
-        // 🆕 GL-4: ใช้ reducer เดียว (atomic + shape-safe สำหรับ multi-warehouse) แทน 3 dispatch
-        dispatch({ type:'ADD_OPENING_STOCK', data:{
-          itemId:item.id, branch:row.branchId, qty, unitCost:cost }});
-        added++;
-      }
-      alert(`✅ Import opening stock ${added} รายการ`);
-    } else if(cfg.addAction === '__custom_line'){
+    if(cfg.addAction === '__custom_line'){
       // Production lines — branch.productionLines += line
       let added = 0;
       for(const row of preview.rows){
@@ -122338,7 +122578,6 @@ function ImportCSVTab({ state, dispatch }){
       items:           'code,name,type,tags,issueUnit,costPrice,sellPrice,minStock,maxStock,barcode\nP001,กระดาษ A4,material,กระดาษ|สำนักงาน,รีม,80,100,5,50,1234567890\nP002,ปากกา,material,เครื่องเขียน,กล่อง,120,150,2,20,',
       suppliers:       'code,name,taxId,branchCode,address,phone,email,credit\nSUP01,บจก. กระดาษไทย,0105501234567,00000,123 ถ.สาทร กรุงเทพ 10120,02-123-4567,info@paper.co.th,30',
       customers:       'code,name,taxId,branchCode,address,phone,email,credit\nCUS01,บจก. ลูกค้าดี,0105509876543,00150,456 ถ.พระราม 4,02-987-6543,contact@cust.co.th,15',
-      openingStock:    'itemCode,branchId,qty,unitCost\nP001,b1,100,80\nP002,b1,50,120',
       branches:        'id,name,branchType,branchCode,address,phone\nb4,สาขาทองหล่อ,store,00003,123 ทองหล่อ,02-111-2222',
       users:           'username,name,role,branch,password,position\nMGR002,วันชัย,manager,b1,1234,manager\nBR401,สมศักดิ์ สาขาทองหล่อ,branch,b4,1234,staff',
       productionLines: 'branchId,id,name,icon,dept\nb1,pl_extra,ไลน์เครื่องดื่ม,☕,beverage',
