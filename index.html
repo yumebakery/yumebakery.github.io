@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="95e80888a61a";window.__ERP_BUILT_AT__="2026-10-27T10:06:20";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="4e1dedfe3fa7";window.__ERP_BUILT_AT__="2026-10-28T18:47:08";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -6838,6 +6838,91 @@ function whtFirstPayDate(state, invId){
       && (p.invId === invId || p.invoiceId === invId || (p.invoiceIds || []).includes(invId) || (p.allocations || []).some(a => a && a.invoiceId === invId))
     ).map(p => p.payDate || p.date).filter(Boolean).sort();
   return ds[0] || null;
+}
+// 🆕 WHT-DRAFT §2: ใบ 50 ทวิ "ร่าง" = PI ยังไม่จ่าย (ไม่มีจ่ายจริง/ไม่มี certDate/ไม่รวม PV/ไม่ใช่ใบเก่า-migrate/ไม่ได้ตัดชำระด้วยมัดจำ-เครดิต)
+function whtCertIsDraft(state, inv, cert){
+  if(!inv || inv.voided) return false;
+  if(whtFirstPayDate(state, inv.id)) return false;
+  if(cert && (cert.certDate || cert.mergedInto || cert.legacy || cert._migrated)) return false;
+  if(inv._migrated || inv._whtStub) return false;
+  // ใบแบบเก่า (ไม่มี whtCertificates เลย — whtNumber บนใบตั้งหนี้) = legacy → คง invDate ไม่ทำเป็นร่าง
+  if(!cert && !(inv.whtCertificates || []).some(c => c && !c.voided)) return false;
+  if(Number(inv.paidAmount) > 0) return false;
+  // UAT S2: ตัดด้วยเครดิต/CN ครบตอนตั้งหนี้ (netPayable 0 · paidAmount ไม่ขยับ) = ไม่มีการจ่าย → ไม่ใช่ร่าง
+  if(inv.netPayable != null && inv.netPayable !== '' && Number(inv.netPayable) <= 0.01) return false;
+  if(inv.paymentStatus === 'paid' || inv.status === 'paid') return false;
+  return true;
+}
+// คำขอจ่ายที่รออนุมัติของใบนี้ (ลิงก์ 4 แบบเดียวกับ whtFirstPayDate) → วันนัดจ่ายเก่าสุด ('' = ไม่มี)
+function _whtScheduledPayDate(state, invId){
+  const ds = ((state && state.payments) || []).filter(p => p && !p.reversed && p.approvalStatus === 'pending'
+      && (p.invId === invId || p.invoiceId === invId || (p.invoiceIds || []).includes(invId) || (p.allocations || []).some(a => a && a.invoiceId === invId))
+    ).map(p => p.requestedPayDate || p.payDate).filter(Boolean).sort();
+  return ds[0] || '';
+}
+// วันที่บนใบ 50 ทวิ/แถวรายงาน: จ่ายจริงแรก → certDate → (ไม่ใช่ร่าง) invDate → วันนัดจ่าย → ครบกำหนด → ว่าง
+//   pending = กฎเดิมของรายงาน (!firstPay && !certDate) ทุกกรณี
+function whtDateInfo(state, inv, cert){
+  if(!inv) return { date: '', kind: 'none', pending: true, draft: false };
+  const paid = whtFirstPayDate(state, inv.id);
+  if(paid) return { date: paid, kind: 'paid', pending: false, draft: false };
+  if(cert && cert.certDate) return { date: cert.certDate, kind: 'cert', pending: false, draft: false };
+  if(!whtCertIsDraft(state, inv, cert)) return { date: inv.invDate || '', kind: 'inv', pending: true, draft: false };
+  const sch = _whtScheduledPayDate(state, inv.id);
+  if(sch) return { date: sch, kind: 'scheduled', pending: true, draft: true };
+  if(inv.dueDate) return { date: inv.dueDate, kind: 'due', pending: true, draft: true };
+  return { date: '', kind: 'none', pending: true, draft: true };
+}
+// 🆕 WHT-DRAFT §2: วันจ่ายจริงทำให้เดือนยื่น ภ.ง.ด. ของใบ 50 ทวิ เปลี่ยนจากวันนัดจ่าย → แถวเตือน (ไม่มีวันนัด = ไม่เตือน)
+function whtPayMonthShift(state, invIds, payDate, requestedPayDate){
+  const payYm = ymOf(payDate);
+  if(!payYm) return [];
+  const today = ymOf(getToday());
+  const seen = new Set(), rows = [];
+  (invIds || []).forEach(id => {
+    if(!id || seen.has(id)) return;
+    seen.add(id);
+    const inv = ((state && state.invoices) || []).find(i => i && i.id === id);
+    if(!inv || inv.voided || !((Number(inv.whtAmount) || 0) > 0)) return;
+    const prior = whtFirstPayDate(state, id);
+    if(prior && prior <= payDate) return;
+    const sched = prior || requestedPayDate || '';
+    if(!sched || ymOf(sched) === payYm) return;
+    const certs = (inv.whtCertificates || []).filter(c => c && !c.voided);
+    const forms = Array.from(new Set((certs.length ? certs.map(c => String(c.form || '')) : [String(inv.whtForm || '53')]).filter(Boolean)));
+    rows.push({ invId: id, invNumber: inv.invNumber || '', certNumbers: certs.map(c => c.certNumber).filter(Boolean).concat(certs.length ? [] : [inv.whtNumber].filter(Boolean)),
+      forms, wht: Number(inv.whtAmount) || 0, schedDate: sched, schedYm: ymOf(sched), payDate, payYm,
+      basis: prior ? 'paid' : 'requested', pastMonth: !!today && payYm < today });
+  });
+  return rows;
+}
+function _whtYmTh(ym){ const m = /^(\d{4})-(\d{2})$/.exec(String(ym || '')); return m ? _TH_MON_SHORT[parseInt(m[2], 10) - 1] + ' ' + (parseInt(m[1], 10) + 543) : (ym || '-'); }
+// ข้อความเตือน (mode 'pick' = เลือกวันจ่ายเองในหน้าต่าง · 'today' = วันที่กดอนุมัติขั้นสุดท้าย) · compact = ไม่มีหัวเรื่อง/คำถามปิดท้าย
+function whtPayMonthShiftText(rows, opts){
+  rows = rows || [];
+  if(!rows.length) return '';
+  const o = opts || {}, mode = (o.mode === 'today' || o.mode === 'fixed') ? o.mode : 'pick';   // verify 2: 'fixed' = วันจ่ายจริงกำหนดไว้ในคำขอแล้ว
+  const L = [];
+  if(!o.compact) L.push('⚠️ เดือนยื่น ภ.ง.ด. ของใบ 50 ทวิ จะเปลี่ยน');
+  const pd = rows[0].payDate;
+  L.push('วันจ่ายจริง ' + fmtDate(pd) + (mode === 'today' ? ' (วันนี้ = วันที่กดอนุมัติขั้นสุดท้าย)' : '') + ' ไม่ตรงกับวันนัดจ่าย — ใบ 50 ทวิ ลงวันที่ตามวันจ่ายจริง');
+  rows.slice(0, 8).forEach(r => {
+    L.push('• ' + (r.invNumber || '-') + ' · 50 ทวิ ' + ((r.certNumbers || []).join(', ') || '-') + ' · หัก ฿' + fmtCur(r.wht)
+      + ': ' + (r.basis === 'paid' ? 'จ่ายครั้งแรก ' : 'นัดจ่าย ') + fmtDate(r.schedDate) + ' (ภ.ง.ด. ' + _whtYmTh(r.schedYm) + ') → จ่ายจริง ' + fmtDate(r.payDate) + ' (ภ.ง.ด. ' + _whtYmTh(r.payYm) + ')');
+  });
+  if(rows.length > 8) L.push('+' + (rows.length - 8) + ' ใบ');
+  const forms = Array.from(new Set(rows.flatMap(r => r.forms || []))).sort((a, b) => Number(a) - Number(b)).join('/') || '3/53';
+  const newYms = Array.from(new Set(rows.map(r => _whtYmTh(r.payYm)))).join(', ');
+  const oldYms = Array.from(new Set(rows.map(r => _whtYmTh(r.schedYm)))).join(', ');
+  // verify 1: ใช้คำ «เดือนภาษี» + กำหนดยื่น (7 / e-filing 15 ของเดือนถัดไป) — กันอ่านเป็น «ยื่นในเดือนนั้น»
+  L.push('→ ใบเหล่านี้ต้องรวมใน ภ.ง.ด.' + forms + ' เดือนภาษี ' + newYms + ' (ยื่นภายในวันที่ 7 / e-filing 15 ของเดือนถัดไป) แทนเดือนภาษี ' + oldYms + ' · ใบร่างที่พิมพ์ไว้ใช้ไม่ได้ ต้องพิมพ์ใหม่หลังอนุมัติ');
+  if(rows.some(r => r.pastMonth)) L.push('⛔ เดือนภาษี ' + Array.from(new Set(rows.filter(r => r.pastMonth).map(r => _whtYmTh(r.payYm)))).join(', ') + ' ผ่านไปแล้ว — ถ้ายื่น ภ.ง.ด. เดือนนั้นไปแล้ว ต้องยื่นเพิ่มเติม (อาจมีเงินเพิ่ม 1.5%/เดือน)');
+  // UAT M1: ห้ามแนะให้แก้วันจ่ายจริงให้ตรงวันนัด (วันจ่ายจริง = วันเงินออกจริง · _payDateBlocked กันวันอนาคตเกินกำหนด)
+  L.push(mode === 'today' ? 'ถ้ายังไม่โอนจริง กด «ยกเลิก» แล้วอนุมัติในวันที่โอน'
+    : mode === 'fixed' ? 'วันจ่ายจริงกำหนดไว้ในคำขอแล้ว — ถ้าไม่ถูก กด «ปฏิเสธ» ให้ผู้ขอส่งคำขอใหม่'
+    : 'วันจ่ายจริงต้องเป็นวันที่เงินออกจริง — ถ้ายังไม่โอน กด «ยกเลิก» แล้วอนุมัติในวันที่โอน · ถ้าโอนแล้ว ยืนยันได้เลย (ใบ 50 ทวิ ลงเดือนที่จ่าย)');
+  if(!o.compact) L.push('ยืนยันใช้วันจ่ายจริงนี้?');
+  return L.join('\n');
 }
 // สิทธิ์ = คนที่ออก/แก้ WHT ฝั่งบัญชี (accounting.wht.create — PERM_TREE ไม่มี edit · เหมือนรวม 50 ทวิ) หรือ payment.edit หรือ superuser
 function canEditWhtCertPayee(user){
@@ -15285,7 +15370,7 @@ Object.assign(global.ERP, {
   WHT_CATEGORIES, WHT_SUB5_TYPES, WHT_SECTION_LABELS, genWHNumber, buildWHTCerts, whtMergeBuild,
   partySnapshot, piVendor, whtPayee, WHT_PERSON_PREFIXES, partyIsIndividual, whtPersonName, whtApplyPerson, whtNewPayee, whtPayeeNameClean, whtPayeeWithName, whtDefaultForm, whtFormMismatch, canEditSupplierParty,
   ITEM_SHELF_COLS, ITEM_SHELF_CLEAR, canEditItemShelf, canExportItemShelf, itemShelfExportItems, itemShelfExportRows, itemShelfExportFilename, storageLocExportRows, decodeCsvBytes, parseCsvRows, planItemShelfImport, isDateLikeShelf, normShelfName, shelfKey, ItemShelfExportButtons, ItemShelfImportModal,   // 🆕 ITEM_SHELF_IO
-  whtSupplierDefaultPayee, whtCertPayeePreview, whtPayeeRememberFlag, supplierPickable, docSuppliers, whtPayeeRememberPlan, whtPayeeRememberApply, whtPayeeRememberSave, whtChosenPayeeIds, whtLinesApplyDefaultPayee, whtLinePayeeId, whtOtherPayee, whtCertForLine, whtCarryEditedPayee, whtOtherPayeeNames, whtRecentPayees, WhtLinePayeeChip, canAddSupplierParty, whtFirstPayDate, canEditWhtCertPayee, whtCertPayeeEditBlock, whtCertPayeeEditWarn, whtLegacyCert, WhtCertPayeeEditBtn,
+  whtSupplierDefaultPayee, whtCertPayeePreview, whtPayeeRememberFlag, supplierPickable, docSuppliers, whtPayeeRememberPlan, whtPayeeRememberApply, whtPayeeRememberSave, whtChosenPayeeIds, whtLinesApplyDefaultPayee, whtLinePayeeId, whtOtherPayee, whtCertForLine, whtCarryEditedPayee, whtOtherPayeeNames, whtRecentPayees, WhtLinePayeeChip, canAddSupplierParty, whtFirstPayDate, whtCertIsDraft, whtDateInfo, whtPayMonthShift, whtPayMonthShiftText, canEditWhtCertPayee, whtCertPayeeEditBlock, whtCertPayeeEditWarn, whtLegacyCert, WhtCertPayeeEditBtn,
   findDupSupInv, consumeSupplierCredit,
   // Helpers
   genId, nextPartyCode, PARTY_CODE_PREFIX, getPendingAssetLines,
@@ -38645,6 +38730,7 @@ function ApprovalRequestCard({ req, state, dispatch, user, mode, onLeave }){
     if(decision === 'approved' && _stuck && _gmMe){ runGmSelf(); return; }   // GM-SELF: GM ไม่ค้าง — กดทุกขั้นที่เหลือแทน
     if(decision === 'approved' && _stuck){ alert('⛔ ขั้น ' + _stuck.order + ' ที่เหลือไม่มีผู้อนุมัติคนอื่น — ให้ ผจก.แผนกกดขั้นนี้แทน'); return; }
     if(decision === 'approved' && _nextGm && !confirm('ถ้าคุณกดขั้นนี้ ขั้นถัดไปต้องให้ GM/เจ้าของ "อีกคน" กด (คนเดียวกดได้ขั้นเดียว)\nกดต่อไหม?')) return;
+    if(decision === 'approved' && !global.ERP.approvalPayShiftConfirm(state, req)) return;   // 🆕 WHT-DRAFT §4: ขั้นสุดท้าย + เดือน ภ.ง.ด. เปลี่ยน
     if(decision === 'rejected'){
       note = prompt('เหตุผลที่ปฏิเสธ:') || '';
       if(!note) return;
@@ -39499,6 +39585,39 @@ function gmSelfRun(req, state, dispatch, user, silent, ack){
   return 'gm_self';
 }
 global.ERP.gmSelfRun = gmSelfRun;
+// 🆕 WHT-DRAFT §4: แถวเตือนเดือน ภ.ง.ด. เปลี่ยน ของคำขออนุมัติจ่าย (ไม่เช็กขั้น) — วันจ่ายจริง = สูตรเดียวกับ executor approve_payment
+function approvalPayShiftInfo(state, req){
+  const E = global.ERP;
+  if(!req || req.action !== 'approve_payment' || !E.whtPayMonthShift) return null;
+  const p = req.payload || {}, pay = ((state && state.payments) || []).find(x => x && x.id === p.payId);
+  if(!pay) return null;
+  const ids = [pay.invId, pay.invoiceId].concat(pay.invoiceIds || [], (pay.allocations || []).map(a => a && a.invoiceId)).filter(Boolean);
+  const today = E.getToday(), d = p.payDate || pay.payDate || today;
+  const rows = E.whtPayMonthShift(state, ids, d, pay.requestedPayDate || '');
+  return rows.length ? { rows, mode: (p.payDate || pay.payDate) ? 'fixed' : (d === today ? 'today' : 'pick') } : null;   // verify 2: วันกำหนดในคำขอ → อนุมัติวันหลังก็ยังจ่ายวันเดิม
+}
+// ถามยืนยันก่อนกดอนุมัติ "ขั้นสุดท้าย" (🔔 decide · แท็บคำขออนุมัติ) — true = ไปต่อ · ห้ามเรียกใน executeApprovedAction
+function approvalPayShiftConfirm(state, req){
+  if(!req || req.action !== 'approve_payment') return true;
+  if((req.steps || []).filter(s => s && s.decision == null).length > 1) return true;   // ยังไม่ใช่ขั้นสุดท้าย
+  const sh = approvalPayShiftInfo(state, req);
+  return !sh || confirm(global.ERP.whtPayMonthShiftText(sh.rows, { mode: sh.mode }));
+}
+global.ERP.approvalPayShiftConfirm = approvalPayShiftConfirm;
+// UAT S3: ข้อความเตือนแบบย่อ ต่อท้าย confirm อนุมัติครั้งเดียว (แท็บคำขออนุมัติ) — '' = ไม่ใช่ขั้นสุดท้าย/ไม่เปลี่ยนเดือน
+function approvalPayShiftNote(state, req){
+  if(!req || req.action !== 'approve_payment') return '';
+  if((req.steps || []).filter(s => s && s.decision == null).length > 1) return '';
+  const sh = approvalPayShiftInfo(state, req);
+  return sh ? '\n\n⚠️ เดือนยื่น ภ.ง.ด. ของใบ 50 ทวิ จะเปลี่ยน\n' + global.ERP.whtPayMonthShiftText(sh.rows, { mode: sh.mode, compact: true }) : '';
+}
+global.ERP.approvalPayShiftNote = approvalPayShiftNote;
+// verify 1: ใส่หัว ⚠️ เหมือน approvalPayShiftNote/อนุมัติรวม (compact ตัดหัวทิ้ง) · ใช้ทั้ง 👑 gmSelfAct และ _gmAck ตอนขออนุมัติ
+function _gmSelfShiftNote(state, req){
+  const sh = approvalPayShiftInfo(state, req);
+  return sh ? '\n\n⚠️ เดือนยื่น ภ.ง.ด. ของใบ 50 ทวิ จะเปลี่ยน\n' + global.ERP.whtPayMonthShiftText(sh.rows, { mode: sh.mode, compact: true }) : '';
+}
+global.ERP.gmSelfShiftNote = _gmSelfShiftNote;
 // 🆕 B18: ปุ่ม 👑 ในการ์ดคำขอ (🔔 + แท็บคำขออนุมัติ ใช้ร่วม) — ตรวจคำขอล้าสมัย → ใบ 2 คน ถามยืนยันแยก → ทำทุกขั้นที่เหลือ
 function gmSelfAct(req, state, dispatch, user){
   const E = global.ERP, own = req.requestedBy === user.username;
@@ -39507,11 +39626,11 @@ function gmSelfAct(req, state, dispatch, user){
   if(stale){ if(own && confirm('⛔ ' + stale + '\n\nยกเลิกคำขอนี้เลยไหม?')) gmSelfCancel(req, state, dispatch, user, true); else if(!own) alert('⛔ ' + stale); return false; }
   const why = own ? E.gmSelfBlockReason(state, req.action, { payload:req.payload, entityId:req.entityId }) : null;
   if(why){
-    if(!confirm('⚠️ ' + why.replace(/ — ปกติต้องให้ผู้อนุมัติอีกคนกด.*$/, '') + '\n\nปกติใบแบบนี้ต้องมีผู้อนุมัติอีกคน — คุณเป็น GM/เจ้าของ ยืนยันทำเองเลยไหม?\n(บันทึก 👑 ให้บัญชี/ผู้ตรวจสอบดูย้อนหลัง)')) return false;
+    if(!confirm('⚠️ ' + why.replace(/ — ปกติต้องให้ผู้อนุมัติอีกคนกด.*$/, '') + '\n\nปกติใบแบบนี้ต้องมีผู้อนุมัติอีกคน — คุณเป็น GM/เจ้าของ ยืนยันทำเองเลยไหม?\n(บันทึก 👑 ให้บัญชี/ผู้ตรวจสอบดูย้อนหลัง)' + _gmSelfShiftNote(state, req))) return false;
     return gmSelfRun(req, state, dispatch, user, false, true);
   }
-  if(!confirm(own ? '👑 ทำ "' + (req.label || req.action) + '" ' + (req.entityRef || '') + ' ทันที โดยไม่ต้องรออนุมัติ?\n(บันทึกไว้ในรายการที่ GM ทำโดยไม่ผ่านอนุมัติ ให้ตรวจย้อนหลัง)'
-    : '👑 อนุมัติทุกขั้นที่เหลือของ "' + (req.label || req.action) + '" แทน (ไม่มีผู้อนุมัติคนอื่นเหลือ)?\n(บันทึกไว้ให้ตรวจย้อนหลัง)')) return false;
+  if(!confirm((own ? '👑 ทำ "' + (req.label || req.action) + '" ' + (req.entityRef || '') + ' ทันที โดยไม่ต้องรออนุมัติ?\n(บันทึกไว้ในรายการที่ GM ทำโดยไม่ผ่านอนุมัติ ให้ตรวจย้อนหลัง)'
+    : '👑 อนุมัติทุกขั้นที่เหลือของ "' + (req.label || req.action) + '" แทน (ไม่มีผู้อนุมัติคนอื่นเหลือ)?\n(บันทึกไว้ให้ตรวจย้อนหลัง)') + _gmSelfShiftNote(state, req))) return false;
   return gmSelfRun(req, state, dispatch, user);
 }
 // 🆕 B18: ยกเลิกคำขอของตัวเองที่ยังค้าง (สถานะ cancelled + ประวัติ · ไม่ลบ) — ใช้กับคำขอเก่าที่ไม่ต้องการแล้ว/ล้าสมัย
@@ -39640,7 +39759,8 @@ function requestApprovalIfNeeded({ action, context, user, state, dispatch, silen
   const _gmWhy = _gmU ? global.ERP.gmSelfBlockReason(state, action, context) : null;
   // 🆕 B18 (เจ้าของ Q1 "ทำได้ทุกอย่าง"): ใบที่ปกติต้องมี 2 คน → GM ยืนยันชัดเจนก่อน (ไม่ยืนยัน = ส่งคำขอตามปกติ) · silent = ไม่ถาม → ส่งคำขอ
   const _gmAck = !!(_gmU && _gmWhy && !silent && confirm('⚠️ ' + _gmWhy.replace(/ — ปกติต้องให้ผู้อนุมัติอีกคนกด.*$/, '')
-    + '\n\nปกติใบแบบนี้ต้องมีผู้อนุมัติอีกคน — คุณเป็น GM/เจ้าของ ยืนยันทำเองเลยไหม?\n(ระบบบันทึก 👑 ให้บัญชี/ผู้ตรวจสอบดูย้อนหลัง · กด "ยกเลิก" = ส่งคำขอให้ ผจก.บัญชีอนุมัติตามปกติ)'));
+    + '\n\nปกติใบแบบนี้ต้องมีผู้อนุมัติอีกคน — คุณเป็น GM/เจ้าของ ยืนยันทำเองเลยไหม?\n(ระบบบันทึก 👑 ให้บัญชี/ผู้ตรวจสอบดูย้อนหลัง · กด "ยกเลิก" = ส่งคำขอให้ ผจก.บัญชีอนุมัติตามปกติ)'
+    + (action === 'approve_payment' ? _gmSelfShiftNote(state, { action, payload:(context && context.payload) || {} }) : '')));   // verify 1: ยืนยัน = จ่ายทันที → เตือนเดือน ภ.ง.ด. เปลี่ยนตรงนี้ (หน้าต่างจ่ายข้ามไว้เพราะ willExecNow=false)
   if(_gmU && (!_gmWhy || _gmAck)){
     const _st0 = { ...state, currentUser:state.currentUser || user };
     const _s0 = global.ERP.reducer(_st0, { type:'ADD_APPROVAL_REQUEST', data:req });
@@ -86724,7 +86844,12 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
                   ' · ', x.by || '-', x.at ? ' · ' + new Date(x.at).toLocaleDateString('th-TH') : '', x.reason ? ' · ' + x.reason : ''))),
               // 🆕 WHT-MERGE M3: ใบนี้รวมอยู่ในใบ 50 ทวิ รวมของ PV (ใบเดิมไม่ void — ยอดในรายงาน ภ.ง.ด. เท่าเดิม)
               c.mergedInto && h('div', { className:'text-[10px] text-teal-800 mt-0.5', 'data-testid':'inv-wht-merged-into' },
-                '🧾 รวมอยู่ในใบ 50 ทวิ เลขที่ ', h('b', { className:'font-mono' }, c.mergedInto.certNumber || '-'), ' (', c.mergedInto.pvNumber || 'PV', ')')),
+                '🧾 รวมอยู่ในใบ 50 ทวิ เลขที่ ', h('b', { className:'font-mono' }, c.mergedInto.certNumber || '-'), ' (', c.mergedInto.pvNumber || 'PV', ')'),
+              // 🆕 WHT-DRAFT §3: ใบยังไม่จ่าย = ร่าง (วันที่บนใบ = วันนัดจ่าย/ครบกำหนด)
+              (() => { const wi = global.ERP.whtDateInfo ? global.ERP.whtDateInfo(state, inv, c) : null;
+                return wi && wi.draft && h('div', { className:'inline-block text-[10px] mt-0.5 px-1.5 py-0.5 rounded bg-red-100 text-red-800 font-bold', 'data-testid':'inv-wht-draft-badge',
+                  title:'ยังไม่จ่ายเงิน — ใบ 50 ทวิ ที่พิมพ์ตอนนี้เป็นฉบับร่าง ใบจริงลงวันที่จ่ายเงินจริง' },
+                  '📝 ร่าง · ', wi.kind === 'scheduled' ? 'นัดจ่าย ' + fmtDate(wi.date) : wi.kind === 'due' ? 'ครบกำหนด ' + fmtDate(wi.date) : 'ยังไม่นัดจ่าย → ส่งคำขอจ่าย/ใส่วันนัดจ่ายก่อน'); })()),   // UAT N2
             c.mergedInto ? h('button', { onClick:()=>_printWhtMerged(c),
               'data-testid':'inv-wht-print-merged', title:'พิมพ์ใบ 50 ทวิ รวมของ ' + (c.mergedInto.pvNumber || 'PV') + ' — แก้ใบนี้ได้หลัง ↩️ แยก 50 ทวิ ที่ ✅ รายการที่จ่ายแล้ว',
               className:'text-[10px] px-2 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded' }, '🖨️ พิมพ์ใบรวม') :
@@ -87104,7 +87229,10 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
             if(_whtMergedCert){ const _at = Date.now();   // 🆕 UAT SF3: บันทึกว่าใครพิมพ์ใบเดี่ยวของใบที่รวมแล้ว (สำเนาภายใน)
               dispatch({ type:'ADD_AUDIT_LOG', data:{ id:'al_whtpi_' + inv.id + '_' + _at.toString(36), ts:_at, type:'wht_print_internal', by:user.username, byName:user.name || user.username,
                 entityType:'invoice', entityId:inv.id, entityRef:inv.invNumber, amount:Number(inv.whtAmount) || 0,
-                note:'🖨️ พิมพ์ใบ 50 ทวิ เดี่ยว (สำเนาภายใน) — รวมอยู่ในเลขที่ ' + (_whtMergedCert.mergedInto.certNumber || '-') + ' (' + (_whtMergedCert.mergedInto.pvNumber || 'PV') + ')' } }); } } }, _whtMergedCert ? '🖨️ ใบเดี่ยว (ภายใน)' : '🖨️ พิมพ์ใบ WHT'),
+                note:'🖨️ พิมพ์ใบ 50 ทวิ เดี่ยว (สำเนาภายใน) — รวมอยู่ในเลขที่ ' + (_whtMergedCert.mergedInto.certNumber || '-') + ' (' + (_whtMergedCert.mergedInto.pvNumber || 'PV') + ')' } }); } } }, _whtMergedCert ? '🖨️ ใบเดี่ยว (ภายใน)' : '🖨️ พิมพ์ใบ WHT' + ((() => {   // 🆕 WHT-DRAFT §3: ทุกใบเป็นร่าง → " (ร่าง)"
+            if(!global.ERP.whtDateInfo) return false;
+            const cs = (inv.whtCertificates || []).filter(c => c && !c.voided);
+            return cs.length ? cs.every(c => global.ERP.whtDateInfo(state, inv, c).draft) : global.ERP.whtDateInfo(state, inv, null).draft; })() ? ' (ร่าง)' : '')),
         // 🆕 RW: เพิ่ม WHT ย้อนหลัง — ทุก status รวม paid
         !inv.voided && hasPerm(user,'purchase','inv','edit') &&
           h(Button, { variant:'warning', disabled: !!_whtMergedCert || _invMoneyLocked, 'data-testid':'inv-add-wht-retro',
@@ -88531,16 +88659,19 @@ function printWHTCert(inv, state, opts){
   const company = state.company || {};
   // 🆕 PETTY-DIRECT UAT M1: วันที่หัก/วันออกใบ = ลำดับเดียวกับรายงาน ภ.ง.ด.3/53 (mod-accounting A7)
   //   วันจ่ายจริงแรก (ผ่านอนุมัติ ไม่กลับรายการ) → cert.certDate → invDate · ใบรวม (mergedNote) ส่ง invDate ที่ถูกแล้วมาเอง
-  const _whtDate = (() => {
-    if(opts.mergedNote || !inv || !inv.id) return inv && inv.invDate;
-    const ds = ((state && state.payments) || []).filter(p => p && !p.reversed
-        && p.approvalStatus !== 'pending' && p.approvalStatus !== 'rejected'
-        && (p.invId === inv.id || p.invoiceId === inv.id ||
-            (p.invoiceIds || []).includes(inv.id) || (p.allocations || []).some(a => a && a.invoiceId === inv.id))
-      ).map(p => p.payDate || p.date).filter(Boolean).sort();
-    const c0 = _fCert || _cAll[0] || null;
-    return ds[0] || (c0 && c0.certDate) || inv.invDate;
-  })();
+  //   🆕 WHT-DRAFT §3: ยังไม่จ่าย → วันนัดจ่าย/ครบกำหนด + ใบ "ร่าง" (helper กลาง whtDateInfo — กฎเดียวกับรายงาน)
+  const _wi = (opts.mergedNote || !inv || !inv.id) ? { date: inv && inv.invDate, draft: false, kind: 'merged' }
+    : global.ERP.whtDateInfo(state, inv, _fCert || _cAll[0] || null);
+  const _whtDate = _wi.date;
+  // 🆕 WHT-DRAFT §3: ใบร่าง (ยังไม่จ่าย) → แถบแดงบนสุด + ลายน้ำ "ร่าง ยังไม่จ่าย" (ติดกระดาษตอนพิมพ์ — ไม่ซ่อน)
+  const _thD = (d) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || '')); return m ? parseInt(m[3], 10) + ' ' + ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'][parseInt(m[2], 10) - 1] + ' ' + (parseInt(m[1], 10) + 543) : ''; };
+  const _draftLine = !_wi.draft ? '' : _wi.kind === 'scheduled' ? '(ร่าง) นัดจ่าย ' + _thD(_wi.date)
+    : _wi.kind === 'due' ? '(ร่าง) ครบกำหนด ' + _thD(_wi.date) : '(ร่าง) ยังไม่นัดจ่าย';
+  const _draftHtml = !_wi.draft ? ''
+    : '<div class="draft-banner" data-testid="wht-draft-banner" style="border:2px solid #dc2626;background:#fef2f2;color:#b91c1c;font-weight:bold;font-size:10pt;text-align:center;padding:4px;margin:4px 0">ร่าง — ยังไม่จ่ายเงิน · ยังไม่ได้หักภาษี ณ ที่จ่าย · ห้ามลงนาม/ห้ามส่งผู้ขาย · '
+      + (_wi.date ? 'วันที่บนใบเป็น' + (_wi.kind === 'due' ? 'วันครบกำหนด ' : 'วันนัดจ่าย ') + _escI(_thD(_wi.date)) : 'ยังไม่นัดจ่าย (วันที่บนใบว่าง) → ส่งคำขอจ่าย/ใส่วันนัดจ่ายก่อน')
+      + ' — ใบจริงจะลงวันที่จ่ายเงินจริง และนับเข้า ภ.ง.ด. เดือนที่จ่าย</div>'
+      + '<div class="draft-wm" data-testid="wht-draft-wm" style="position:fixed;top:40%;left:0;right:0;text-align:center;transform:rotate(-30deg);font-size:64pt;color:rgba(220,38,38,0.15);font-weight:bold;pointer-events:none;z-index:50">ร่าง ยังไม่จ่าย</div>';
   // 🆕 PETTY-DIRECT P4: ชื่อผู้หัก (บริษัทเรา) ต้องมี "(สำนักงานใหญ่)" — ตั้งรหัสสาขาภาษีบริษัทอื่นที่ไม่ใช่ 00000 → "(สาขาที่ xxxxx)" · ชื่อมีคำอยู่แล้ว = ไม่ซ้ำ
   const _coBcRaw = String(company.branchCode || company.taxBranchCode || '').replace(/\D/g, '');
   const _coBc = _coBcRaw ? _coBcRaw.padStart(5, '0').slice(-5) : '';
@@ -88716,7 +88847,7 @@ function printWHTCert(inv, state, opts){
 
   const html = `<!DOCTYPE html>
 <html lang="th"><head><meta charset="utf-8"/>
-<title>หนังสือรับรองการหักภาษี ณ ที่จ่าย — ${bookNumber}</title>
+<title>${_wi.draft ? '(ร่าง) ' : ''}หนังสือรับรองการหักภาษี ณ ที่จ่าย — ${bookNumber}</title>
 <style>
   @page { size: A4 portrait; margin: 8mm 10mm; }
   * { box-sizing: border-box; }
@@ -88824,7 +88955,7 @@ function printWHTCert(inv, state, opts){
   .noprint .hint { display: inline-block; margin-left: 10px; font-size: 9pt; color: #555; }
 </style></head>
 <body>
-${_internalHtml}${_row6InternalHtml}
+${_draftHtml}${_internalHtml}${_row6InternalHtml}
 <div class="noprint">
   <button onclick="window.print()">🖨️ Print (A4)</button>
   <button onclick="window.close()">ปิด</button>
@@ -88968,6 +89099,7 @@ ${_internalHtml}${_row6InternalHtml}
         <div class="sign-space"></div>
         <div class="role-line">ลงชื่อ ............................................................ ผู้จ่ายเงิน</div>
         <div class="date-line">${thDate(_whtDate)}</div>
+        ${_draftLine ? '<div class="hint" data-testid="wht-draft-dateline" style="color:#b91c1c;font-weight:bold">' + _escI(_draftLine) + '</div>' : ''}
         <div class="hint">(วัน เดือน ปี ที่ออกหนังสือรับรองฯ)</div>
         <div class="stamp">ประทับตรา<br/>นิติบุคคล<br/>(ถ้ามี)</div>
       </div>
@@ -98655,12 +98787,14 @@ function ApprovalRequestsTab({ state, dispatch, user }){
     const cur = getCurrentStep && getCurrentStep(req);
     if(gmMe && cur && global.ERP.approvalCanDecide(req, cur, rowOf(user)) && req.requestedBy !== user.username
       && global.ERP.approvalStuckStep(state, req, user.username, cur.order)) return onGmSelf(req);
-    if(!confirm(`✅ อนุมัติ ${req.label || req.action}?\n${req.reason || ''}`)) return;
     if(!cur) return alert('ไม่พบ current step');
     // 🆕 verify F5: ด่านเดียวกับ 🔔 — ต้องตัดสินขั้นนี้ได้จริง · ขั้นที่เหลือต้องมีคนอื่น · reducer ต้องรับขั้นนี้ก่อน (ไม่งั้นห้ามสั่งจ่าย/ทำรายการ)
     if(!(global.ERP.approvalCanDecide(req, cur, rowOf(user)) && (req.requestedBy !== user.username || _selfMe(req)))) return alert('⛔ ' + approverHint(req, cur));
     { const _stk = global.ERP.approvalStuckStep(state, req, user.username, cur.order);
       if(_stk) return alert('⛔ ขั้น ' + _stk.order + ' ที่เหลือไม่มีผู้อนุมัติคนอื่น — ให้ ผจก.แผนกกดขั้นนี้แทน'); }
+    // UAT S3: ถามหลังตรวจสิทธิ์ · รวมคำเตือนเดือน ภ.ง.ด. (WHT-DRAFT §4) ไว้ใน confirm เดียว
+    const _shiftNote = global.ERP.approvalPayShiftNote ? global.ERP.approvalPayShiftNote(state, req) : '';
+    if(!confirm(`✅ อนุมัติ ${req.label || req.action}?\n${req.reason || ''}` + _shiftNote)) return;
     const updatedSteps = (req.steps||[]).map(s => s.order === cur.order && s.decision == null
       ? { ...s, decision:'approved', decidedBy:user.username, decidedByName:user.name||user.username, decidedAt:Date.now(), note:'' }
       : s);
@@ -102511,14 +102645,7 @@ function WHTReport({ state, dispatch, user }){
 
   // 🆕 A7: WHT ยื่น ภ.ง.ด.3/53 ตาม "วันจ่ายจริง/วันที่หัก" ไม่ใช่ invDate
   //   หน้าที่หัก ณ ที่จ่าย เกิดเมื่อจ่ายเงิน → วันหัก = วันออกใบรับรอง (cert.certDate) → วันจ่ายแรก → invDate (fallback)
-  const _firstPayDate = (invId) => {
-    const ds = (state.payments||[]).filter(p => !p.reversed
-        && p.approvalStatus !== 'pending' && p.approvalStatus !== 'rejected'   // 🆕 A7: นับเฉพาะจ่ายจริง (ผ่านอนุมัติ)
-        && (p.invId === invId || p.invoiceId === invId ||
-            p.invoiceIds?.includes(invId) || (p.allocations||[]).some(a => a.invoiceId === invId))
-      ).map(p => p.payDate || p.date).filter(Boolean).sort();
-    return ds[0] || null;
-  };
+  //   🆕 WHT-DRAFT §3: กฎวันที่อยู่ที่ helper กลาง E.whtDateInfo (จ่ายจริงแรก → certDate → ยังไม่จ่าย = วันนัดจ่าย/ครบกำหนด)
   // Flatten: each WHT line → one row (for INVs with multi-line WHT)
   const rows = useMemo(() => {
     const result = [];
@@ -102526,7 +102653,6 @@ function WHTReport({ state, dispatch, user }){
       .filter(i => !i.voided && (i.whtAmount||0) > 0);   // 🆕 A7: กรองด้วยวันหักราย-line ด้านล่าง (ไม่ pre-filter invDate)
     for(const i of invs){
       const sup = state.suppliers.find(s => s.id === i.supplierId);
-      const firstPay = _firstPayDate(i.id);
       const lines = (i.whtLines && i.whtLines.length > 0) ? i.whtLines
         : (i.whtCategory && (i.whtAmount||0) > 0)
           ? [{ category:i.whtCategory, sub5:i.whtSub5, rate:i.whtRate, base:i.amount, whtAmount:i.whtAmount }]
@@ -102549,9 +102675,11 @@ function WHTReport({ state, dispatch, user }){
           return;
         }
         // 🆕 A7: เดือนยื่นผูก "วันจ่ายจริง" เป็นหลัก (immutable) → certDate (retro แก้ได้ไม่ให้ override เดือน) → invDate
-        const whtDate = firstPay || cert?.certDate || i.invDate;
+        //   🆕 WHT-DRAFT: ยังไม่จ่าย → วันนัดจ่าย (ร่าง) · pending = กฎเดิม (!จ่ายจริง && !certDate) → ยอดยื่นไม่เปลี่ยน
+        const wi = global.ERP.whtDateInfo(state, i, cert || null);
+        const whtDate = wi.date || i.invDate;
         if(!inDateRange(whtDate, dr.startDate, dr.endDate)) return;
-        const pending = !firstPay && !cert?.certDate;   // ยังไม่จ่ายจริง+ไม่มีวันบนใบรับรอง → ตกไป invDate (ยังไม่ถึงกำหนดยื่น)
+        const pending = wi.pending, whtKind = wi.kind;   // ยังไม่จ่ายจริง+ไม่มีวันบนใบรับรอง (ยังไม่ถึงกำหนดยื่น)
         // 🆕 WHT-MERGE M3: ใบสมาชิกของ 50 ทวิ รวม → แสดงเลขใบรวม (ยอด/บรรทัดเท่าเดิม · เลขเดิมเก็บไว้ที่ origCertNumber)
         const mergedInto = (cert && cert.mergedInto && cert.mergedInto.payId) ? cert.mergedInto : null;
         const certNumber = (mergedInto && mergedInto.certNumber) || cert?.certNumber || i.whtNumber || '-';
@@ -102577,7 +102705,7 @@ function WHTReport({ state, dispatch, user }){
           certNumber,               // per-line cert number
           origCertNumber, mergedInto,   // 🆕 WHT-MERGE M3
           certMatched: !!cert,      // 🆕 verify 2: แถวนี้จับคู่ใบรับรองจริง (ไม่ใช่เลข whtNumber สำรอง)
-          whtDate, pending,         // 🆕 A7
+          whtDate, pending, whtKind,   // 🆕 A7 · WHT-DRAFT
         });
       });
     }
@@ -102622,9 +102750,9 @@ function WHTReport({ state, dispatch, user }){
     h('div', { className:'bg-white rounded-lg shadow p-3 mb-3' },
       h(DateRangeBar, { ...dr, showAll:true, label:'ช่วงวันจ่าย/หัก ณ ที่จ่าย:' }),
       h('div', { className:'text-[11px] text-gray-500 mt-1' },
-        '🆕 จัดเดือนตาม ', h('b', null, 'วันจ่ายจริง/วันหัก ณ ที่จ่าย'), ' (วันจ่ายแรก → วันบนใบรับรอง → วันที่ INV)',
+        '🆕 จัดเดือนตาม ', h('b', null, 'วันจ่ายจริง/วันหัก ณ ที่จ่าย'), ' (วันจ่ายแรก → วันบนใบรับรอง → วันนัดจ่าย (ยังไม่จ่าย))',
         pendingCount > 0 && h('span', { className:'text-amber-600 ml-1' },
-          `· ⚠️ ${pendingCount} บรรทัด (${fmtCur(pendingWHT)}) ยังไม่จ่าย → ยังไม่มีภาระนำส่ง `, h('b', null, 'ไม่นับในยอดยื่น/CSV'), ' (โชว์ตามวันที่ INV ชั่วคราว)')),
+          `· ⚠️ ${pendingCount} บรรทัด (${fmtCur(pendingWHT)}) ยังไม่จ่าย → ยังไม่มีภาระนำส่ง `, h('b', null, 'ไม่นับในยอดยื่น/CSV'), ' (โชว์ตามวันนัดจ่าย — ร่าง ยังไม่จ่าย)')),
     ),
 
     h('div', { className:'grid grid-cols-4 gap-3 mb-4' },
@@ -102698,7 +102826,12 @@ function WHTReport({ state, dispatch, user }){
                             : (r.inv.paymentStatus === 'paid'
                                 ? h('span', { className:'text-orange-600' }, '⏳')
                                 : h('span', { className:'text-gray-400' }, '-'))) })),
-                    h('td', { className:'px-2 py-1.5 text-xs' }, isContinued ? '' : fmtDate(r.inv.invDate)),
+                    // 🆕 WHT-DRAFT §3: แถวที่ยังไม่จ่าย → วันนัดจ่าย/ครบกำหนด + ป้าย + วันที่ INV ตัวเทา (แถวจ่ายแล้วคงเดิม)
+                    h('td', { className:'px-2 py-1.5 text-xs' }, isContinued ? '' : (!r.pending || r.whtKind === 'inv') ? fmtDate(r.inv.invDate)   // UAT S1: kind inv (ใบเก่า/ยกมา/ตัดมัดจำ) ไม่ใส่ป้าย — หลายใบจ่ายแล้ว
+                      : h('div', { 'data-testid':'wht-rpt-pending-date' }, fmtDate(r.whtDate),
+                          h('span', { className:'ml-1 text-[10px] px-1 rounded ' + (r.whtKind === 'scheduled' ? 'bg-sky-100 text-sky-800' : r.whtKind === 'due' ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-700') },
+                            r.whtKind === 'scheduled' ? '📅 นัดจ่าย' : r.whtKind === 'due' ? 'ครบกำหนด' : 'ร่าง'),
+                          r.whtDate !== r.inv.invDate && h('div', { className:'text-[10px] text-gray-400' }, 'INV ', fmtDate(r.inv.invDate)))),
                     h('td', { className:'px-2 py-1.5' },
                       isContinued ? h('span', { className:'text-gray-400 text-xs' }, '↳')
                         : h('div', null,
@@ -105661,6 +105794,28 @@ function _payDateBlocked(state, date){
   return null;
 }
 
+// 🆕 WHT-DRAFT §4: จ่ายทันทีในหน้าต่างนี้ไหม (วันจ่ายจริงที่เลือก = วันลง JE/ใบ 50 ทวิ) — ยอด <100k หรือ GM/เจ้าของ ทำทันที (เงื่อนไขเดียวกับ requestPayApproval ใส่ payDate)
+function _payWillExecNow(state, pay, user){
+  if(!payNeedsHighApproval(state, pay.amount)) return true;
+  const ctx = { entityType:'payment', entityId:pay.id, scope:'accounting', amount:Number(pay.amount)||0, payload:{ payId:pay.id } };
+  return !!(global.ERP.gmSelfWill && global.ERP.gmSelfWill(state, user, 'approve_payment', ctx));
+}
+// แถวเตือนเดือน ภ.ง.ด. เปลี่ยน รวมหลายคำขอ (ตัดซ้ำตาม invId) · วันนัด = requestedPayDate || payDate ของแต่ละคำขอ
+function _payShiftRows(state, pays, payDate){
+  const seen = new Set(), out = [];
+  (pays || []).forEach(p => {
+    const ids = _payMembers(state, p).map(m => m.inv && m.inv.id).filter(Boolean);
+    global.ERP.whtPayMonthShift(state, ids, payDate, p.requestedPayDate || p.payDate || '').forEach(r => { if(!seen.has(r.invId)){ seen.add(r.invId); out.push(r); } });
+  });
+  return out;
+}
+// กล่องเหลืองใต้ช่องวันจ่ายจริง (หายเองเมื่อวันจ่ายอยู่เดือนเดียวกับวันนัด)
+function WhtMonthShiftBox({ rows }){
+  if(!rows || !rows.length) return null;
+  return h('div', { 'data-testid':'wht-month-shift', className:'bg-amber-50 border border-amber-400 rounded p-2 text-[11px] text-amber-900 whitespace-pre-line' },
+    h('div', { className:'font-bold' }, '⚠️ เดือนยื่น ภ.ง.ด. ของใบ 50 ทวิ จะเปลี่ยน'),
+    global.ERP.whtPayMonthShiftText(rows, { mode:'pick', compact:true }));
+}
 // Bulk approval modal — เลือกบัญชีเดียวจ่ายทุกใบที่เลือก
 function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
   const purchaseMod = global.ERP.MODULES.purchase;
@@ -105681,6 +105836,11 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
   const [note, setNote] = useState('');
 
   const total = pays.reduce((s,p) => s + (p.amount||0), 0);
+  // 🆕 WHT-DRAFT §4: เดือน ภ.ง.ด. เปลี่ยน — เฉพาะรายการที่จ่ายทันที (≥100k ที่ส่งคำขอ = เตือนอีกทีตอนขั้นสุดท้าย)
+  const shiftRows = useMemo(() => _payShiftRows(state, (pays || []).filter(p => _payWillExecNow(state, p, user)), date), [state, pays, date, user]);
+  // verify 2: ≥100k ที่ส่งคำขอ (ไม่จ่ายทันที) → บอกเป็นหมายเหตุเทา ว่าจะเตือนอีกทีตอนขั้นสุดท้าย (วันจ่ายจริง = วันที่ผู้อนุมัติขั้นสุดท้ายกด)
+  const laterRows = useMemo(() => _payShiftRows(state, (pays || []).filter(p => !_payWillExecNow(state, p, user)), date), [state, pays, date, user]);
+
 
   const confirm_ = () => {
     if(!bankId) return alert('เลือกบัญชีที่ใช้โอน');
@@ -105689,7 +105849,8 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
     // 🆕 SELF-APPROVE UAT N4: บอกจำนวนใบที่เป็นคำขอของผู้อนุมัติเอง (ทาง ✋ · ไม่ใช่ 👑 GM/เจ้าของ ซึ่งถามแยกรายใบอยู่แล้ว) — ให้รู้ตัวก่อนกด
     const _ownSp = global.ERP.gmSelfUser(state, user.username) ? 0 : pays.filter(p => (p.createdBy || p.by) === user.username).length;
     if(!confirm(`ยืนยันอนุมัติจ่าย ${pays.length} รายการ\nรวม ${fmtCur(total)} จากบัญชี ${banks.find(b=>b.id===bankId)?.name}?`
-      + (_ownSp ? `\n\n✋ มี ${_ownSp} ใบเป็นคำขอของคุณเอง (อนุมัติด้วยสิทธิ์ ✋ · บันทึกให้ผู้ตรวจสอบดูย้อนหลัง)` : ''))) return;
+      + (_ownSp ? `\n\n✋ มี ${_ownSp} ใบเป็นคำขอของคุณเอง (อนุมัติด้วยสิทธิ์ ✋ · บันทึกให้ผู้ตรวจสอบดูย้อนหลัง)` : '')
+      + (shiftRows.length ? '\n\n⚠️ เดือนยื่น ภ.ง.ด. ของใบ 50 ทวิ จะเปลี่ยน\n' + global.ERP.whtPayMonthShiftText(shiftRows, { mode:'pick', compact:true }) : ''))) return;
     const bank = banks.find(b => b.id === bankId);
     // 🆕 ใช้ ADJUST_BANK_BALANCE atomic delta (กัน stale-closure ของ UPDATE_BANK ปลายลูป)
     let paidCount = 0, paidTotal = 0, gatedCount = 0, gatedTotal = 0, gmPaid = 0;
@@ -105798,6 +105959,10 @@ function BulkApprovePayModal({ pays, state, dispatch, user, onClose, onDone }){
               `${b.bank||''} ${b.name} · เหลือ ${fmtCur(b.balance||0)}`))),
           reqBankIds.length === 1 && h('div', { className:'text-[10px] mt-0.5 ' + (bankId === reqBankIds[0] ? 'text-gray-500' : 'text-amber-700 font-medium') },
             bankId === reqBankIds[0] ? '✓ ตามบัญชีที่ผู้ขอเลือกไว้' : `⚠️ ต่างจากที่ผู้ขอเลือก (${(banks.find(b => b.id === reqBankIds[0])||{}).name || reqBankIds[0]})`))),
+      // verify 1: กล่องเตือนเต็มความกว้าง นอก <label> (ไม่บีบครึ่งจอ · แตะข้อความไม่เปิดปฏิทิน) — เหมือนหน้าต่างอนุมัติเดี่ยว
+      shiftRows.length > 0 && h(WhtMonthShiftBox, { rows: shiftRows }),
+      laterRows.length > 0 && h('div', { 'data-testid':'wht-month-shift-later', className:'text-[11px] text-gray-500' },
+        'ยอด ≥100,000 ' + laterRows.length + ' ใบ — วันจ่ายจริงจะเป็นวันที่ผู้อนุมัติขั้นสุดท้ายกด (ระบบจะเตือนเรื่องเดือนยื่น ภ.ง.ด. อีกครั้งตอนนั้น)'),
       // 🆕 ACCT-V2: บัญชีที่ขอโอนต่างกันในชุดเดียว → เตือนก่อนจ่ายรวมจากบัญชีเดียว
       reqBankMixed && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900' },
         h('div', { className:'font-bold' }, '⚠️ บัญชีที่ขอโอนต่างกัน — จ่ายรวมจะใช้บัญชีเดียวข้างบนกับทุกใบ'),
@@ -105871,6 +106036,9 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
   // 🆕 FIX(P0): เหตุผลเดียวกับ BulkApprovePayModal — วันจ่ายจริง default = วันนี้เสมอ
   const reqPayDate = pay.requestedPayDate || pay.payDate || '';
   const [payDate, setPayDate] = useState(getToday);
+  // 🆕 WHT-DRAFT §4: วันจ่ายจริงทำให้เดือน ภ.ง.ด. ของใบ 50 ทวิ เปลี่ยนไหม · willExecNow = จ่ายทันที (ไม่งั้นวันจ่ายจริง = วันอนุมัติขั้นสุดท้าย)
+  const willExecNow = useMemo(() => _payWillExecNow(state, pay, user), [state, pay, user]);
+  const shift = useMemo(() => _payShiftRows(state, [pay], payDate), [state, pay, payDate]);
 
   const onSlip = (e) => {
     const file = e.target.files?.[0];
@@ -105906,6 +106074,8 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
       }
     }
     const bank = bankId ? banks.find(b => b.id === bankId) : null;
+    // 🆕 WHT-DRAFT §4: เตือนก่อน dispatch ใด ๆ · เฉพาะจ่ายทันที (≥100k รอ GM = เตือนตอนขั้นสุดท้าย)
+    if(shift.length && willExecNow && !confirm(global.ERP.whtPayMonthShiftText(shift, { mode:'pick' }))) return;
 
     // 🆕 F1 (CRITICAL): ยอด ≥100,000 ต้องผ่าน approval engine (manager→GM) — ห้ามจ่ายทันที
     //   ส่งคำขอแทน, executor 'approve_payment' (03-shell) จ่ายจริงตอนอนุมัติครบทุก step
@@ -106006,6 +106176,11 @@ function ApprovePaymentModal({ pay, state, dispatch, user, onClose }){
             ? h('span', { className:'text-amber-800' }, '📅 ผู้ขอนัดจ่าย: ', fmtDate(reqPayDate))
             : h('span', { className:'text-gray-500' }, 'ผู้ขอไม่ได้ระบุวันที่ต้องการจ่าย'))
       ),
+      willExecNow ? h(WhtMonthShiftBox, { rows: shift })
+        : shift.length > 0 && h('div', { 'data-testid':'wht-month-shift-later', className:'text-[11px] text-gray-500' }, (global.ERP.gmSelfUser && user && global.ERP.gmSelfUser(state, user.username))
+          // verify 1: GM/เจ้าของ ใบต้อง 2 คน — ยืนยันทำเองในหน้าต่างถัดไป = จ่ายวันนี้ (ระบบเตือนในหน้าต่างยืนยันนั้น)
+          ? 'ยอด ≥100,000 ใบนี้ปกติต้องมีผู้อนุมัติอีกคน — ถ้ายืนยันทำเองในขั้นถัดไป วันจ่ายจริง = วันนี้ (ระบบจะเตือนเรื่องเดือนยื่น ภ.ง.ด. ในหน้าต่างยืนยันนั้น)'
+          : 'ยอด ≥100,000 — วันจ่ายจริงจะเป็นวันที่ผู้อนุมัติขั้นสุดท้ายกด (ระบบจะเตือนเรื่องเดือนยื่น ภ.ง.ด. อีกครั้งตอนนั้น)'),
       method === 'transfer' && h('label', { className:'block text-sm' }, '🏦 บัญชีที่ใช้โอน *',
         // 🆕 ACCT-V2: ผู้ขอเลือกบัญชีไว้แล้ว (requestedBankId) → prefill จาก pay.bankId · ถ้าผู้อนุมัติเปลี่ยน บอกให้เห็น
         pay.requestedBankId && h('span', { className: cls('ml-2 text-[10px] font-normal', bankId === pay.requestedBankId ? 'text-gray-500' : 'text-amber-700 font-medium') },
