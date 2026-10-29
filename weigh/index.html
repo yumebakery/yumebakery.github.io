@@ -12,7 +12,7 @@
 <script>
 (function(){
 'use strict';
-const WEIGH_VERSION = '2026.09.27';
+const WEIGH_VERSION = '2026.10.29';   // 🆕 (2026.10.29) ตัดปุ่มตัวคูณ ×0.5/×2/×3 ทิ้งทั้งหมด — ปริมาณตามสูตรเสมอ (×1)
 // ความสามารถของรุ่นนี้ — ส่งไปกับ ready ให้แอปแม่เช็คได้ตรง ๆ ไม่ต้องเทียบเลขเวอร์ชัน
 const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode', 'job', 'portion'];   // 🆕 'job' = รับงานใบสั่ง start-job/cancel-job · 'portion' = งานชั่งแยกชิ้น (job.recipe.portion)
 const h = React.createElement;
@@ -1253,7 +1253,7 @@ function App(){
         if(sessionHasLocked(stateRef.current.settings)) return reply(false, { error:'busy' });   // มีค่าล็อกค้าง (สูตรไหน/งานไหนก็ตาม) → ไม่ทับ
         if(outboxFull()) return reply(false, { error:'busy', detail:'outbox_full' });   // 🆕 log งานค้างส่ง ≥ 50 → รับงานใหม่ไม่ได้จนกว่าแม่จะ ack (ไม่ตัด log ทิ้ง)
         const next = JSON.parse(JSON.stringify(job));
-        next.lockMult = true;
+        next.lockMult = true;   // (2026.10.29) ไม่มีผลแล้ว — หน้าชั่งไม่มีตัวคูณ คงไว้ให้รูปร่างงานเดิม
         setJob(next);
         if(cur) embedPost({ type:'job-cancelled', jobId: cur.id, reason:'parent' });   // งานเก่าถูกแทน
         reply(true);
@@ -1539,8 +1539,7 @@ function RecipesTab({ state, update, perms, replaceMode }){
                   className:'text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded' }, '🗑'))),
             h('div', { className:'mt-2 text-xs text-gray-600 space-y-0.5' },
               r.items.slice(0,5).map((it,i)=>h('div',{key:i},'• ',it.name,' ',fmt(it.target),' ',it.unit,
-                h('span',{className:'text-gray-400'},' ±', it.tol>0 ? it.tol : calcTol(toGrams(it.target, it.unit))),
-                it.fixed && h('span',{className:'ml-1 text-orange-700'},'🔒 ไม่คูณ'))),   // 🆕 qty คงที่ทุก batch
+                h('span',{className:'text-gray-400'},' ±', it.tol>0 ? it.tol : calcTol(toGrams(it.target, it.unit))))),   // (2026.10.29) ไม่มีตัวคูณ → ไม่ต้องโชว์ 🔒 ไม่คูณ
               r.items.length>5&&h('div',{className:'italic'},'+',r.items.length-5,' รายการ'),
               // 🆕 วัตถุดิบใน BOM ที่ ERP แปลงเป็นกรัมไม่ได้ (หน่วยนับชิ้น/ไม่มีน้ำหนักต่อหน่วย) — ไม่ต้องชั่ง
               Array.isArray(r.skipped) && r.skipped.length>0 && h('div', { className:'text-amber-700' }, '⚠️ ไม่ชั่ง (ไม่ใช่หน่วยน้ำหนัก): ', r.skipped.join(', ')))))));
@@ -1567,7 +1566,7 @@ const beep = (kind) => {
 };
 
 // ==================== WEIGH TAB ====================
-// 🆕 job = งานใบสั่งจากแอปแม่ (start-job) | null — มีงาน: ใช้สูตรของงาน (ปริมาณ 1 batch) · ล็อกตัวคูณ ×1 · เลือกสูตรอื่นไม่ได้
+// 🆕 job = งานใบสั่งจากแอปแม่ (start-job) | null — มีงาน: ใช้สูตรของงาน (ปริมาณ 1 batch) · เลือกสูตรอื่นไม่ได้
 //    onJobCancel(reason) = WeighTab ยกเลิกงานเอง (แจ้งแม่ job-cancelled) · onJobDone() = ชั่งครบแล้ว ล้างงาน (ไม่ใช่การยกเลิก)
 //    🆕 parentCancel = แม่ขอยกเลิกงานตอนนับชิ้นไปแล้ว { reqId, jobId, reason, at } → dialog ในแอป · onParentCancel(ok) = คำตอบของพนักงาน
 function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, embedSelect, onEmbedSelected, job, onJobCancel, onJobDone, parentCancel, onParentCancel }){
@@ -1577,7 +1576,8 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   // 🆕 กู้ชุดที่ชั่งค้างไว้ (refresh/จอดับ/เผลอสลับแท็บ) — ค่าที่ล็อกแล้วอยู่ครบ ตัวที่ยังไม่ล็อกต้องตั้ง 0 ใหม่
   const sess = useMemo(loadSession, []);
   const [recipeId, setRecipeId] = useState(sess && recipes.some(r=>r.id===sess.recipeId) ? sess.recipeId : '');
-  const [mult, setMult] = useState(!job && sess && Number(sess.mult)>0 ? Number(sess.mult) : 1);   // งานใบสั่ง = ×1 เสมอ
+  // 🆕 (2026.10.29) เจ้าของสั่งตัดตัวคูณ (กลัวพนักงานลืมกด) → ปริมาณตามสูตรเสมอ · ขนาดอื่น = เลือกสูตรของขนาดนั้น
+  const mult = 1;
   const operatorLocked = EMBED && !!settings.operatorLocked;   // ล็อกเฉพาะตอนฝังในแอปแม่
   const [operator, setOperator] = useState(operatorLocked ? (settings.lastOperator||'') : (sess?.operator ?? (settings.lastOperator||'')));
   // 🆕 แท็บเล็ตใช้ร่วมกัน: ชุดที่ค้างเป็นของ "คนก่อน" (sess.operator) แต่ชื่อผู้ชั่งที่ล็อกจากแอปแม่เป็นอีกคน → ไม่กู้ค่าที่ล็อกไว้
@@ -1590,7 +1590,9 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   const sessLockedN = sess && sess.entries ? Object.values(sess.entries).filter(e => e && e.locked).length : 0;
   // 🆕 session ค้างของคนก่อน แต่เป็นงานใบสั่งที่ทำไปแล้ว (ชิ้นที่นับแล้ว / วัตถุดิบที่เทลงชามแล้ว) → ไม่ทิ้งเงียบ ๆ · เก็บไว้แล้วถามคนใหม่ (ทำต่อ / ยกเลิกชุดนี้)
   const staleKeep = !!(sessStale && sessJobMatch && (portion ? (Array.isArray(sess.pieces) && sess.pieces.length > 0) : sessLockedN > 0));
-  const dropStale = sessStale && !staleKeep;
+  // 🆕 (2026.10.29) session เก่าจากรุ่นที่มีตัวคูณ (sess.mult ≠ 1) + มีค่าที่ล็อกแล้ว (ชั่งชุดอิสระตามตัวคูณเดิม) → ล้างชุดนั้น + แจ้ง toast (ไม่ confirm)
+  const sessMultDrop = !!(!job && !sessStale && sess && Number(sess.mult) > 0 && Number(sess.mult) !== 1 && sessLockedN > 0);
+  const dropStale = (sessStale && !staleKeep) || sessMultDrop;
   const [note, setNote] = useState(dropStale ? '' : (sess?.note || ''));
   const [entries, setEntries] = useState(()=>{
     if(dropStale) return {};
@@ -1602,6 +1604,8 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   const [activeIdx, setActiveIdx] = useState(sess ? (dropStale ? 0 : (sess.activeIdx!=null ? sess.activeIdx : null)) : null);
   const [toast, setToast] = useState('');
   const [dropNotice, setDropNotice] = useState('');
+  // 🆕 (2026.10.29 verify) ล้างชุดตัวคูณเก่า → แถบแดงค้างจนกด "รับทราบ" (toast หายใน 2.5 วิ · ของ ×N ยังอยู่ในชาม ห้ามชั่ง ×1 ซ้ำลงชามเดิม)
+  const [multDropNotice, setMultDropNotice] = useState(sessMultDrop ? `หน้าชั่งรุ่นใหม่ไม่มีตัวคูณ — ชุดที่ชั่งค้าง (×${sess.mult}) ถูกล้าง · ของที่เทลงชามแล้วยังอยู่ในชาม ให้หัวหน้าตัดสินก่อน แล้วชั่งชุดนี้ใหม่ตามสูตร` : '');
   // 🆕 มีงานใบสั่ง → สูตรของงาน (ไม่อยู่ในรายการสูตร · ไม่หายตอน recipesMode 'replace' ส่งรายการใหม่)
   const recipe = job ? job.recipe : recipes.find(r=>r.id===recipeId);
   const effRecipeId = job ? job.recipe.id : recipeId;
@@ -1658,7 +1662,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     jobIdRef.current = jobId;
     if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current = null; }
     dwellRef.current = null; maxSeenRef.current = null;
-    setEntries({}); setCountdown(0); setMult(1); setNote('');
+    setEntries({}); setCountdown(0); setNote('');
     pDwellRef.current = null; setPieces([]); setArmed(false); setZeroRef(null); setPModal(null); setPSwitch(null); setPStatus('');
     setPortionStartedAt(portion ? Date.now() : null);
     if(job) setRecipeId('');   // จบงานแล้วกลับมาหน้า "เลือกสูตร" ไม่ใช่สูตรที่เปิดค้างก่อนเริ่มงาน
@@ -1681,10 +1685,10 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   // เก็บ session ทุกครั้งที่เปลี่ยน (ไม่มีสูตร = ล้าง)
   useEffect(()=>{
     if(!effRecipeId){ saveSession(null); return; }
-    saveSession({ recipeId: effRecipeId, mult, operator, note, entries, activeIdx, recipeSig, ...(job ? { job } : {}),   // 🆕 job อยู่ใน session → รีโหลดแล้วงานยังอยู่
+    saveSession({ recipeId: effRecipeId, mult: 1, operator, note, entries, activeIdx, recipeSig, ...(job ? { job } : {}),   // 🆕 job อยู่ใน session → รีโหลดแล้วงานยังอยู่
       ...(job && pSwitch ? { pSwitch } : {}),   // รอเลือกหลังเปลี่ยนคน (ชั่งแยกชิ้น + วัตถุดิบ)
       ...(portion ? { pieces, portionStartedAt } : {}) });   // 🆕 ชิ้นที่นับแล้ว (armed/zeroRef ไม่เก็บ) + รอเลือกหลังเปลี่ยนคน
-  }, [effRecipeId, mult, operator, note, entries, activeIdx, recipeSig, job, pieces, portionStartedAt, pSwitch]);
+  }, [effRecipeId, operator, note, entries, activeIdx, recipeSig, job, pieces, portionStartedAt, pSwitch]);
   // เตือนก่อนปิด/รีเฟรชถ้ามีค่าที่ชั่งไปแล้ว
   const hasAny = portion ? pieces.length > 0 : Object.values(entries).some(e=>e && e.locked);
   useEffect(()=>{
@@ -1694,21 +1698,19 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     return ()=>window.removeEventListener('beforeunload', f);
   }, [hasAny]);
 
-  // Scaled items — 🆕 หน่วย: kg/L ×1000 · ml/g ×1 · tol: ตามสูตร (×ตัวคูณ) ถ้าไม่ตั้ง → ตาราง calcTol ของ target ที่คูณแล้ว
+  // Scaled items — 🆕 หน่วย: kg/L ×1000 · ml/g ×1 · tol: ตามสูตร ถ้าไม่ตั้ง → ตาราง calcTol ของ target
   //    และไม่ต่ำกว่า minTolG (ค่าเริ่มต้น 1 ก. = ความละเอียดเครื่องชั่งครัวทั่วไป — ±0.5 บนเครื่องก้าว 1 ก. ล็อกไม่ได้เลย)
   const minTolG = Math.max(0, Number(settings.minTolG ?? 1) || 0);
-  //    🆕 it.fixed (ERP: scaleType 'fixed' — qty คงที่ทุก batch เช่น เกลือ/ผงฟู/ยีสต์) → ไม่คูณตามตัวคูณ ทั้งเป้าและเกณฑ์
+  //    (2026.10.29) ไม่มีตัวคูณแล้ว → it.fixed (ERP scaleType 'fixed') ไม่มีผลต่าง · ยังส่งต่อใน log เหมือนเดิม
   const items = useMemo(()=> !recipe ? [] : recipe.items.map((it,i)=>{
-    const k = it.fixed ? 1 : mult;
-    const targetG = toGrams(it.target, it.unit) * k;
+    const targetG = toGrams(it.target, it.unit);
     const tolSet = Number(it.tol)||0;
     // 🆕 tol เป็น "กรัม" เสมอ (ตรง placeholder/ตารางมาตรฐาน/saveRecipe auto-fill/ERP) — เดิมแปลงตามหน่วยสูตร (kg → ×1000) ทำให้สูตร kg ที่คีย์ ±20 ได้ ±20000 g
-    const tolG = tolSet > 0 ? tolSet * k : calcTol(targetG);
+    const tolG = tolSet > 0 ? tolSet : calcTol(targetG);
     return { idx:i, name:it.name, target:targetG, tol:Math.max(minTolG, tolG), unit:'g',
       origUnit:it.unit||'g', origTarget:Number(it.target)||0, tolAuto: !(tolSet>0), fixed: !!it.fixed,
       ...(it.itemId ? { itemId: it.itemId } : {}) };   // 🆕 รหัสสินค้าใน ERP (มีเฉพาะสูตรจาก BOM)
-  }), [recipe, mult, minTolG]);
-  const fixedCount = items.filter(it => it.fixed).length;
+  }), [recipe, minTolG]);
 
   // 🆕 ชื่อผู้ชั่งที่ล็อกจากแอปแม่เปลี่ยนคน (B ล็อกอินต่อจาก A บนเครื่องเดียวกัน) ทั้งที่มีค่าล็อกไว้ → ยกเลิกชุดของ A แล้วเริ่มใหม่
   //    ตอน mount operator = settings.lastOperator ที่ persist ไว้ (คนก่อน) → config ของคนใหม่มาถึงหลัง mount จึงจับได้
@@ -1736,7 +1738,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     }
     setOperator(nextOp);
   }, [operatorLocked, settings.lastOperator]);
-  useEffect(()=>{ if(dropStale){ showToast(`ชุดที่ค้างของ ${sess.operator} ถูกยกเลิก` + (sessLockedN ? ' — ของที่เทลงชามแล้วยังอยู่ในชาม ให้หัวหน้าตัดสินก่อนเริ่มใหม่' : ' — เริ่มชั่งใหม่')); if(job) onJobCancel && onJobCancel('stale-session'); } }, []);
+  useEffect(()=>{ if(sessMultDrop){ showToast('หน้าชั่งรุ่นใหม่ไม่มีตัวคูณ — ของในชามยังอยู่ ให้หัวหน้าตัดสินก่อน'); return; } if(dropStale){ showToast(`ชุดที่ค้างของ ${sess.operator} ถูกยกเลิก` + (sessLockedN ? ' — ของที่เทลงชามแล้วยังอยู่ในชาม ให้หัวหน้าตัดสินก่อนเริ่มใหม่' : ' — เริ่มชั่งใหม่')); if(job) onJobCancel && onJobCancel('stale-session'); } }, []);
   // 🆕 งานใน session กู้ไม่ได้ (รูปร่างเสีย — App แจ้งแม่ job-cancelled{stale-session} แล้ว) → บอกคนหน้าเครื่อง
   useEffect(()=>{ if(EMBED && !PRINTER_MODE && !job && sess && sess.job) showToast('งานใบสั่งที่ค้างอยู่กู้ต่อไม่ได้ — ยกเลิกแล้ว (แจ้งระบบหลักแล้ว)'); }, []);
 
@@ -1979,7 +1981,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   const resetForNext = () => {
     if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current=null; }
     dwellRef.current = null; maxSeenRef.current = null;
-    setEntries({}); setCountdown(0); setNote(''); setMult(1);
+    setEntries({}); setCountdown(0); setNote('');
     setActiveIdx(items.length ? items[0].idx : null);
   };
 
@@ -2011,7 +2013,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       return { name:it.name, value:v, unit:'g', target:it.target, tol:it.tol,
         pass: !e.offSpec && Math.abs(v-it.target)<=it.tol,
         ...(it.itemId ? { itemId: it.itemId } : {}),
-        ...(it.fixed ? { fixed:true } : {}),                                  // 🆕 ตัวนี้ไม่ถูกคูณตามตัวคูณ
+        ...(it.fixed ? { fixed:true } : {}),                                  // qty คงที่ทุก batch (ERP) — ส่งต่อใน log เหมือนเดิม
         ...(e.lockedAt ? { lockedAt:e.lockedAt } : {}), ...(e.by ? { by:e.by } : {}),   // 🆕 ใครล็อกตัวไหนเมื่อไหร่
         ...(e.offSpec ? { offSpec:true, reason:e.reason||'' } : {}) };
     });
@@ -2024,7 +2026,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       batchNo: job.batchNo != null ? job.batchNo : null, batchCount: job.batchCount != null ? job.batchCount : null } : null;
     const rid = job ? (String(recipe.id).startsWith('job:') ? recipe.id : 'job:' + job.id) : recipe.id;
     const data = { recipeName:recipe.name, recipeId:rid, recipeCode:recipeCode(recipe), lot, items:resultItems, total, operator, note, ts:Date.now(),
-      multiplier: job ? 1 : mult, ...(jobEcho ? { job: jobEcho } : {}), scaleMode: scale.mode, scaleDevice: scale.device?.name||'', deviceId: getDeviceId(),
+      multiplier: 1, ...(jobEcho ? { job: jobEcho } : {}), scaleMode: scale.mode, scaleDevice: scale.device?.name||'', deviceId: getDeviceId(),
       ...(settings.branchId ? { branchId: settings.branchId } : {}),
       // 🆕 field จากแอปแม่ (สูตรที่สร้างจาก BOM ของ ERP) ส่งกลับไปกับ log ตรง ๆ — แม่ dedupe ด้วย deviceId+id
       ...(recipe.bomId ? { bomId: recipe.bomId } : {}),
@@ -2064,16 +2066,9 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     if(hasAny && !confirm('มีค่าที่ชั่งไว้แล้วในชุดนี้ — เปลี่ยนสูตรจะล้างทิ้งทั้งหมด ยืนยัน?')) return;
     if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current=null; }
     dwellRef.current = null; maxSeenRef.current = null;
-    setRecipeId(id); setEntries({}); setMult(1); setCountdown(0);
+    setRecipeId(id); setEntries({}); setCountdown(0);
     const r = recipes.find(x=>x.id===id);
     setActiveIdx(r && r.items.length ? 0 : null);   // เริ่มที่ตัวแรกเลย ไม่ต้องแตะเพิ่ม
-  };
-  const pickMult = (m) => {
-    if(m === mult) return;
-    if(job) return showToast('งานใบสั่ง — ปริมาณของ 1 batch ล็อกตัวคูณ ×1');
-    if(hasAny && !confirm(`เปลี่ยนตัวคูณเป็น ×${m} จะล้างค่าที่ชั่งไว้แล้ว (${lockedCount} ตัว) ยืนยัน?`)) return;
-    setEntries({}); setMult(m); setActiveIdx(items.length ? items[0].idx : null);
-    dwellRef.current = null; maxSeenRef.current = null;
   };
 
   useEffect(()=>{
@@ -2152,6 +2147,9 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
         h('pre', { className:'bg-gray-900 text-green-400 text-[10px] p-2 rounded mt-1 max-h-24 overflow-y-auto' },
           scale.rawLog.join('\n')))),
     dropNotice && h('div', { className:'bg-red-100 border-2 border-red-400 text-red-900 rounded-lg p-3 font-bold' }, '⚠️ ', dropNotice),
+    multDropNotice && h('div', { className:'bg-red-100 border-2 border-red-400 text-red-900 rounded-lg p-3 font-bold flex items-start gap-2', 'data-mult-drop':'1' },
+      h('div', { className:'flex-1' }, '⚠️ ', multDropNotice),
+      h('button', { className:'shrink-0 bg-white border border-red-400 text-red-800 rounded px-2 py-1 text-sm', onClick:()=>setMultDropNotice('') }, 'รับทราบ')),
 
     // ===== Recipe picker =====
     h('div', { className:'bg-white rounded-lg shadow p-3 space-y-2' },
@@ -2163,18 +2161,13 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
           !job && recipes.map(r=>h('option',{key:r.id,value:r.id},r.name))),
         h('input', { type:'text', value:operator, onChange:e=>setOperator(e.target.value), readOnly:operatorLocked,
           placeholder:'ชื่อผู้ชั่ง', className:cls('w-32 px-2 py-2 border rounded text-sm', operatorLocked && 'bg-gray-100 text-gray-600') })),
-      // 🆕 แถบงานใบสั่ง — แทนแถวตัวคูณ (ซ่อนปุ่ม ×)
+      // 🆕 แถบงานใบสั่ง (2026.10.29: หน้าชั่งไม่มีตัวคูณแล้วทุกโหมด)
       job && h('div', { 'data-job-banner':'1', className:'rounded-lg p-2 bg-violet-50 border-2 border-violet-400 flex items-center gap-2 flex-wrap' },
         h('span', { className:'text-lg font-bold text-violet-900' }, '📦 ', job.label || job.id),
-        h('span', { className:'text-sm text-violet-800' }, 'ปริมาณของ 1 batch — ล็อกตัวคูณ'),
+        h('span', { className:'text-sm text-violet-800' }, 'ปริมาณของ 1 batch'),
         h('button', { onClick:cancelJobByOperator, disabled: !!pModal, 'data-job-cancel':'1', className:'ml-auto px-3 py-1.5 bg-white border border-red-300 text-red-700 hover:bg-red-50 rounded text-sm disabled:opacity-50' }, 'ยกเลิกงานนี้')),
-      recipe && !job && h('div', { className:'flex gap-2 items-center flex-wrap' },
-        h('span', { className:'text-sm font-medium' }, '× ตัวคูณ:'),
-        [0.5,1,2,3].map(m=>h('button', { key:m, onClick:()=>pickMult(m),
-          className: cls('px-3 py-1.5 rounded border-2 text-sm font-bold',
-            mult===m ? (m===1 ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-orange-500 text-white border-orange-600') : 'bg-white border-gray-300') }, '×'+m)),
-        mult!==1 && h('span', { className:'text-sm font-bold text-orange-700 bg-orange-100 px-2 py-1 rounded' },
-          fixedCount > 0 ? ['⚠️ คูณ ', mult, ' เท่า (ยกเว้น 🔒 ', fixedCount, ' ตัว ไม่คูณ)'] : ['⚠️ ทุกตัวคูณ ', mult, ' เท่า'])),
+      // 🆕 (2026.10.29) แทนแถวปุ่มตัวคูณ — ข้อความเล็กสีเทา (ไม่ใช่ปุ่ม) · ขนาด batch อื่น = สูตรของขนาดนั้น
+      recipe && !job && h('div', { 'data-no-mult-hint':'1', className:'text-xs text-gray-500 px-1' }, 'ปริมาณตามสูตร — ต้องการขนาดอื่น เลือกสูตรของขนาดนั้น'),
       recipe && h('div', { className: cls('rounded-lg p-2 text-sm flex items-center gap-3 flex-wrap',
           todayLogs.length > 0 ? 'bg-indigo-50 border border-indigo-300' : 'bg-gray-50 border border-gray-200') },
         h('span', { className:'font-bold text-indigo-900' }, '📊 "', recipe.name, '" วันนี้ทำแล้ว: ',
@@ -2187,8 +2180,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
           replaceMode && recipes.length===0 ? NO_EMBED_RECIPES : 'เลือกสูตรเพื่อเริ่มชั่ง')
       : h('div', { className:'space-y-2' },
-          h('div', { className:'text-2xl font-bold text-gray-800 px-1' }, recipe.name,
-            mult!==1 && h('span', { className:'ml-2 text-orange-600' }, '×', mult)),
+          h('div', { className:'text-2xl font-bold text-gray-800 px-1' }, recipe.name),
           portion ? h(PortionPanel, { pCount, pTarget, pTolEff, pieces, armed, zeroRef, status: pStatus, scale, items, totalG, countdown,
               stale: scale.connected && scale.mode!=='mock' && scale.packetAge() > STALE_MS,
               modal: pModal, pSwitch, openModal: openPModal, closeModal: closePModal, parentCancel, jobLabel: job ? (job.label || job.id) : '',
@@ -2248,8 +2240,8 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
                   h('span', { className:'ml-2 text-base text-gray-700 font-semibold' },
                     '🎯 ', fmt(it.target), ' g ',
                     h('span', { className:'text-sm text-gray-500 font-normal' }, '± '+fmt(it.tol))),
-                  (it.origUnit!=='g' || mult!==1) && h('span', { className: cls('ml-1 text-xs', mult!==1 && it.fixed ? 'text-orange-700 font-bold' : 'text-gray-500') },
-                    '(', fmt(it.origTarget), ' ', it.origUnit, mult!==1 ? (it.fixed ? ' 🔒 ไม่คูณ' : ' × '+mult) : '',
+                  it.origUnit!=='g' && h('span', { className:'ml-1 text-xs text-gray-500' },
+                    '(', fmt(it.origTarget), ' ', it.origUnit,
                     (it.origUnit==='ml'||it.origUnit==='L') ? ' · ตวงเป็นกรัม 1 มล.=1 ก.' : '', ')')),
                 e.locked && h('span', { className: cls('text-xs text-white px-2 py-0.5 rounded font-bold', e.offSpec ? 'bg-orange-500' : 'bg-green-600') },
                   e.offSpec ? '⚠️ นอกเกณฑ์' : '🔒 ล็อก')),
