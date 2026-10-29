@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="4e1dedfe3fa7";window.__ERP_BUILT_AT__="2026-10-28T18:47:08";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="275ee35702cd";window.__ERP_BUILT_AT__="2026-10-29T11:47:58";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -6567,7 +6567,23 @@ function genWHNumber(state){
     }
   }
   count += 1 + (Number(state._certOffset)||0);
+  // 🆕 WHT_GROUP D5: กันเลขชน — ไม่ต่ำกว่า (เลขท้ายสูงสุดของเดือนนี้ที่ออกไปแล้ว + 1) · เลขที่นับแบบเดิมได้มากกว่า = ใช้เลขเดิม (ไม่เปลี่ยนเลขที่ออกไปแล้ว)
+  count = Math.max(count, whMaxSuffix(state, ym) + 1 + (Number(state._certOffset)||0));
   return `WH${ym}${String(count).padStart(5,'0')}`;
+}
+// 🆕 WHT_GROUP D5: เลขท้ายสูงสุดของใบ 50 ทวิ เดือน ym (YYYYMM) — ทุกใบทุกสถานะ (รวมใบ void) + inv.whtNumber + ใบรวม PV (payments[].whtMerge.certs)
+function whMaxSuffix(state, ym){
+  const pre = 'WH' + ym; let mx = 0;
+  const see = (n) => { n = String(n || ''); if(!n.startsWith(pre)) return; const t = n.slice(pre.length); if(/^\d+$/.test(t)){ const k = parseInt(t, 10); if(k > mx) mx = k; } };
+  for(const inv of ((state && state.invoices) || [])){ if(!inv) continue; see(inv.whtNumber); for(const c of (inv.whtCertificates || [])) see(c && c.certNumber); }
+  for(const p of ((state && state.payments) || [])) for(const c of ((p && p.whtMerge && p.whtMerge.certs) || [])) see(c && c.certNumber);
+  return mx;
+}
+// 🆕 WHT_GROUP §3 ข้อ 4: เลข 50 ทวิ รวม = 'WH' + ym(at) + (เลขท้ายสูงสุดของเดือนนั้น + 1) · at = ms (deterministic — ไม่อ่านนาฬิกา)
+function genWHGroupNumber(state, at){
+  const d = new Date(Number(at) || 0);
+  const ym = d.getFullYear() + String(d.getMonth()+1).padStart(2,'0');
+  return 'WH' + ym + String(whMaxSuffix(state, ym) + 1).padStart(5,'0');
 }
 
 // 🆕 DUP: หา PI ที่ใช้เลขใบกำกับ supplier ซ้ำ (ต่อ supplier เดียวกัน)
@@ -6862,8 +6878,15 @@ function _whtScheduledPayDate(state, invId){
 }
 // วันที่บนใบ 50 ทวิ/แถวรายงาน: จ่ายจริงแรก → certDate → (ไม่ใช่ร่าง) invDate → วันนัดจ่าย → ครบกำหนด → ว่าง
 //   pending = กฎเดิมของรายงาน (!firstPay && !certDate) ทุกกรณี
-function whtDateInfo(state, inv, cert){
+function whtDateInfo(state, inv, cert, gCache){
   if(!inv) return { date: '', kind: 'none', pending: true, draft: false };
+  // 🆕 WHT_GROUP S2: cert ของชุด = วันที่ของใบรวม (จ่ายจริงเร็วสุด · ร่าง = วันนัดเร็วสุดของชุด → ครบกำหนดเร็วสุด)
+  //   UAT S1: gCache (Map groupId → ผล) ให้รายงานคิดครั้งเดียวต่อชุด (ไม่สแกนบิล+PV ซ้ำทุกแถวสมาชิก)
+  if(cert && cert.groupId && !cert.voided){
+    let g = gCache && gCache.get(cert.groupId);
+    if(!g){ g = whtGroupDateInfo(state, cert.groupId); if(gCache) gCache.set(cert.groupId, g); }
+    if(g.size) return g;
+  }
   const paid = whtFirstPayDate(state, inv.id);
   if(paid) return { date: paid, kind: 'paid', pending: false, draft: false };
   if(cert && cert.certDate) return { date: cert.certDate, kind: 'cert', pending: false, draft: false };
@@ -6878,12 +6901,26 @@ function whtPayMonthShift(state, invIds, payDate, requestedPayDate){
   const payYm = ymOf(payDate);
   if(!payYm) return [];
   const today = ymOf(getToday());
-  const seen = new Set(), rows = [];
+  const seen = new Set(), rows = [], gSeen = new Set();
   (invIds || []).forEach(id => {
     if(!id || seen.has(id)) return;
     seen.add(id);
     const inv = ((state && state.invoices) || []).find(i => i && i.id === id);
     if(!inv || inv.voided || !((Number(inv.whtAmount) || 0) > 0)) return;
+    // 🆕 WHT_GROUP S2: บิลในชุด = แถวเดียวต่อใบ 50 ทวิ รวม (เลข G · ยอดหักรวม · วันจ่ายจริงแรกของชุด)
+    const _g = whtGroupOfInv(inv);
+    if(_g){
+      if(gSeen.has(_g.groupId)) return;
+      gSeen.add(_g.groupId);
+      const b = whtGroupBuild(state, _g.groupId); if(!b) return;
+      const gp = b.invIds.map(x => whtFirstPayDate(state, x)).filter(Boolean).sort()[0] || null;
+      if(gp && gp <= payDate) return;
+      const gs = gp || requestedPayDate || '';
+      if(!gs || ymOf(gs) === payYm) return;
+      rows.push({ invId: id, groupId: _g.groupId, size: b.size, invNumber: '🧾 ชุด ' + b.size + ' ใบ', certNumbers: [b.certNumber].filter(Boolean), forms: [String(b.form || '53')],
+        wht: b.totalWht, schedDate: gs, schedYm: ymOf(gs), payDate, payYm, basis: gp ? 'paid' : 'requested', pastMonth: !!today && payYm < today });
+      return;
+    }
     const prior = whtFirstPayDate(state, id);
     if(prior && prior <= payDate) return;
     const sched = prior || requestedPayDate || '';
@@ -6924,6 +6961,156 @@ function whtPayMonthShiftText(rows, opts){
   if(!o.compact) L.push('ยืนยันใช้วันจ่ายจริงนี้?');
   return L.join('\n');
 }
+// ==================== 🆕 WHT_GROUP (WHT_GROUP_CONTRACT §2/§3): 50 ทวิ ใบเดียวรวมหลายบิล ====================
+//   ข้อมูลชุดอยู่บน cert ของแต่ละบิล (cert.groupId + cert.group) — ไม่มี collection ใหม่ · ชุดที่ยกเลิก = cert voided (เก็บ groupId ไว้ · เลขไม่นำกลับมาใช้)
+const _whgR2 = (v) => Number((Number(v) || 0).toFixed(2));
+// D6: สวิตช์ปิดฉุกเฉิน — ไม่มีค่า = เปิด · ปิด = ซ่อนปุ่มออกชุดใหม่ (ชุดเดิมยังพิมพ์/จ่าย/ยกเลิกได้)
+function whtGroupEnabled(state){ return !(state && state.settings && state.settings.whtGroupEnabled === false); }
+// cert ที่ยังไม่ void ของชุดบนบิลนี้ (null = ไม่อยู่ในชุด)
+function whtGroupOfInv(inv){
+  return ((inv && inv.whtCertificates) || []).find(c => c && !c.voided && c.groupId) || null;
+}
+const _whgSort = (a, b) => String(a.invDate || '').localeCompare(String(b.invDate || '')) || String(a.invNumber || '').localeCompare(String(b.invNumber || '')) || String(a.id || '').localeCompare(String(b.id || ''));
+// สมาชิกชุด (เฉพาะ cert ที่ยังไม่ void) เรียง (invDate, invNumber, id) → [{ inv, cert }]
+function whtGroupMembers(state, gid){
+  if(!gid) return [];
+  const out = [];
+  for(const inv of ((state && state.invoices) || [])){
+    if(!inv) continue;
+    const c = (inv.whtCertificates || []).find(x => x && !x.voided && x.groupId === gid);
+    if(c) out.push({ inv, cert: c });
+  }
+  return out.sort((a, b) => _whgSort(a.inv, b.inv));
+}
+// มี cert ใด (ทุกสถานะ) ใช้ groupId นี้แล้ว — กันออกซ้ำ (idempotent) / เล่นซ้ำหลังยกเลิก
+function whtGroupIdUsed(state, gid){
+  return !!gid && ((state && state.invoices) || []).some(inv => inv && (inv.whtCertificates || []).some(c => c && c.groupId === gid));
+}
+// คำขอจ่ายค้างที่อ้างบิล (4 ทางแบบ whtFirstPayDate)
+function _whgPendingPay(state, invId){
+  return ((state && state.payments) || []).find(p => p && !p.reversed && p.approvalStatus === 'pending' && p.status !== 'cancelled'
+    && (p.invId === invId || p.invoiceId === invId || (p.invoiceIds || []).includes(invId) || (p.allocations || []).some(a => a && a.invoiceId === invId))) || null;
+}
+// เหตุที่บิลนี้เข้าชุดไม่ได้ ('' = ได้) — ใช้ร่วม UI (รายการ "เลือกไม่ได้") + reducer · opts.exceptReqId = คำขออนุมัติของชุดนี้เอง (ไม่นับเป็นคำขอค้าง)
+function whtGroupEligibility(state, inv, opts){
+  const o = opts || {}, st = state || {};
+  if(!inv) return 'ไม่พบใบตั้งหนี้';
+  if(inv.voided) return 'ใบถูกยกเลิกแล้ว';
+  if(Number(inv.paidAmount) > 0 || ['paid', 'partial'].includes(inv.paymentStatus)) return 'จ่ายแล้ว/จ่ายบางส่วน';
+  if(!(Number(inv.netPayable) > 0.01)) return 'ไม่มียอดต้องจ่าย';
+  if(inv._migrated === true || inv.createdBy === 'migration' || inv._whtStub) return 'บิลยกมาจาก Ecount — ใช้ไม่ได้ในรุ่นนี้';
+  if((Number(inv.whtAmount) || 0) > 0 || (inv.whtCertificates || []).some(c => c && !c.voided)) return 'มี WHT/ใบ 50 ทวิ อยู่แล้ว — ✏️ แก้ WHT ของใบนี้เป็น 0 ก่อน (หรือออก 50 ทวิ แยกใบ)';
+  if(!inv.supplierId) return 'ไม่มีผู้ขายในทะเบียน';
+  if((inv.whtLines || []).some(l => l && l.payeeId && l.payeeId !== inv.supplierId)) return 'มีผู้ถูกหักรายอื่นในบรรทัด WHT';
+  const sup = (st.suppliers || []).find(x => x && x.id === inv.supplierId);
+  if(sup && sup.whtPayeeId) return 'ผู้ขายตั้งผู้ถูกหักรายอื่นไว้';
+  if(_whgPendingPay(st, inv.id)) return 'มีคำขอจ่ายค้างอยู่ — ปฏิเสธ/ยกเลิกคำขอจ่ายที่ 🔒 รออนุมัติ ก่อน';
+  { const q = pendingInvChangeReq(st, inv.id); if(q && q.id !== o.exceptReqId) return 'มีคำขอแก้ใบ/WHT รออนุมัติ — รอผู้อนุมัติกด 🔔 ก่อน'; }
+  if((typeof priceFixOpenForInv === 'function' && priceFixOpenForInv(st, inv.id)) || (typeof invPriceApprovalPending === 'function' && invPriceApprovalPending(st, inv.id))) return 'รอแก้ราคา — ให้จัดซื้อ/บัญชีปิดคำขอแก้ราคาก่อน';
+  { const E = (typeof global !== 'undefined' && global.ERP) || {}; if(typeof E.pendingRtvForInv === 'function' && E.pendingRtvForInv(st, inv.id).length) return 'มีของคืน (RTV) รอตัดสิน'; }
+  if(offInvDiscAmt(inv) > 0) return 'มีส่วนลดนอกใบกำกับ';
+  if(invUsedDepositOrCredit(st, inv)) return 'ใช้ CN/มัดจำ/เครดิตผู้ขาย';
+  if(inv.contractId || inv.source === 'retention_release' || (Number(inv.retentionAmount) || 0) > 0) return 'ใบงานจ้าง/ค้ำประกันสัญญา';
+  if((inv.priceAdjustHistory || []).length) return 'ราคาแก้หลังตั้งหนี้';
+  if(inv.migApClose) return 'ปิดยอดค้างไว้';
+  return '';
+}
+// §3 ข้อ 2-3: ฐาน = inv.amount (ก่อน VAT) · ΣWHT = round(Σฐาน×อัตรา) เป็นสตางค์ · แบ่งแบบ largest remainder (tie-break invDate, invNumber, id)
+//   คำนวณเป็นจำนวนเต็มล้วน (สตางค์ × อัตรา×10000) — ไม่มีเศษทศนิยมลอย · คืน { allocs:[{invId, base, wht}], totalBase, totalWht }
+function whtGroupAlloc(state, invIds, rate){
+  const invs = (invIds || []).map(id => ((state && state.invoices) || []).find(i => i && i.id === id)).filter(Boolean);
+  const R = Math.round((Number(rate) || 0) * 10000), DEN = 100 * 10000;
+  const rows = invs.map(inv => { const bc = Math.round((Number(inv.amount) || 0) * 100), num = bc * R;
+    return { inv, bc, num, fl: Math.floor(num / DEN), rem: num % DEN }; });
+  const sumNum = rows.reduce((t, r) => t + r.num, 0);
+  const totC = Math.floor((2 * sumNum + DEN) / (2 * DEN));   // ปัดครึ่งขึ้น
+  let left = totC - rows.reduce((t, r) => t + r.fl, 0);
+  const order = rows.slice().sort((a, b) => (b.rem - a.rem) || _whgSort(a.inv, b.inv));
+  const plus = new Set();
+  for(const r of order){ if(left <= 0) break; plus.add(r.inv.id); left--; }
+  const allocs = rows.map(r => ({ invId: r.inv.id, base: r.bc / 100, wht: (r.fl + (plus.has(r.inv.id) ? 1 : 0)) / 100 }));
+  return { allocs, totalBase: _whgR2(rows.reduce((t, r) => t + r.bc, 0) / 100), totalWht: totC / 100 };
+}
+// คีย์ผู้ถูกหักของบิล (เลขภาษี + สาขา) — snapshot บนบิลก่อน ไม่มีค่อยใช้ทะเบียน
+function _whgPkey(state, inv){
+  const sn = (inv && inv.supplierSnapshot && inv.supplierSnapshot.name) ? inv.supplierSnapshot : (((state && state.suppliers) || []).find(x => x && x.id === inv.supplierId) || {});
+  return String(sn.taxId || '').replace(/\D/g, '') + '|' + String(sn.branchCode == null ? '' : sn.branchCode);
+}
+// §3 ข้อ 1: ด่านออกชุด (all-or-nothing) · d = { supplierId, invIds, category, sub5, rate, form, customLabel, reason } · opts.exceptReqId
+//   คืน '' = ผ่าน หรือข้อความปฏิเสธ (พร้อมรายชื่อบิล) · ไม่ตรวจงวดปิด/อนุมัติ (reducer ทำ)
+function whtGroupIssueDeny(state, d, opts){
+  const st = state || {}, x = d || {};
+  const ids = Array.isArray(x.invIds) ? x.invIds : [];
+  if(new Set(ids).size !== ids.length) return 'รายการบิลซ้ำกัน';
+  if(ids.length < 2) return 'ต้องเลือกอย่างน้อย 2 ใบ — ใบเดียวใช้ ✏️ แก้ WHT ของใบนั้น';
+  if(!String(x.reason || '').trim()) return 'ใส่เหตุผล';
+  if((x.category || '00017') !== '00017') return 'รุ่นนี้รองรับเฉพาะเงินได้ประเภท 5 (ท.ป.4/2528)';
+  const t = WHT_SUB5_TYPES.find(y => y.code === x.sub5);
+  if(!t) return 'เลือกประเภทเงินได้ (ค่าขนส่ง 1% / ค่าบริการ 3% / อื่น ๆ)';
+  const rate = Number(x.rate) || 0;
+  if(t.code === 'other'){ if(!(rate > 0 && rate <= 15)) return 'อัตราไม่ถูกต้อง'; if(!String(x.customLabel || '').trim()) return 'อื่น ๆ — ระบุประเภทเงินได้'; }
+  else if(Math.abs(rate - t.rate) > 1e-9) return 'อัตราไม่ตรงประเภท ' + t.label + ' (' + t.rate + '%)';
+  if(!['3', '53'].includes(String(x.form || ''))) return 'เลือกแบบ ภ.ง.ด.3 หรือ 53';
+  const sup = (st.suppliers || []).find(y => y && y.id === x.supplierId);
+  if(!sup) return 'ไม่พบผู้ขายในทะเบียน';
+  if(sup.whtPayeeId) return 'ผู้ขายตั้งผู้ถูกหักรายอื่นไว้ — ใช้ชุดไม่ได้';
+  const bad = [];
+  let pk0 = null;
+  for(const id of ids){
+    const inv = (st.invoices || []).find(i => i && i.id === id);
+    let why = whtGroupEligibility(st, inv, opts);
+    if(!why && inv.supplierId !== x.supplierId) why = 'คนละผู้ขาย';
+    if(!why){ const pk = _whgPkey(st, inv); if(pk0 == null) pk0 = pk; else if(pk !== pk0) why = 'เลขภาษี/สาขาผู้ขายบนบิลไม่ตรงกัน'; }
+    if(why) bad.push(((inv && inv.invNumber) || id) + ': ' + why);
+  }
+  if(bad.length) return 'บิลต่อไปนี้เข้าชุดไม่ได้\n• ' + bad.join('\n• ');
+  if(String(pk0 || '').split('|')[0].length !== 13) return 'เลขประจำตัวผู้เสียภาษีผู้ขายไม่ครบ 13 หลัก — แก้ทะเบียนผู้ขายก่อน';
+  // verify 1: ผู้ถูกหักบนใบ (reducer สร้างจากทะเบียน partySnapshot(sup)) ต้องเลขภาษี/สาขาตรงกับบิล — ไม่งั้นใบพิมพ์/ภ.ง.ด. ได้ TIN ผิด
+  { const ps = partySnapshot(sup) || {}, pt = String(ps.taxId || '').replace(/\D/g, '');
+    if(pt.length !== 13 || (pt + '|' + String(ps.branchCode == null ? '' : ps.branchCode)) !== pk0) return 'เลขภาษี/สาขาในทะเบียนผู้ขายไม่ตรงกับบิล — แก้ทะเบียนผู้ขายให้ตรงก่อน'; }
+  const al = whtGroupAlloc(st, ids, rate);
+  if(!(al.totalWht > 0)) return 'ยอดหักรวมเป็น 0';
+  const over = al.allocs.find(a => { const inv = (st.invoices || []).find(i => i && i.id === a.invId); return a.wht > (Number(inv.netPayable) || 0) + 0.005; });
+  if(over) return 'ยอดหักเกินยอดสุทธิของบิล ' + over.invId;
+  return '';
+}
+// ใบรวมของชุด (พิมพ์/รายงาน) — null = ชุดไม่มี cert ที่ active แล้ว
+function whtGroupBuild(state, gid){
+  const ms = whtGroupMembers(state, gid);
+  if(!ms.length) return null;
+  const c0 = ms[0].cert, g = c0.group || {};
+  const totalBase = _whgR2(ms.reduce((t, m) => t + (Number((m.cert.lines || [])[0] && m.cert.lines[0].base) || 0), 0));
+  const totalWht = _whgR2(ms.reduce((t, m) => t + (Number(m.cert.whtAmount) || 0), 0));
+  const l0 = (c0.lines || [])[0] || {};
+  return { groupId: gid, certNumber: c0.certNumber, form: c0.form, size: ms.length, members: ms, invIds: ms.map(m => m.inv.id),
+    supplierId: ms[0].inv.supplierId, payeeSnapshot: c0.payeeSnapshot || null, rate: Number(g.rate != null ? g.rate : l0.rate) || 0,
+    sub5: g.sub5 || l0.sub5 || null, category: g.category || l0.category || '00017', totalBase, totalWht, group: g,
+    lines: [{ category: l0.category || '00017', sub5: l0.sub5 || null, rate: Number(l0.rate) || 0, base: totalBase, whtAmount: totalWht, customLabel: l0.customLabel || '' }] };
+}
+// วันที่ของใบรวม = วันจ่ายจริง (เร็วสุดของสมาชิก) · ยังไม่จ่าย = ร่าง (วันนัดเร็วสุด → ครบกำหนดเร็วสุด)
+//   paidCount = จำนวนบิลที่จ่ายแล้ว (ปกติ 0 หรือ ครบ N — ด่านจ่ายแยกกันไว้)
+function whtGroupDateInfo(state, gid){
+  const ms = whtGroupMembers(state, gid);
+  if(!ms.length) return { date: '', kind: 'none', pending: true, draft: false, paidCount: 0, size: 0 };
+  const paid = ms.map(m => whtFirstPayDate(state, m.inv.id)).filter(Boolean).sort();
+  const base = { paidCount: paid.length, size: ms.length };
+  if(paid.length) return { date: paid[0], kind: 'paid', pending: false, draft: false, ...base };
+  const sch = ms.map(m => _whtScheduledPayDate(state, m.inv.id)).filter(Boolean).sort();
+  if(sch.length) return { date: sch[0], kind: 'scheduled', pending: true, draft: true, ...base };
+  const due = ms.map(m => m.inv.dueDate).filter(Boolean).sort();
+  if(due.length) return { date: due[0], kind: 'due', pending: true, draft: true, ...base };
+  return { date: '', kind: 'none', pending: true, draft: true, ...base };
+}
+// D3 นโยบายยกเลิกชุด: ทำเองทันทีได้ถ้า GM 👑 หรือเป็นผู้อนุมัติขั้นใดของคำขอออกชุด (ไม่ใช่คนขอ) · นอกนั้น = ขออนุมัติ wht_group_cancel 1 ขั้น
+function whtGroupCancelPolicy(state, gid, user){
+  const b = whtGroupBuild(state, gid);
+  if(!b || !user) return { direct: false, why: '' };
+  if(isTopAuthority(user)) return { direct: true, why: 'GM/เจ้าของ' };
+  const rq = ((state && state.approvalRequests) || []).find(r => r && r.id === (b.group && b.group.approvalReqId));
+  if(rq && rq.requestedBy !== user.username && (rq.steps || []).some(x => x && x.decision === 'approved' && x.decidedBy === user.username))
+    return { direct: true, why: 'ผู้อนุมัติคำขอออกชุด' };
+  return { direct: false, why: '' };
+}
 // สิทธิ์ = คนที่ออก/แก้ WHT ฝั่งบัญชี (accounting.wht.create — PERM_TREE ไม่มี edit · เหมือนรวม 50 ทวิ) หรือ payment.edit หรือ superuser
 function canEditWhtCertPayee(user){
   return !!user && (isSuperUser(user) || hasPerm(user, 'accounting', 'wht', 'create') || hasPerm(user, 'accounting', 'payment', 'edit'));
@@ -6932,6 +7119,7 @@ function canEditWhtCertPayee(user){
 function whtCertPayeeEditBlock(state, inv, cert){
   if(!inv || !cert) return 'ไม่พบใบ 50 ทวิ';
   if(inv.voided || cert.voided) return 'ใบ 50 ทวิ นี้ยกเลิกแล้ว — แก้ไม่ได้';
+  if(cert.groupId) return 'ใบนี้อยู่ใน 50 ทวิ รวม ' + (cert.certNumber || '-') + ' (หลายบิล) — ยกเลิกชุด 50 ทวิ รวมก่อน แล้วออกชุดใหม่';   // 🆕 WHT_GROUP S2
   // 🆕 verify 3: คำขอแก้ WHT/ใบตั้งหนี้ค้างอนุมัติ — payload ถือบรรทัด WHT ก่อนแก้ชื่อ → อนุมัติทีหลังจะออกใบใหม่ทับชื่อ/ผู้ถูกหักที่แก้
   if(pendingInvChangeReq(state, inv.id, ['adjust_inv_wht','edit_inv'])) return 'มีคำขอแก้ WHT/ใบตั้งหนี้รออนุมัติ — รอคำขอเดิมก่อน';
   if(cert.mergedInto && cert.mergedInto.payId) return 'ใบนี้รวมอยู่ในใบ 50 ทวิ เลขที่ ' + (cert.mergedInto.certNumber || '-') + ' (' + (cert.mergedInto.pvNumber || 'PV') + ') — ↩️ แยก 50 ทวิ ก่อน';
@@ -7055,6 +7243,7 @@ function whtMergeBuild(state, pay, opts){
     if(!certs.length) return skip((Number(inv.whtAmount) || 0) > 0 ? 'ไม่มีใบ 50 ทวิ ในระบบ' : 'ไม่มีหัก ณ ที่จ่าย');
     const other = certs.find(x => x.c.mergedInto && x.c.mergedInto.payId !== pay.id);
     if(other) return skip('รวมอยู่ในใบ ' + (other.c.mergedInto.certNumber || '') + ' (' + (other.c.mergedInto.pvNumber || '') + ') แล้ว');
+    { const _g = certs.find(x => x.c.groupId); if(_g) return skip('อยู่ใน 50 ทวิ รวม ' + (_g.c.certNumber || '') + ' แล้ว'); }   // 🆕 WHT_GROUP S2: ชุดมีใบรวมของตัวเองแล้ว
     if(pendingInvChangeReq(state, inv.id)) return skip('มีคำขอแก้ไขใบค้างอยู่');
     // PV นี้ต้องเป็นตัวปิดยอดของใบ (จ่ายครบด้วย PV นี้) · มี PV ที่อนุมัติหลังจากนี้ = ไม่ใช่ตัวปิด
     const net = _wmR2(inv.netPayable), alloc = _wmR2(_wmAlloc(pay, inv.id));
@@ -8312,6 +8501,7 @@ function planInvPriceAdjust(state, opts){
     grIds = (inv.grIds && inv.grIds.length) ? inv.grIds.slice() : (inv.grId ? [inv.grId] : []);
   } else grIds = Array.from(new Set((o.grIds || []).filter(Boolean)));
   out.inv = inv; out.grIds = grIds;
+  { const _g = inv && whtGroupOfInv(inv); if(_g) push('ใบตั้งหนี้ ' + (inv.invNumber || inv.id) + ' อยู่ใน 50 ทวิ รวม ' + (_g.certNumber || '-') + ' — ยกเลิกชุด 50 ทวิ รวมก่อน'); }   // 🆕 WHT_GROUP S2
   // 🆕 STOCK_TO_ASSET S1: ใบที่ JE ย้ายสต๊อกเป็นทรัพย์สินอ้างยอด 1300 → ปรับราคาหลังตั้งหนี้ไม่ได้ (ใช้ CN/DN)
   if(inv && (inv.assetReclassIds || []).length) push('ใบตั้งหนี้ ' + (inv.invNumber || inv.id) + ' มีบรรทัดที่ย้ายจากสต๊อกเป็นทรัพย์สิน 💎 แล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN) หรือ JE ปรับปรุง');
   // 🆕 STOCK_TO_ASSET S4: ใบที่ JE ลงค่าใช้จ่ายทรัพย์สินต่ำกว่าเกณฑ์อ้างยอด 16xx → ปรับราคาหลังตั้งหนี้ไม่ได้
@@ -10541,7 +10731,7 @@ Object.assign(_ACT_LABEL, {
   ADD_PETTY_TXN:'บันทึกเงินสดย่อย', UPDATE_PETTY_TXN:'แก้รายการเงินสดย่อย', REVERSE_PETTY_TOPUP:'กลับรายการเติมเงินสดย่อย',
   ADD_STAFF_ADVANCE:'บันทึกสำรองจ่ายพนักงาน', UPDATE_STAFF_ADVANCE:'แก้สำรองจ่ายพนักงาน', CANCEL_REIMBURSE:'ยกเลิกการคืนเงินสำรองจ่าย',
   ADD_JE:'บันทึกรายการบัญชี (JE)', UPDATE_JE:'แก้รายการบัญชี (JE)', DELETE_JE:'ลบรายการบัญชี (JE)', POST_JE:'ลงบัญชีรายการ (JE)',
-  UPDATE_WHT_CERT_INFO:'แก้ข้อมูลหนังสือ 50 ทวิ', EDIT_WHT_CERT_PAYEE:'แก้ชื่อผู้ถูกหักบนใบ 50 ทวิ', WHT_MERGE_PV:'รวมหนังสือ 50 ทวิ ของ PV', WHT_UNMERGE_PV:'แยกหนังสือ 50 ทวิ ของ PV',
+  UPDATE_WHT_CERT_INFO:'แก้ข้อมูลหนังสือ 50 ทวิ', EDIT_WHT_CERT_PAYEE:'แก้ชื่อผู้ถูกหักบนใบ 50 ทวิ', WHT_MERGE_PV:'รวมหนังสือ 50 ทวิ ของ PV', WHT_UNMERGE_PV:'แยกหนังสือ 50 ทวิ ของ PV', WHT_GROUP_ISSUE:'ออก 50 ทวิ รวมหลายใบ', WHT_GROUP_CANCEL:'ยกเลิก 50 ทวิ รวมหลายใบ',
   CLAIM_VAT_IN_PERIOD:'เคลมภาษีซื้อในงวด', DEFER_VAT_CLAIM:'เลื่อนเคลมภาษีซื้อ', FILE_VAT_RETURN:'ยื่น ภ.พ.30', UNLOCK_VAT_PERIOD:'ปลดล็อกงวดภาษี', MARK_VAT_EXPIRED:'ตั้งภาษีซื้อหมดสิทธิ์เคลม',
   MARK_DOC_PRINTED:'ทำเครื่องหมายพิมพ์แล้ว', UNMARK_DOC_PRINTED:'ยกเลิกเครื่องหมายพิมพ์แล้ว',
   MIG_AP_CLOSE:'ปรับเจ้าหนี้ยกมา (Ecount): ปิดยอด', MIG_AP_CLOSE_UNDO:'ปรับเจ้าหนี้ยกมา (Ecount): ยกเลิกปิดยอด', MIG_AP_MARKPAID:'ปรับเจ้าหนี้ยกมา (Ecount): จ่ายแล้ว', MIG_AP_UNPAY:'ปรับเจ้าหนี้ยกมา (Ecount): ยกเลิกจ่ายแล้ว',
@@ -10936,6 +11126,8 @@ const APPROVAL_ACTIONS = {
   vat_claim_in:     { label:'เคลมภาษีซื้อที่เลื่อนไว้ (เคลมคืน)', scopeDefault:'accounting' },
   // 🆕 APPROVAL ขั้น 1 (APPROVAL_IMPL_CONTRACT §B2)
   adjust_inv_wht:   { label:'แก้ WHT ใบตั้งหนี้',          scopeDefault:'accounting' },
+  wht_group_issue:  { label:'ออก 50 ทวิ รวมหลายใบ',        scopeDefault:'accounting' },   // 🆕 WHT_GROUP S1
+  wht_group_cancel: { label:'ยกเลิก 50 ทวิ รวมหลายใบ',     scopeDefault:'accounting' },
   adjust_inv_price: { label:'ปรับราคาตามใบกำกับ (กระทบต้นทุน)', scopeDefault:'accounting' },   // 🆕 PRICE-FIX ขั้น 1 (PRICE_VARIANCE_CONTRACT R2.6)
   approval_rule_change: { label:'แก้กฎอนุมัติแบบผ่อนลง (ต้อง GM/เจ้าของอนุมัติ)', scopeDefault:'any' },   // เจ้าของ 2026-09-29 §B15 ข้อ 6
   // 🆕 EXPENSE_PO ภาค P (P4): สัญญางานจ้าง/โครงการ — บัญชีคีย์ · GM/เจ้าของอนุมัติ (แบ่งหน้าที่)
@@ -10974,6 +11166,9 @@ const APPROVAL_BUILTIN_RULES = Object.freeze([
   { id:'r_delete_si', action:'delete_si', scope:'any', active:true, label:'ยกเลิกใบกำกับภาษีขาย', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },
   { id:'r_edit_si', action:'edit_si', scope:'any', active:true, label:'แก้ใบกำกับภาษีขาย (ยอด/VAT เปลี่ยน)', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },   // 🆕 SI_EDIT E38 (overlay ไม่ migrate)
   // 🆕 APPROVAL 1b-3: แก้ WHT ใบตั้งหนี้ · WHT ลด = ยอดที่ต้องโอนให้ผู้ขายเพิ่ม → 2 ขั้น
+  // 🆕 WHT_GROUP S1 (D3): ออก/ยกเลิก 50 ทวิ รวมหลายใบ — 1 ขั้น ผจก.บัญชี/GM ไม่มีเพดาน
+  { id:'r_wht_group_issue', action:'wht_group_issue', scope:'accounting', active:true, label:'ออก 50 ทวิ รวมหลายใบ', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },
+  { id:'r_wht_group_cancel', action:'wht_group_cancel', scope:'accounting', active:true, label:'ยกเลิก 50 ทวิ รวมหลายใบ', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },
   { id:'r_adjust_inv_wht', action:'adjust_inv_wht', scope:'accounting', active:true, label:'แก้ WHT ใบตั้งหนี้', steps:[ { order:1, anyOf:[ _AP_M('accounting'), _AP_GM ] } ] },
   { id:'r_adjust_inv_wht_up', action:'adjust_inv_wht', scope:'accounting', active:true, label:'⚠️ แก้ WHT ลด (ยอดโอนเพิ่ม) — 2 ขั้น (ผจก.บัญชี + GM)', condition:{ amountGte:0.01, isIncrease:true },
     steps:[ { order:1, anyOf:[ _AP_M('accounting') ] }, { order:2, anyOf:[ _AP_GM ] } ] },
@@ -11170,7 +11365,7 @@ function _saUserRow(state, ref){ return ref ? (((state && state.users) || []).fi
 // คำขอที่ไม่ปลดด้วยสิทธิ์นี้ (ต้อง GM/เจ้าของคนละคนกับผู้ขอ · ทาง 👑 GM-SELF เดิมยังใช้ได้) · UAT M1: + ปรับ VAT/WHT ใบตั้งหนี้
 //   S5: + คำขอสต๊อกทั้งหมด (ปรับ/ยกเลิกปรับ · ตัดของเสีย · ของหายระหว่างโอน · ยกเลิกเบิก/GR/TO) = ต้องมีอีกคนเสมอ
 const SELF_APPROVE_STOCK_ACTIONS = Object.freeze(['adjust_stock','reverse_adjust','scrap','transfer_loss','void_issue','void_gr','cancel_to','edit_gr_date']);   // GR-DATE-FIX: แก้วันที่รับของ = สต๊อก ต้องมีอีกคนเสมอ
-const SELF_APPROVE_NEVER = Object.freeze(['vat_unlock','vat_defer','vat_claim_in','approval_rule_change','adjust_inv_vat','adjust_inv_wht','adjust_inv_price','approve_contract','contract_amend','release_retention','edit_si'].concat(SELF_APPROVE_STOCK_ACTIONS));   // 🆕 SI_EDIT E38: เงินบนใบกำกับต้องมีคนที่สองเสมอ (GM 👑 = direct)
+const SELF_APPROVE_NEVER = Object.freeze(['vat_unlock','vat_defer','vat_claim_in','approval_rule_change','adjust_inv_vat','adjust_inv_wht','adjust_inv_price','approve_contract','contract_amend','release_retention','edit_si','wht_group_issue','wht_group_cancel'].concat(SELF_APPROVE_STOCK_ACTIONS));   // 🆕 SI_EDIT E38: เงินบนใบกำกับต้องมีคนที่สองเสมอ (GM 👑 = direct)
 function selfApproveKind(action){
   if(!action || SELF_APPROVE_NEVER.includes(action)) return null;
   for(const k of Object.keys(SELF_APPROVE_GROUPS)) if(SELF_APPROVE_GROUPS[k].includes(action)) return k;
@@ -11393,6 +11588,19 @@ function approvalStaleReason(state, req){
     if(iv && iv.voided) return 'ใบตั้งหนี้ ' + (iv.invNumber || '') + ' ถูกยกเลิกไปแล้ว — คำขอนี้ใช้ไม่ได้แล้ว';
     return null;
   }
+  // 🆕 WHT_GROUP S1: ออกชุด — บิลใดถูก void / จ่ายแล้ว / มี WHT แล้ว = ล้าสมัย · ยกเลิกชุด — ชุดไม่มีใบ active แล้ว = ล้าสมัย
+  if(A === 'wht_group_issue'){
+    for(const id of (Array.isArray(pl.invIds) ? pl.invIds : [])){
+      const iv = _inv(id);
+      if(!iv) return 'ไม่พบใบตั้งหนี้ในชุด — คำขอนี้ใช้ไม่ได้แล้ว';
+      const no = 'ใบตั้งหนี้ ' + (iv.invNumber || id);
+      if(iv.voided) return no + ' ถูกยกเลิกไปแล้ว — คำขอนี้ใช้ไม่ได้แล้ว';
+      if(Number(iv.paidAmount) > 0 || ['paid','partial'].includes(iv.paymentStatus)) return no + ' จ่ายแล้ว — คำขอนี้ใช้ไม่ได้แล้ว';
+      if((Number(iv.whtAmount) || 0) > 0 || (iv.whtCertificates || []).some(c => c && !c.voided)) return no + ' มี WHT แล้ว — คำขอนี้ใช้ไม่ได้แล้ว';
+    }
+    return null;
+  }
+  if(A === 'wht_group_cancel') return whtGroupMembers(st, pl.groupId || req.entityId).length ? null : 'ชุด 50 ทวิ รวมนี้ถูกยกเลิกไปแล้ว — คำขอนี้ใช้ไม่ได้แล้ว';
   if(A === 'approve_payment'){
     const pay = (st.payments || []).find(x => x && x.id === pl.payId);
     if(!pay) return 'ไม่พบรายการขอจ่าย — คำขอนี้ใช้ไม่ได้แล้ว';
@@ -11531,7 +11739,8 @@ const APPROVAL_FAIL_CLOSED = Object.freeze(['delete_je','approve_payment','adjus
   'edit_gr_date',   // 🆕 GR-DATE-FIX
   'approve_contract','contract_amend','release_retention',   // 🆕 EXPENSE_PO P4
   'change_po_paymode',   // 🆕 PO-PAYMODE
-  'edit_si']);   // 🆕 SI_EDIT E38
+  'edit_si',   // 🆕 SI_EDIT E38
+  'wht_group_issue','wht_group_cancel']);   // 🆕 WHT_GROUP S1
 
 // 🆕 VAT-FIX helpers (ใช้ร่วมจัดซื้อ/บัญชี)
 //   invVatAdjusted(inv) = ใบนี้เคยปรับ VAT ให้ตรงใบกำกับ (ตอนตั้งหนี้หรือหลังตั้งหนี้)
@@ -11575,9 +11784,10 @@ function poPaymodeDeny(state, po, to, exceptReqId){
   return null;
 }
 function pendingInvChangeReq(state, invId, actions){
-  const acts = actions || ['adjust_inv_vat','edit_inv','adjust_inv_wht','adjust_inv_price'];   // 🆕 APPROVAL 1b-3: คำขอแก้ WHT ค้าง = กันขอจ่ายทับ
+  const acts = actions || ['adjust_inv_vat','edit_inv','adjust_inv_wht','adjust_inv_price','wht_group_issue','wht_group_cancel'];   // 🆕 APPROVAL 1b-3: คำขอแก้ WHT ค้าง = กันขอจ่ายทับ · WHT_GROUP: คำขอชุด
   return ((state && state.approvalRequests) || []).find(r => r.status === 'pending' && acts.includes(r.action)
-    && (r.entityId === invId || (r.payload && r.payload.invId === invId) || (r.payload && r.payload.updatedInv && r.payload.updatedInv.id === invId))) || null;
+    && (r.entityId === invId || (r.payload && r.payload.invId === invId) || (r.payload && r.payload.updatedInv && r.payload.updatedInv.id === invId)
+      || (r.payload && Array.isArray(r.payload.invIds) && r.payload.invIds.includes(invId)))) || null;   // 🆕 WHT_GROUP: คำขอหลายบิล
 }
 
 // ตรวจว่า user match กับ match-spec หรือไม่
@@ -15368,6 +15578,7 @@ Object.assign(global.ERP, {
   STORAGE_KEY, LEGACY_KEY, APP_VERSION, MODULES, MODULE_FILES, ROLE_SCOPE, LZ,
   PERM_TREE, PERM_ACTION_LABEL, PERM_MODULE_LABEL, ROLE_DEFAULT_PERMS, QUICK_PROFILES,
   WHT_CATEGORIES, WHT_SUB5_TYPES, WHT_SECTION_LABELS, genWHNumber, buildWHTCerts, whtMergeBuild,
+  whMaxSuffix, genWHGroupNumber, whtGroupEnabled, whtGroupOfInv, whtGroupMembers, whtGroupIdUsed, whtGroupEligibility, whtGroupAlloc, whtGroupIssueDeny, whtGroupBuild, whtGroupDateInfo, whtGroupCancelPolicy,   // 🆕 WHT_GROUP S1
   partySnapshot, piVendor, whtPayee, WHT_PERSON_PREFIXES, partyIsIndividual, whtPersonName, whtApplyPerson, whtNewPayee, whtPayeeNameClean, whtPayeeWithName, whtDefaultForm, whtFormMismatch, canEditSupplierParty,
   ITEM_SHELF_COLS, ITEM_SHELF_CLEAR, canEditItemShelf, canExportItemShelf, itemShelfExportItems, itemShelfExportRows, itemShelfExportFilename, storageLocExportRows, decodeCsvBytes, parseCsvRows, planItemShelfImport, isDateLikeShelf, normShelfName, shelfKey, ItemShelfExportButtons, ItemShelfImportModal,   // 🆕 ITEM_SHELF_IO
   whtSupplierDefaultPayee, whtCertPayeePreview, whtPayeeRememberFlag, supplierPickable, docSuppliers, whtPayeeRememberPlan, whtPayeeRememberApply, whtPayeeRememberSave, whtChosenPayeeIds, whtLinesApplyDefaultPayee, whtLinePayeeId, whtOtherPayee, whtCertForLine, whtCarryEditedPayee, whtOtherPayeeNames, whtRecentPayees, WhtLinePayeeChip, canAddSupplierParty, whtFirstPayDate, whtCertIsDraft, whtDateInfo, whtPayMonthShift, whtPayMonthShiftText, canEditWhtCertPayee, whtCertPayeeEditBlock, whtCertPayeeEditWarn, whtLegacyCert, WhtCertPayeeEditBtn,
@@ -20631,6 +20842,12 @@ function _ctInvMoneyDeny(old, nu){
   }
   return chg ? 'ใบผูกสัญญา/PO แก้ยอดไม่ได้ — ยกเลิกใบแล้วตั้งใหม่' : null;
 }
+// 🆕 WHT_GROUP S2: บิลในชุด 50 ทวิ รวม ห้ามแก้ฟิลด์เงิน (ฐาน/VAT/WHT/ยอดสุทธิ/ผู้ขาย) → ข้อความ | null · ยอดจ่าย (paidAmount) ไม่นับ (สายจ่ายเงิน)
+const _WHG_MONEY = Object.freeze(['amount','subtotal','total','netPayable','vat','vatTotal','vatRate','vatableBase','whtAmount','whtRate','whtLines','whtForm','whtNumber','whtCertificates','supplierId','partyId','offInvDiscount','retention','roundingAdjustment','depositUsed','creditApplied']);
+function _whtGroupInvMoneyDeny(old, nu){
+  if(!old || !nu || !global.ERP.whtGroupOfInv(old)) return null;
+  return _WHG_MONEY.some(f => nu[f] !== undefined && !_protSame(old[f], nu[f])) ? _whtGroupDenyMsg(old).replace(/^⛔ /, '') : null;
+}
 function _invKeepProtected(old, nu, allow){
   const out = { ...nu }, dropped = [];
   if(old && 'id' in old && out.id !== old.id){ dropped.push('id'); out.id = old.id; }   // 🆕 UNDO_FIELD_GUARD (UAT ตรวจสอบ 🔴): PATCH_INV.fields id ใหม่ = ตัดลิงก์ทุกอย่าง (จ่าย/RTV/CN/ทรัพย์สิน/JE)
@@ -20765,6 +20982,7 @@ global.ERP.invUpdateDeny = function(state, old, nu){
     // 🆕 EXPENSE_PO verify 2a: ด่านเดียวกับ UPDATE_INV — ใบผูกสัญญา/PO ค่าบริการ/คืนประกัน แก้เงินไม่ได้
     //   (เพิ่ม WHT ย้อนหลัง/แก้ INV/executor edit_inv ต้องหยุดก่อนลง JE-VOID · JE ใหม่ · เครดิตผู้ขาย)
     { const _cm = _ctInvMoneyDeny(old, nu); if(_cm) return '⛔ ' + _cm; }
+    { const _wg = _whtGroupInvMoneyDeny(old, nu); if(_wg) return '⛔ ' + _wg; }   // 🆕 WHT_GROUP S2
     // 🆕 PRICE-FIX verify 1: ใบปรับราคาแล้ว (post_pi) — ทางแก้ INV กลับ JE ทุกตัวรวม inv_price_adjust แล้วลงใหม่ทั้งก้อนเข้า 1300 (5391 หาย · GL 1300 เกิน FIFO)
     if((old.priceAdjustHistory || []).some(x => x && x.mode === 'post_pi')) return '⛔ ใบนี้ปรับราคาแล้ว — ใช้ใบเพิ่ม/ลดหนี้ (DN/CN)';
     if(old.chargeClearedId && _INV_GL_FIN.concat(['netPayable','partyId']).some(f => nu[f] !== undefined && !_protSame(old[f], nu[f]))) return '⛔ ใบนี้ล้างล็อตค่าใช้จ่ายแล้ว — ใช้ใบลดหนี้/JE ปรับปรุง';   // 🆕 FREIGHT_EXPENSE UAT ชุด 1 M2
@@ -22089,6 +22307,50 @@ function _blockIfApproveOverRemain(s, pay){
   }
   return null;
 }
+// 🆕 WHT_GROUP S2 §4: บิลในชุด 50 ทวิ รวม = จ่ายพร้อมกันทั้งชุดใน PV เดียว ยอดเต็ม (วันที่บนใบ = วันจ่ายจริง ใบเดียว)
+//   คืน '' = ผ่าน หรือข้อความปฏิเสธ · ใช้ร่วม reducer (ADD_PAY/UPDATE_PAY เพิ่งอนุมัติ) + UI (ผ่าน global.ERP.whtGroupPayDeny)
+function whtGroupPayDeny(s, pay){
+  if(!pay || pay.status === 'cancelled' || pay.voided || pay.reversed) return '';
+  // verify 1: นับลิงก์ 4 แบบเหมือน whtFirstPayDate (invId/invoiceIds/invoiceId/allocations[].invoiceId) — กันจ่ายบางใบผ่าน allocations อย่างเดียว
+  const _base = _payInvIds(pay).filter(Boolean);
+  const ids = [...new Set([..._base, pay.invoiceId, ...(Array.isArray(pay.allocations) ? pay.allocations : []).map(x => x && x.invoiceId)].filter(Boolean))];
+  const _mineOf = (id) => _base.includes(id) ? _payAllocOf(pay, id)
+    : (Array.isArray(pay.allocations) ? pay.allocations : []).filter(x => x && x.invoiceId === id).reduce((t, x) => t + (Number(x.amount) || 0), 0);
+  const seen = new Set();
+  for(const invId of ids){
+    const inv = (s.invoices || []).find(i => i && i.id === invId);
+    const c = global.ERP.whtGroupOfInv(inv);
+    if(!c || seen.has(c.groupId)) continue;
+    seen.add(c.groupId);
+    const ms = global.ERP.whtGroupMembers(s, c.groupId), G = c.certNumber || (c.group && c.group.certNumber) || '-';
+    const msg = '⛔ บิลนี้อยู่ใน 50 ทวิ รวม ' + G + ' — ต้องจ่ายพร้อมกันทั้ง ' + ms.length + ' ใบใน PV เดียว หรือยกเลิกชุดก่อน';
+    if(pay.method === 'petty_cash' || pay.paySource === 'petty') return msg + '\n(จ่ายจากเงินสดย่อยไม่ได้)';
+    const miss = ms.filter(m => !ids.includes(m.inv.id));
+    if(miss.length) return msg + '\n(ขาด ' + miss.map(m => m.inv.invNumber || m.inv.id).join(', ') + ')';
+    for(const m of ms){
+      const remain = Number(((Number(m.inv.netPayable) || 0) - (Number(m.inv.paidAmount) || 0)).toFixed(2));
+      const mine = _mineOf(m.inv.id);
+      if(Math.abs(mine - remain) > 0.01) return msg + '\n(' + (m.inv.invNumber || m.inv.id) + ' ขอจ่าย ' + mine.toLocaleString('th-TH') + ' ≠ ยอดเต็ม ' + remain.toLocaleString('th-TH') + ')';
+    }
+    const mIds = ms.map(m => m.inv.id);
+    const rq = (s.approvalRequests || []).find(r => r && (r.status || 'pending') === 'pending' && ['wht_group_issue', 'wht_group_cancel'].includes(r.action)
+      && (r.entityId === c.groupId || (r.payload && r.payload.groupId === c.groupId) || (r.payload && Array.isArray(r.payload.invIds) && r.payload.invIds.some(x => mIds.includes(x)))));
+    if(rq) return '⛔ ชุด 50 ทวิ รวม ' + G + ' มีคำขอ' + (rq.action === 'wht_group_cancel' ? 'ยกเลิกชุด' : 'ออกชุด') + 'รออนุมัติ — รอผลก่อนจ่าย';
+  }
+  return '';
+}
+// 🆕 WHT_GROUP S2: CN/ยกเลิกใบ/แก้ราคา/VAT/ปิดยอดค้าง บนบิลในชุด → 'ยกเลิกชุด 50 ทวิ รวมก่อน' (alert + return s)
+function _blockIfWhtGroupInv(s, invId){
+  const inv = invId ? (s.invoices || []).find(i => i && i.id === invId) : null;
+  const m = inv ? _whtGroupDenyMsg(inv) : '';
+  if(!m) return null;
+  alert(m); return s;
+}
+function _blockIfWhtGroupSplit(s, pay){
+  const m = whtGroupPayDeny(s, pay);
+  if(!m) return null;
+  alert(m); return s;
+}
 function _blockIfSelfPayTwoEye(s, pay){
   if(!_payPostedOf(pay) || !_paySelfApproved(pay)) return null;
   const hit = _payInvIds(pay).map(id => (s.invoices || []).find(i => i && i.id === id)).find(_invNeedsTwoEye);
@@ -22501,6 +22763,87 @@ function _whtMergedDenyMsg(inv){
   const m = _invWhtMergedInto(inv);
   return m ? '⛔ ใบ ' + ((inv && inv.invNumber) || '') + ' รวมอยู่ใน 50 ทวิ เลขที่ ' + (m.certNumber || '-') + ' (' + (m.pvNumber || 'PV') + ') — ↩️ ยกเลิกการรวมก่อน' : '';
 }
+// 🆕 WHT_GROUP S1: ข้อความปฏิเสธเมื่อใบอยู่ใน 50 ทวิ รวม (ชุด) — ต้องยกเลิกชุดก่อน
+function _whtGroupDenyMsg(inv){
+  const g = global.ERP.whtGroupOfInv ? global.ERP.whtGroupOfInv(inv) : null;
+  return g ? '⛔ ใบ ' + ((inv && inv.invNumber) || '') + ' อยู่ใน 50 ทวิ รวม ' + ((g.group && g.group.certNumber) || g.certNumber || '-') + ' — ยกเลิกชุด 50 ทวิ รวมก่อน' : '';
+}
+// 🆕 WHT_GROUP S1 (refactor ADJUST_INV_WHT · พฤติกรรมเดิม): ด่านแก้ WHT ของใบเดียว · '' = ผ่าน (ไม่ alert เอง)
+function _invWhtAdjustDeny(s, inv){
+  if(inv.voided) return 'ใบตั้งหนี้นี้ยกเลิกไปแล้ว';
+  if(_invWhtMergedInto(inv)) return _whtMergedDenyMsg(inv);   // 🆕 WHT-MERGE: ใบรวมอยู่ใน 50 ทวิ ของ PV
+  { const _g = _whtGroupDenyMsg(inv); if(_g) return _g; }      // 🆕 WHT_GROUP: ใบในชุด → ยกเลิกชุดก่อน
+  // 🆕 นำเข้า2569 UAT MF3: เจ้าหนี้ค้างจ่ายยกมา (ยังไม่จ่าย) ยังไม่ออก 50ทวิ — หัก WHT ตอนจ่ายในระบบนี้ได้ · ใบที่จ่ายแล้วใน Ecount = ยื่น ภ.ง.ด. ในระบบเดิมแล้ว
+  if(_invIsMigrated(inv) && (['paid','partial'].includes(inv.paymentStatus) || Number(inv.paidAmount) > 0)) return '⛔ PI นำเข้าจาก Ecount ที่จ่ายแล้ว — ออก 50ทวิ/ยื่น ภ.ง.ด. ในระบบเดิมแล้ว แก้ WHT ทางนี้ไม่ได้';
+  if((inv.paidAmount||0) > 0 || ['paid','partial'].includes(inv.paymentStatus)) return '⛔ ใบนี้จ่ายไปแล้ว — แก้ WHT ทางนี้ไม่ได้ (ใช้ 🧾 เพิ่ม WHT ย้อนหลัง หรือยกเลิก PV ก่อน)';
+  if((s.payments||[]).some(p => (p.invId === inv.id || (p.invoiceIds||[]).includes(inv.id)) && p.approvalStatus === 'pending')) return '⛔ มีคำขอจ่ายค้างอยู่ — ยกเลิกคำขอจ่ายก่อน';
+  return '';
+}
+// 🆕 WHT_GROUP S1 (refactor ADJUST_INV_WHT): ลงบรรทัด WHT ใหม่บนใบ (ใบ 50 ทวิ เก่า void + ออกใหม่ + JE ส่วนต่าง 2100↔2130 + ประวัติ)
+//   pure: เวลา/ไอดีมาจากผู้เรียก (o.at, o.jeId, o.alId) · o.certs = ใบ 50 ทวิ ที่ผู้เรียกสร้างให้ (ชุด) แทน buildWHTCerts
+//   o = { lines(ทำความสะอาดแล้ว), form, reason, by, at, jeDate, jeSeq, jeId, alId, splitCert?, apId?, certs?, jeDesc?, jeExtra?, invExtra?, histExtra? }
+//   คืน { inv, je|null, al } หรือ { deny }
+function _invWhtApplyLines(s, inv, o){
+  const lines = o.lines || [], now = o.at, jeDate = o.jeDate, reason = String(o.reason || '').trim();
+  const amount = Number(inv.amount)||0;
+  const newWht = Number(lines.reduce((t,l) => t + l.whtAmount, 0).toFixed(2));
+  const oldWht = Number(inv.whtAmount)||0;
+  const delta = Number((newWht - oldWht).toFixed(2));
+  const seqJe = o.jeSeq;
+  let je = null;
+  if(Math.abs(delta) >= 0.005){
+    const ap = _acc(s, '2100') || (() => { const x = (s.chartOfAccounts||[]).find(y => y.type === 'liability' && String(y.name||'').includes('เจ้าหนี้')); return x ? { accountId:x.id, accountCode:x.code, account:x.code, accountName:x.name } : null; })();
+    const wh = _acc(s, '2130') || (() => { const x = (s.chartOfAccounts||[]).find(y => y.type === 'liability' && String(y.name||'').includes('หัก')); return x ? { accountId:x.id, accountCode:x.code, account:x.code, accountName:x.name } : null; })();
+    if(!ap || !wh) return { deny:'⚠️ ไม่พบบัญชีเจ้าหนี้ (2100) / ภาษีหัก ณ ที่จ่ายค้างนำส่ง (2130) ในผังบัญชี' };
+    const amt = Math.abs(delta);
+    const jeLines = delta > 0
+      ? [{ ...ap, debit:amt, credit:0, description:'ลดเจ้าหนี้ — แก้ WHT ' + (inv.invNumber||''), branchId: inv.branch || s.currentBranch },
+         { ...wh, debit:0, credit:amt, description:'เพิ่มภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber||'') }]
+      : [{ ...wh, debit:amt, credit:0, description:'ลดภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber||'') },
+         { ...ap, debit:0, credit:amt, description:'เพิ่มเจ้าหนี้ — แก้ WHT ' + (inv.invNumber||''), branchId: inv.branch || s.currentBranch }];
+    const dj = new Date(jeDate);
+    je = { id:o.jeId,
+      jeNumber:`JE-${dj.getFullYear()}-${String(dj.getMonth()+1).padStart(2,'0')}-${String(seqJe).padStart(4,'0')}`, date: jeDate,
+      description: o.jeDesc || `แก้ WHT ${inv.invNumber||''}: ${oldWht.toLocaleString('th-TH')} → ${newWht.toLocaleString('th-TH')} — ${reason}`,
+      source:'inv', sourceId: inv.id, sourceRef: inv.invNumber, refType:'wht_adjust', branchId: inv.branch || s.currentBranch,
+      lines: jeLines, totalDebit: amt, totalCredit: amt, status:'posted', createdBy:o.by, postedBy:o.by, createdAt: now, postedAt: now, ...(o.jeExtra || {}) };
+  }
+  // ใบ 50ทวิ: ใบเก่า void (เก็บ trace) → ออกชุดใหม่จากบรรทัดใหม่ (ใช้ buildWHTCerts ของ core เหมือนตอนตั้งหนี้)
+  const build = global.ERP.buildWHTCerts;
+  const oldCerts = (inv.whtCertificates||[]).map(c => c.voided ? c : ({ ...c, voided:true, voidedAt: now, voidedBy: o.by, voidReason:'แก้ WHT — ออกใบใหม่' }));
+  let newCerts;
+  if(Array.isArray(o.certs)) newCerts = o.certs;
+  else {
+    // 🔒 PARTY-SNAP: ใบ 50 ทวิ ชุดใหม่ ใช้ผู้ถูกหักที่ตรึงไว้กับ PI (ไม่ใช่ทะเบียนสด ณ วันแก้)
+    const _snapW = global.ERP && global.ERP.partySnapshot;
+    const _payeeW = (inv.supplierSnapshot && inv.supplierSnapshot.name) ? inv.supplierSnapshot
+      : (typeof _snapW === 'function'
+          ? _snapW((s.suppliers||[]).find(x => x.id === inv.supplierId), inv.supplierNameFreeform || '')
+          : null);
+    // 🆕 WHT-PAYEE: ใบชุดใหม่ = ใบ "ใหม่" → ชื่อบุคคลตามบัตรจากทะเบียนสด (ถ้ากรอก) ทับชื่อร้าน · ที่อยู่/เลขภาษีตาม PI
+    const _npW = global.ERP && global.ERP.whtNewPayee;
+    // CHANGELOG รอบ 3: เลิกชื่อพิมพ์เอง — d.whtPayeeName ไม่ใช้ · ใบเก่าที่มี inv.whtPayeeName (รุ่นก่อน) ยังอ่านได้ผ่าน whtNewPayee
+    const _payeeW2 = (typeof _npW === 'function' && _payeeW) ? _npW(inv, s, _payeeW) : _payeeW;
+    const _newC0 = (typeof build === 'function' && newWht > 0) ? build(lines.filter(l => l.whtAmount > 0), o.form || inv.whtForm || '53', { splitPerLine: !!o.splitCert, state: s, payee: _payeeW2, supplierId: inv.supplierId }) : [];
+    // 🆕 verify 3: ใบเดิมที่ ✏️ แก้ชื่อผู้ถูกหักแล้ว → ใบใหม่ใช้ชื่อตามที่แก้ (กันชื่อเด้งกลับเป็นทะเบียน — สำคัญกับผู้ถูกหักรายอื่น WP7)
+    const _carry = global.ERP.whtCarryEditedPayee;
+    newCerts = typeof _carry === 'function' ? _carry(inv.whtCertificates, _newC0, inv, true) : _newC0;
+  }
+  // เลขที่ใบ 50ทวิ บนใบตั้งหนี้ = เลขของใบใหม่ (ใบเก่า void แล้ว — รายงานที่อ่าน inv.whtNumber ต้องไม่โชว์เลขที่ยกเลิก)
+  const whtNumber = (newCerts[0] && newCerts[0].certNumber) || (newWht > 0 ? (inv.whtNumber || (typeof global.ERP.genWHNumber === 'function' ? global.ERP.genWHNumber(s) : '')) : '');
+  const invNext = { ...inv,
+    whtLines: lines, whtForm: o.form || inv.whtForm || '53', whtAmount: newWht,
+    whtRate: amount > 0 ? Number((newWht / amount * 100).toFixed(4)) : 0,
+    netPayable: Number(((Number(inv.netPayable)||0) + oldWht - newWht).toFixed(2)),
+    whtCertificates: [...oldCerts, ...newCerts], whtNumber,
+    ...(o.apId ? { usedApprovalIds:[...(inv.usedApprovalIds || []), o.apId] } : {}),
+    whtAdjustHistory: [...(inv.whtAdjustHistory||[]), { ts: now, by: o.by, reason, prevWht: oldWht, newWht, prevLines: inv.whtLines || [], prevForm: inv.whtForm || null, ...(o.histExtra || {}) }],
+    ...(o.invExtra || {}),
+  };
+  const al = { id:o.alId, ts: now, type:'inv_wht_adjust', by: o.by, entityId: inv.id, entityRef: inv.invNumber,
+    amount: Math.abs(delta), note: `WHT ${oldWht} → ${newWht} · ${reason}` };
+  return { inv: invNext, je, al };
+}
 // 🆕 WHT-MERGE UAT MF2: งวดปิด (settings.periodLockUntil) — วันจ่ายของ PV (= วันที่ใบรวม) อยู่ในงวดที่ปิด/ยื่น ภ.ง.ด. แล้ว → รวม/แยกไม่ได้
 //   (เลขใบในรายงานที่ยื่นแล้วจะเปลี่ยน + ใบเดี่ยวเก่ากลับมาพิมพ์ได้) · ใบรวมเดิมดูวันที่ใบรวมด้วย
 function _whtMergeLockReason(s, pay){
@@ -22723,6 +23066,9 @@ const _ADD_DUP = {
   MIG_AP_CLOSE_UNDO:    (s, d) => { const inv = d && (s.invoices || []).find(i => i && i.id === d.invId);
                           return !!(inv && d.at != null && (inv.migApCloseLog || []).some(x => x && x.action === 'undo' && x.at === Number(d.at))); },
   // 🆕 WHT-MERGE M2: รวม/แยก 50 ทวิ ครั้งเดียวกัน (at เดิม) ลง whtMergeLog ของ PV แล้ว = ซ้ำ
+  // 🆕 WHT_GROUP S1: มี cert ใช้ groupId นี้แล้ว (ทุกสถานะ) = ออกไปแล้ว · ยกเลิก: เคยออกแต่ไม่มีใบ active แล้ว = ยกเลิกไปแล้ว
+  WHT_GROUP_ISSUE:      (s, d) => !!(d && global.ERP.whtGroupIdUsed(s, d.groupId)),
+  WHT_GROUP_CANCEL:     (s, d) => !!(d && global.ERP.whtGroupIdUsed(s, d.groupId) && !global.ERP.whtGroupMembers(s, d.groupId).length),
   WHT_MERGE_PV:         (s, d) => { const p = d && (s.payments || []).find(x => x && x.id === d.payId);
                           // 🆕 verify: อีกเครื่องรวมไว้แล้ว (at คนละค่า) = เป้าหมายสำเร็จแล้ว → ซ้ำ ไม่ตกงานค้าง
                           return !!(p && (p.whtMerge || (d.at != null && (p.whtMergeLog || []).some(x => x && x.action === 'merge' && x.at === Number(d.at))))); },
@@ -24668,7 +25014,7 @@ function _reducerCore(s, a){
       const _old = s.settings || {}, _new = { ..._old, ...(a.data || {}) };
       const _WATCH = ['gmSelfApprove', 'posBackflushPhantomOnly','productionLive','periodLockUntil','futureDateLimit','siRequirePrice','stockValueRoles','allowNegativeStock',
         'weighOrderJobs', 'vatLockUntil', 'capitalizeThreshold',
-        'priceKeyInEnabled', 'priceKeyInTolAbs', 'priceKeyInTolPct', 'priceKeyInBlockPct', 'priceKeyInVolatileTolAbs', 'priceKeyInVolatileTolPct', 'priceKeyInWarnPct', 'lineTrStockHints', 'priceFixInvDiscEnabled'];   /* UAT S2: สวิตช์โชว์ยอดที่ไลน์ตอนขอของเข้าไลน์ ลงประวัติ */   // 🆕 PRICE-FIX UAT M2: สวิตช์/เกณฑ์ไม่ต้องอนุมัติ ลงประวัติ (กันขยับเกณฑ์ชั่วคราวแล้วคืนเงียบ) ·   💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · B18 gmSelfApprove · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
+        'priceKeyInEnabled', 'priceKeyInTolAbs', 'priceKeyInTolPct', 'priceKeyInBlockPct', 'priceKeyInVolatileTolAbs', 'priceKeyInVolatileTolPct', 'priceKeyInWarnPct', 'lineTrStockHints', 'priceFixInvDiscEnabled', 'whtGroupEnabled'];   /* 🆕 WHT_GROUP S3 (D6): สวิตช์ออก 50 ทวิ รวม ลงประวัติ */   /* UAT S2: สวิตช์โชว์ยอดที่ไลน์ตอนขอของเข้าไลน์ ลงประวัติ */   // 🆕 PRICE-FIX UAT M2: สวิตช์/เกณฑ์ไม่ต้องอนุมัติ ลงประวัติ (กันขยับเกณฑ์ชั่วคราวแล้วคืนเงียบ) ·   💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · B18 gmSelfApprove · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
       const _chg = _WATCH.filter(k => a.data && Object.prototype.hasOwnProperty.call(a.data, k) && JSON.stringify(_old[k]) !== JSON.stringify(a.data[k]));
       if(!_chg.length) return { ...s, settings:_new };
       const _by = (s.currentUser && s.currentUser.username) || (a.data && a.data._by) || 'system', _now = Date.now();
@@ -26503,6 +26849,8 @@ function _reducerCore(s, a){
       const data = a.data;
       const locked = _checkDateLock(s, data.date, 'CN/DN memo');
       if(locked) return locked;
+      // verify 1: CN หัก INV ทันที บนบิลในชุด 50 ทวิ รวม → ยกเลิกชุดก่อน (§4 · เหมือน APPLY_CN_MEMO)
+      if(data.type === 'credit' && data.disposition === 'apply_now' && data.applyToInvId){ const _wg = _blockIfWhtGroupInv(s, data.applyToInvId); if(_wg) return _wg; }
       const seqM = (s.seq?.supMemo || 0) + 1;
       const prefix = data.type === 'credit' ? 'CN' : 'DN';
       const d = new Date(data.date || getToday());
@@ -26596,6 +26944,7 @@ function _reducerCore(s, a){
       const memo = (s.supplierMemos||[]).find(m => m.id === memoId);
       const inv = (s.invoices||[]).find(i => i.id === invId);
       if(!memo || !inv){ alert('ไม่พบ memo/inv'); return s; }
+      { const _wg = _blockIfWhtGroupInv(s, invId); if(_wg) return _wg; }   // 🆕 WHT_GROUP S2
       if(memo.status !== 'await_doc'){
         // ถ้า status อื่น ข้ามไป (กัน double apply)
         return s;
@@ -26834,6 +27183,7 @@ function _reducerCore(s, a){
       //    เดิมบล็อกไว้ = เครดิตจากคืนของเอาไปหักบิลไม่ได้เลย (เงินค้างกับ supplier ถาวร)
       const _APPLYABLE = ['open','await_doc','doc_received'];
       if(!_APPLYABLE.includes(memo.status)){ alert('CN ใบนี้ใช้/ปิดไปแล้ว'); return s; }
+      { const _wg = _blockIfWhtGroupInv(s, invId); if(_wg) return _wg; }   // 🆕 WHT_GROUP S2
       // 🆕 กันหักซ้ำ 2 ทาง:
       //   (ก) ยอดถูกหักออกจากบิลต้นทางไปแล้ว (พักที่ 2100)
       //   (ข) ยอดถูกเขียนลง inv.creditDue แล้ว — จัดซื้อใช้ผ่านช่อง "ใช้เครดิต" ตอนเปิด PI ใบถัดไป
@@ -27779,6 +28129,7 @@ function _reducerCore(s, a){
       // 🆕 DEPOSIT-VAT verify: งวด GL ของ invDate เดิม/ใหม่ปิดแล้ว → ห้ามเปลี่ยนยอด/วันที่ (JE ใหม่ลงไม่ได้ = AP หายจาก GL)
       if(_oldInv){ const _gl = _invGlLockReason(s, _oldInv, a.data); if(_gl){ alert('⛔ ' + _gl); return s; } }
       if(_oldInv){ const _cm = _ctInvMoneyDeny(_oldInv, a.data); if(_cm){ alert('⛔ ' + _cm); return s; } }   // 🆕 EXPENSE_PO P10.2
+      if(_oldInv){ const _wg = _whtGroupInvMoneyDeny(_oldInv, a.data); if(_wg){ alert('⛔ ' + _wg); return s; } }   // 🆕 WHT_GROUP S2: บิลในชุด
       // 🆕 PRICE-FIX verify 2: ใบปรับราคาแล้ว (post_pi) — reducer ปฏิเสธการเปลี่ยนเงิน (ด่านเดียวกับ invUpdateDeny · กันสำเนาเก่าย้อนยอด)
       if(_oldInv && (_oldInv.priceAdjustHistory || []).some(x => x && x.mode === 'post_pi')
         && ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId'].some(f => a.data[f] !== undefined && !_protSame(_oldInv[f], a.data[f]))){
@@ -27880,6 +28231,7 @@ function _reducerCore(s, a){
       // 🆕 DEPOSIT-VAT review (R1): ใบกำกับยื่นแล้ว → fields ห้ามเปลี่ยนยอด/อัตรา/ฐาน VAT/วันที่/ผู้ขาย
       { const _fx = _invFiledFinChange(s, _cur, _pf); if(_fx) return _fx; }
       { const _cm = _ctInvMoneyDeny(_cur, _pf); if(_cm){ alert('⛔ ' + _cm); return s; } }   // 🆕 EXPENSE_PO P10.2
+      { const _wg = _whtGroupInvMoneyDeny(_cur, _pf); if(_wg){ alert('⛔ ' + _wg); return s; } }   // 🆕 WHT_GROUP S2: บิลในชุด
       // 🆕 DEPOSIT-VAT E-5 R4: fields ห้ามแตะฟิลด์ควบคุม (คงค่าเดิม) · ข้อยกเว้นชั่วคราว: depositUsed ครั้งแรกของทางหักมัดจำเดิม (ตั้งหนี้ใบใหม่)
       //   — ลบข้อยกเว้นนี้เมื่อ S4 ย้ายการหักมัดจำเข้า APPLY_DEPOSIT_TO_INV
       const _allowF = (_cur.depositUsed == null && !(_cur.depositApplications||[]).length) ? ['depositUsed'] : null;
@@ -27972,6 +28324,7 @@ function _reducerCore(s, a){
       const inv = (s.invoices||[]).find(i => i.id === d.invId);
       if(!inv){ alert('ไม่พบใบตั้งหนี้'); return s; }
       if(inv.voided){ alert('ใบตั้งหนี้นี้ยกเลิกไปแล้ว'); return s; }
+      { const _wg = _blockIfWhtGroupInv(s, inv.id); if(_wg) return _wg; }   // 🆕 WHT_GROUP S2
       // PI นำเข้าจาก Ecount ยื่น ภ.พ.30 ในระบบเดิมแล้ว + ไม่มี GR/netPayable → ห้ามปรับ (guard เดียวกับหน้าคีย์ใบกำกับ)
       if(inv.source === 'po_gr' && (inv.expenseLines || []).length){ alert('⛔ PI นี้รวมค่าบริการกับสินค้า (PO ผสม) — ปรับ VAT ทางนี้ไม่ได้ ให้ยกเลิกใบแล้วตั้งหนี้ใหม่'); return s; }   // 🔧 EXPENSE_PO S4
       if(global.ERP.invVatInEcount(inv)){ alert('⛔ PI นำเข้าจาก Ecount — ยื่น ภ.พ.30 ในระบบเดิมแล้ว ปรับ VAT ไม่ได้ (ถ้าต้องแก้ ให้ยื่นเพิ่มเติมและลง JE ปรับปรุงเอง)'); return s; }
@@ -28285,6 +28638,7 @@ function _reducerCore(s, a){
       const oldCert = certs[certIdx];
       if(oldCert.voided){ alert('cert ใบนี้ voided ไปแล้ว — แก้ไม่ได้'); return s; }
       if(oldCert.mergedInto){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบนี้รวมอยู่ในใบรวมของ PV — แก้เลข/ผู้ถูกหักต้องแยกก่อน
+      if(oldCert.groupId){ alert(_whtGroupDenyMsg(inv) || '⛔ ใบนี้อยู่ใน 50 ทวิ รวม — ยกเลิกชุดก่อน'); return s; }   // verify 1: ชุดเดียว = เลข/แบบเดียว
       // 🆕 UNDO_FIELD_GUARD (UAT ตรวจสอบ 🔴): แก้ได้เฉพาะ 5 ช่องข้อมูลบนใบ (หน้าจอส่งแค่นี้) — เดิมรับทุกช่อง = ตั้ง voided/certDate/legacy/mergedInto
       //   ผ่าน action นี้แล้ว ↩️ ทางตรงหลบด่าน whtCertIssued (ย้ายช่องโหว่จาก UPDATE_INV มาที่นี่)
       const _WCI = ['certNumber','supName','supAddress','supTaxId','form'];
@@ -28571,6 +28925,7 @@ function _reducerCore(s, a){
         && (a.data.status || 'posted') !== 'cancelled';
       if(isPosted){ const _ov = _blockIfOverpay(s, a.data); if(_ov) return _ov; }
       { const _se = _blockIfSelfPayTwoEye(s, a.data); if(_se) return _se; }   // DEPOSIT-VAT R8
+      { const _wg = _blockIfWhtGroupSplit(s, a.data); if(_wg) return _wg; }   // 🆕 WHT_GROUP S2: บิลในชุด 50 ทวิ รวม = จ่ายทั้งชุดใน PV เดียว (pending + posted)
       // 🆕 DEPOSIT-VAT review (R8): บิลที่ต้องจ่ายผ่านอนุมัติ (DP/paymentBlock/vatConflict) — ADD_PAY แบบจ่ายแล้วทันทีไม่มีทางถูกต้อง
       //   (ทางปกติ = ขอจ่าย pending แล้วผู้อนุมัติอีกคนกด UPDATE_PAY) → ปฏิเสธทุกกรณี ไม่เชื่อ approvedBy/createdBy ใน payload
       if(isPosted){
@@ -28663,6 +29018,7 @@ function _reducerCore(s, a){
         if(_spDeny){ alert('⛔ อนุมัติคำขอจ่ายที่ตัวเองส่งไม่ได้ — ต้องให้คนอื่นอนุมัติ (หรือให้ admin ติ๊กสิทธิ์ "✋ อนุมัติจ่ายคำขอที่ตัวเองส่งได้")'); return s; }
         // DEPOSIT-VAT R10: เพิ่งอนุมัติ → ใบต้องมีจริง/ไม่ยกเลิก + ยอด ≤ ยอดค้างของใบล่าสุด
         if(_payPostedOf(_ud) && _prev && !_payPostedOf(_prev)){ const _or = _blockIfApproveOverRemain(s, _ud); if(_or) return _or; }
+        if(_payPostedOf(_ud) && !_payPostedOf(_prev)){ const _wg = _blockIfWhtGroupSplit(s, _ud); if(_wg) return _wg; }   // 🆕 WHT_GROUP S2: เพิ่งอนุมัติ → ตรวจกับชุดล่าสุด
       }
       // 🆕 PIPV-C: ถ้า approvalStatus เป็น 'approved' และยังไม่มี pvNumber → gen
       let payment = _ud;
@@ -28744,12 +29100,7 @@ function _reducerCore(s, a){
       const d = a.data || {};
       const inv = (s.invoices||[]).find(i => i.id === d.invId);
       if(!inv){ alert('ไม่พบใบตั้งหนี้'); return s; }
-      if(inv.voided){ alert('ใบตั้งหนี้นี้ยกเลิกไปแล้ว'); return s; }
-      if(_invWhtMergedInto(inv)){ alert(_whtMergedDenyMsg(inv)); return s; }   // 🆕 WHT-MERGE: ใบรวมอยู่ใน 50 ทวิ ของ PV
-      // 🆕 นำเข้า2569 UAT MF3: เจ้าหนี้ค้างจ่ายยกมา (ยังไม่จ่าย) ยังไม่ออก 50ทวิ — หัก WHT ตอนจ่ายในระบบนี้ได้ · ใบที่จ่ายแล้วใน Ecount = ยื่น ภ.ง.ด. ในระบบเดิมแล้ว
-      if(_invIsMigrated(inv) && (['paid','partial'].includes(inv.paymentStatus) || Number(inv.paidAmount) > 0)){ alert('⛔ PI นำเข้าจาก Ecount ที่จ่ายแล้ว — ออก 50ทวิ/ยื่น ภ.ง.ด. ในระบบเดิมแล้ว แก้ WHT ทางนี้ไม่ได้'); return s; }
-      if((inv.paidAmount||0) > 0 || ['paid','partial'].includes(inv.paymentStatus)){ alert('⛔ ใบนี้จ่ายไปแล้ว — แก้ WHT ทางนี้ไม่ได้ (ใช้ 🧾 เพิ่ม WHT ย้อนหลัง หรือยกเลิก PV ก่อน)'); return s; }
-      if((s.payments||[]).some(p => (p.invId === inv.id || (p.invoiceIds||[]).includes(inv.id)) && p.approvalStatus === 'pending')){ alert('⛔ มีคำขอจ่ายค้างอยู่ — ยกเลิกคำขอจ่ายก่อน'); return s; }
+      { const _dn = _invWhtAdjustDeny(s, inv); if(_dn){ alert(_dn); return s; } }   // 🆕 WHT_GROUP S1: ด่านเดิม (ยกเลิก/รวม PV/ยกมาจ่ายแล้ว/จ่ายแล้ว/คำขอจ่ายค้าง) + ใบในชุด
       if(!String(d.reason||'').trim()){ alert('ใส่เหตุผลที่แก้ WHT'); return s; }
       const jeDate = getToday();
       const locked = _checkDateLock(s, jeDate, 'แก้ WHT ใบตั้งหนี้'); if(locked) return locked;
@@ -28778,57 +29129,119 @@ function _reducerCore(s, a){
             && J(p.whtLines || []) === J(d.whtLines || []) && (p.whtForm || null) === (d.whtForm || null) && Math.abs((Number(q.amount) || 0) - Math.abs(delta)) < 0.01; }, inv.usedApprovalIds);
       if(_whtGate.deny){ alert('⛔ ' + _whtGate.deny); return s; }
       const now = Date.now();
-      let journalEntries = s.journalEntries || [];
-      let seqJe = ((s.seq && s.seq.je) || 0) + 1;   // ตรงกับ ADD_JE (seq.je = เลขล่าสุดที่ใช้)
-      let seqUsed = false;
-      if(Math.abs(delta) >= 0.005){
-        const ap = _acc(s, '2100') || (() => { const x = (s.chartOfAccounts||[]).find(y => y.type === 'liability' && String(y.name||'').includes('เจ้าหนี้')); return x ? { accountId:x.id, accountCode:x.code, account:x.code, accountName:x.name } : null; })();
-        const wh = _acc(s, '2130') || (() => { const x = (s.chartOfAccounts||[]).find(y => y.type === 'liability' && String(y.name||'').includes('หัก')); return x ? { accountId:x.id, accountCode:x.code, account:x.code, accountName:x.name } : null; })();
-        if(!ap || !wh){ alert('⚠️ ไม่พบบัญชีเจ้าหนี้ (2100) / ภาษีหัก ณ ที่จ่ายค้างนำส่ง (2130) ในผังบัญชี'); return s; }
-        const amt = Math.abs(delta);
-        const jeLines = delta > 0
-          ? [{ ...ap, debit:amt, credit:0, description:'ลดเจ้าหนี้ — แก้ WHT ' + (inv.invNumber||''), branchId: inv.branch || s.currentBranch },
-             { ...wh, debit:0, credit:amt, description:'เพิ่มภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber||'') }]
-          : [{ ...wh, debit:amt, credit:0, description:'ลดภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber||'') },
-             { ...ap, debit:0, credit:amt, description:'เพิ่มเจ้าหนี้ — แก้ WHT ' + (inv.invNumber||''), branchId: inv.branch || s.currentBranch }];
-        const dj = new Date(jeDate);
-        journalEntries = [...journalEntries, { id:'je_wht_'+now.toString(36)+Math.random().toString(36).slice(2,5),
-          jeNumber:`JE-${dj.getFullYear()}-${String(dj.getMonth()+1).padStart(2,'0')}-${String(seqJe).padStart(4,'0')}`, date: jeDate,
-          description:`แก้ WHT ${inv.invNumber||''}: ${oldWht.toLocaleString('th-TH')} → ${newWht.toLocaleString('th-TH')} — ${String(d.reason).trim()}`,
-          source:'inv', sourceId: inv.id, sourceRef: inv.invNumber, refType:'wht_adjust', branchId: inv.branch || s.currentBranch,
-          lines: jeLines, totalDebit: amt, totalCredit: amt, status:'posted', createdBy:d.by, postedBy:d.by, createdAt: now, postedAt: now }];
-        seqUsed = true;
+      const seqJe = ((s.seq && s.seq.je) || 0) + 1;   // ตรงกับ ADD_JE (seq.je = เลขล่าสุดที่ใช้)
+      // 🆕 WHT_GROUP S1: ตัวลงบรรทัด/ใบ 50 ทวิ/JE แยกเป็น _invWhtApplyLines (ใช้ร่วม WHT_GROUP_ISSUE) — พฤติกรรมเดิมทุกช่อง
+      const _r = _invWhtApplyLines(s, inv, { lines, form: d.whtForm, reason: d.reason, by: d.by, at: now, jeDate, jeSeq: seqJe, splitCert: !!d.splitCert,
+        jeId: 'je_wht_'+now.toString(36)+Math.random().toString(36).slice(2,5), alId: 'al_'+now.toString(36)+Math.random().toString(36).slice(2,5),
+        apId: _whtGate.ap ? _whtGate.ap.id : null });
+      if(_r.deny){ alert(_r.deny); return s; }
+      const journalEntries = _r.je ? [...(s.journalEntries || []), _r.je] : (s.journalEntries || []);
+      return { ...s, invoices: (s.invoices||[]).map(i => i.id === inv.id ? _r.inv : i), journalEntries, seq: _r.je ? { ...(s.seq||{}), je: seqJe } : s.seq, auditLog: [...(s.auditLog||[]), _r.al] };
+    }
+    // 🆕 WHT_GROUP S1 (WHT_GROUP_CONTRACT §3): ออก 50 ทวิ ใบเดียว เลขเดียว รวมหลายบิลของผู้ขายรายเดียว (Grab รายเดือน)
+    //   a.data = { groupId, supplierId, invIds(≥2), category:'00017', sub5, rate, form:'3'|'53', customLabel?, reason, by, at, jeDate, approvalReqId }
+    //   deterministic (เวลา/วันที่มาจาก data) · ซ้ำ groupId = ไม่ทำ · ด่าน all-or-nothing · JE 1 ใบต่อบิล (D2) · audit 1 แถว
+    case 'WHT_GROUP_ISSUE': {
+      const d = a.data || {}, E = global.ERP;
+      if(!d.groupId){ alert('⛔ ไม่มีรหัสชุด 50 ทวิ รวม'); return s; }
+      if(E.whtGroupIdUsed(s, d.groupId)) return s;   // ออกไปแล้ว (เล่นซ้ำ/sync) = ไม่ทำซ้ำ
+      const at = Number(d.at) || 0, jeDate = String(d.jeDate || '');
+      if(!at || !/^\d{4}-\d{2}-\d{2}$/.test(jeDate)){ alert('⛔ ข้อมูลออกชุดไม่ครบ (เวลา/วันที่)'); return s; }
+      { const _dn = E.whtGroupIssueDeny(s, d, { exceptReqId: d.approvalReqId }); if(_dn){ alert('⛔ ' + _dn); return s; } }
+      const locked = _checkDateLock(s, jeDate, 'ออก 50 ทวิ รวม'); if(locked) return locked;
+      const ids = d.invIds, rate = Number(d.rate) || 0, form = String(d.form);
+      const al = E.whtGroupAlloc(s, ids, rate);
+      const invs = ids.map(id => s.invoices.find(i => i && i.id === id)).sort((x, y) => String(x.invDate || '').localeCompare(String(y.invDate || '')) || String(x.invNumber || '').localeCompare(String(y.invNumber || '')) || String(x.id).localeCompare(String(y.id)));
+      const _used = [...new Set(invs.flatMap(i => i.usedApprovalIds || []))];
+      const _gate = _approvalGate(s, d.approvalReqId, 'wht_group_issue', { scope:'accounting', amount: al.totalWht },
+        (q) => { const p = q.payload || {}, J = E.approvalStableJson;
+          return q.entityId === d.groupId && p.groupId === d.groupId && p.supplierId === d.supplierId && J(p.invIds || []) === J(ids)
+            && (p.sub5 || null) === (d.sub5 || null) && Math.abs((Number(p.rate) || 0) - rate) < 1e-9 && String(p.form || '') === form
+            && String(p.customLabel || '') === String(d.customLabel || '') && Math.abs((Number(p.totalBase) || 0) - al.totalBase) < 0.005
+            && J((p.allocs || []).map(x => [x.invId, Number(x.wht)])) === J(al.allocs.map(x => [x.invId, x.wht])); }, _used);
+      if(_gate.deny){ alert('⛔ ' + _gate.deny); return s; }
+      const sup = (s.suppliers || []).find(x => x && x.id === d.supplierId);
+      const P = E.whtNewPayee(invs[0], s, E.partySnapshot(sup));   // ผู้ถูกหักคำนวณครั้งเดียว ใช้ทุกบิล
+      const G = E.genWHGroupNumber(s, at);
+      const apId = _gate.ap ? _gate.ap.id : null, reason = String(d.reason).trim();
+      const group = { certNumber:G, size:invs.length, totalBase:al.totalBase, totalWht:al.totalWht, rate, sub5:d.sub5, category:'00017', form, issuedAt:at, issuedBy:d.by, approvalReqId: apId || d.approvalReqId || null };
+      const L = { category:'00017', sub5:d.sub5, rate, customLabel:String(d.customLabel || '') };
+      let seqJe = (s.seq && s.seq.je) || 0;
+      const jes = [], byId = new Map();
+      for(let k = 0; k < invs.length; k++){
+        const inv = invs[k], w = al.allocs.find(x => x.invId === inv.id);
+        const ln = { ...L, base: w.base, whtAmount: w.wht, form };
+        const cert = { certNumber:G, form, totalAmount:w.wht, whtAmount:w.wht, splitCert:false, payeeSnapshot:P,
+          lines:[{ category:L.category, sub5:L.sub5, rate, base:w.base, whtAmount:w.wht, customLabel:L.customLabel }], groupId:d.groupId, group };
+        const r = _invWhtApplyLines(s, inv, { lines:[ln], form, reason, by:d.by, at, jeDate, jeSeq: seqJe + 1, certs:[cert], apId,
+          jeId:'je_whtg_' + _sanId(d.groupId) + '_' + k, alId:'',
+          jeDesc:'50 ทวิ รวม ' + G + ' (' + invs.length + ' ใบ) ' + (inv.invNumber || '') + ': หัก ' + w.wht.toLocaleString('th-TH') + ' — ' + reason,
+          jeExtra:{ whtGroupId:d.groupId }, invExtra:{ whtGroupId:d.groupId }, histExtra:{ groupId:d.groupId, certNumber:G } });
+        if(r.deny){ alert(r.deny); return s; }
+        if(r.je){ jes.push(r.je); seqJe++; }
+        byId.set(inv.id, r.inv);
       }
-      // ใบ 50ทวิ: ใบเก่า void (เก็บ trace) → ออกชุดใหม่จากบรรทัดใหม่ (ใช้ buildWHTCerts ของ core เหมือนตอนตั้งหนี้)
-      const build = global.ERP.buildWHTCerts;
-      const oldCerts = (inv.whtCertificates||[]).map(c => c.voided ? c : ({ ...c, voided:true, voidedAt: now, voidedBy: d.by, voidReason:'แก้ WHT — ออกใบใหม่' }));
-      // 🔒 PARTY-SNAP: ใบ 50 ทวิ ชุดใหม่ ใช้ผู้ถูกหักที่ตรึงไว้กับ PI (ไม่ใช่ทะเบียนสด ณ วันแก้)
-      const _snapW = global.ERP && global.ERP.partySnapshot;
-      const _payeeW = (inv.supplierSnapshot && inv.supplierSnapshot.name) ? inv.supplierSnapshot
-        : (typeof _snapW === 'function'
-            ? _snapW((s.suppliers||[]).find(x => x.id === inv.supplierId), inv.supplierNameFreeform || '')
-            : null);
-      // 🆕 WHT-PAYEE: ใบชุดใหม่ = ใบ "ใหม่" → ชื่อบุคคลตามบัตรจากทะเบียนสด (ถ้ากรอก) ทับชื่อร้าน · ที่อยู่/เลขภาษีตาม PI
-      const _npW = global.ERP && global.ERP.whtNewPayee;
-      // CHANGELOG รอบ 3: เลิกชื่อพิมพ์เอง — d.whtPayeeName ไม่ใช้ · ใบเก่าที่มี inv.whtPayeeName (รุ่นก่อน) ยังอ่านได้ผ่าน whtNewPayee
-      const _payeeW2 = (typeof _npW === 'function' && _payeeW) ? _npW(inv, s, _payeeW) : _payeeW;
-      const _newC0 = (typeof build === 'function' && newWht > 0) ? build(lines.filter(l => l.whtAmount > 0), d.whtForm || inv.whtForm || '53', { splitPerLine: !!d.splitCert, state: s, payee: _payeeW2, supplierId: inv.supplierId }) : [];
-      // 🆕 verify 3: ใบเดิมที่ ✏️ แก้ชื่อผู้ถูกหักแล้ว → ใบใหม่ใช้ชื่อตามที่แก้ (กันชื่อเด้งกลับเป็นทะเบียน — สำคัญกับผู้ถูกหักรายอื่น WP7)
-      const _carry = global.ERP.whtCarryEditedPayee;
-      const newCerts = typeof _carry === 'function' ? _carry(inv.whtCertificates, _newC0, inv, true) : _newC0;
-      // เลขที่ใบ 50ทวิ บนใบตั้งหนี้ = เลขของใบใหม่ (ใบเก่า void แล้ว — รายงานที่อ่าน inv.whtNumber ต้องไม่โชว์เลขที่ยกเลิก)
-      const whtNumber = (newCerts[0] && newCerts[0].certNumber) || (newWht > 0 ? (inv.whtNumber || (typeof global.ERP.genWHNumber === 'function' ? global.ERP.genWHNumber(s) : '')) : '');
-      const invNext = { ...inv,
-        whtLines: lines, whtForm: d.whtForm || inv.whtForm || '53', whtAmount: newWht,
-        whtRate: amount > 0 ? Number((newWht / amount * 100).toFixed(4)) : 0,
-        netPayable: Number(((Number(inv.netPayable)||0) + oldWht - newWht).toFixed(2)),
-        whtCertificates: [...oldCerts, ...newCerts], whtNumber,
-        ...(_whtGate.ap ? { usedApprovalIds:[...(inv.usedApprovalIds || []), _whtGate.ap.id] } : {}),
-        whtAdjustHistory: [...(inv.whtAdjustHistory||[]), { ts: now, by: d.by, reason: String(d.reason).trim(), prevWht: oldWht, newWht, prevLines: inv.whtLines || [], prevForm: inv.whtForm || null }],
-      };
-      const al = { id:'al_'+now.toString(36)+Math.random().toString(36).slice(2,5), ts: now, type:'inv_wht_adjust', by: d.by, entityId: inv.id, entityRef: inv.invNumber,
-        amount: Math.abs(delta), note: `WHT ${oldWht} → ${newWht} · ${String(d.reason).trim()}` };
-      return { ...s, invoices: (s.invoices||[]).map(i => i.id === inv.id ? invNext : i), journalEntries, seq: seqUsed ? { ...(s.seq||{}), je: seqJe } : s.seq, auditLog: [...(s.auditLog||[]), al] };
+      const audit = { id:'al_whtg_' + _sanId(d.groupId), ts:at, type:'wht_group_issue', by:d.by, entityType:'wht_group', entityId:d.groupId, entityRef:G,
+        amount:al.totalWht, invIds:invs.map(i => i.id), ...(apId ? { approvalReqId: apId } : {}), note:'50 ทวิ รวม ' + invs.length + ' ใบ · ' + rate + '% · ' + reason };
+      return { ...s, invoices: s.invoices.map(i => byId.get(i && i.id) || i), journalEntries:[...(s.journalEntries || []), ...jes],
+        seq: jes.length ? { ...(s.seq || {}), je: seqJe } : s.seq, auditLog:[...(s.auditLog || []), audit] };
+    }
+    // 🆕 WHT_GROUP S1 (§3 · D3): ยกเลิกชุด 50 ทวิ รวม — ใบ void (เก็บ groupId · เลขไม่นำกลับมาใช้) + คืน WHT/ยอดสุทธิ + JE กลับรายการต่อบิล
+    //   a.data = { groupId, reason, by, at, jeDate, approvalReqId? } · ทำเองได้ = GM 👑 หรือผู้อนุมัติคำขอออกชุด (ไม่ใช่คนขอ) จาก s.currentUser · นอกนั้นต้องมีคำขอ wht_group_cancel
+    case 'WHT_GROUP_CANCEL': {
+      const d = a.data || {}, E = global.ERP;
+      const ms = E.whtGroupMembers(s, d.groupId);
+      if(!ms.length) return s;   // ยกเลิกไปแล้ว/ไม่มีชุด = ไม่มีอะไรทำ
+      const at = Number(d.at) || 0, jeDate = String(d.jeDate || ''), reason = String(d.reason || '').trim();
+      if(!at || !/^\d{4}-\d{2}-\d{2}$/.test(jeDate)){ alert('⛔ ข้อมูลยกเลิกชุดไม่ครบ (เวลา/วันที่)'); return s; }
+      if(!reason){ alert('ใส่เหตุผลที่ยกเลิกชุด 50 ทวิ รวม'); return s; }
+      const G = ms[0].cert.certNumber;
+      for(const { inv } of ms){
+        if(Number(inv.paidAmount) > 0 || ['paid','partial'].includes(inv.paymentStatus) || E.whtFirstPayDate(s, inv.id)){ alert('⛔ บิล ' + (inv.invNumber || inv.id) + ' ในชุด ' + G + ' จ่ายแล้ว — ↩️ กลับรายการ PV ก่อน แล้วค่อยยกเลิกชุด'); return s; }
+        if((s.payments || []).some(p => p && !p.reversed && p.approvalStatus === 'pending' && p.status !== 'cancelled' && (p.invId === inv.id || p.invoiceId === inv.id || (p.invoiceIds || []).includes(inv.id) || (p.allocations || []).some(x => x && x.invoiceId === inv.id)))){
+          alert('⛔ บิล ' + (inv.invNumber || inv.id) + ' มีคำขอจ่ายค้างอยู่ — ยกเลิกคำขอจ่ายก่อน'); return s; }
+      }
+      const locked = _checkDateLock(s, jeDate, 'ยกเลิก 50 ทวิ รวม'); if(locked) return locked;
+      const totalWht = Number(ms.reduce((t, m) => t + (Number(m.cert.whtAmount) || 0), 0).toFixed(2));
+      let apId = null;
+      if(d.approvalReqId || !E.whtGroupCancelPolicy(s, d.groupId, s.currentUser).direct){
+        const _used = [...new Set(ms.flatMap(m => m.inv.usedApprovalIds || []))];
+        const _gate = _approvalGate(s, d.approvalReqId, 'wht_group_cancel', { scope:'accounting', amount: totalWht },
+          (q) => q.entityId === d.groupId && (q.payload || {}).groupId === d.groupId, _used);
+        if(_gate.deny){ alert('⛔ ' + _gate.deny); return s; }
+        apId = _gate.ap ? _gate.ap.id : null;
+      }
+      const ap = _acc(s, '2100'), wh = _acc(s, '2130');
+      let seqJe = (s.seq && s.seq.je) || 0;
+      const jes = [], byId = new Map();
+      ms.forEach(({ inv, cert }, k) => {
+        const w = Number(cert.whtAmount) || 0;
+        const orig = (s.journalEntries || []).find(j => j && j.whtGroupId === d.groupId && j.source === 'inv' && j.sourceId === inv.id && !j.voidedReversal);
+        if(w >= 0.005 && ap && wh){
+          seqJe++;
+          const dj = new Date(jeDate), br = inv.branch || s.currentBranch;
+          jes.push({ id:'je_whtgx_' + _sanId(d.groupId) + '_' + k,
+            jeNumber:`JE-${dj.getFullYear()}-${String(dj.getMonth()+1).padStart(2,'0')}-${String(seqJe).padStart(4,'0')}`, date: jeDate,
+            description:'ยกเลิก 50 ทวิ รวม ' + G + ' ' + (inv.invNumber || '') + ' — ' + reason,
+            source:'inv', sourceId: inv.id, sourceRef: inv.invNumber, refType:'wht_adjust', branchId: br, whtGroupId: d.groupId,
+            voidedReversal:true, ...(orig ? { reversesJeId: orig.id } : {}),
+            lines:[{ ...wh, debit:w, credit:0, description:'ลดภาษีหัก ณ ที่จ่ายค้างนำส่ง ' + (inv.invNumber || '') },
+                   { ...ap, debit:0, credit:w, description:'เพิ่มเจ้าหนี้ — ยกเลิก 50 ทวิ รวม ' + (inv.invNumber || ''), branchId: br }],
+            totalDebit:w, totalCredit:w, status:'posted', createdBy:d.by, postedBy:d.by, createdAt:at, postedAt:at });
+        }
+        const oldWht = Number(inv.whtAmount) || 0;
+        byId.set(inv.id, { ...inv,
+          whtCertificates:(inv.whtCertificates || []).map(c => (c && !c.voided && c.groupId === d.groupId) ? { ...c, voided:true, voidedAt:at, voidedBy:d.by, voidReason:'ยกเลิก 50 ทวิ รวม' } : c),
+          whtLines:[], whtAmount:0, whtRate:0, whtNumber:'', whtGroupId:null,
+          netPayable: Number(((Number(inv.netPayable) || 0) + w).toFixed(2)),
+          ...(apId ? { usedApprovalIds:[...(inv.usedApprovalIds || []), apId] } : {}),
+          whtAdjustHistory:[...(inv.whtAdjustHistory || []), { ts:at, by:d.by, reason, prevWht:oldWht, newWht:0, prevLines:inv.whtLines || [], prevForm:inv.whtForm || null, groupId:d.groupId, certNumber:G, action:'group_cancel' }] });
+      });
+      if(totalWht >= 0.005 && !(ap && wh)){ alert('⚠️ ไม่พบบัญชีเจ้าหนี้ (2100) / ภาษีหัก ณ ที่จ่ายค้างนำส่ง (2130) ในผังบัญชี'); return s; }
+      const audit = { id:'al_whtgx_' + _sanId(d.groupId), ts:at, type:'wht_group_cancel', by:d.by, entityType:'wht_group', entityId:d.groupId, entityRef:G,
+        amount:totalWht, invIds:ms.map(m => m.inv.id), ...(apId ? { approvalReqId: apId } : { directUndo: true }), note:reason };
+      return { ...s, invoices: s.invoices.map(i => byId.get(i && i.id) || i), journalEntries:[...(s.journalEntries || []), ...jes],
+        seq: jes.length ? { ...(s.seq || {}), je: seqJe } : s.seq, auditLog:[...(s.auditLog || []), audit] };
     }
     case 'VOID_INV': {
       const { invId, reason } = a.data;
@@ -28836,6 +29249,7 @@ function _reducerCore(s, a){
       const inv = (s.invoices||[]).find(i => i.id === invId);
       if(!inv) return s;
       if(inv.voided) { alert('INV นี้ยกเลิกไปแล้ว'); return s; }
+      { const _wg = _blockIfWhtGroupInv(s, invId); if(_wg) return _wg; }   // 🆕 WHT_GROUP S2: ยกเลิกชุดก่อน (cert ชุด/JE ต่อบิล)
       // 🆕 UNDO_PRINCIPLE §2.4 (U8): ทางตรง (ไม่ผ่านคำขอ) → คำนวณนโยบายซ้ำจาก state สด + s.currentUser · ไม่เชื่อ by/wasPaid จาก payload
       //   ไม่ใช่ direct หรือ basis ไม่ตรง = ปฏิเสธ · ไม่มี directUndo = ทางเดิม (executor หลังอนุมัติ / GM 👑) · ด่านข้อมูลด้านล่างรันครบ (U7)
       const _dU = a.data.directUndo || null;
@@ -29237,6 +29651,11 @@ function _reducerCore(s, a){
       // 🆕 MIG_AP_CLOSE verify: ใบที่ ✂️ ปิดยอดค้างแล้ว (netPayable = ยอดจ่าย) — กลับ PV จะทำให้ใบกลับเข้าคิวรอจ่ายทั้งที่ป้ายบอกปิดยอด → ยกเลิกการปิดยอดก่อน
       { const _mcInv = (s.invoices||[]).find(i => i && i.migApClose && (targetInvIds.includes(i.id) || allocations.some(x => x && x.invoiceId === i.id)));
         if(_mcInv){ alert('⛔ ใบ ' + (_mcInv.invNumber || _mcInv.id) + ' ✂️ ปิดยอดค้างไว้ — ↩️ ยกเลิกการปิดยอดก่อน (ผจก.บัญชี/GM) แล้วค่อยยกเลิกการจ่าย'); return s; } }
+      // 🆕 WHT_GROUP S2: กลับ PV ของชุด 50 ทวิ รวม = ชุดยังอยู่ กลับเป็นร่าง · แต่ใบลงวันจ่ายจริงในงวดที่ปิด (ยื่น ภ.ง.ด. แล้ว) → ห้าม
+      { const _gInv = (s.invoices||[]).find(i => i && (targetInvIds.includes(i.id) || allocations.some(x => x && x.invoiceId === i.id)) && global.ERP.whtGroupOfInv(i));
+        const _lk = String((s.settings && s.settings.periodLockUntil) || ''), _pd = String(pay.payDate || pay.date || '').slice(0, 10);
+        if(_gInv && _lk && _pd && _pd <= _lk){ const _gc = global.ERP.whtGroupOfInv(_gInv);
+          alert('⛔ PV นี้จ่ายบิลในชุด 50 ทวิ รวม ' + (_gc.certNumber || '') + ' ลงวันที่ ' + _pd + ' ซึ่งอยู่ในงวดที่ปิด/ยื่น ภ.ง.ด. แล้ว (≤ ' + _lk + ') — ยกเลิกการจ่ายไม่ได้ (ให้ admin ปลด period lock ก่อน)'); return s; } }
       const invoices = (s.invoices||[]).map(i => {
         if(!targetInvIds.includes(i.id)) return i;
         const alloc = allocations.find(a => a.invoiceId === i.id);
@@ -29689,6 +30108,7 @@ function _reducerCore(s, a){
       const d = a.data || {}, u = _actorOf(s, d.by), undo = a.type === 'MIG_AP_CLOSE_UNDO';
       const ck = _migApCloseCheck(s, d, u, undo);
       if(ck.dup) return s;
+      if(!undo){ const _wg = _blockIfWhtGroupInv(s, d.invId); if(_wg) return _wg; }   // 🆕 WHT_GROUP S2
       if(ck.deny){ alert('⛔ ' + ck.deny); return s; }
       const { inv, amt, ap, obe, date, vatKeep, vatCut, vatCutBase, vat1150, vacc } = ck, now = Number(d.at) || Date.now(), who = (u && u.username) || d.by || '', reason = String(d.reason || '').trim();
       const no = inv.invNumber || inv.id, br = inv.branch || s.currentBranch, paid = _r2mp(inv.paidAmount);
@@ -29781,6 +30201,8 @@ function _reducerCore(s, a){
       }
       // 🆕 นำเข้า2569 UAT MF1: GR ประวัติ Ecount ไม่ได้เข้าสต๊อก → คืนไม่ได้ (กันตัดสต๊อกนับจริง + แก้บิลที่ยื่น VAT ใน Ecount แล้ว)
       if(rtv && _grIsMigrated((s.grs||[]).find(g => g.id === rtv.grId))){ alert(_MIG_GR_MSG); return s; }
+      // 🆕 WHT_GROUP UAT M1: ใบคืนที่หักบิล (invAdjust) หรือผูกบิล (linkedINV) ที่อยู่ในชุด 50 ทวิ รวม → ยกเลิกชุดก่อน
+      for(const _wid of [invAdjust && invAdjust.invId, rtv && rtv.linkedINV]){ if(!_wid) continue; const _wg = _blockIfWhtGroupInv(s, _wid); if(_wg) return _wg; }
       // 📦 OVER_RECEIVE UAT S1: ป้าย "คืนส่วนเกิน" (rtv.overRecv) เคลียร์ด่านรับเกิน → ต้องเป็นจัดซื้อ (purchase.po.edit) ที่ไม่ใช่คนรับของใบนั้น · ไม่ผ่าน = ไม่ประทับป้าย (ยังเป็นใบคืนปกติ)
       if(rtv && rtv.overRecv === true){
         // verify 1 (SoD fail-closed แบบ ACK): ผู้กด = s.currentUser ก่อน (ไม่เชื่อ createdBy จาก payload) · createdBy ไม่ตรงคนกด = ถอดป้าย · ประทับ createdBy = คนกดจริง
@@ -29966,6 +30388,8 @@ function _reducerCore(s, a){
       const inv = rtv.linkedINV ? (s.invoices||[]).find(i => i.id === rtv.linkedINV) : null;
       // verify รอบ 1 H1 (กันซ้ำ): ใบตั้งหนี้ที่ผูกถูกยกเลิกแล้ว → ตัดสินกับใบเดิมจะหัก 2100/ลงเครดิตของใบที่ตายแล้ว (ใบใหม่ตั้งหนี้เต็ม) → ห้าม
       if(inv && inv.voided){ alert('⛔ ใบตั้งหนี้ ' + (inv.invNumber || inv.id) + ' ที่ผูกกับใบคืนนี้ถูกยกเลิกแล้ว — ตัดสินกับใบเดิมไม่ได้ (เจ้าหนี้จะไม่ตรง)\n→ ให้ ผจก.บัญชีตัดสินใบคืนนี้กับใบตั้งหนี้ใบใหม่ของใบรับของเดียวกัน (ยกเลิกใบคืนนี้แล้วเปิดใบคืนใหม่ที่ผูกใบตั้งหนี้ใบใหม่)'); return s; }
+      // 🆕 WHT_GROUP UAT M1: ลดหนี้/ขอเงินคืนบนบิลในชุด 50 ทวิ รวม → ฐานหักในใบชุดผิด → ยกเลิกชุดก่อน (รอเปลี่ยนของไม่แตะยอด = ผ่าน)
+      if(inv && (decision === 'credit_note' || decision === 'refund')){ const _wg = _blockIfWhtGroupInv(s, inv.id); if(_wg) return _wg; }
       const isPaid = inv && inv.paymentStatus === 'paid';
       const totalValue = rtv.totalValue || 0;
       // 🆕 council F5: cap มูลค่าคืนไม่เกินยอดบิลที่ผูก (กันออกเครดิตเกินจริง)
@@ -35877,7 +36301,9 @@ const ACTION_MERGE = Object.freeze({
   MIG_AP_MARKPAID: { kind:'delta' },   // 🆕 MIG_AP_NORMAL N5 ใบนำเข้า: จ่ายแล้วก่อนตัดระบบ
   MIG_AP_CLOSE: { kind:'delta' },      // 🆕 MIG_AP_CLOSE C3 ใบนำเข้า: ✂️ ปิดยอดค้าง (ไม่ต้องจ่าย)
   MIG_AP_CLOSE_UNDO: { kind:'delta' }, // 🆕 MIG_AP_CLOSE C3 ใบนำเข้า: ↩️ ยกเลิกการปิดยอด
-  WHT_MERGE_PV: { kind:'delta' },      // 🆕 WHT-MERGE M2: 🧾 รวม 50 ทวิ ของ PV รวม (คิดจากใบ/PV ปัจจุบัน · at เดิม = ซ้ำ)
+  WHT_MERGE_PV: { kind:'delta' },
+  WHT_GROUP_ISSUE: { kind:'delta' },    // 🆕 WHT_GROUP S1: ออก 50 ทวิ รวมหลายบิล (ด่าน/ยอดแบ่งคิดจาก state สด · groupId เดิม = ซ้ำ)
+  WHT_GROUP_CANCEL: { kind:'delta' },   // 🆕 WHT_GROUP S1: ยกเลิกชุด (ชุดไม่มีใบ active = ซ้ำ)      // 🆕 WHT-MERGE M2: 🧾 รวม 50 ทวิ ของ PV รวม (คิดจากใบ/PV ปัจจุบัน · at เดิม = ซ้ำ)
   MARK_DOC_PRINTED: { kind:'delta' },   // 🆕 PRINT-MARK K1: นับครั้งพิมพ์บนก้อนปัจจุบัน (2 เครื่องพร้อมกัน = รวมกัน) · at|by เดิม = ซ้ำ (_ADD_DUP)
   UNMARK_DOC_PRINTED: { kind:'delta' }, // 🆕 PRINT-MARK UAT M2: ↩️ ล้างเครื่องหมายพิมพ์แล้ว (ล้างเฉพาะที่ lastAt ≤ at ของคำสั่ง · ไม่ชนงานอื่น)
   WHT_UNMERGE_PV: { kind:'delta' },    // 🆕 WHT-MERGE M2: ↩️ แยก 50 ทวิ
@@ -36152,7 +36578,9 @@ const ACTION_READS = Object.freeze({
   FILE_VAT_RETURN: ['approvalRequests','auditLog','invoices','returns','supplierMemos','vatFilings'],   // VAT-DEFER D2: คำขอเลื่อน/เคลมคืนค้าง = ต้องรับทราบ     // 🆕 VAT-CLAIM V3a (B4.6 · deposits ตัดออก: T-READS ไม่อ่าน — D2 ค่อยเพิ่ม)
   UNLOCK_VAT_PERIOD: ['approvalRequests','auditLog','vatFilings'],
 
-  ADJUST_INV_WHT: ['approvalRequests','auditLog','invoices','journalEntries','payments','suppliers'],   // 🆕 APPROVAL 1b-3: ด่านอ่านคำขอ
+  ADJUST_INV_WHT: ['approvalRequests','auditLog','invoices','journalEntries','payments','suppliers'],
+  WHT_GROUP_ISSUE: ['approvalRequests','auditLog','deposits','invoices','journalEntries','payments','returns','supplierMemos','suppliers'],   // 🆕 WHT_GROUP S1: ด่าน whtGroupEligibility (CN/มัดจำ/RTV/คำขอค้าง)
+  WHT_GROUP_CANCEL: ['approvalRequests','auditLog','invoices','journalEntries','payments'],   // 🆕 APPROVAL 1b-3: ด่านอ่านคำขอ
   ADJUST_INV_PARTY_BRANCH: ['auditLog','invoices','suppliers'],   // UAT S4
   ADD_SUP_MEMO: ['auditLog','invoices','journalEntries','supplierMemos','suppliers'],
 });
@@ -36265,6 +36693,7 @@ Object.assign(global.ERP, {
   ACTION_READS, MERGE_GUARD_KEYS, capLogsForSave: _capLogsForSave,   // 🆕 คลื่น 3 (WAVE3_CONTRACT §B4.1)
   APPEND_KEYS, SEQ_BUMP_KEYS, SEQ_BUMPS, APPEND_ONLY_READS, PATCH_READS, CAP_LIMITS: Object.freeze({ auditLog:AUDIT_LOG_CAP, weighLogs:WEIGH_LOG_CAP }),   // 🌊 คลื่น 4 (WAVE4_CONTRACT §B4.1)
   PUSH_LINE_REASONS,   // 🆕 TR_PUSH_FAV (A2)
+  whtGroupPayDeny,   // 🆕 WHT_GROUP S2: ด่านจ่ายบิลในชุด 50 ทวิ รวม (UI ใช้ตัวเดียวกับ reducer)
   WEIGH_FREE_SKIP_TH, weighFreeSkipLabel: _weighFreeSkipLabel,   // 🆕 WEIGH_FREE_STOCK UAT M1: ป้ายเหตุผลที่ชั่งอิสระไม่ได้ตัดสต๊อก (ประวัติชั่ง/ข้อความหลังชั่ง)
   nextDayDocNo: _dayDocNo,   // 🆕 เลข TO/GR ที่ SHIP_TR/ADD_HANDOVER_TO/RECEIVE_INTRA_TO จะออก (หน้าจอใช้บอกผู้ใช้)
   saveState, loadState, migrateState,
@@ -38511,6 +38940,13 @@ function approvalDocTargets(state, req){
     if(!ids.length) out.push({ kind:'pi', id:null, ref:req.entityRef || '', doc:null });
     return out;
   }
+  if(et === 'wht_group'){
+    // 🆕 WHT_GROUP verify 3: คำขอออก/ยกเลิก 50 ทวิ รวม → ลิงก์ไปทุกบิลในชุด (payload.invIds · ชุดเก่าไม่มี → หาจาก groupId)
+    const ids = (p.invIds && p.invIds.length) ? p.invIds
+      : ((global.ERP.whtGroupMembers && global.ERP.whtGroupMembers(s, p.groupId || req.entityId)) || []).map(m => m.inv.id);
+    ids.forEach(id => out.push(find('pi', id)));
+    return out;
+  }
   if(et === 'sup_memo'){
     const m = (s.supplierMemos || []).find(x => x && (x.id === req.entityId || (req.entityRef && x.memoNumber === req.entityRef))) || null;
     if(m) return [find(m.type === 'debit' ? 'dn' : 'cn', m.id)];
@@ -38800,6 +39236,10 @@ function ApprovalRequestCard({ req, state, dispatch, user, mode, onLeave }){
             && h(global.ERP.MigLatePill, { inv: (state.invoices || []).find(i => i && i.id === (req.payload || {}).invId && i.migLate) || { migLate:{} } })),
         h(ApprovalDocRef, { req, state, dispatch, user, onLeave, className:'text-xs text-gray-500 font-mono' }),   // 🆕 APPROVAL-DOCLINK: เลขเอกสารกดเปิดดู + 🔍 ดูสิ่งที่ขอแก้
         req.amount > 0 && !_hideAmt && h('div', { className:'text-xs text-red-700 font-bold' }, 'ยอด: ' + fmtCur(req.amount)),
+        // 🆕 WHT_GROUP verify 3: คำขอออก 50 ทวิ รวม — โชว์ฐานรวม/อัตรา/แบบ ภ.ง.ด. ให้ผู้อนุมัติตรวจก่อนกด
+        req.entityType === 'wht_group' && req.payload && (req.payload.rate || req.payload.totalBase) && h('div', { className:'text-xs text-indigo-700', 'data-testid':'apcard-whtg-sum' },
+          '🧾 ' + ((req.payload.invIds || []).length || '-') + ' ใบ · ฐานรวม ' + fmtCur(Number(req.payload.totalBase) || 0) + ' · อัตรา ' + (req.payload.rate || '-') + '%'
+          + ' · ภ.ง.ด.' + (req.payload.form || '-') + (req.payload.totalWht != null ? ' · หักรวม ' + fmtCur(Number(req.payload.totalWht) || 0) : '')),
         // 🆕 ADJ-COST UAT ชุด 1 S1: คำขอปรับสต๊อกที่แนบต้นทุนแก้เอง → ผู้อนุมัติเห็นต้นทุน/หน่วย (คนไม่เห็นมูลค่าสต๊อก = ไม่แสดง)
         req.action === 'adjust_stock' && !_hideAmt && Number((req.payload || {}).unitCostOverride) > 0
           && h('div', { className:'text-xs text-amber-800 font-medium', 'data-aco':'req-uc' },
@@ -39278,6 +39718,16 @@ function executeApprovedAction(req, state, dispatch, user){
       // 🆕 WHT-PAYEE รอบ 3: จำผู้ถูกหัก (whtPayeeId) กับผู้ขาย หลังแก้ WHT สำเร็จเท่านั้น (ผู้ขอติ๊กจำ + มีสิทธิ์ตอนขอ) · คำขอรุ่นเก่า (ชื่อพิมพ์เอง) = ข้าม
       { const _rm = p.whtPayeeRemember;
         if(_rm && _rm.payeeId !== undefined && global.ERP.whtPayeeRememberApply) global.ERP.whtPayeeRememberApply(state, dispatch, req.requestedBy || user.username, _rm); }
+      break;
+    }
+    // 🆕 WHT_GROUP S1: ออก/ยกเลิก 50 ทวิ รวมหลายใบ — at จับครั้งเดียว · jeDate = วันนี้ · ผู้ทำ = ผู้ขอ · reducer ตรวจคำขอ (บิล/อัตรา/ยอดแบ่ง ตรง payload) ซ้ำ
+    case 'wht_group_issue':
+    case 'wht_group_cancel': {
+      const _at = Date.now(), _issue = req.action === 'wht_group_issue';
+      const _d = _issue
+        ? { groupId:p.groupId, supplierId:p.supplierId, invIds:p.invIds, category:'00017', sub5:p.sub5, rate:p.rate, form:p.form, customLabel:p.customLabel || '', reason:p.reason || req.reason || '' }
+        : { groupId:p.groupId || req.entityId, reason:p.reason || req.reason || '' };
+      if(!_execGated(req, state, dispatch, user, { type: _issue ? 'WHT_GROUP_ISSUE' : 'WHT_GROUP_CANCEL', data:{ ..._d, by:req.requestedBy || user.username, approvedBy:user.username, at:_at, jeDate:global.ERP.getToday(), approvalReqId:req.id } }, _issue ? 'ออก 50 ทวิ รวม' : 'ยกเลิก 50 ทวิ รวม')) return false;
       break;
     }
     // 🆕 APPROVAL 1a (เจ้าของ 2026-09-29 §B15 ข้อ 6): แก้กฎแบบผ่อนลง — GM/เจ้าของอนุมัติแล้วจึงบันทึก · reducer ตรวจว่ากฎ/ก่อน/หลัง ตรงคำขอ
@@ -81847,7 +82297,8 @@ function CreditDebitMemoModal({ presetPo, presetInv, presetType, state, dispatch
   }, [isCredit, refInvId, supplierId]);
   // INVs ที่ apply credit ได้ (unpaid/partial)
   const applyableInvs = supplierInvs.filter(i => (i.paymentStatus||'unpaid') !== 'paid'
-    && (i.netPayable||0) > (i.paidAmount||0));
+    && (i.netPayable||0) > (i.paidAmount||0)
+    && !(global.ERP.whtGroupOfInv && global.ERP.whtGroupOfInv(i)));   // verify 1: บิลในชุด 50 ทวิ รวม หัก CN ไม่ได้ (ยกเลิกชุดก่อน)
 
   const onMemoImage = (e) => {
     const f = e.target.files?.[0];
@@ -86496,7 +86947,8 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
   const canChangeInv = !inv.voided && hasPerm(user,'purchase','inv','edit') && (inv.paidAmount||0) === 0 && !hasPendingPay;
   // 🆕 WHT-EDIT: ปุ่ม ✏️ แก้ WHT — โชว์เมื่อ ยังไม่ยกเลิก · ยังไม่จ่าย (paidAmount 0 + status ไม่ใช่ paid/partial) · ไม่ใช่ PI นำเข้า · มีสิทธิ์แก้ INV
   //   เหตุที่ใช้ไม่ได้ชั่วคราว (คำขอจ่ายค้าง / งวดปิด) → ปุ่ม disabled + บอกเหตุผล (mirror reducer ADJUST_INV_WHT)
-  const showWhtEdit = !inv.voided && (inv.paidAmount||0) === 0 && !['paid','partial'].includes(inv.paymentStatus) && hasPerm(user,'purchase','inv','edit');   // 🆕 นำเข้า2569 MF3: เจ้าหนี้ยกมาที่ยังไม่จ่าย แก้ WHT ได้ (50ทวิ ออกตอนจ่าย)
+  const showWhtEdit = !inv.voided && (inv.paidAmount||0) === 0 && !['paid','partial'].includes(inv.paymentStatus) && hasPerm(user,'purchase','inv','edit')
+    && !(global.ERP.whtGroupOfInv && global.ERP.whtGroupOfInv(inv));   // 🆕 WHT_GROUP S3: บิลในชุด → ซ่อน ✏️ แก้ WHT (ยกเลิกชุดก่อน)   // 🆕 นำเข้า2569 MF3: เจ้าหนี้ยกมาที่ยังไม่จ่าย แก้ WHT ได้ (50ทวิ ออกตอนจ่าย)
   // 🆕 WHT-MERGE M3: ใบ 50 ทวิ ที่รวมอยู่ในใบรวมของ PV + พิมพ์ใบรวม (ตามแบบ ภ.ง.ด. ของใบนั้น)
   const _whtMergedCert = (inv.whtCertificates||[]).find(c => c && !c.voided && c.mergedInto && c.mergedInto.payId) || null;
   const _invMoneyLocked = _invMoneyLockedOf(inv);   // 🆕 EXPENSE_PO verify 2a: 🧾 เพิ่ม WHT ย้อนหลัง = แก้เงิน → ปิดปุ่ม
@@ -86845,6 +87297,9 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
               // 🆕 WHT-MERGE M3: ใบนี้รวมอยู่ในใบ 50 ทวิ รวมของ PV (ใบเดิมไม่ void — ยอดในรายงาน ภ.ง.ด. เท่าเดิม)
               c.mergedInto && h('div', { className:'text-[10px] text-teal-800 mt-0.5', 'data-testid':'inv-wht-merged-into' },
                 '🧾 รวมอยู่ในใบ 50 ทวิ เลขที่ ', h('b', { className:'font-mono' }, c.mergedInto.certNumber || '-'), ' (', c.mergedInto.pvNumber || 'PV', ')'),
+              // 🆕 WHT_GROUP S3: บิลนี้อยู่ในชุด 50 ทวิ รวม (หลายบิล เลขเดียว)
+              c.groupId && !c.voided && h('div', { className:'text-[10px] text-indigo-800 mt-0.5', 'data-testid':'inv-wht-group' },
+                '🧾 อยู่ในชุด ', h('b', { className:'font-mono' }, c.certNumber || '-'), ' (', global.ERP.whtGroupMembers(state, c.groupId).length, ' ใบ) — แก้ทีละบิลไม่ได้ · ยกเลิกชุดแล้วออกใหม่'),
               // 🆕 WHT-DRAFT §3: ใบยังไม่จ่าย = ร่าง (วันที่บนใบ = วันนัดจ่าย/ครบกำหนด)
               (() => { const wi = global.ERP.whtDateInfo ? global.ERP.whtDateInfo(state, inv, c) : null;
                 return wi && wi.draft && h('div', { className:'inline-block text-[10px] mt-0.5 px-1.5 py-0.5 rounded bg-red-100 text-red-800 font-bold', 'data-testid':'inv-wht-draft-badge',
@@ -86853,6 +87308,11 @@ function INVDetailModal({ inv:invProp, state, dispatch, user, onClose, viewOnly 
             c.mergedInto ? h('button', { onClick:()=>_printWhtMerged(c),
               'data-testid':'inv-wht-print-merged', title:'พิมพ์ใบ 50 ทวิ รวมของ ' + (c.mergedInto.pvNumber || 'PV') + ' — แก้ใบนี้ได้หลัง ↩️ แยก 50 ทวิ ที่ ✅ รายการที่จ่ายแล้ว',
               className:'text-[10px] px-2 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded' }, '🖨️ พิมพ์ใบรวม') :
+            (c.groupId && !c.voided) ? h('span', { className:'flex gap-1' },   // 🆕 WHT_GROUP S3: ชุด → พิมพ์ใบรวม + ยกเลิกชุด (ไม่มีแก้รายใบ)
+              h('button', { onClick:()=>printWHTCertGroup(c.groupId, state), 'data-testid':'inv-wht-group-print', title:'พิมพ์ใบ 50 ทวิ รวม ' + (c.certNumber || '') + ' + ใบแนบ',
+                className:'text-[10px] px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded' }, '🖨️ พิมพ์ใบรวม'),
+              !ro && (isSuperUser(user) || hasPerm(user, 'accounting', 'wht', 'create')) && !_whgCancelHidden(state, c.groupId) && h('button', { onClick:()=>whtGroupCancelUI(state, dispatch, user, c.groupId), 'data-testid':'inv-wht-group-cancel',
+                className:'text-[10px] px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50' }, '🗑️ ยกเลิกชุด')) :
             h('span', { className:'flex gap-1' },
             // 🆕 verify: ใบเดี่ยวที่ไม่ได้รวม → พิมพ์เฉพาะใบนี้ (ตามแบบ ภ.ง.ด.) — ใช้ส่งผู้ขายได้ แม้อีกแบบของใบแจ้งหนี้เดียวกันถูกรวมไปแล้ว
             !c.voided && h('button', { onClick:()=>printWHTCert(inv, state, { form: c.form || inv.whtForm || null, certNumber: c.certNumber || null }),
@@ -88622,6 +89082,193 @@ function AdjustINVWhtModal({ inv:invProp, state, dispatch, user, onClose, onDone
 }
 
 // ================================================================
+// 🆕 WHT_GROUP S3 (WHT_GROUP_CONTRACT §5): ออก 50 ทวิ ใบเดียวรวมหลายบิล (Grab รายเดือน) — เปิดจากแท็บ WHT
+//   ผู้ขาย 1 ราย · บิลยังไม่จ่าย ≥ 2 ใบ · บัญชีเลือกอัตราเอง (ไม่มีค่าเริ่ม) · ส่งขออนุมัติ wht_group_issue (GM 👑 = ออกเลย)
+// ================================================================
+const _WHG_RATES = [ { k:'transport', label:'🚚 ค่าขนส่ง 1%', rate:1 }, { k:'service', label:'🛠️ ค่าบริการ 3%', rate:3 }, { k:'other', label:'⋯ อื่น ๆ', rate:null } ];
+function WhtGroupIssueModal({ state, dispatch, user, onClose, onDone }){
+  const E = global.ERP;
+  const ym = (d) => String(d || '').slice(0, 7);
+  // บิลที่ "ยังไม่จ่าย" ของแต่ละผู้ขาย + เหตุผลที่เลือกไม่ได้ (helper เดียวกับ reducer)
+  const bySup = useMemo(() => {
+    const m = {};
+    for(const inv of (state.invoices || [])){
+      if(!inv || inv.voided || !inv.supplierId || inv.type === 'deposit_pi') continue;
+      if(Number(inv.paidAmount) > 0 || inv.paymentStatus === 'paid' || !(Number(inv.netPayable) > 0.01)) continue;
+      const why = E.whtGroupEligibility(state, inv);
+      (m[inv.supplierId] = m[inv.supplierId] || []).push({ inv, why });
+    }
+    return m;
+  }, [state.invoices, state.payments, state.approvalRequests, state.suppliers]);
+  const supOpts = useMemo(() => Object.keys(bySup).map(id => ({ id, sup:(state.suppliers || []).find(x => x && x.id === id), n: bySup[id].filter(r => !r.why).length }))
+    .filter(o => o.sup && o.n > 0).sort((a, b) => (b.n - a.n) || String(a.sup.name || '').localeCompare(String(b.sup.name || ''))), [bySup, state.suppliers]);
+  const [supplierId, setSupplierId] = useState('');
+  const [month, setMonth] = useState(null);   // null = ยังไม่ตั้ง → เดือนล่าสุด · '' = ทุกเดือน
+  const [sel, setSel] = useState([]);
+  const [rk, setRk] = useState('');           // D1: ไม่มีค่าเริ่ม
+  const [otherRate, setOtherRate] = useState('');
+  const [otherLabel, setOtherLabel] = useState('');
+  const [form, setForm] = useState('');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const sup = (state.suppliers || []).find(x => x && x.id === supplierId) || null;
+  const all = (bySup[supplierId] || []).slice().sort((a, b) => String(a.inv.invDate || '').localeCompare(String(b.inv.invDate || '')) || String(a.inv.invNumber || '').localeCompare(String(b.inv.invNumber || '')));
+  const months = Array.from(new Set(all.map(r => ym(r.inv.invDate)).filter(Boolean))).sort().reverse();
+  const curMonth = month == null ? (months[0] || '') : month;
+  const inMonth = all.filter(r => !curMonth || ym(r.inv.invDate) === curMonth);
+  const okRows = inMonth.filter(r => !r.why), badRows = inMonth.filter(r => r.why);
+  const pickSup = (id) => { setSupplierId(id); setMonth(null); setSel([]);
+    const s0 = (state.suppliers || []).find(x => x && x.id === id); setForm(s0 ? E.whtDefaultForm(s0) : ''); };
+  const toggle = (id) => setSel(p => p.includes(id) ? p.filter(x => x !== id) : p.concat([id]));
+  const allOn = okRows.length > 0 && okRows.every(r => sel.includes(r.inv.id));
+  const toggleAll = () => setSel(allOn ? sel.filter(id => !okRows.some(r => r.inv.id === id)) : Array.from(new Set(sel.concat(okRows.map(r => r.inv.id)))));
+  // บิลที่เลือก (เฉพาะที่เลือกได้ · ข้ามเดือนได้) เรียง (invDate, invNumber, id) = ลำดับเดียวกับ reducer
+  const selRows = all.filter(r => !r.why && sel.includes(r.inv.id));
+  const ids = selRows.map(r => r.inv.id);
+  const rt = _WHG_RATES.find(x => x.k === rk) || null;
+  const rate = !rt ? 0 : rt.k === 'other' ? (Number(otherRate) || 0) : rt.rate;
+  const al = ids.length && rate > 0 ? E.whtGroupAlloc(state, ids, rate) : { allocs: [], totalBase: Number(selRows.reduce((t, r) => t + (Number(r.inv.amount) || 0), 0).toFixed(2)), totalWht: 0 };
+  const allocOf = (id) => (al.allocs.find(a => a.invId === id) || {}).wht;
+  const exactWht = Number((al.totalBase * rate / 100).toFixed(4));
+  const payload = { groupId: '', supplierId, invIds: ids, category: '00017', sub5: rt ? rt.k : '', rate, form, customLabel: rt && rt.k === 'other' ? otherLabel.trim() : '',
+    totalBase: al.totalBase, totalWht: al.totalWht, allocs: al.allocs, reason: reason.trim() };
+  const deny = supplierId && ids.length ? E.whtGroupIssueDeny(state, { ...payload, reason: payload.reason || '-' }) : '';
+  const todayLocked = _periodLocked(state, getToday());
+  const payee = sup ? E.whtNewPayee({ supplierId }, state, E.partySnapshot(sup)) : null;
+  const isGm = !!(E.gmSelfUser && E.gmSelfUser(state, user && user.username));
+  // เตือนแบบไม่บล็อก (§5 ข้อ 9)
+  const warns = [];
+  if(ids.length && al.totalBase < 1000) warns.push('ฐานรวม ' + fmtCur(al.totalBase) + ' ต่ำกว่า 1,000 บาท — ปกติไม่ต้องหัก ณ ที่จ่าย (ถ้าจ่ายรวมครั้งเดียวเกิน 1,000 ต้องหัก)');
+  if(new Set(selRows.map(r => ym(r.inv.invDate))).size > 1) warns.push('บิลข้ามเดือน (' + Array.from(new Set(selRows.map(r => ym(r.inv.invDate)))).sort().join(', ') + ') — ใบ 50 ทวิ ลงเดือนที่จ่ายจริง');
+  { const nt = selRows.filter(r => !((E.invTaxInvNumbers ? E.invTaxInvNumbers(r.inv) : '') || r.inv.supTaxInvNumber)); if(nt.length) warns.push(nt.length + ' ใบยังไม่มีเลขใบกำกับภาษี (' + nt.slice(0, 5).map(r => r.inv.invNumber).join(', ') + (nt.length > 5 ? ' …' : '') + ')'); }
+  const missing = !supplierId ? 'เลือกผู้ขาย' : ids.length < 2 ? 'เลือกบิลอย่างน้อย 2 ใบ' : !rt ? 'เลือกอัตรา (1% / 3% / อื่น ๆ)' : (rt.k === 'other' && !(rate > 0 && rate <= 15)) ? 'ใส่อัตรา อื่น ๆ (0-15%)'
+    : (rt.k === 'other' && !otherLabel.trim()) ? 'ระบุประเภทเงินได้ (อื่น ๆ)' : !['3', '53'].includes(form) ? 'เลือก ภ.ง.ด.3 / 53' : deny ? deny : todayLocked ? 'งวดวันนี้ปิดแล้ว' : !reason.trim() ? 'ใส่เหตุผล' : '';
+  const save = () => {
+    if(saving) return;
+    if(missing) return alert('⛔ ' + missing);
+    const gid = 'whtg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);   // สร้างครั้งเดียวที่ UI (reducer deterministic)
+    const pl = { ...payload, groupId: gid };
+    const msg = '🧾 ออก 50 ทวิ รวม ' + ids.length + ' ใบ — ' + (sup.name || '') + '\nอัตรา ' + rate + '% · ภ.ง.ด.' + form + '\nฐานรวม ' + fmtCur(al.totalBase) + ' · หักรวม ' + fmtCur(al.totalWht)
+      + '\nทุกบิลได้เลข 50 ทวิ เลขเดียวกัน · วันที่บนใบ = วันจ่ายจริง (ต้องขอจ่ายทุกใบใน PV เดียว)\n\n' + (isGm ? '👑 ออกใบเลย (GM/เจ้าของ)?' : '📤 ส่งขออนุมัติ ผจก.บัญชี/GM?');
+    if(!confirm(msg)) return;
+    setSaving(true);
+    const _sent = E.requestApprovalIfNeeded({ action:'wht_group_issue', user, state, dispatch, silent:true,
+      context:{ entityType:'wht_group', entityId:gid, entityRef:(sup.name || '') + ' ' + ids.length + ' ใบ', scope:'accounting', amount:al.totalWht,
+        reason:'ออก 50 ทวิ รวม ' + ids.length + ' ใบ ' + (sup.name || '') + ' ' + rate + '% · ' + reason.trim(), payload:pl } });
+    if(_sent === 'blocked'){ setSaving(false); return; }
+    if(!_sent) dispatch({ type:'WHT_GROUP_ISSUE', data:{ ...pl, by:user.username, at:Date.now(), jeDate:getToday(), approvalReqId:'' } });   // ไม่มีกฎ (fail-closed — ไม่ควรเกิด)
+    if(E.toast) E.toast(_sent === 'gm_self' || !_sent ? '👑 ออก 50 ทวิ รวม ' + ids.length + ' ใบ แล้ว (หัก ' + fmtCur(al.totalWht) + ')' : '📤 ส่งคำขออนุมัติออก 50 ทวิ รวม ' + ids.length + ' ใบ แล้ว — มีผลเมื่ออนุมัติ (🔔)', 'info');
+    onClose(); onDone && onDone();
+  };
+  const th = (t, c) => h('th', { className:'px-2 py-1 text-xs ' + (c || 'text-left') }, t);
+  const td = (v, c) => h('td', { className:'px-2 py-1 text-xs ' + (c || '') }, v);
+  return h(Modal, { isOpen:true, title:'🧾 ออก 50 ทวิ รวมหลายใบ (ใบเดียว เลขเดียว)', onClose, size:'xl', docKey:'whtGroup:new' },
+    h('div', { className:'space-y-3', 'data-testid':'whg-modal' },
+      h('div', { className:'bg-indigo-50 border border-indigo-200 rounded p-2 text-xs text-indigo-900' },
+        '💡 ผู้ขายที่ส่งบิลถี่ (เช่น Grab) และขอรับ 50 ทวิ เดือนละใบ — เลือกบิลที่ยังไม่จ่าย ≥ 2 ใบ ระบบหักตามอัตราที่เลือก ',
+        h('b', null, 'ทุกบิลขึ้นเลข 50 ทวิ เลขเดียวกัน'), ' · ลง JE ต่อบิล (เจ้าหนี้ 2100 → ภาษีหัก ณ ที่จ่ายค้างนำส่ง 2130)'),
+      h('div', { className:'flex flex-wrap gap-3 items-end' },
+        h('label', { className:'text-xs' }, h('div', { className:'font-medium mb-0.5' }, 'ผู้ขาย'),
+          h('select', { value:supplierId, onChange:e => pickSup(e.target.value), className:'border rounded px-2 py-1 text-sm min-w-[260px]', 'data-testid':'whg-sup' },
+            h('option', { value:'' }, supOpts.length ? '— เลือกผู้ขาย —' : '— ไม่มีผู้ขายที่มีบิลเลือกได้ —'),
+            supOpts.map(o => h('option', { key:o.id, value:o.id }, (o.sup.name || o.id) + ' (' + o.n + ' ใบ ยังไม่หัก)')))),
+        supplierId && h('label', { className:'text-xs' }, h('div', { className:'font-medium mb-0.5' }, 'เดือน (วันที่บิล)'),
+          h('select', { value:curMonth, onChange:e => setMonth(e.target.value), className:'border rounded px-2 py-1 text-sm', 'data-testid':'whg-month' },
+            months.map(m => h('option', { key:m, value:m }, m)), h('option', { value:'' }, 'ทุกเดือน'))),
+        payee && h('div', { className:'text-xs bg-gray-50 border rounded px-2 py-1', 'data-testid':'whg-payee' },
+          '👤 ผู้ถูกหัก: ', h('b', null, payee.name || '-'), ' · ', payee.taxId || 'ไม่มีเลขภาษี',
+          payee.branchCode !== '' && payee.branchCode != null ? ' · สาขา ' + payee.branchCode : '',
+          (!(payee.branchCode !== '' && payee.branchCode != null) || form === '3') && h('span', { className:'ml-1 text-amber-700' },
+            form === '3' ? '⚠️ บุคคลธรรมดา (ภ.ง.ด.3)' : '⚠️ ยังไม่ระบุสาขา — ตรวจทะเบียนผู้ขาย'))),
+      supplierId && h('div', { className:'border rounded overflow-auto max-h-[320px]' },
+        h('table', { className:'w-full text-sm', 'data-testid':'whg-table' },
+          h('thead', { className:'bg-gray-50 sticky top-0' }, h('tr', null,
+            h('th', { className:'px-2 py-1 w-8' }, h('input', { type:'checkbox', checked:allOn, onChange:toggleAll, 'data-testid':'whg-all', title:'เลือกทั้งหมด' })),
+            th('INV'), th('ใบกำกับ'), th('วันที่'), th('ครบกำหนด'), th('ฐาน', 'text-right'), th('VAT', 'text-right'), th('WHT', 'text-right'), th('สุทธิ เดิม→ใหม่', 'text-right'))),
+          h('tbody', { className:'divide-y' },
+            okRows.length === 0 ? h('tr', null, h('td', { colSpan:9, className:'px-2 py-3 text-center text-xs text-gray-500' }, 'ไม่มีบิลที่เลือกได้ในเดือนนี้'))
+            : okRows.map(r => { const on = sel.includes(r.inv.id), w = on ? allocOf(r.inv.id) : null;
+              return h('tr', { key:r.inv.id, className: on ? 'bg-indigo-50/50' : '', 'data-testid':'whg-row' },
+                h('td', { className:'px-2 py-1 text-center' }, h('input', { type:'checkbox', checked:on, onChange:() => toggle(r.inv.id) })),
+                td(r.inv.invNumber, 'font-mono'), td((E.invTaxInvNumbers ? E.invTaxInvNumbers(r.inv) : '') || r.inv.supTaxInvNumber || h('span', { className:'text-amber-600' }, '—')),
+                td(fmtDate(r.inv.invDate)), td(fmtDate(r.inv.dueDate)), td(fmtCur(r.inv.amount), 'text-right font-mono'), td(fmtCur(r.inv.vat || 0), 'text-right font-mono'),
+                td(w != null ? fmtCur(w) : '', 'text-right font-mono text-pink-700'),
+                td(h('span', null, fmtCur(r.inv.netPayable), w != null ? ' → ' : '', w != null && h('b', null, fmtCur((Number(r.inv.netPayable) || 0) - w))), 'text-right font-mono')); })))),
+      badRows.length > 0 && h('details', { className:'text-xs border rounded p-2 bg-gray-50', 'data-testid':'whg-bad' },
+        h('summary', { className:'cursor-pointer font-medium text-gray-700' }, '⛔ เลือกไม่ได้ (' + badRows.length + ')'),
+        h('ul', { className:'mt-1 space-y-0.5' }, badRows.map(r => h('li', { key:r.inv.id }, h('span', { className:'font-mono' }, r.inv.invNumber), ' ', fmtCur(r.inv.amount), ' — ', h('span', { className:'text-red-700' }, r.why))))),
+      supplierId && h('div', { className:'grid md:grid-cols-2 gap-3' },
+        h('div', { className:'border rounded p-2 text-sm', 'data-testid':'whg-rate' },
+          h('div', { className:'font-medium mb-1' }, 'ประเภทเงินได้ / อัตรา ', h('span', { className:'text-red-500' }, '*'), h('span', { className:'text-[11px] font-normal text-gray-500 ml-1' }, '(ระบบไม่เลือกให้ — บัญชีเลือกเอง)')),
+          _WHG_RATES.map(x => h('label', { key:x.k, className:'flex items-center gap-1 cursor-pointer' },
+            h('input', { type:'radio', name:'whg-rate', checked:rk === x.k, onChange:() => setRk(x.k) }), h('span', null, x.label))),
+          rk === 'other' && h('div', { className:'flex gap-2 mt-1' },
+            h('input', { type:'number', step:'0.01', min:0, max:15, value:otherRate, onChange:e => setOtherRate(e.target.value), placeholder:'อัตรา %', className:'border rounded px-2 py-1 w-24 text-sm' }),
+            h('input', { value:otherLabel, onChange:e => setOtherLabel(e.target.value), placeholder:'ระบุประเภทเงินได้ (ขึ้นบนใบ)', className:'border rounded px-2 py-1 flex-1 text-sm' }))),
+        h('div', { className:'border rounded p-2 text-sm' },
+          h('div', { className:'font-medium mb-1' }, '📋 แบบนำส่ง'),
+          h('div', { className:'flex gap-4' }, ['3', '53'].map(f => h('label', { key:f, className:'flex items-center gap-1 cursor-pointer' },
+            h('input', { type:'radio', name:'whg-form', checked:form === f, onChange:() => setForm(f) }), h('span', null, f === '3' ? 'ภ.ง.ด.3 (บุคคลธรรมดา)' : 'ภ.ง.ด.53 (นิติบุคคล)')))),
+          sup && _whtFormWarn(sup, form))),
+      warns.length > 0 && h('div', { className:'bg-yellow-50 border border-yellow-300 rounded p-2 text-xs text-yellow-900', 'data-testid':'whg-warn' }, warns.map((w, i) => h('div', { key:i }, '⚠️ ', w))),
+      supplierId && h('div', { className:'bg-sky-50 border border-sky-200 rounded p-2 text-[11px] text-sky-900 space-y-0.5' },
+        h('div', null, '📅 ', h('b', null, 'วันที่บนใบ = วันจ่ายจริง'), ' — ก่อนจ่ายพิมพ์ได้เป็น "ร่าง" · ต้องขอจ่ายทุกใบในชุดพร้อมกันใน PV เดียว (จ่ายแยก/เงินสดย่อย ไม่ได้)'),
+        h('div', null, '💳 ถ้าผู้ขายตัดบัตรอัตโนมัติ (เช่น Grab ตัดบัตรเครดิต) เราไม่ได้เป็นผู้จ่าย/หักภาษีเอง — ใช้ฟีเจอร์นี้ไม่ได้')),
+      supplierId && deny && ids.length >= 2 && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-xs text-red-800 whitespace-pre-line', 'data-testid':'whg-deny' }, '⛔ ', deny),
+      supplierId && h('div', null,
+        h('label', { className:'block text-xs font-medium mb-1' }, 'เหตุผล ', h('span', { className:'text-red-500' }, '*')),
+        h('textarea', { value:reason, onChange:e => setReason(e.target.value), rows:2, placeholder:'เช่น Grab ต.ค. 2569 — ผู้ขายขอ 50 ทวิ ใบเดียวต่อเดือน', className:'w-full px-3 py-2 border-2 rounded text-sm', 'data-testid':'whg-reason' })),
+      h('div', { className:'sticky bottom-0 bg-white border-t pt-2 flex flex-wrap items-center gap-3 justify-between', 'data-testid':'whg-foot' },
+        h('div', { className:'text-sm' }, h('b', null, ids.length), ' ใบ · ฐานรวม ', h('b', { className:'font-mono' }, fmtCur(al.totalBase)),
+          ' · หักรวม ', h('b', { className:'font-mono text-pink-700', 'data-testid':'whg-total' }, fmtCur(al.totalWht)),
+          rate > 0 && ids.length > 0 && Math.abs(exactWht - al.totalWht) > 0.00001 && h('span', { className:'text-[11px] text-gray-500 ml-1' }, '(ปัดเศษรวมเป็นสตางค์ · เกลี่ยเศษให้บิลที่เศษมากสุด)')),
+        h('div', { className:'flex flex-wrap items-center gap-2' },
+          // verify 2: แท็บเล็ตไม่มี hover → เหตุที่ปุ่มกดไม่ได้ต้องเห็นเป็นตัวหนังสือ (ไม่ใช่ tooltip อย่างเดียว)
+          missing && h('span', { className:'text-xs text-amber-700', 'data-testid':'whg-missing' }, 'ยังส่งไม่ได้: ' + missing),
+          h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
+          h('span', { title: missing }, h(Button, { variant:'primary', disabled: !!missing || saving, onClick:save }, isGm ? '👑 ออกใบเลย' : '📤 ส่งขออนุมัติ'))))
+    ));
+}
+// 🆕 WHT_GROUP S3 (D3): ยกเลิกชุด 50 ทวิ รวม — GM 👑 / ผู้อนุมัติคำขอออกชุด = ยกเลิกเองทันที · คนอื่น = ขออนุมัติ wht_group_cancel 1 ขั้น
+//   จ่ายแล้ว = ทำไม่ได้ (กลับรายการ PV ก่อน) · เลข 50 ทวิ ของชุดที่ยกเลิกไม่นำกลับมาใช้
+// verify 2: ซ่อนปุ่ม 🗑️ ยกเลิกชุด เมื่อชุดมีคำขอจ่ายค้าง/จ่ายแล้ว หรือมีคำขอยกเลิกค้างอยู่ (เหมือนแถบชุดในแท็บ WHT)
+function _whgCancelHidden(state, gid){
+  const di = global.ERP.whtGroupDateInfo(state, gid);
+  if(di.paidCount > 0 || di.kind === 'scheduled') return true;
+  return (state.approvalRequests || []).some(q => q && q.action === 'wht_group_cancel' && (q.status || 'pending') === 'pending' && (q.entityId === gid || (q.payload && q.payload.groupId === gid)));
+}
+function whtGroupCancelUI(state, dispatch, user, gid){
+  const E = global.ERP;
+  const b = E.whtGroupBuild(state, gid);
+  if(!b){ alert('⛔ ชุดนี้ถูกยกเลิกไปแล้ว'); return false; }
+  const di = E.whtGroupDateInfo(state, gid);
+  if(di.paidCount > 0) return alert('⛔ ชุด ' + b.certNumber + ' จ่ายแล้ว — ↩️ กลับรายการ PV ก่อน แล้วค่อยยกเลิกชุด'), false;
+  // verify 2: คำขอจ่ายค้าง = ยกเลิกไม่ได้ (เดิมขอยกเลิกได้ → คำขอจ่ายกับคำขอยกเลิกบล็อกกันเอง) · คำขอยกเลิกค้างอยู่แล้ว = ไม่ส่งซ้ำ
+  if(di.kind === 'scheduled') return alert('⛔ ชุด ' + b.certNumber + ' มีคำขอจ่ายค้าง — ปฏิเสธ/ยกเลิกคำขอจ่ายที่ 🔒 รออนุมัติ ก่อน แล้วค่อยยกเลิกชุด'), false;
+  if((state.approvalRequests || []).some(q => q && q.action === 'wht_group_cancel' && (q.status || 'pending') === 'pending' && (q.entityId === gid || (q.payload && q.payload.groupId === gid))))
+    return alert('⏳ ชุด ' + b.certNumber + ' มีคำขอยกเลิกรออนุมัติอยู่แล้ว — รอผู้อนุมัติกด 🔔'), false;
+  const reason = (prompt('🗑️ ยกเลิก 50 ทวิ รวม ' + b.certNumber + ' (' + b.size + ' ใบ · หัก ' + fmtCur(b.totalWht) + ')\nทุกบิลจะกลับเป็นไม่มี WHT (ลง JE กลับรายการ) · เลขนี้ไม่นำกลับมาใช้\n\nเหตุผลที่ยกเลิก:', '') || '').trim();
+  if(!reason) return false;
+  const pol = E.whtGroupCancelPolicy(state, gid, user);
+  const data = { groupId: gid, reason, by: user.username, at: Date.now(), jeDate: getToday() };
+  if(pol.direct){
+    if(!confirm('ยืนยันยกเลิกชุด ' + b.certNumber + ' ทันที (' + pol.why + ')?')) return false;
+    const _act = { type:'WHT_GROUP_CANCEL', data:{ ...data, directUndo:true } };
+    // verify 2: ลองกับ reducer ก่อน (reducer แจ้งเหตุเอง) — ไม่ผ่าน = ไม่ขึ้น toast ว่ายกเลิกแล้ว
+    try { if(E.reducer && E.reducer({ ...state, currentUser:user }, _act) === state) return false; } catch(_e){ return false; }
+    dispatch(_act);
+    E.toast && E.toast('🗑️ ยกเลิก 50 ทวิ รวม ' + b.certNumber + ' แล้ว', 'info');
+    return true;
+  }
+  const _sent = E.requestApprovalIfNeeded({ action:'wht_group_cancel', user, state, dispatch, silent:true,
+    context:{ entityType:'wht_group', entityId:gid, entityRef:b.certNumber, scope:'accounting', amount:b.totalWht, reason:'ยกเลิก 50 ทวิ รวม ' + b.certNumber + ' · ' + reason, payload:{ groupId:gid, invIds:b.invIds, reason } } });   // verify 2: invIds = คำขอค้างกันขอจ่าย/ตัดชุด (pendingInvChangeReq)
+  if(_sent === 'blocked') return false;
+  if(!_sent) dispatch({ type:'WHT_GROUP_CANCEL', data });
+  E.toast && E.toast((!_sent || _sent === 'gm_self') ? '🗑️ ยกเลิก 50 ทวิ รวม ' + b.certNumber + ' แล้ว' : '📤 ส่งคำขออนุมัติยกเลิก 50 ทวิ รวม ' + b.certNumber + ' แล้ว (🔔)', 'info');   // gm_self = ยกเลิกแล้ว (ไม่ใช่ส่งคำขอ)
+  return true;
+}
+
+// ================================================================
 // WHT CERTIFICATE PRINT (หนังสือรับรองการหักภาษี ณ ที่จ่าย — ม.50 ทวิ)
 // ================================================================
 // 🆕 WHT-MERGE M3: opts.mergedNote = บรรทัดเล็กใต้ตาราง "รวมใบแจ้งหนี้: …" (ใบรวมของ PV) · แบบฟอร์มเดิมทุกอย่าง
@@ -88643,6 +89290,12 @@ function printWHTCert(inv, state, opts){
     ? '<div class="internal-banner" style="border:2px solid #b91c1c;color:#b91c1c;font-weight:bold;font-size:10pt;text-align:center;padding:4px;margin:4px 0">สำเนาภายใน — รวมใน 50 ทวิ เลขที่ ' + _escI(_mInto.certNumber || '-') + ' (' + _escI(_mInto.pvNumber || 'PV') + ') ห้ามส่งผู้ขาย</div>'
       + '<div class="internal-wm" style="position:fixed;top:40%;left:0;right:0;text-align:center;transform:rotate(-30deg);font-size:64pt;color:rgba(185,28,28,0.15);font-weight:bold;pointer-events:none;z-index:50">สำเนาภายใน</div>'
     : '';
+  // 🆕 WHT_GROUP S3: พิมพ์บิลเดียวที่อยู่ในชุด 50 ทวิ รวม → สำเนาภายใน (ใบจริงคือใบรวม G)
+  const _gIn = (opts.dateInfo || opts.mergedNote || _mInto) ? null : ((_fCert && _fCert.groupId) ? _fCert : (_cAll.find(c => c.groupId) || null));
+  const _groupInternalHtml = _gIn
+    ? '<div class="internal-banner" data-testid="wht-group-internal" style="border:2px solid #b91c1c;color:#b91c1c;font-weight:bold;font-size:10pt;text-align:center;padding:4px;margin:4px 0">สำเนาภายใน — รวมใน ' + _escI(_gIn.certNumber || '-') + ' (50 ทวิ รวม ' + _escI((_gIn.group && _gIn.group.size) || '') + ' ใบ) ห้ามส่งผู้ขาย</div>'
+      + '<div class="internal-wm" style="position:fixed;top:40%;left:0;right:0;text-align:center;transform:rotate(-30deg);font-size:64pt;color:rgba(185,28,28,0.15);font-weight:bold;pointer-events:none;z-index:50">สำเนาภายใน</div>'
+    : '';
   const { WHT_CATEGORIES, WHT_SUB5_TYPES } = global.ERP;
   // 🆕 PARTY-BRANCH (verify): ผู้ถูกหัก = payeeSnapshot ของใบ 50ทวิ ที่ออกไป (ชื่อ/เลขภาษี/ที่อยู่/สาขา ชุดเดียวกัน) → snapshot PI → ทะเบียนสด
   //   🆕 UAT M1: ผู้ถูกหักหลายราย → ใบสำรองต้องเป็นของผู้ถูกหักรายเดียวกับบรรทัดที่พิมพ์ (_pk)
@@ -88660,7 +89313,9 @@ function printWHTCert(inv, state, opts){
   // 🆕 PETTY-DIRECT UAT M1: วันที่หัก/วันออกใบ = ลำดับเดียวกับรายงาน ภ.ง.ด.3/53 (mod-accounting A7)
   //   วันจ่ายจริงแรก (ผ่านอนุมัติ ไม่กลับรายการ) → cert.certDate → invDate · ใบรวม (mergedNote) ส่ง invDate ที่ถูกแล้วมาเอง
   //   🆕 WHT-DRAFT §3: ยังไม่จ่าย → วันนัดจ่าย/ครบกำหนด + ใบ "ร่าง" (helper กลาง whtDateInfo — กฎเดียวกับรายงาน)
-  const _wi = (opts.mergedNote || !inv || !inv.id) ? { date: inv && inv.invDate, draft: false, kind: 'merged' }
+  //   🆕 WHT_GROUP S3: opts.dateInfo (ใบรวมของชุด) มาก่อน shortcut ของ mergedNote — ยังไม่จ่าย = ร่าง + ลายน้ำ
+  const _wi = opts.dateInfo ? opts.dateInfo
+    : (opts.mergedNote || !inv || !inv.id) ? { date: inv && inv.invDate, draft: false, kind: 'merged' }
     : global.ERP.whtDateInfo(state, inv, _fCert || _cAll[0] || null);
   const _whtDate = _wi.date;
   // 🆕 WHT-DRAFT §3: ใบร่าง (ยังไม่จ่าย) → แถบแดงบนสุด + ลายน้ำ "ร่าง ยังไม่จ่าย" (ติดกระดาษตอนพิมพ์ — ไม่ซ่อน)
@@ -88955,7 +89610,7 @@ function printWHTCert(inv, state, opts){
   .noprint .hint { display: inline-block; margin-left: 10px; font-size: 9pt; color: #555; }
 </style></head>
 <body>
-${_draftHtml}${_internalHtml}${_row6InternalHtml}
+${_draftHtml}${_internalHtml}${_groupInternalHtml}${_row6InternalHtml}
 <div class="noprint">
   <button onclick="window.print()">🖨️ Print (A4)</button>
   <button onclick="window.close()">ปิด</button>
@@ -89175,6 +89830,42 @@ function printWHTCertMerged(pay, state, form, certNumber, popts){   // PRINT-MAR
   const win = window.open('', '_blank');
   if(!win){ alert('⛔ เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาต pop-up แล้วกดใหม่'); return html; }
   win.document.write(_pm ? _printMarkHtml(html, _pm) : html);   // PRINT-MARK: ลงทะเบียนเฉพาะเมื่อเปิดหน้าต่างได้
+  win.document.close();
+  return html;
+}
+
+// 🆕 WHT_GROUP S3: พิมพ์ใบ 50 ทวิ รวมของชุด (หลายบิล เลขเดียว) — แบบฟอร์มเดียวกับ printWHTCert (ใบสังเคราะห์แบบ printWHTCertMerged)
+//   วันที่ = whtGroupDateInfo (วันจ่ายจริง · ยังไม่จ่าย = ร่าง + ลายน้ำ) · ใต้ตาราง "รวมใบกำกับ N ใบ (a…b) — ตามใบแนบ" · หน้าถัดไป = ใบแนบรายการบิล
+function printWHTCertGroup(gid, state, popts){
+  const E = global.ERP;
+  const b = E.whtGroupBuild && E.whtGroupBuild(state, gid);
+  if(!b){ alert('⛔ ไม่พบชุด 50 ทวิ รวมนี้ (อาจถูกยกเลิกแล้ว)'); return null; }
+  const di = E.whtGroupDateInfo(state, gid);
+  const base0 = b.members[0].inv;
+  const lines = b.lines.map(l => ({ ...l, form: b.form }));
+  const cert = { certNumber: b.certNumber, form: b.form, payeeSnapshot: b.payeeSnapshot, lines, totalAmount: b.totalWht };
+  const inv = { ...base0, invDate: di.date || base0.invDate, amount: b.totalBase, whtLines: lines, whtCategory: null, whtAmount: b.totalWht,
+    whtForm: b.form, whtNumber: b.certNumber, whtCertificates: [cert], note: '' };
+  const _no = (m) => (E.invTaxInvNumbers ? E.invTaxInvNumbers(m.inv) : '') || m.inv.supTaxInvNumber || m.inv.supInvNumber || m.inv.invNumber || '';
+  const first = _no(b.members[0]), last = _no(b.members[b.members.length - 1]);
+  const note = 'รวมใบกำกับ ' + b.size + ' ใบ (' + first + (b.size > 1 ? ' … ' + last : '') + ') — ตามใบแนบ';
+  let html = printWHTCert(inv, state, { mergedNote: note, dateInfo: di, noOpen: true });
+  const esc = (x) => String(x == null ? '' : x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const f2 = (v) => (Number(v) || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const payee = (b.payeeSnapshot && b.payeeSnapshot.name) || '';
+  const rows = b.members.map((m, i) => '<tr><td style="text-align:center">' + (i + 1) + '</td><td>' + esc(m.inv.invNumber) + '</td><td>' + esc(_no(m)) + '</td><td>' + esc(m.inv.invDate ? fmtDate(m.inv.invDate) : '')
+    + '</td><td style="text-align:right">' + f2((m.cert.lines || [])[0] && m.cert.lines[0].base) + '</td><td style="text-align:right">' + f2(m.cert.whtAmount) + '</td></tr>').join('');
+  const att = '<div style="page-break-before:always;break-before:page"></div><div class="wht-group-attach" data-testid="wht-group-attach" style="font-family:sans-serif;font-size:10pt;padding:8px">'
+    + '<h3 style="margin:0 0 4px">ใบแนบหนังสือรับรองการหักภาษี ณ ที่จ่าย เลขที่ ' + esc(b.certNumber) + (di.draft ? ' (ร่าง)' : '') + '</h3>'
+    + '<div style="margin-bottom:6px">ผู้ถูกหัก: ' + esc(payee) + ' · อัตรา ' + esc(b.rate) + '% · ภ.ง.ด.' + esc(b.form) + ' · ' + b.size + ' ใบ</div>'
+    + '<table style="width:100%;border-collapse:collapse" border="1" cellpadding="3"><thead><tr><th>#</th><th>เลขที่ระบบ</th><th>เลขที่ใบกำกับ</th><th>วันที่</th><th>ฐาน</th><th>ภาษีที่หัก</th></tr></thead><tbody>'
+    + rows + '<tr style="font-weight:bold"><td colspan="4" style="text-align:right">รวม</td><td style="text-align:right">' + f2(b.totalBase) + '</td><td style="text-align:right">' + f2(b.totalWht) + '</td></tr></tbody></table></div>';
+  const k = html.lastIndexOf('</body>');
+  html = k >= 0 ? html.slice(0, k) + att + html.slice(k) : html + att;
+  if(popts && popts.noOpen) return html;
+  const win = window.open('', '_blank');
+  if(!win){ alert('⛔ เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาต pop-up แล้วกดใหม่'); return html; }
+  win.document.write(html);
   win.document.close();
   return html;
 }
@@ -95476,6 +96167,7 @@ global.ERP.registerModule('purchase', {
   PettyCashTab,
   printWHTCert,
   printWHTCertMerged,   // 🆕 WHT-MERGE M3
+  printWHTCertGroup, WhtGroupIssueModal, whtGroupCancelUI, _whgCancelHidden,   // 🆕 WHT_GROUP S3 · verify 2: _whgCancelHidden
   printPayApprovalSheet,
   printPO, printGR, printRTV, printPI, printPV, printPayCover, payCoverModel,   // 🆕 PAY-COVER B1
   printEcountPV,                // 🆕 PV-A5 (P2): ใบสำคัญจ่ายของบิลที่จ่ายใน Ecount (รวมตามเลขใบจ่าย)
@@ -102632,6 +103324,37 @@ function VoidedWHTReport({ state }){
   );
 }
 
+// 🆕 WHT_GROUP S3 (§5): แถบพับได้ "🧾 ใบ 50 ทวิ รวม (ชุด)" ในแท็บ WHT — เลข · ผู้ขาย · N · ΣWHT · สถานะ · [🖨️][🗑️ ยกเลิกชุด][💰 ขอจ่ายทั้งชุด]
+function WhtGroupStrip({ state, dispatch, user, sets, onPay }){
+  const P = global.ERP.MODULES.purchase || {};
+  const [open, setOpen] = useState(true);
+  const canAct = !!user && (isSuperUser(user) || hasPerm(user, 'accounting', 'wht', 'create'));
+  const canPay = !!user && (isSuperUser(user) || hasPerm(user, 'purchase', 'payment', 'create'));   // เหมือนปุ่ม 📋 ขออนุมัติจ่าย ในรอจ่าย
+  const tone = { 'รออนุมัติ':'bg-amber-100 text-amber-800', 'รออนุมัติยกเลิก':'bg-red-100 text-red-800', 'ร่าง':'bg-gray-100 text-gray-700', 'ขอจ่ายแล้ว':'bg-sky-100 text-sky-800', 'จ่ายแล้ว':'bg-green-100 text-green-800' };
+  return h('div', { className:'bg-white rounded-lg shadow mb-3 border border-indigo-200', 'data-testid':'wht-group-strip' },
+    h('button', { onClick:() => setOpen(!open), className:'w-full text-left px-3 py-2 text-sm font-medium text-indigo-900 flex justify-between' },
+      h('span', null, '🧾 ใบ 50 ทวิ รวม (ชุด) · ', sets.length, ' ชุด'), h('span', { className:'text-xs text-gray-500' }, open ? '▲ ซ่อน' : '▼ แสดง')),
+    open && h('div', { className:'overflow-x-auto border-t' }, h('table', { className:'w-full text-xs' },
+      h('thead', { className:'bg-indigo-50' }, h('tr', null, ['เลข 50 ทวิ', 'ผู้ขาย', 'ใบ', 'อัตรา', 'WHT รวม', 'วันที่', 'สถานะ', ''].map((t, i) => h('th', { key:i, className:'px-2 py-1 ' + (i === 4 ? 'text-right' : 'text-left') }, t)))),
+      h('tbody', { className:'divide-y' }, sets.map(x => {
+        const pendPay = x.status === 'ขอจ่ายแล้ว' || x.status === 'จ่ายแล้ว' || !!x.cancelReqId;
+        return h('tr', { key:x.gid, 'data-testid':'wht-group-row', 'data-gid':x.gid },
+          h('td', { className:'px-2 py-1 font-mono text-pink-700 font-semibold' }, x.b.certNumber),
+          h('td', { className:'px-2 py-1' }, (x.sup && x.sup.name) || '-'),
+          h('td', { className:'px-2 py-1' }, x.b.size),
+          h('td', { className:'px-2 py-1' }, (x.b.rate || 0) + '% · ภ.ง.ด.' + (x.b.form || '')),
+          h('td', { className:'px-2 py-1 text-right font-mono font-bold' }, fmtCur(x.b.totalWht)),
+          h('td', { className:'px-2 py-1' }, x.di && x.di.date ? fmtDate(x.di.date) : '-', x.di && x.di.draft && h('span', { className:'ml-1 text-[10px] text-red-700' }, '(ร่าง)')),
+          h('td', { className:'px-2 py-1' }, h('span', { className:'px-1.5 py-0.5 rounded ' + (tone[x.status] || '') }, x.status)),
+          h('td', { className:'px-2 py-1 whitespace-nowrap space-x-1' },
+            !x.reqId && P.printWHTCertGroup && h('button', { onClick:() => P.printWHTCertGroup(x.gid, state), title:'พิมพ์ใบ 50 ทวิ รวม + ใบแนบ', className:'px-2 py-0.5 bg-indigo-600 text-white rounded', 'data-testid':'wht-group-print' }, '🖨️'),
+            !x.reqId && canAct && !pendPay && P.whtGroupCancelUI && h('button', { onClick:() => P.whtGroupCancelUI(state, dispatch, user, x.gid), className:'px-2 py-0.5 border border-red-300 text-red-700 rounded', 'data-testid':'wht-group-cancel' }, '🗑️ ยกเลิกชุด'),
+            !x.reqId && canPay && !pendPay && h('button', { onClick:() => onPay(x.b.invIds), className:'px-2 py-0.5 bg-emerald-600 text-white rounded', 'data-testid':'wht-group-pay' }, '💰 ขอจ่ายทั้งชุด'),
+            (x.reqId || x.cancelReqId) && h('span', { className:'text-[10px] text-amber-700', 'data-testid': x.cancelReqId ? 'wht-group-cancel-pending' : undefined }, x.cancelReqId ? '⏳ รออนุมัติยกเลิกชุด (🔔)' : '⏳ รอผู้อนุมัติกด 🔔')));
+      }))))
+  );
+}
+
 function WHTReport({ state, dispatch, user }){
   const dr = useDateRange(90);
   // 🆕 TODO-DEEPLINK: scope acct.wht รับ focus.period ('YYYY-MM') → ตั้งช่วงวันเป็นเดือนนั้น (รายงานนี้เป็นรายบรรทัด ไม่มีแถวงวด)
@@ -102642,6 +103365,37 @@ function WHTReport({ state, dispatch, user }){
   const purchaseMod = global.ERP.MODULES.purchase;
   const printWHT = purchaseMod?.printWHTCert;
   const { WHT_CATEGORIES, WHT_SUB5_TYPES } = global.ERP;
+  // 🆕 WHT_GROUP S3 (§5): ออก 50 ทวิ รวมหลายใบ + แถบชุด + toggle รวมแถวตามใบ (D8 ค่าเริ่มปิด)
+  const E = global.ERP;
+  const canGroup = !!user && (isSuperUser(user) || hasPerm(user, 'accounting', 'wht', 'create'));
+  const [showGroupNew, setShowGroupNew] = useState(false);
+  const [groupView, setGroupView] = useState(false);
+  const [grpPay, setGrpPay] = useState(null);   // invIds ของชุดที่กด 💰 ขอจ่ายทั้งชุด
+  const whtSets = useMemo(() => {
+    const seen = new Set(), out = [];
+    for(const inv of (state.invoices || [])) for(const c of ((inv && inv.whtCertificates) || [])){
+      if(!c || c.voided || !c.groupId || seen.has(c.groupId)) continue;
+      seen.add(c.groupId);
+      const di = E.whtGroupDateInfo(state, c.groupId);
+      // 🆕 UAT S1: แถบชุดแสดงเฉพาะชุดที่ยังไม่จ่าย หรือวันที่ชุดอยู่ในช่วงวันที่ที่เลือก (ชุดเก่าจ่ายแล้วเดือนอื่นไม่ต้องสร้างใหม่ทุกครั้ง)
+      if(di.kind === 'paid' && !inDateRange(di.date, dr.startDate, dr.endDate)) continue;
+      const b = E.whtGroupBuild(state, c.groupId); if(!b) continue;
+      const sup = (state.suppliers || []).find(x => x && x.id === b.supplierId);
+      // verify 2: คำขอยกเลิกชุดค้าง → สถานะ 'รออนุมัติยกเลิก' (ซ่อนปุ่มจ่าย/ยกเลิก — กันขอซ้ำ/ขอจ่ายทับ)
+      const _cx = (state.approvalRequests || []).find(q => q && q.action === 'wht_group_cancel' && (q.status || 'pending') === 'pending'
+        && (q.entityId === c.groupId || (q.payload && q.payload.groupId === c.groupId)));
+      out.push({ gid:c.groupId, b, di, sup, cancelReqId: _cx ? _cx.id : null,
+        status: di.kind === 'paid' ? 'จ่ายแล้ว' : _cx ? 'รออนุมัติยกเลิก' : di.kind === 'scheduled' ? 'ขอจ่ายแล้ว' : 'ร่าง' });
+    }
+    // คำขอออกชุดที่ยังรออนุมัติ (ยังไม่มี cert)
+    for(const q of (state.approvalRequests || [])){
+      if(!q || q.action !== 'wht_group_issue' || q.status !== 'pending' || seen.has(q.entityId)) continue;
+      const pl = q.payload || {}; seen.add(q.entityId);
+      out.push({ gid:q.entityId, b:{ certNumber:'—', size:(pl.invIds || []).length, totalWht:Number(pl.totalWht) || 0, rate:pl.rate, form:pl.form }, di:null,
+        sup:(state.suppliers || []).find(x => x && x.id === pl.supplierId), status:'รออนุมัติ', reqId:q.id });
+    }
+    return out.sort((a, b) => String(b.b.certNumber).localeCompare(String(a.b.certNumber)));
+  }, [state.invoices, state.payments, state.approvalRequests, state.suppliers, dr.startDate, dr.endDate]);
 
   // 🆕 A7: WHT ยื่น ภ.ง.ด.3/53 ตาม "วันจ่ายจริง/วันที่หัก" ไม่ใช่ invDate
   //   หน้าที่หัก ณ ที่จ่าย เกิดเมื่อจ่ายเงิน → วันหัก = วันออกใบรับรอง (cert.certDate) → วันจ่ายแรก → invDate (fallback)
@@ -102649,6 +103403,7 @@ function WHTReport({ state, dispatch, user }){
   // Flatten: each WHT line → one row (for INVs with multi-line WHT)
   const rows = useMemo(() => {
     const result = [];
+    const _gdi = new Map();   // 🆕 WHT_GROUP UAT S1: cache whtGroupDateInfo ต่อ groupId (ชุด 59 ใบ = สแกน PV ครั้งเดียว ไม่ใช่ 59 ครั้ง)
     const invs = (state.invoices||[])
       .filter(i => !i.voided && (i.whtAmount||0) > 0);   // 🆕 A7: กรองด้วยวันหักราย-line ด้านล่าง (ไม่ pre-filter invDate)
     for(const i of invs){
@@ -102676,7 +103431,7 @@ function WHTReport({ state, dispatch, user }){
         }
         // 🆕 A7: เดือนยื่นผูก "วันจ่ายจริง" เป็นหลัก (immutable) → certDate (retro แก้ได้ไม่ให้ override เดือน) → invDate
         //   🆕 WHT-DRAFT: ยังไม่จ่าย → วันนัดจ่าย (ร่าง) · pending = กฎเดิม (!จ่ายจริง && !certDate) → ยอดยื่นไม่เปลี่ยน
-        const wi = global.ERP.whtDateInfo(state, i, cert || null);
+        const wi = global.ERP.whtDateInfo(state, i, cert || null, _gdi);   // UAT S1: คิดวันที่ชุดครั้งเดียวต่อ groupId
         const whtDate = wi.date || i.invDate;
         if(!inDateRange(whtDate, dr.startDate, dr.endDate)) return;
         const pending = wi.pending, whtKind = wi.kind;   // ยังไม่จ่ายจริง+ไม่มีวันบนใบรับรอง (ยังไม่ถึงกำหนดยื่น)
@@ -102706,27 +103461,43 @@ function WHTReport({ state, dispatch, user }){
           origCertNumber, mergedInto,   // 🆕 WHT-MERGE M3
           certMatched: !!cert,      // 🆕 verify 2: แถวนี้จับคู่ใบรับรองจริง (ไม่ใช่เลข whtNumber สำรอง)
           whtDate, pending, whtKind,   // 🆕 A7 · WHT-DRAFT
+          groupId: (cert && cert.groupId) || '', groupSize: (cert && cert.groupId && cert.group && cert.group.size) || 0,   // 🆕 WHT_GROUP S3
         });
       });
     }
     return result.sort((a,b) => (b.whtDate||'').localeCompare(a.whtDate||''));
   }, [state.invoices, state.suppliers, state.payments, dr.startDate, dr.endDate]);
-  const pg = usePaged(rows, 50);
+  // 🆕 WHT_GROUP S3 (D8): toggle "รวมแถวตามใบ 50 ทวิ" — บิลในชุดยุบเหลือแถวเดียวต่อใบ (ฐาน/WHT รวม) · ปิด = เหมือนเดิมทุกอย่าง
+  const viewRows = useMemo(() => {
+    if(!groupView) return rows;
+    const out = [], at = new Map();
+    for(const r of rows){
+      if(!r.groupId){ out.push(r); continue; }
+      const k = r.groupId + '|' + r.form;
+      if(at.has(k)){ const g = at.get(k); g.base = Number((g.base + r.base).toFixed(2)); g.whtAmount = Number((g.whtAmount + r.whtAmount).toFixed(2)); g.groupInvs.push(r.inv); continue; }
+      const g = { ...r, groupRow: true, groupInvs: [r.inv], idx: 0, totalLines: 1 };
+      at.set(k, g); out.push(g);
+    }
+    return out;
+  }, [rows, groupView]);
+  const pg = usePaged(viewRows, 50);
 
   // 🆕 A7: "ยอดสำหรับยื่น" นับเฉพาะแถวที่หักจริงแล้ว (จ่าย/มีใบรับรอง) — pending (ยังไม่จ่าย) ยังไม่มีภาระนำส่ง กันยื่นเกิน/ซ้ำ
   const filingRows = rows.filter(r => !r.pending);
+  const filingViewRows = viewRows.filter(r => !r.pending);   // 🆕 WHT_GROUP S3: CSV ตาม toggle (ยอดรวมเท่าเดิม)
   const totalWHT = filingRows.reduce((s,r) => s + r.whtAmount, 0);
   const totalBase = filingRows.reduce((s,r) => s + r.base, 0);
   const uniqueInvs = new Set(filingRows.map(r => r.inv.id));
 
   const doExport = () => {
     const out = [['#','เลข WH','INV ระบบ','INV Sup','📄 Tax INV','วันหัก ณ ที่จ่าย','Supplier','เลขผู้เสียภาษี','สาขาที่','ประเภทเงินได้','ท.ป.4/2528','ฐาน','อัตรา %','WHT','ภ.ง.ด.']];
-    filingRows.forEach((r, idx) => {   // 🆕 A7: ยื่นเฉพาะที่หักจริง — ไม่รวม pending
+    filingViewRows.forEach((r, idx) => {   // 🆕 A7: ยื่นเฉพาะที่หักจริง — ไม่รวม pending · WHT_GROUP S3: toggle เปิด = 1 แถวต่อใบรวม
+      const _gi = r.groupRow ? r.groupInvs : null;
       out.push([idx+1,
         r.certNumber,
-        r.inv.invNumber || '',
-        r.inv.supInvNumber || '',
-        (global.ERP.invTaxInvNumbers ? global.ERP.invTaxInvNumbers(r.inv) : '') || r.inv.supTaxInvNumber || '',   // 🆕 MULTI-TAXINV เลขทุกใบ
+        _gi ? 'รวม ' + _gi.length + ' ใบ' : (r.inv.invNumber || ''),
+        _gi ? '' : (r.inv.supInvNumber || ''),
+        _gi ? '' : ((global.ERP.invTaxInvNumbers ? global.ERP.invTaxInvNumbers(r.inv) : '') || r.inv.supTaxInvNumber || ''),   // 🆕 MULTI-TAXINV เลขทุกใบ
         r.whtDate || r.inv.invDate || '',   // 🆕 A7: วันที่หัก ณ ที่จ่าย (ยื่นตามวันนี้)
         r.pp.supName,
         _xlText(r.pp.taxId),
@@ -102767,9 +103538,16 @@ function WHTReport({ state, dispatch, user }){
         'สำหรับยื่น ภ.ง.ด. 3 / 53 · INV ที่มีหลายรายการหัก จะแสดงหลายแถว · ',
         h('b', null, 'INV ระบบ'), ' = เลขของเราเอง · ',
         h('b', null, 'เลข WH'), ' = เลขใบรับรอง'),
-      h('button', { onClick:doExport, className:'px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded text-sm font-medium' },
-        '📥 Export CSV')
+      h('div', { className:'flex items-center gap-2' },
+        // 🆕 WHT_GROUP S3: toggle รวมแถว (D8 ค่าเริ่มปิด) + ปุ่มออกชุด (D6 สวิตช์ปิด = ซ่อนปุ่ม)
+        whtSets.length > 0 && h('label', { className:'text-xs flex items-center gap-1 cursor-pointer', 'data-testid':'wht-group-toggle' },
+          h('input', { type:'checkbox', checked:groupView, onChange:e => setGroupView(e.target.checked) }), 'รวมแถวตามใบ 50 ทวิ'),
+        canGroup && E.whtGroupEnabled(state) && E.MODULES.purchase?.WhtGroupIssueModal && h('button', { onClick:() => { if(!(E.restoreMinimized && E.restoreMinimized('whtGroup:new'))) setShowGroupNew(true); },
+          className:'px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm font-medium', 'data-testid':'wht-group-new' }, '➕ ออก 50 ทวิ รวมหลายใบ'),
+        h('button', { onClick:doExport, className:'px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded text-sm font-medium' },
+          '📥 Export CSV'))
     ),
+    whtSets.length > 0 && h(WhtGroupStrip, { state, dispatch, user, sets:whtSets, onPay:(ids) => setGrpPay(ids) }),
 
     rows.length === 0
       ? h('div', { className:'bg-white rounded-lg shadow p-8 text-center text-gray-500' },
@@ -102798,7 +103576,7 @@ function WHTReport({ state, dispatch, user }){
                   const idx = pg.from - 1 + _i;   // ลำดับจริงในชุดเต็ม (กันเลขแถว/การจับกลุ่มเพี้ยน)
                   const formTag = `ภ.ง.ด.${r.form}`;
                   // grouping: continued = บรรทัดเดียวกับก่อนหน้า (ถ้า cert เดียวกัน)
-                  const prev = rows[idx-1];
+                  const prev = viewRows[idx-1];   // WHT_GROUP S3: ตาม toggle
                   const sameInv = prev && prev.inv.id === r.inv.id;
                   const sameCert = prev && prev.certNumber === r.certNumber;
                   // 🆕 แถวแรกของแต่ละหน้าต้องแสดงข้อมูลเต็ม ไม่ใช่ '↳ ต่อจากแถวก่อน' (แถวนั้นอยู่คนละหน้า)
@@ -102811,9 +103589,13 @@ function WHTReport({ state, dispatch, user }){
                       // 🆕 WHT-MERGE M3: บรรทัดของใบที่รวมอยู่ใน 50 ทวิ รวม
                       !isContinued && r.mergedInto && h('div', { className:'text-[10px] font-normal text-teal-700 whitespace-nowrap', 'data-testid':'wht-report-merged',
                         title:'รวมอยู่ในใบ 50 ทวิ ' + r.certNumber + ' (' + (r.mergedInto.pvNumber || 'PV') + ') · ใบเดิมของใบแจ้งหนี้นี้ ' + r.origCertNumber },
-                        '🧾 รวม · ', r.mergedInto.pvNumber || '', r.origCertNumber !== r.certNumber ? ' · เดิม ' + r.origCertNumber : '')),
+                        '🧾 รวม · ', r.mergedInto.pvNumber || '', r.origCertNumber !== r.certNumber ? ' · เดิม ' + r.origCertNumber : ''),
+                      // 🆕 WHT_GROUP S3: บิลในชุด 50 ทวิ รวม (หลายบิล เลขเดียว)
+                      !isContinued && r.groupId && h('div', { className:'text-[10px] font-normal text-indigo-700 whitespace-nowrap', 'data-testid':'wht-report-group',
+                        title:'อยู่ใน 50 ทวิ รวม ' + r.certNumber + ' (' + (r.groupSize || '') + ' ใบ) — วันที่ = วันจ่ายจริงของชุด' },
+                        '🧾 ชุด·', r.groupRow ? r.groupInvs.length : (r.groupSize || ''))),
                     h('td', { className:'px-2 py-1.5 font-mono text-xs text-blue-700' },
-                      isContinued ? h('span', { className:'text-gray-400' }, '↳') : r.inv.invNumber,
+                      isContinued ? h('span', { className:'text-gray-400' }, '↳') : r.groupRow ? h('span', { title:r.groupInvs.map(x => x.invNumber).join(', ') }, 'รวม ' + r.groupInvs.length + ' ใบ') : r.inv.invNumber,
                       r.totalLines > 1 && !isContinued && h('span', {
                         className:'ml-1 text-[10px] bg-indigo-100 text-indigo-700 rounded px-1' },
                         `${r.idx+1}/${r.totalLines}`)),
@@ -102827,7 +103609,9 @@ function WHTReport({ state, dispatch, user }){
                                 ? h('span', { className:'text-orange-600' }, '⏳')
                                 : h('span', { className:'text-gray-400' }, '-'))) })),
                     // 🆕 WHT-DRAFT §3: แถวที่ยังไม่จ่าย → วันนัดจ่าย/ครบกำหนด + ป้าย + วันที่ INV ตัวเทา (แถวจ่ายแล้วคงเดิม)
-                    h('td', { className:'px-2 py-1.5 text-xs' }, isContinued ? '' : (!r.pending || r.whtKind === 'inv') ? fmtDate(r.inv.invDate)   // UAT S1: kind inv (ใบเก่า/ยกมา/ตัดมัดจำ) ไม่ใส่ป้าย — หลายใบจ่ายแล้ว
+                    h('td', { className:'px-2 py-1.5 text-xs' }, isContinued ? '' : (r.groupId && !r.pending) ? h('div', { 'data-testid':'wht-rpt-group-date' }, fmtDate(r.whtDate),   // 🆕 WHT_GROUP S3: ชุด = วันจ่ายจริงของชุด
+                        !r.groupRow && r.whtDate !== r.inv.invDate && h('div', { className:'text-[10px] text-gray-400' }, 'INV ', fmtDate(r.inv.invDate)))
+                      : (!r.pending || r.whtKind === 'inv') ? fmtDate(r.inv.invDate)   // UAT S1: kind inv (ใบเก่า/ยกมา/ตัดมัดจำ) ไม่ใส่ป้าย — หลายใบจ่ายแล้ว
                       : h('div', { 'data-testid':'wht-rpt-pending-date' }, fmtDate(r.whtDate),
                           h('span', { className:'ml-1 text-[10px] px-1 rounded ' + (r.whtKind === 'scheduled' ? 'bg-sky-100 text-sky-800' : r.whtKind === 'due' ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-700') },
                             r.whtKind === 'scheduled' ? '📅 นัดจ่าย' : r.whtKind === 'due' ? 'ครบกำหนด' : 'ร่าง'),
@@ -102853,6 +103637,7 @@ function WHTReport({ state, dispatch, user }){
                     h('td', { className:'px-2 py-1.5 text-center' },
                       !isContinued && printWHT && h('button', {
                         onClick:()=>{   // 🆕 WHT-MERGE M3: ใบสมาชิก → พิมพ์ใบรวมของ PV
+                          if(r.groupId && purchaseMod?.printWHTCertGroup) return purchaseMod.printWHTCertGroup(r.groupId, state);   // 🆕 WHT_GROUP S3: บิลในชุด → ใบรวม + ใบแนบ
                           const _mp = r.mergedInto && (state.payments||[]).find(p => p && p.id === r.mergedInto.payId);
                           if(_mp && _mp.whtMerge && purchaseMod?.printWHTCertMerged) return purchaseMod.printWHTCertMerged(_mp, state, r.form, r.mergedInto.certNumber || r.certNumber || null);
                           printWHT(r.inv, state, r.form ? { form: r.form, certNumber: r.certMatched ? (r.origCertNumber || null) : null } : undefined); },   // (verify 2) ส่งเลขเฉพาะแถวที่จับคู่ใบรับรองจริง ห้ามส่ง whtNumber สำรอง   // 🆕 verify: พิมพ์เฉพาะใบของแบบในแถวนี้
@@ -102860,7 +103645,7 @@ function WHTReport({ state, dispatch, user }){
                         className:'px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-medium'
                       }, '🖨️'),
                       // 🆕 WHT-PAYEE WP6: ✏️ แก้ชื่อผู้ถูกหัก (ใบเดี่ยวที่จับคู่ได้ · งวดยังไม่ยื่น)
-                      !isContinued && r.certMatched && !r.mergedInto && global.ERP.WhtCertPayeeEditBtn && h('div', { className:'mt-1' },
+                      !isContinued && r.certMatched && !r.mergedInto && !r.groupId && global.ERP.WhtCertPayeeEditBtn && h('div', { className:'mt-1' },
                         h(global.ERP.WhtCertPayeeEditBtn, { state, dispatch, user, inv: r.inv, testid: 'whtr-wcpe',
                           cert: (r.inv.whtCertificates || []).find(c => c && !c.voided && c.certNumber === r.origCertNumber) || null })),
                       // 🆕 WHT-PAYEE WP8: ใบแบบเก่า (ไม่มี whtCertificates) → ปุ่มเดียวกัน ใช้ใบที่สร้างจากข้อมูลเดิม (บันทึกแล้วกลายเป็นใบจริง)
@@ -102880,7 +103665,9 @@ function WHTReport({ state, dispatch, user }){
           ),
           h(Pager, { pg, label:'บรรทัด WHT' })
         ),
-    tx.modal
+    tx.modal,
+    showGroupNew && E.MODULES.purchase?.WhtGroupIssueModal && h(E.MODULES.purchase.WhtGroupIssueModal, { state, dispatch, user, onClose:() => setShowGroupNew(false) }),
+    grpPay && h(BulkRequestPayModal, { invIds:grpPay, state, dispatch, user, onClose:() => setGrpPay(null), onDone:() => setGrpPay(null) })
   );
 }
 
@@ -105805,7 +106592,7 @@ function _payShiftRows(state, pays, payDate){
   const seen = new Set(), out = [];
   (pays || []).forEach(p => {
     const ids = _payMembers(state, p).map(m => m.inv && m.inv.id).filter(Boolean);
-    global.ERP.whtPayMonthShift(state, ids, payDate, p.requestedPayDate || p.payDate || '').forEach(r => { if(!seen.has(r.invId)){ seen.add(r.invId); out.push(r); } });
+    global.ERP.whtPayMonthShift(state, ids, payDate, p.requestedPayDate || p.payDate || '').forEach(r => { const k = r.groupId || r.invId; if(!seen.has(k)){ seen.add(k); out.push(r); } });   // 🆕 WHT_GROUP S2: ชุด = แถวเดียว
   });
   return out;
 }
@@ -108095,8 +108882,23 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   // 🎯 UAT ชุด 1 M3: ตัดใบที่มีคำขอจ่ายรออนุมัติอยู่แล้ว / จ่ายแล้ว / ยกเลิกแล้ว (เครื่องอื่นขอไปก่อน หรือติ๊กค้าง) — กันคำขอจ่ายซ้ำ
   const _pendPayIds = new Set();
   for(const p of (state.payments||[])){ if(p && p.approvalStatus === 'pending') for(const x of _payInvIds(p)) _pendPayIds.add(x); }
-  const invsAll = (state.invoices||[]).filter(i => invIds.includes(i.id) && !i.voided && i.paymentStatus !== 'paid' && !_pendPayIds.has(i.id));
-  const skippedPend = invIds.length - invsAll.length;
+  // 🆕 WHT_GROUP S2: ติ๊กบิลในชุด 50 ทวิ รวม = ขอจ่ายทั้งชุด (ขยายให้ครบทุกใบ) · ใบใดในชุดติดเหตุ → ตัดทั้งชุดออก (reducer ปฏิเสธจ่ายแยกอยู่แล้ว)
+  const _wgOf = (i) => (global.ERP.whtGroupOfInv && global.ERP.whtGroupOfInv(i)) || null;
+  const invIdsX = (() => { const out = invIds.slice();
+    for(const id of invIds){ const c = _wgOf((state.invoices||[]).find(i => i && i.id === id)); if(c) for(const m of global.ERP.whtGroupMembers(state, c.groupId)) if(!out.includes(m.inv.id)) out.push(m.inv.id); }
+    return out; })();
+  const invsAll0 = (state.invoices||[]).filter(i => invIdsX.includes(i.id) && !i.voided && i.paymentStatus !== 'paid' && !_pendPayIds.has(i.id));
+  const wgCut = [];   // ชุดที่ตัดออกทั้งชุด [{ certNumber, size, why }]
+  const invsAll = invsAll0.filter(i => { const c = _wgOf(i); if(!c) return true;
+    const ms = global.ERP.whtGroupMembers(state, c.groupId);
+    const bad = ms.find(m => !invsAll0.some(x => x.id === m.inv.id) || pendingInvChange(state, m.inv.id));
+    if(!bad) return true;
+    if(!wgCut.some(w => w.groupId === c.groupId)) wgCut.push({ groupId:c.groupId, certNumber:c.certNumber, size:ms.length, why:(bad.inv.invNumber || bad.inv.id) + (pendingInvChange(state, bad.inv.id) ? ' มีคำขอแก้รออนุมัติ' : ' จ่ายแล้ว/มีคำขอจ่ายค้าง') });
+    return false; });
+  const wgIds = new Set(invsAll.filter(i => _wgOf(i)).map(i => i.id));
+  const wgList = (() => { const m = {}; for(const i of invsAll){ const c = _wgOf(i); if(c){ (m[c.groupId] = m[c.groupId] || { certNumber:c.certNumber, invs:[] }).invs.push(i); } } return Object.values(m); })();
+  const _wgCutIds = new Set(wgCut.flatMap(w => global.ERP.whtGroupMembers(state, w.groupId).map(m => m.inv.id)));
+  const skippedPend = invIdsX.filter(id => !invsAll0.some(i => i.id === id) && !_wgCutIds.has(id)).length;
   // 🆕 ใบที่มีคำขอปรับ VAT / แก้ไข INV รออนุมัติ (อาจถูกส่งหลังติ๊กเลือกในคิว) → โชว์แถวปิดไว้ ไม่รวมยอด ไม่ส่งคำขอจ่าย (ไม่ตัดทิ้งเงียบ ๆ)
   const heldByChange = (i) => pendingInvChange(state, i.id);
   const invs = invsAll.filter(i => !heldByChange(i));
@@ -108118,11 +108920,15 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   const tagSel = tagPick.touched ? tagPick.tags : invTagInfo.tags;
   const setTagSel = (x) => setTagPick({ touched:true, tags:x || [] });
   const tagFields = tagSel.length ? global.ERP.docTagFields(tagSel) : {};
-  const [amounts, setAmounts] = useState(() => {
+  const [amounts0, setAmounts] = useState(() => {
     const m = {};
     for(const i of invs) m[i.id] = (i.netPayable||0) - (i.paidAmount||0);
     return m;
   });
+  // 🆕 WHT_GROUP S2: บิลในชุด = ล็อกยอดเต็มเสมอ (แก้ช่องยอดไม่ได้)
+  const amounts = (() => { if(!wgIds.size) return amounts0; const m = { ...amounts0 };
+    for(const i of invs) if(wgIds.has(i.id)) m[i.id] = Number(((i.netPayable||0) - (i.paidAmount||0)).toFixed(2));
+    return m; })();
   // verify: หน้าต่างนี้ย่อค้างได้ (ยังอยู่) → บิลที่ติ๊กเพิ่มระหว่างย่อ ต้องได้ยอดค้างตั้งต้น (เดิม 0 → ถูกข้ามเงียบ)
   useEffect(() => {
     setAmounts(prev => { let ch = false; const m = { ...prev };
@@ -108135,7 +108941,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   const banks = state.bankAccounts || [];
   // 🆕 DEPOSIT-VAT E-5 R8: ใบมัดจำ (DP) / paymentBlock / vatConflict ค้าง → จ่ายผ่าน "ขออนุมัติจ่าย" เท่านั้น (ซ่อนเงินสดย่อย · reducer ADD_PAY ปฏิเสธซ้ำ)
   //   🆕 EXPENSE_PO P10.1: ใบผูกสัญญา / จาก PO ค่าบริการ / คืนเงินประกันผลงาน → ห้ามเงินสดย่อย (ERP.pettyDenyInv · reducer ADD_PAY ปฏิเสธซ้ำ)
-  const pettyForbid = invs.filter(i => i.type === 'deposit_pi' || !!i.paymentBlock || !!(i.vatConflict && !i.vatConflict.resolvedAt) || !!(global.ERP.pettyDenyInv && global.ERP.pettyDenyInv(i)));
+  const pettyForbid = invs.filter(i => wgIds.has(i.id) || i.type === 'deposit_pi' || !!i.paymentBlock || !!(i.vatConflict && !i.vatConflict.resolvedAt) || !!(global.ERP.pettyDenyInv && global.ERP.pettyDenyInv(i)));
   const canPetty = !pettyForbid.length && (hasPerm(user, 'accounting', 'payment', 'create') || hasPerm(user, 'accounting', 'payApprove', 'approve') || isSuperUser(user));
   const allIntendPetty = invs.length > 0 && invs.every(i => i.payMethod === 'petty_cash');
   const [paySource, setPaySource] = useState(() => (canPetty && allIntendPetty) ? 'petty' : 'bank');
@@ -108155,15 +108961,15 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
   const supNameOf = (sid, i) => ((state.suppliers||[]).find(s => s.id === sid) || {}).name || (i && i.supplierNameFreeform) || sid || '-';
   const _groupable = (() => { const c = {}; for(const i of invs) if(i.supplierId) c[i.supplierId] = (c[i.supplierId]||0) + 1; return Object.values(c).some(n => n > 1); })();
   const bankGroups = (() => {
-    if(isPetty || !groupBySup) return [];
+    if(isPetty) return [];
     const m = {};
-    for(const i of invs){ const amt = Number(amounts[i.id])||0; if(amt <= 0 || !i.supplierId) continue; (m[i.supplierId] = m[i.supplierId] || []).push({ inv:i, amt }); }
+    for(const i of invs){ const amt = Number(amounts[i.id])||0; if(amt <= 0 || !i.supplierId || !(groupBySup || wgIds.has(i.id))) continue; (m[i.supplierId] = m[i.supplierId] || []).push({ inv:i, amt }); }   // WHT_GROUP S2: ชุด = PV เดียวเสมอ
     return Object.entries(m).filter(([, l]) => l.length > 1)
       .map(([sid, l]) => ({ supplierId:sid, name: supNameOf(sid, l[0].inv), items:l, total: Number(l.reduce((s,x) => s + x.amt, 0).toFixed(2)) }));
   })();
   // 🆕 WHT-MERGE M2: กลุ่ม PV รวมที่มี ≥2 ใบหัก ณ ที่จ่าย → ติ๊กรวม 50 ทวิ เป็นใบเดียวต่อผู้ขาย (ค่าเริ่ม ติ๊ก · เก็บ whtMergeWanted บนคำขอรวม · รวมจริงตอนอนุมัติ)
   const [whtMergeWanted, setWhtMergeWanted] = useState(true);
-  const _whtN = (l) => l.filter(x => (Number(x.inv.whtAmount) || 0) > 0).length;
+  const _whtN = (l) => l.filter(x => (Number(x.inv.whtAmount) || 0) > 0 && !wgIds.has(x.inv.id)).length;   // WHT_GROUP S2: บิลในชุดมีใบรวมของตัวเองแล้ว
   const whtMergeGroups = bankGroups.filter(g => _whtN(g.items) >= 2);
   // 🆕 UAT N5: ป้ายสาขาภาษีของผู้ขาย (ศูนย์การค้าหลายสาขาเลขภาษีเดียวกัน) · ว่าง → เตือนให้ตรวจทะเบียนก่อนรวม
   const _wmSupBr = (sid) => { const sp = (state.suppliers||[]).find(s => s.id === sid); return (sp && partyBranchLabel(sp) !== 'สาขา ไม่ระบุ') ? partyBranchLabel(sp) : '⚠️ สาขา ไม่ระบุ — ตรวจทะเบียนผู้ขายก่อน'; };
@@ -108285,9 +109091,10 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         ...tagFields,   // 🆕 PAY-TAGS T2: ทุกคำขอในรอบนี้ (PV รวม + เดี่ยว) แท็กเดียวกัน
         ...extra,
       });
+      const _wgPayDeny = (d) => { try { return (global.ERP.whtGroupPayDeny && global.ERP.whtGroupPayDeny(state, d)) || ''; } catch(_e){ return ''; } };
       const bySup = {}; const singles = [];
       for(const it of bankItems){
-        if(groupBySup && it.inv.supplierId) (bySup[it.inv.supplierId] = bySup[it.inv.supplierId] || []).push(it);
+        if((groupBySup || wgIds.has(it.inv.id)) && it.inv.supplierId) (bySup[it.inv.supplierId] = bySup[it.inv.supplierId] || []).push(it);   // WHT_GROUP S2: ชุด = PV เดียวเสมอ
         else singles.push(it);
       }
       for(const [sid, items] of Object.entries(bySup)){
@@ -108295,13 +109102,19 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         const gTotal = Number(items.reduce((s,x) => s + x.amt, 0).toFixed(2));
         // record คำขอรวม (วางบิล): invId:null · supplierId เดียว · invoiceIds[] · allocations[{invoiceId, amount}] · amount = Σ allocations (reducer ADD_PAY ตรวจ Σ + supplier เดียว)
         const _wm = whtMergeWanted && _whtN(items) >= 2 ? { whtMergeWanted: true } : {};   // 🆕 WHT-MERGE M2
-        dispatch({ type:'ADD_PAY', data: mkPay({ invId:null, supplierId:sid,
-          invoiceIds: items.map(x => x.inv.id), allocations: items.map(x => ({ invoiceId:x.inv.id, amount:x.amt })), amount: gTotal, ..._wm }) });
+        const _gPay = mkPay({ invId:null, supplierId:sid,
+          invoiceIds: items.map(x => x.inv.id), allocations: items.map(x => ({ invoiceId:x.inv.id, amount:x.amt })), amount: gTotal, ..._wm });
+        const _gDeny = _wgPayDeny(_gPay);   // verify 2: ด่านชุด 50 ทวิ รวม (ตัวเดียวกับ reducer) — ไม่ผ่าน = ไม่ dispatch + ไม่นับว่าส่งแล้ว
+        if(_gDeny){ skipped.push(items.map(x => x.inv.invNumber || x.inv.id).join(', ') + ' — ' + _gDeny.replace(/^⛔\s*/, '')); continue; }
+        dispatch({ type:'ADD_PAY', data: _gPay });
         requests.push({ group:true, label: supNameOf(sid, items[0].inv), nos: items.map(x => x.inv.invNumber), total:gTotal });
         sent += items.length;
       }
       for(const it of singles){
-        dispatch({ type:'ADD_PAY', data: mkPay({ invId: it.inv.id, supplierId: it.inv.supplierId, amount: it.amt }) });
+        const _sPay = mkPay({ invId: it.inv.id, supplierId: it.inv.supplierId, amount: it.amt });
+        const _sDeny = _wgPayDeny(_sPay);
+        if(_sDeny){ skipped.push((it.inv.invNumber || it.inv.id) + ' — ' + _sDeny.replace(/^⛔\s*/, '')); continue; }
+        dispatch({ type:'ADD_PAY', data: _sPay });
         requests.push({ group:false, label: supNameOf(it.inv.supplierId, it.inv), nos:[it.inv.invNumber], total:it.amt });
         sent++;
       }
@@ -108312,6 +109125,10 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         + (capped ? `\n(ปรับยอดลงให้พอดียอดค้าง ${capped} ใบ)` : '')
         + (skipped.length ? `\n⛔ ข้าม ${skipped.length} ใบ:\n• ` + skipped.join('\n• ') : '')
         + `\n→ ออกเลข PV แล้ว — ดูที่ ✅ รายการที่จ่ายแล้ว`);
+    } else if(!requests.length){
+      // verify 2: ไม่มีคำขอไหนผ่าน (เช่น ชุด 50 ทวิ รวมมีคำขอยกเลิกค้าง) → ไม่แจ้งว่าส่งแล้ว · ไม่ปิดหน้าต่าง
+      alert('⛔ ยังไม่ได้ส่งคำขออนุมัติจ่าย' + (skipped.length ? `\n• ` + skipped.join('\n• ') : ''));
+      return;
     } else {
       const nGroup = requests.filter(r => r.group).length;
       alert(`📋 ส่งคำขออนุมัติจ่าย ${requests.length} คำขอ (${sent} ใบ)`
@@ -108405,6 +109222,12 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
           h('span', null, h('b', null, '🧾 รวมใบหัก ณ ที่จ่าย (50 ทวิ) เป็นใบเดียวต่อผู้ขาย'),
             ` — ${whtMergeGroups.map(g => g.name + ' (' + _wmSupBr(g.supplierId) + ') ' + _whtN(g.items) + ' ใบ').join(' · ')} · รวมให้ตอนอนุมัติจ่าย (เลขใบ = เลขเดิมที่น้อยที่สุด · วันที่ = วันจ่ายจริง) · แยกคืนได้ที่ ✅ รายการที่จ่ายแล้ว`))),
       // 🆕 ใบที่รอปรับ VAT/แก้ไข — ไม่รวมในคำขอนี้ (ยอดค้างจะเปลี่ยนหลังอนุมัติ)
+      // 🆕 WHT_GROUP S2: ชุด 50 ทวิ รวม ที่ขอจ่ายในรอบนี้ (ทั้งชุด PV เดียว) / ชุดที่ตัดออกทั้งชุด
+      wgList.length > 0 && h('div', { className:'bg-indigo-50 border border-indigo-300 rounded p-2 text-xs text-indigo-900', 'data-testid':'brp-wg-summary' },
+        wgList.map(g => h('div', { key:g.certNumber }, '🧾 50 ทวิ รวม ' + g.certNumber + ' — ' + g.invs.length + ' ใบ · ยอดเต็ม ' + fmtCur(g.invs.reduce((t, i) => t + (Number(amounts[i.id]) || 0), 0)) + ' · หัก ณ ที่จ่าย ' + fmtCur(g.invs.reduce((t, i) => t + (Number(i.whtAmount) || 0), 0)))),
+        h('div', { className:'text-[10px] mt-0.5' }, 'บิลในชุดต้องจ่ายพร้อมกันใน PV เดียวยอดเต็ม (แก้ยอด/เงินสดย่อยไม่ได้) · วันที่บนใบ 50 ทวิ = วันจ่ายจริง')),
+      wgCut.length > 0 && h('div', { className:'bg-red-50 border border-red-300 rounded p-2 text-xs text-red-800', 'data-testid':'brp-wg-cut' },
+        wgCut.map(w => h('div', { key:w.groupId }, '⛔ ตัดชุด 50 ทวิ รวม ' + w.certNumber + ' (' + w.size + ' ใบ) ออกทั้งชุด — ' + w.why))),
       skippedPend > 0 && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900', 'data-pay-skip-pending':'1' },
         `⏳ ตัดออก ${skippedPend} ใบ — มีคำขอจ่ายรออนุมัติอยู่แล้ว/จ่ายแล้ว (ดูแท็บ 🔒 รออนุมัติ) ไม่ต้องขอซ้ำ`),
       heldInvs.length > 0 && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs text-amber-900' },
@@ -108465,7 +109288,8 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
                 h('td', { className:'px-2 py-1 font-mono text-xs text-red-700' }, i.invNumber,
                   i.source === 'direct_expense' && h('span', { className:'ml-1 text-[9px] text-gray-500 font-sans' }, 'ค่าใช้จ่าย'),
                   overMax && h('div', { className:'text-[10px] text-red-700 font-sans' }, `เกินเพดาน ${fmtCur(pettyPayMax)}`),
-                  nonDirect && h('div', { className:'text-[10px] text-red-700 font-sans' }, 'ต้องห้ามใช้กับ PI ที่มี PO ไม่ได้')),
+                  nonDirect && h('div', { className:'text-[10px] text-red-700 font-sans' }, 'ต้องห้ามใช้กับ PI ที่มี PO ไม่ได้'),
+                  wgIds.has(i.id) && h('div', { className:'text-[10px] text-indigo-700 font-sans', 'data-testid':'brp-wg-chip' }, '🧾 ชุด ' + (_wgOf(i) || {}).certNumber)),
                 h('td', { className:'px-2 py-1 text-xs' }, sup?.name || i.supplierNameFreeform || '-', sup && global.ERP.PartyBranchChip && h(global.ERP.PartyBranchChip, { party:sup, parties:state.suppliers })),
                 h('td', { className:'px-2 py-1 text-xs' }, fmtDate(i.dueDate)),
                 h('td', { className:'px-2 py-1 text-right text-xs' }, (() => {   // 🆕 AMOUNT-INCL-VAT B4.3: คงเหลือ (ยอดโอน) + รวม VAT/จ่ายแล้ว
@@ -108473,7 +109297,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
                   return h(AmtCell, { main:remain, mainCls:'', subCls:'text-gray-500', sub:_paySub(v, v ? v.paidCash : 0) });
                 })()),
                 h('td', { className:'px-2 py-1 text-right' },
-                  h('input', { type:'number', step:'0.01', min:0, max:remain, value:amounts[i.id]||0,
+                  h('input', { type:'number', step:'0.01', min:0, max:remain, value:amounts[i.id]||0, disabled: wgIds.has(i.id),   // WHT_GROUP S2: ยอดเต็มล็อก
                     // 🆕 กันจ่ายเกินยอดค้าง — clamp ที่ช่องกรอก (ตรวจซ้ำอีกทีตอนส่งและตอนอนุมัติ)
                     onChange:e=>{ const v=Number(e.target.value)||0;
                       setAmounts({...amounts, [i.id]: v > remain ? remain : (v < 0 ? 0 : v)}); },
@@ -108559,8 +109383,11 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
       : h('div', { className:'bg-green-50 border border-green-200 rounded-lg p-8 text-center text-green-700' },
           '✅ ไม่มี INV ค้างจ่าย (หรือขออนุมัติไปหมดแล้ว)');
   }
-  const toggle = (id) => setSelectedIds(selectedIds.includes(id)
-    ? selectedIds.filter(x => x !== id) : [...selectedIds, id]);
+  // 🆕 WHT_GROUP S2: บิลในชุด 50 ทวิ รวม → ติ๊ก/เอาติ๊กออก ทั้งชุดพร้อมกัน (ต้องจ่ายทั้งชุดใน PV เดียว)
+  const _wgIdsOf = (id) => { const i = (state.invoices || []).find(x => x && x.id === id); const c = i && global.ERP.whtGroupOfInv && global.ERP.whtGroupOfInv(i);
+    return c ? global.ERP.whtGroupMembers(state, c.groupId).map(m => m.inv.id) : [id]; };
+  const toggle = (id) => { const ids = _wgIdsOf(id);
+    setSelectedIds(selectedIds.includes(id) ? selectedIds.filter(x => !ids.includes(x)) : Array.from(new Set([...selectedIds, ...ids]))); };
   // 🆕 บิลที่ถูก hold เพราะของคืนยังไม่เคลียร์ — โชว์ในคิวได้ แต่เลือกจ่ายไม่ได้
   // 🆕 บิลที่มีคำขอปรับ VAT / แก้ไข INV รออนุมัติ (adjust_inv_vat / edit_inv) — ยอดค้างจะเปลี่ยนหลังอนุมัติ → ยังโชว์ในคิวแต่เลือกไม่ได้ (กันขอจ่ายยอดเก่าทับ · executor ปรับ VAT จะบล็อกใบที่มีคำขอจ่ายค้าง)
   // เลือกทั้งหมด = เฉพาะแถวในหน้าปัจจุบัน (บิลที่ถูกพักจ่าย/รอปรับ VAT ยังเลือกไม่ได้เหมือนเดิม)
@@ -108634,6 +109461,11 @@ function PayQueue({ invs, state, dispatch, user, setDetail, canPay, today, selec
               h('div', { className:'font-mono text-xs text-red-700 font-semibold' }, i.invNumber,
                 global.ERP.invOnBehalfGR && global.ERP.grOnBehalfTag(global.ERP.invOnBehalfGR(i, state), state),   // 🆕 RECV-ONBEHALF UAT S3
                 h(MigLatePill, { inv:i })),   // 🆕 MIG_LATE_INV
+              // 🆕 WHT_GROUP verify 3: บอกว่าบิลอยู่ในชุด 50 ทวิ รวม — ติ๊ก/เอาติ๊กออกทั้งชุดพร้อมกัน (ไม่ใช่บั๊ก)
+              (() => { const _wc = global.ERP.whtGroupOfInv && global.ERP.whtGroupOfInv(i); if(!_wc) return null;
+                const _n = global.ERP.whtGroupMembers(state, _wc.groupId).length;
+                return h('div', { className:'text-[10px] text-indigo-700 font-semibold', 'data-testid':'pay-whtg-chip', title:'บิลในชุด 50 ทวิ รวม ต้องขอจ่ายทุกใบใน PV เดียว' },
+                  '🧾 ชุด ' + (_wc.certNumber || '') + ' (' + _n + ' ใบ) — ติ๊ก/จ่ายพร้อมกันทั้งชุด'); })(),
               _pfHold(i) && h('div', { className:'text-[10px] text-orange-700 font-semibold', 'data-testid':'pay-pf-hold', title:_pfHold(i) }, _pfHold(i).split(' — ')[0], ' · ขอจ่ายไม่ได้'),   // 🆕 PRICE-FIX ขั้น 4
               i.rtvHoldPayment && h('div', { className:'text-[10px] text-rose-700 font-semibold',
                 title:'ไปที่ บัญชี → 🔄 ศูนย์จัดการคืนของ เพื่อปิดเคสก่อน' },
@@ -108844,6 +109676,7 @@ function pettyPayInvoice(state, dispatch, user, inv, amt, opts){
   const note = o.note || '';
   const tagFields = o.tagFields || {};
   const kindLabel = PETTY_KIND_LABEL[pettyKind] || pettyKind;
+  { const _g = global.ERP.whtGroupOfInv && global.ERP.whtGroupOfInv(inv); if(_g) return { skipped: 'อยู่ใน 50 ทวิ รวม ' + (_g.certNumber || '') + ' — ต้องขอจ่ายทั้งชุดใน PV เดียว (จ่ายเงินสดย่อยไม่ได้)' }; }   // 🆕 WHT_GROUP S2
   const _blk = _pettyPayDateBlock(state, payDate, today);
   if(_blk) return { skipped: _blk.split('\n')[0] };
   // verify 1 (#3): ต้องห้าม + ไม่เคลม → JE reclass (CR 1150) ลงวันที่จ่าย — งวดภาษีของวันที่จ่ายยื่น ภ.พ.30 แล้ว = ห้าม (1150 ขยับในเดือนที่ยื่นแล้ว)
@@ -109444,7 +110277,10 @@ function PaidPaymentsTab({ state, dispatch, user }){
     // 🆕 verify: PV ที่รวม 50 ทวิ ไว้ → ยกเลิกจ่าย = แยกใบรวมอัตโนมัติ (reducer) — บอกให้เรียกใบรวมคืนถ้าส่งผู้ขายแล้ว
     const _wmTxt = (p.whtMerge && (p.whtMerge.certs || []).length)
       ? '\n• แยกใบ 50 ทวิ รวม ' + p.whtMerge.certs.map(c => c.certNumber).join(', ') + ' กลับเป็นใบเดี่ยว — ถ้าส่งใบรวมให้ผู้ขายแล้ว ต้องเรียกคืน' : '';
-    if(!confirm(`⚠️ ยกเลิก Payment ${fmtCur(p.amount||0)}${_grp ? ` (PV รวม ${_nos.length} ใบ: ${_nos.join(', ')})` : ''}?\n\nระบบจะ:\n• คืน paidAmount ใน INV${_grp ? ' ทุกใบตามยอดที่จัดสรร' : ''}\n• Post reverse JE\n• Mark payment เป็น reversed (ไม่ลบ)${p.method === 'petty_cash' ? '\n• คืนเงินเข้าเงินสดย่อย' : ''}${_wmTxt}\n\nเหตุผล: ${reason}`)) return;
+    // 🆕 WHT_GROUP S2: PV ที่จ่ายบิลในชุด 50 ทวิ รวม → ชุดยังอยู่ แต่กลับเป็นร่าง (วันที่บนใบหาย) — ใบที่ส่งผู้ขายแล้วต้องเรียกคืน
+    const _wgCs = Array.from(new Set((p.invId ? [p.invId] : (p.invoiceIds || [p.invoiceId])).filter(Boolean).map(id => { const i = (state.invoices || []).find(x => x && x.id === id); const c = i && global.ERP.whtGroupOfInv(i); return c ? c.certNumber : ''; }).filter(Boolean)));
+    const _wgTxt = _wgCs.length ? '\n• ใบ 50 ทวิ รวม ' + _wgCs.join(', ') + ' กลับเป็นร่าง (ชุดยังอยู่) — ถ้าส่งใบให้ผู้ขายแล้ว ต้องเรียกคืน' : '';
+    if(!confirm(`⚠️ ยกเลิก Payment ${fmtCur(p.amount||0)}${_grp ? ` (PV รวม ${_nos.length} ใบ: ${_nos.join(', ')})` : ''}?\n\nระบบจะ:\n• คืน paidAmount ใน INV${_grp ? ' ทุกใบตามยอดที่จัดสรร' : ''}\n• Post reverse JE\n• Mark payment เป็น reversed (ไม่ลบ)${p.method === 'petty_cash' ? '\n• คืนเงินเข้าเงินสดย่อย' : ''}${_wmTxt}${_wgTxt}\n\nเหตุผล: ${reason}`)) return;
     dispatch({ type:'REVERSE_PAYMENT', data:{ paymentId:p.id, reason, by:user.username, bySuper: isSuperUser(user) } });   // bySuper → reducer ยกเว้น dual-eye ให้ superuser (PV เงินสดย่อยของตัวเอง)
     alert(`✅ ยกเลิก payment เรียบร้อย\nINV ${_grp ? `ทั้ง ${_nos.length} ใบ` : ''}กลับเป็นค้างจ่าย — ออก payment ใหม่ได้${_wmTxt}`);
   };
@@ -109456,7 +110292,7 @@ function PaidPaymentsTab({ state, dispatch, user }){
     if(!p || !((p.invoiceIds || []).length > 1)) return null;
     let txt = '';
     // 🆕 PAID-LAYOUT L3: ใบที่ไม่มีหัก ณ ที่จ่ายเลย = ไม่มีอะไรให้รวม → ไม่นับเป็น "ใบที่รวมไม่ได้" (ข้อมูล skipped เก็บเหมือนเดิม)
-    const _sk = (arr) => (arr || []).filter(x => x && x.reason !== 'ไม่มีหัก ณ ที่จ่าย');
+    const _sk = (arr) => (arr || []).filter(x => x && x.reason !== 'ไม่มีหัก ณ ที่จ่าย' && !/^อยู่ใน 50 ทวิ รวม /.test(String(x.reason || '')));   // WHT_GROUP S2: ชุด = ไม่ใช่ปัญหา
     if(p.whtMerge && _sk(p.whtMerge.skipped).length) txt = 'บางใบไม่ได้รวม 50 ทวิ: ' + _sk(p.whtMerge.skipped).map(x => x.invNumber + ' — ' + x.reason).join('; ') + ' (ใช้ใบเดี่ยวของใบนั้น)';
     else if(p.whtMergeWanted === true && !p.whtMerge){
       const lg = (p.whtMergeLog || []).slice(-1)[0];
@@ -115989,6 +116825,14 @@ function SystemPolicyToggles({ state, dispatch }){
         h('div', null,
           h('div', { className:'font-bold text-emerald-900' }, '🧾 บิลเดียวใส่ใบกำกับภาษีซื้อได้หลายใบ (จ่ายเป็นรอบ แล้วคีย์ใบกำกับทีละใบเมื่อได้รับ)'),
           h('div', { className:'text-xs text-emerald-800 mt-0.5' }, 'เปิด = หน้าต่างใบกำกับมีปุ่ม "➕ เพิ่มใบกำกับอีกใบ" และตัวเลือก "ครอบทั้งบิล / ครอบบางส่วน" · ใบกำกับแต่ละใบขึ้นแถวของตัวเองในรายงานภาษีซื้อ และเคลมในเดือนของตัวเอง · เปิดหลังทุกเครื่องรีโหลดรุ่นใหม่แล้ว (อย่างน้อย 1 วันทำการหลังอัปเดต) · ปิดภายหลังได้ ใบที่คีย์ไว้แล้วไม่หาย')))),
+
+    // 🆕 WHT_GROUP S3 (D6): สวิตช์ปิดฉุกเฉิน ออก 50 ทวิ รวมหลายใบ (ไม่มีค่า = เปิด) — ปิด = ซ่อนปุ่มออกชุดใหม่ · ชุดเดิมยังพิมพ์/จ่าย/ยกเลิกได้ · ห้ามย้อนโค้ดหลังมีชุดบนจริง
+    h('div', { className:'bg-pink-50 border-2 border-pink-300 rounded p-4', 'data-testid':'policy-wht-group' },
+      h('label', { className:'flex items-center gap-3 cursor-pointer' },
+        h('input', { type:'checkbox', checked: st.whtGroupEnabled !== false, onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ whtGroupEnabled: e.target.checked ? true : false } }), className:'w-5 h-5', 'data-testid':'toggle-wht-group' }),
+        h('div', null,
+          h('div', { className:'font-bold text-pink-900' }, '🧾 ออก 50 ทวิ ใบเดียวรวมหลายบิล (แท็บ WHT → ➕ ออก 50 ทวิ รวมหลายใบ)'),
+          h('div', { className:'text-xs text-pink-800 mt-0.5' }, 'สำหรับผู้ขายที่ส่งบิลถี่และขอ 50 ทวิ เดือนละใบ (เช่น Grab) · ปิด = ซ่อนปุ่มออกชุดใหม่เท่านั้น — ชุดที่ออกไปแล้วยังพิมพ์ ขอจ่าย และยกเลิกได้ตามปกติ')))),
 
     // 🆕 PARTY-FORM (C.9): ฟอร์มคู่ค้าแบบแยกช่อง (คำนำหน้า ▾ + ชื่อ · ปุ่มสาขา · preview หัวเอกสาร) — default เปิด · ปิด = ฟอร์มเดิมทุกเครื่อง (settings.partyFormSplit)
     h('div', { className:'bg-violet-50 border-2 border-violet-300 rounded p-4', 'data-testid':'policy-party-form-split' },
