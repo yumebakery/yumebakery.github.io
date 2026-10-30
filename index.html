@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="0a8c432bbc3f";window.__ERP_BUILT_AT__="2026-10-30T11:31:09";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="73b5806eff7d";window.__ERP_BUILT_AT__="2026-10-30T11:38:44";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -107047,9 +107047,13 @@ function _payPiLabel(state, p, max){
   return `${nos.length} ใบ: ${nos.slice(0, k).join(', ')}${nos.length > k ? ` +${nos.length - k}` : ''}`;
 }
 // 🆕 ACCT-V2 (E): จัดกลุ่มคิวรออนุมัติตาม "วันนัดจ่าย" — pure function ใช้ทั้งจอและใบพิมพ์
-//   { id:dateISO|'_none', key, date, pays (เรียง supplier th → PI), total, count }[] เรียงวันจากน้อยไปมาก · 'ไม่ระบุวันนัด' ท้ายสุด
+//   { id:dateISO|'_none', key, date, pays, total, count }[] เรียงวันจากน้อยไปมาก · 'ไม่ระบุวันนัด' ท้ายสุด
+//   🆕 PAYQ_ORDER D2 (เจ้าของ 2026-10-30): ในวันเรียงตาม "ลำดับที่บัญชีส่งขอจ่าย" (createdAt น้อย→มาก) ไม่ใช่ชื่อผู้ขาย/เลข PI
+//     ไม่มี createdAt / เวลาเท่ากัน (ส่งเป็นชุด) → ลำดับใน orderList (= state.payments = ลำดับที่บันทึก) · ไม่ส่ง orderList → ลำดับใน pays
+//     supOf/invOf คงไว้ในลายเซ็นเพื่อความเข้ากันได้ (ไม่ใช้เรียงแล้ว)
 const _reqDateOf = (p) => p.requestedPayDate || p.payDate || '';
-function groupByReqDate(pays, supOf, invOf){
+const _payReqTs = (p) => { const v = p && p.createdAt; if(v == null || v === '') return null; const n = typeof v === 'number' ? v : (isFinite(Number(v)) ? Number(v) : Date.parse(v)); return isFinite(n) && n > 0 ? n : null; };
+function groupByReqDate(pays, supOf, invOf, orderList){
   const m = {};
   for(const p of (pays||[])){
     const d = _reqDateOf(p);
@@ -107059,10 +107063,15 @@ function groupByReqDate(pays, supOf, invOf){
     m[k].total += Number(p.amount)||0;
     m[k].count++;
   }
-  const nm = (p) => { const s = supOf && supOf(p.supplierId); return String((s && s.name) || ''); };
-  const inv = (p) => { const i = invOf && invOf(p); return String((i && i.invNumber) || ''); };
+  // ลำดับที่บันทึก (index ใน state.payments) — ตัวตัดสินเมื่อไม่มีเวลา/เวลาเท่ากัน (stable)
+  const src = Array.isArray(orderList) ? orderList : (pays || []);
+  const idx = new Map(); src.forEach((p, i) => { if(p && !idx.has(p)) idx.set(p, i); });
+  const byId = new Map(); src.forEach((p, i) => { if(p && p.id != null && !byId.has(p.id)) byId.set(p.id, i); });
+  const io = (p) => idx.has(p) ? idx.get(p) : (p && byId.has(p.id) ? byId.get(p.id) : Number.MAX_SAFE_INTEGER);
+  // verify 1: คีย์เดียวทุกใบ [เวลาส่งขอ (ไม่มี = เก่าสุด 0), ลำดับใน state] → total order ไม่วนลูป · ข้อมูลเดิมเรียงเหมือนกันทุกจอ/ใบพิมพ์
+  const cmp = (a, b) => ((_payReqTs(a) || 0) - (_payReqTs(b) || 0)) || (io(a) - io(b));
   const gs = Object.values(m);
-  gs.forEach(g => g.pays.sort((a,b) => nm(a).localeCompare(nm(b), 'th') || inv(a).localeCompare(inv(b))));
+  gs.forEach(g => g.pays.sort(cmp));
   gs.sort((a,b) => (a.key === '_none') - (b.key === '_none') || a.key.localeCompare(b.key));
   return gs;
 }
@@ -107168,7 +107177,7 @@ function PayApprovalTab({ state, dispatch, user }){
   }), [state.payments, state.invoices, state.suppliers, state.bankAccounts, state.payTags, q, F.rows]);
 
   // 🆕 ACCT-V2 (E): จัดกลุ่มตามวันนัดจ่าย (1 ตาราง/วัน) — paginate ที่ "วัน" บิลในวันแสดงครบเสมอ (ยอดรวมวันจึงถูกต้อง)
-  const dateGroups = useMemo(() => groupByReqDate(pendingF, supOf, invOf), [pendingF, state.suppliers, state.invoices]);
+  const dateGroups = useMemo(() => groupByReqDate(pendingF, supOf, invOf, state.payments), [pendingF, state.suppliers, state.invoices, state.payments]);
   const pgPending = usePaged(dateGroups, 10);
 
   // สรุปทั้งคิว (ตาม pendingF ไม่ใช่หน้าที่แสดง): ตามวันนัด + ตามบัญชีที่ขอโอน
@@ -107205,7 +107214,8 @@ function PayApprovalTab({ state, dispatch, user }){
   const toggleAll = () => setSelectedIds(allSelected
     ? selectedIds.filter(x => !pageIds.includes(x))
     : Array.from(new Set([...selectedIds, ...pageIds])));
-  const selectedPays = pending.filter(p => selectedIds.includes(p.id));
+  // verify 1: ลำดับเดียวกับจอ (วัน → ลำดับที่ส่งขอ) → อนุมัติหลายใบแล้วเลข PV เรียงตามจอ/ใบพิมพ์
+  const selectedPays = groupByReqDate(pending.filter(p => selectedIds.includes(p.id)), supOf, invOf, state.payments).flatMap(g => g.pays);
   const selectedTotal = selectedPays.reduce((s,p) => s + (p.amount||0), 0);
 
   // 🆕 ACCT-V2 (E): ใบสรุปคำขอจ่ายรออนุมัติ (ตามวันนัดจ่าย) — พิมพ์ทั้งคิว (pendingF) หรือเฉพาะที่ติ๊ก · A4 landscape · 1 ตารางต่อวัน + สรุป 2 ตาราง + ลายเซ็น 3 ช่อง
@@ -107213,7 +107223,7 @@ function PayApprovalTab({ state, dispatch, user }){
     const list = (pays||[]);
     if(!list.length) return alert('ไม่มีคำขอให้พิมพ์');
     const esc = _escHtml;
-    const groups = groupByReqDate(list, supOf, invOf);
+    const groups = groupByReqDate(list, supOf, invOf, state.payments);   // PAYQ_ORDER D3: ลำดับเดียวกับจอ
     const grand = list.reduce((s,p) => s + (Number(p.amount)||0), 0);
     // 🆕 PS1 (เจ้าของ 2026-10-09): ตัดคอลัมน์ "ผู้รับเงิน" + "บัญชีที่ขอโอน" ออกจากตาราง
     //   ผู้รับเงินรายเดียวทั้งชุด → ชื่อ+เลขภาษีขึ้นหัวกระดาษ ไม่มีคอลัมน์ชื่อ · หลายราย → คอลัมน์ "Supplier" คอลัมน์เดียว (ชื่อ + เลขภาษีบรรทัดล่าง)
@@ -107455,7 +107465,9 @@ function PayApprovalTab({ state, dispatch, user }){
       '🔒 คำขอจ่ายที่รออนุมัติ · ยังไม่ตัดบัญชีจนกว่าจะอนุมัติ · JE post หลังอนุมัติ · ',
       h('b', null, 'ติ๊กหลายใบ'), ' → พิมพ์ใบสรุป / อนุมัติพร้อมกันได้',
       h('div', { className:'text-xs mt-1' },
-        '📅 เรียงตามวันนัดจ่าย · 1 ตารางต่อวัน · ติ๊กที่หัววัน = เลือกทุกบิลของวันนั้น · คอลัมน์ "บัญชีที่ขอโอน" = บัญชีที่ผู้ขอเลือกไว้ (ผู้อนุมัติเปลี่ยนได้)')
+        '📅 เรียงตามวันนัดจ่าย · 1 ตารางต่อวัน · ',
+        h('span', { 'data-testid':'payq-order-hint' }, 'ในแต่ละวันเรียงตามลำดับที่ส่งขอจ่าย'),   // 🆕 PAYQ_ORDER D4
+        ' · ติ๊กที่หัววัน = เลือกทุกบิลของวันนั้น · คอลัมน์ "บัญชีที่ขอโอน" = บัญชีที่ผู้ขอเลือกไว้ (ผู้อนุมัติเปลี่ยนได้)')
     ),
 
     // Bulk action bar (only in waiting sub-tab)
@@ -110024,6 +110036,21 @@ function useTaxInvEntry(state, dispatch, user){
   return { open: enabled ? ((x, t) => { setId(x); setTiOpen(t || null); }) : null, modal, enabled };
 }
 
+// 🆕 PAYQ_ORDER S1 (UAT): ส่งหลายใบพร้อมกัน → ลำดับคำขอ (= ลำดับ createdAt/state ในคิว 🔒 รออนุมัติ) ตามลำดับที่ติ๊ก
+//   tickIds = id ใบตามลำดับที่ติ๊ก · items = [{ inv, amt }] · groupKeyOf(it) → supplierId ถ้าจัด PV รวมได้ / null = เดี่ยว
+//   คืน [{ sid|null, items }] · PV รวม (≥2 ใบ) อยู่ที่ตำแหน่งใบแรกที่ติ๊กของกลุ่ม · กลุ่มเหลือใบเดียว = เดี่ยว · pure (ทดสอบใน payq_order_unit)
+function bulkPayUnitsInTickOrder(tickIds, items, groupKeyOf){
+  const rank = {}; (tickIds || []).forEach((id, k) => { if(!(id in rank)) rank[id] = k; });
+  const rk = (it) => (it && it.inv && (it.inv.id in rank)) ? rank[it.inv.id] : 1e9;
+  const units = [], bySup = {};
+  for(const it of (items || [])){ const g = groupKeyOf ? groupKeyOf(it) : null;
+    if(g){ if(!bySup[g]){ bySup[g] = { sid:g, items:[] }; units.push(bySup[g]); } bySup[g].items.push(it); }
+    else units.push({ sid:null, items:[it] }); }
+  for(const u of units){ u.items = u.items.map((it, k) => ({ it, k })).sort((a, b) => (rk(a.it) - rk(b.it)) || (a.k - b.k)).map(x => x.it);
+    if(u.sid && u.items.length < 2) u.sid = null; u._r = rk(u.items[0]); }
+  return units.map((u, k) => ({ u, k })).sort((a, b) => (a.u._r - b.u._r) || (a.k - b.k)).map(x => ({ sid:x.u.sid, items:x.u.items }));
+}
+
 function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone }){
   const purchaseMod = global.ERP.MODULES.purchase;
   // 🎯 UAT ชุด 1 M3: ตัดใบที่มีคำขอจ่ายรออนุมัติอยู่แล้ว / จ่ายแล้ว / ยกเลิกแล้ว (เครื่องอื่นขอไปก่อน หรือติ๊กค้าง) — กันคำขอจ่ายซ้ำ
@@ -110246,13 +110273,20 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         ...extra,
       });
       const _wgPayDeny = (d) => { try { return (global.ERP.whtGroupPayDeny && global.ERP.whtGroupPayDeny(state, d)) || ''; } catch(_e){ return ''; } };
-      const bySup = {}; const singles = [];
-      for(const it of bankItems){
-        if((groupBySup || wgIds.has(it.inv.id)) && it.inv.supplierId) (bySup[it.inv.supplierId] = bySup[it.inv.supplierId] || []).push(it);   // WHT_GROUP S2: ชุด = PV เดียวเสมอ
-        else singles.push(it);
-      }
-      for(const [sid, items] of Object.entries(bySup)){
-        if(items.length < 2){ singles.push(items[0]); continue; }
+      // 🆕 PAYQ_ORDER S1: PV รวม + เดี่ยว ส่งรวดเดียวตามลำดับที่ติ๊ก (PV รวม = ตำแหน่งใบแรกที่ติ๊กของผู้ขายนั้น) — เดิมส่ง PV รวมก่อนทั้งหมด
+      const _units = bulkPayUnitsInTickOrder(invIdsX, bankItems,
+        it => ((groupBySup || wgIds.has(it.inv.id)) && it.inv.supplierId) ? it.inv.supplierId : null);   // WHT_GROUP S2: ชุด = PV เดียวเสมอ
+      for(const _u of _units){
+        if(!_u.sid){ const it = _u.items[0];
+          const _sPay = mkPay({ invId: it.inv.id, supplierId: it.inv.supplierId, amount: it.amt });
+          const _sDeny = _wgPayDeny(_sPay);
+          if(_sDeny){ skipped.push((it.inv.invNumber || it.inv.id) + ' — ' + _sDeny.replace(/^⛔\s*/, '')); continue; }
+          dispatch({ type:'ADD_PAY', data: _sPay });
+          requests.push({ group:false, label: supNameOf(it.inv.supplierId, it.inv), nos:[it.inv.invNumber], total:it.amt });
+          sent++;
+          continue;
+        }
+        const sid = _u.sid, items = _u.items;
         const gTotal = Number(items.reduce((s,x) => s + x.amt, 0).toFixed(2));
         // record คำขอรวม (วางบิล): invId:null · supplierId เดียว · invoiceIds[] · allocations[{invoiceId, amount}] · amount = Σ allocations (reducer ADD_PAY ตรวจ Σ + supplier เดียว)
         const _wm = whtMergeWanted && _whtN(items) >= 2 ? { whtMergeWanted: true } : {};   // 🆕 WHT-MERGE M2
@@ -110263,14 +110297,6 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         dispatch({ type:'ADD_PAY', data: _gPay });
         requests.push({ group:true, label: supNameOf(sid, items[0].inv), nos: items.map(x => x.inv.invNumber), total:gTotal });
         sent += items.length;
-      }
-      for(const it of singles){
-        const _sPay = mkPay({ invId: it.inv.id, supplierId: it.inv.supplierId, amount: it.amt });
-        const _sDeny = _wgPayDeny(_sPay);
-        if(_sDeny){ skipped.push((it.inv.invNumber || it.inv.id) + ' — ' + _sDeny.replace(/^⛔\s*/, '')); continue; }
-        dispatch({ type:'ADD_PAY', data: _sPay });
-        requests.push({ group:false, label: supNameOf(it.inv.supplierId, it.inv), nos:[it.inv.invNumber], total:it.amt });
-        sent++;
       }
     }
     if(isPetty){
