@@ -12,9 +12,9 @@
 <script>
 (function(){
 'use strict';
-const WEIGH_VERSION = '2026.10.29';   // 🆕 (2026.10.29) ตัดปุ่มตัวคูณ ×0.5/×2/×3 ทิ้งทั้งหมด — ปริมาณตามสูตรเสมอ (×1)
+const WEIGH_VERSION = '2026.10.30';   // 🆕 (2026.10.30) แถวปุ่มหมวดสูตร (recipes[].category) ตอนฝัง · ก่อนหน้า: 🆕 (2026.10.29) ตัดปุ่มตัวคูณ ×0.5/×2/×3 ทิ้งทั้งหมด — ปริมาณตามสูตรเสมอ (×1)
 // ความสามารถของรุ่นนี้ — ส่งไปกับ ready ให้แอปแม่เช็คได้ตรง ๆ ไม่ต้องเทียบเลขเวอร์ชัน
-const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode', 'job', 'portion'];   // 🆕 'job' = รับงานใบสั่ง start-job/cancel-job · 'portion' = งานชั่งแยกชิ้น (job.recipe.portion)
+const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode', 'job', 'portion', 'recipe-category'];   // 🆕 'job' = รับงานใบสั่ง start-job/cancel-job · 'portion' = งานชั่งแยกชิ้น (job.recipe.portion) · 'recipe-category' = แถวปุ่มหมวดจาก recipes[].category (2026.10.30)
 const h = React.createElement;
 const { useState, useEffect, useRef, useMemo } = React;
 const cls = (...a)=>a.filter(Boolean).join(' ');
@@ -54,6 +54,8 @@ const saveState = (s) => {
 try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch(e){}
 // 🆕 ชุดที่กำลังชั่ง (session) เก็บแยก — refresh/เผลอสลับแท็บ/จอดับ แล้วกลับมาชั่งต่อได้ ไม่ต้องเริ่มใหม่
 const SESSION_KEY = KEY + '__session';
+const CAT_KEY = KEY + '__cat';        // 🆕 (2026.10.30) หมวดสูตรที่เลือกล่าสุดของเครื่องนี้ ('' = ทั้งหมด)
+const CAT_OTHER = '__other';          // ค่าพิเศษ = สูตรที่ไม่มีหมวด ("อื่น ๆ")
 const loadSession = () => { try { return JSON.parse(localStorage.getItem(SESSION_KEY)||'null') || null; } catch(e){ return null; } };
 const saveSession = (x) => { try { x ? localStorage.setItem(SESSION_KEY, JSON.stringify(x)) : localStorage.removeItem(SESSION_KEY); } catch(e){} };
 // 🆕 กล่องขาออกของ log งานใบสั่ง — finish() เขียนก่อนส่ง finished · ออกจากกล่องเมื่อแม่ตอบ finished-ack เท่านั้น
@@ -1576,6 +1578,16 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   // 🆕 กู้ชุดที่ชั่งค้างไว้ (refresh/จอดับ/เผลอสลับแท็บ) — ค่าที่ล็อกแล้วอยู่ครบ ตัวที่ยังไม่ล็อกต้องตั้ง 0 ใหม่
   const sess = useMemo(loadSession, []);
   const [recipeId, setRecipeId] = useState(sess && recipes.some(r=>r.id===sess.recipeId) ? sess.recipeId : '');
+  // 🆕 (2026.10.30) หมวดสูตร (recipes[].category จากแอปแม่) — แถวปุ่ม "ทั้งหมด · <หมวด> · อื่น ๆ" กรองช่องเลือกสูตร
+  //    เฉพาะตอนฝัง + มีสูตรที่มีหมวดอย่างน้อย 1 สูตร (เปิดเดี่ยว = เหมือนเดิมทุกอย่าง) · จำหมวดล่าสุดต่อเครื่อง
+  const catOf = (r) => (r && typeof r.category === 'string') ? r.category.trim() : '';
+  const recipeCats = useMemo(() => EMBED ? [...new Set(recipes.map(catOf).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'th')) : [], [recipes]);
+  const hasUncat = recipeCats.length > 0 && recipes.some(r => !catOf(r));
+  const [catSelRaw, setCatSelRaw] = useState(() => { try { return localStorage.getItem(CAT_KEY) || ''; } catch(e){ return ''; } });
+  const catSel = (catSelRaw === CAT_OTHER ? hasUncat : recipeCats.includes(catSelRaw)) ? catSelRaw : '';   // หมวดที่จำไว้หายไปแล้ว = ทั้งหมด
+  const pickCat = (c) => { setCatSelRaw(c); try { c ? localStorage.setItem(CAT_KEY, c) : localStorage.removeItem(CAT_KEY); } catch(e){} };
+  const shownRecipes = !catSel ? recipes
+    : recipes.filter(r => r.id === recipeId || (catSel === CAT_OTHER ? !catOf(r) : catOf(r) === catSel));   // สูตรที่เลือกค้างอยู่ยังโชว์ (ช่องเลือกไม่ว่างเปล่า)
   // 🆕 (2026.10.29) เจ้าของสั่งตัดตัวคูณ (กลัวพนักงานลืมกด) → ปริมาณตามสูตรเสมอ · ขนาดอื่น = เลือกสูตรของขนาดนั้น
   const mult = 1;
   const operatorLocked = EMBED && !!settings.operatorLocked;   // ล็อกเฉพาะตอนฝังในแอปแม่
@@ -2153,12 +2165,17 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
 
     // ===== Recipe picker =====
     h('div', { className:'bg-white rounded-lg shadow p-3 space-y-2' },
+      // 🆕 (2026.10.30) แถวปุ่มหมวด — เฉพาะเมื่อมีสูตรที่มีหมวด · ระหว่างงานใบสั่งซ่อน
+      recipeCats.length > 0 && !job && h('div', { 'data-weigh-cats':'1', className:'flex gap-1.5 flex-wrap' },
+        [['', 'ทั้งหมด'], ...recipeCats.map(c => [c, c]), hasUncat && [CAT_OTHER, 'อื่น ๆ']].filter(Boolean).map(([v, label]) =>
+          h('button', { key: v || '__all', type:'button', onClick:()=>pickCat(v), 'data-weigh-cat': v || '__all', 'aria-pressed': catSel === v ? 'true' : 'false',
+            className: cls('px-3 py-1.5 rounded-full border text-sm', catSel === v ? 'bg-indigo-600 border-indigo-600 text-white font-bold' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50') }, label))),
       h('div', { className:'flex gap-2 items-center flex-wrap' },
         h('span', { className:'text-sm font-medium' }, '📋 สูตร:'),
         h('select', { value: job ? '__job' : recipeId, onChange:e=>pickRecipe(e.target.value), disabled: !!job, 'data-recipe-select':'1',
           className:cls('flex-1 min-w-[180px] px-3 py-2 border-2 rounded text-base', job && 'bg-gray-100 text-gray-600') },
           job ? h('option', { value:'__job' }, recipe.name) : h('option', { value:'' }, '— เลือกสูตร —'),
-          !job && recipes.map(r=>h('option',{key:r.id,value:r.id},r.name))),
+          !job && shownRecipes.map(r=>h('option',{key:r.id,value:r.id},r.name))),
         h('input', { type:'text', value:operator, onChange:e=>setOperator(e.target.value), readOnly:operatorLocked,
           placeholder:'ชื่อผู้ชั่ง', className:cls('w-32 px-2 py-2 border rounded text-sm', operatorLocked && 'bg-gray-100 text-gray-600') })),
       // 🆕 แถบงานใบสั่ง (2026.10.29: หน้าชั่งไม่มีตัวคูณแล้วทุกโหมด)
