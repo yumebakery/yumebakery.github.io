@@ -12,9 +12,9 @@
 <script>
 (function(){
 'use strict';
-const WEIGH_VERSION = '2026.10.30';   // 🆕 (2026.10.30) แถวปุ่มหมวดสูตร (recipes[].category) ตอนฝัง · ก่อนหน้า: 🆕 (2026.10.29) ตัดปุ่มตัวคูณ ×0.5/×2/×3 ทิ้งทั้งหมด — ปริมาณตามสูตรเสมอ (×1)
+const WEIGH_VERSION = '2026.11.02';   // 🆕 (2026.11.02) ขนาดฉลากผลชั่งตามไลน์ (recipes[].labelSize / job.recipe.labelSize / print-label.size) · ก่อนหน้า: (2026.10.30) แถวปุ่มหมวดสูตร (recipes[].category) ตอนฝัง · ก่อนหน้า: 🆕 (2026.10.29) ตัดปุ่มตัวคูณ ×0.5/×2/×3 ทิ้งทั้งหมด — ปริมาณตามสูตรเสมอ (×1)
 // ความสามารถของรุ่นนี้ — ส่งไปกับ ready ให้แอปแม่เช็คได้ตรง ๆ ไม่ต้องเทียบเลขเวอร์ชัน
-const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode', 'job', 'portion', 'recipe-category'];   // 🆕 'job' = รับงานใบสั่ง start-job/cancel-job · 'portion' = งานชั่งแยกชิ้น (job.recipe.portion) · 'recipe-category' = แถวปุ่มหมวดจาก recipes[].category (2026.10.30)
+const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode', 'job', 'portion', 'recipe-category', 'label-size'];   // 🆕 'job' = รับงานใบสั่ง start-job/cancel-job · 'portion' = งานชั่งแยกชิ้น (job.recipe.portion) · 'recipe-category' = แถวปุ่มหมวดจาก recipes[].category (2026.10.30) · 'label-size' = ขนาดฉลากตามไลน์ {wmm,hmm} (2026.11.02)
 const h = React.createElement;
 const { useState, useEffect, useRef, useMemo } = React;
 const cls = (...a)=>a.filter(Boolean).join(' ');
@@ -135,7 +135,8 @@ const resolvePerms = (settings) => {
 //   แอปแม่ → เรา : { target:'weigh-system', type:'config', operator?, lockOperator?, branchId?, role?, permissions?, recipes?, recipesMode?, settings? }
 //                    recipesMode:'replace' = รายการที่เห็นคือของแม่ทั้งชุด (ไม่รวมกับสูตรในเครื่อง · ว่างได้) — ERP ใช้แบบนี้ · ไม่ส่ง = รวมตาม id แบบเดิม
 //                  { target:'weigh-system', type:'select-recipe', code | recipeId }
-//                  { target:'weigh-system', type:'print-label', log:{ recipeName, lot, total, operator, ts, note?, offSpec? }, copies? }
+//                  { target:'weigh-system', type:'print-label', log:{ recipeName, lot, total, operator, ts, note?, offSpec? }, copies?, size?:{wmm,hmm} }
+//                    ← 🆕 (2026.11.02 'label-size') size / recipes[].labelSize / job.recipe.labelSize = {wmm,hmm} ขนาดฉลากตามไลน์ (กว้าง 20–150 · สูง 15–200 มม. · ผิด = ขนาดเครื่อง)
 //                    ← พิมพ์ฉลากซ้ำจากข้อมูลที่แอปแม่เก็บไว้ทันที (เครื่องพิมพ์ที่ต่ออยู่ → ตรง · ไม่มี → หน้าจอพิมพ์) ไม่แตะสูตร/ชุดที่ชั่งค้างอยู่
 //                  { target:'weigh-system', type:'start-job', reqId, job:{ id, label, orderNumber?, batchNo?, batchCount?, lockMult:true, recipe:{ id, code, name, items:[…] } } }
 //                    ← 🆕 งานใบสั่ง 1 batch (สูตรของงานเอง ไม่เข้ารายการสูตร) · ไม่เปิด dialog เด็ดขาด · ตอบ job-started
@@ -625,12 +626,38 @@ const _C128 = [
 function code128Widths(text){
   const raw = String(text == null ? '' : text);
   if(!raw || /[^\x20-\x7E]/.test(raw)) return null;
-  const codes = [104];
-  for(let i=0;i<raw.length;i++) codes.push(raw.charCodeAt(i)-32);
-  let sum = 104; for(let i=1;i<codes.length;i++) sum += codes[i]*i;
+  // 🆕 (UAT N3) ตัวเลขติดกัน ≥4 ตัว → ชุด C (2 หลัก/แท่ง) · ดวงแคบ 60×40 ใส่ LOT ยาวได้มากขึ้น · ยิงแล้วได้ข้อความเดิมทุกตัว
+  const isD = (i) => { const c = raw.charCodeAt(i); return c >= 48 && c <= 57; };
+  const runAt = (i) => { let j = i; while(j < raw.length && isD(j)) j++; return j - i; };
+  const codes = []; let set = null, i = 0;
+  while(i < raw.length){
+    const r = runAt(i);
+    if(r >= 4){
+      if(r % 2){   // คี่ → หลักแรกไปชุด B ก่อน
+        if(set !== 'B'){ codes.push(set ? 100 : 104); set = 'B'; }
+        codes.push(raw.charCodeAt(i)-32); i++;
+      }
+      if(set !== 'C'){ codes.push(set ? 99 : 105); set = 'C'; }
+      const end = i + (r - (r % 2));
+      for(; i < end; i += 2) codes.push(Number(raw.substr(i, 2)));
+    } else {
+      if(set !== 'B'){ codes.push(set ? 100 : 104); set = 'B'; }
+      codes.push(raw.charCodeAt(i)-32); i++;
+    }
+  }
+  let sum = codes[0]; for(let k=1;k<codes.length;k++) sum += codes[k]*k;
   codes.push(sum % 103); codes.push(106);
   let out=''; for(const c of codes){ const pat=_C128[c]; if(!pat) return null; out+=pat; }
   return out;
+}
+
+// 🆕 (UAT N3) ขนาดแท่งเล็กสุด (จุด) ที่บาร์โค้ดลงดวงกว้าง W ได้ · quiet zone 10 module ต่อข้าง นับรวมขอบดวง (ขอบว่างอยู่แล้ว)
+//   แท่ง ≥2 จุด (0.25 มม.) ถึงจะยิงติด · ≤4 จุด · คืน 0 = ไม่พอ (ไม่วาด ไม่กันที่)
+function barcodeMod(widths, W){
+  if(!widths) return 0;
+  const modules = widths.split('').reduce((a,b)=>a+Number(b),0);
+  const mod = Math.max(2, Math.min(4, Math.floor(W / (modules + 20))));
+  return mod*(modules + 20) <= W ? mod : 0;
 }
 
 const LABEL_PRESETS = [
@@ -739,12 +766,12 @@ function renderLabelCanvas(data, opt){
   ctx.fillText('LOT ' + (data.lot||'-'), pad, y); y += lotFs*1.3;
   // 4) น้ำหนักรวม (ใหญ่สุด) · ปรับขนาดให้พอที่เหลือ
   let barcodeH = small ? 0 : Math.round(H*0.16);
-  if(pi && barcodeH){   // 🆕 ดวงแคบ (60×40) บาร์โค้ด LOT ไม่พอกว้างอยู่แล้ว → ไม่ต้องกันที่ไว้ ให้ตัวเลขชิ้นใหญ่ขึ้น
-    const wd = code128Widths(data.lot||'');
-    const mods = wd ? wd.split('').reduce((a,b)=>a+Number(b),0) : 0;
-    const md = mods ? Math.max(2, Math.min(4, Math.floor((innerW - 40) / mods))) : 0;
-    if(!mods || md*mods + 40 > innerW) barcodeH = 0;
-  }
+  // 🆕 (UAT N3) เช็กก่อนว่าบาร์โค้ด LOT ลงดวงได้ไหม (ทุกโหมด) · ไม่ได้ → ไม่กันที่ ให้ตัวเลขน้ำหนัก/ชิ้นใหญ่ขึ้นแทนช่องว่างเปล่า
+  //   ชั่งแยกชิ้นบนดวงเตี้ย (60×40) → ไม่วาดบาร์โค้ดเหมือนเดิม: จำนวนชิ้นต้องใหญ่สุดบนดวง
+  if(pi && H < 400) barcodeH = 0;
+  const bcWidths = barcodeH ? code128Widths(data.lot||'') : null;
+  const bcMod = barcodeMod(bcWidths, W);
+  if(!bcMod) barcodeH = 0;
   const footFs = Math.round(H * (small ? 0.075 : 0.06));
   const earlyTxt = pi && pi.early ? `จบที่ ${pi.K}${pi.N ? '/' + pi.N : ''}${pi.reason ? ' · ' + pi.reason : ''}` : '';
   const reserve = barcodeH + (barcodeH ? dpmm*2 : 0) + footFs*1.4 + pad + (earlyTxt ? footFs*1.3 : 0);
@@ -778,17 +805,11 @@ function renderLabelCanvas(data, opt){
   }
   // 5) บาร์โค้ด LOT (เฉพาะเมื่อเป็น ASCII ล้วน — เข้ารหัส Code128 ได้ครบทุกตัว)
   if(barcodeH){
-    const widths = code128Widths(data.lot||'');
-    if(widths){
-      const modules = widths.split('').reduce((a,b)=>a+Number(b),0);
-      let mod = Math.floor((innerW - 20*2) / modules);        // quiet zone 10 module ต่อข้าง
-      mod = Math.max(2, Math.min(4, mod));                      // ≥2 จุด (0.25 มม.) ถึงจะยิงติด
-      if(mod*modules + 40 <= innerW){
-        let x = Math.round((W - mod*modules)/2); let bar = true;
-        for(const wch of widths){ const ww = Number(wch)*mod; if(bar) ctx.fillRect(x, Math.round(y), ww, barcodeH); x += ww; bar = !bar; }
-        y += barcodeH + dpmm*0.5;
-      }
-    }
+    const widths = bcWidths, mod = bcMod;
+    const modules = widths.split('').reduce((a,b)=>a+Number(b),0);
+    let x = Math.round((W - mod*modules)/2); let bar = true;
+    for(const wch of widths){ const ww = Number(wch)*mod; if(bar) ctx.fillRect(x, Math.round(y), ww, barcodeH); x += ww; bar = !bar; }
+    y += barcodeH + dpmm*0.5;
   }
   // 6) ท้ายดวง: 🆕 จบก่อนครบ (ชั่งแยกชิ้น) / นอกเกณฑ์ / หมายเหตุ
   if(earlyTxt){ setFont(footFs, true); const el = wrap(earlyTxt, innerW, 1)[0]||''; ctx.fillText(el, pad, Math.min(y, H - footFs*2.5 - pad)); y += footFs*1.3; }
@@ -858,6 +879,36 @@ function buildLotLabelsHTML(labels, opt){
   labels.forEach(lb => { const n = Math.max(1, Math.min(99, Number(lb.count)||1)); for(let k = 1; k <= n; k++){ const cv = renderLotLabelCanvas({ ...lb, idx:k, count:n }, opt); imgs.push(cv.toDataURL('image/png')); } });
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ฉลากล็อต ${imgs.length} ดวง</title><style>@page{size:${opt.wmm}mm ${opt.hmm}mm;margin:0}body{margin:0}img{display:block;width:${opt.wmm}mm;height:${opt.hmm}mm;page-break-after:always}img:last-child{page-break-after:auto}</style></head><body>${imgs.map(u => `<img src="${u}">`).join('')}<script>window.onload=()=>{setTimeout(()=>{window.print();},300);};<\/script></body></html>`;
 }
+
+// 🆕 (2026.11.02 · label-size) ขนาดฉลากผลชั่งตามไลน์จากแอปแม่ — { wmm, hmm } (กว้าง 20–150 · สูง 15–200 มม.) · ค่าผิด = null (ใช้ขนาดเครื่อง)
+function normLabelSize(x){
+  if(!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const okType = v => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '');
+  if(!okType(x.wmm) || !okType(x.hmm)) return null;
+  const w = Number(x.wmm), hh = Number(x.hmm);
+  if(!isFinite(w) || !isFinite(hh) || w < 20 || w > 150 || hh < 15 || hh > 200) return null;
+  return { wmm: w, hmm: hh };
+}
+// ขนาดฉลากของสูตร — ใช้เฉพาะตอนฝัง (เปิดเดี่ยว = ขนาดเครื่องเหมือนเดิม)
+const recipeLabelSize = (r) => (EMBED && r) ? normLabelSize(r.labelSize) : null;
+// หน้าจอพิมพ์ (ไม่มีเครื่องพิมพ์ต่อ) ขนาดตามไลน์ — วาดด้วย renderLabelCanvas ตัวเดียวกับเครื่องพิมพ์ตรง แล้ววางรูปลงหน้า @page ขนาดนั้น
+//   rotate = ค่าตั้ง labelRotate ของเครื่อง: วาดแนวตั้ง (สลับ กว้าง/สูง) แล้วหมุน 90° เข้ากรอบ เหมือน buildLabel
+function buildSizedLabelHTML(data, copies, opt, rotate){
+  const W = opt.wmm, H = opt.hmm;
+  const cv = renderLabelCanvas(data, rotate ? { ...opt, wmm: H, hmm: W } : opt);
+  const u = cv.toDataURL('image/png');
+  const n = Math.max(1, Math.min(99, Number(copies) || 1));
+  const imgCss = rotate
+    ? `position:absolute;top:0;left:0;width:${H}mm;height:${W}mm;transform-origin:top left;transform:translate(${W}mm,0) rotate(90deg)`
+    : `display:block;width:${W}mm;height:${H}mm`;
+  const one = `<div class="wrap"><img src="${u}"></div>`;
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Label ${escHTML(data.lot || '')}</title><style>@page{size:${W}mm ${H}mm;margin:0}html,body{margin:0;padding:0}.wrap{position:relative;width:${W}mm;height:${H}mm;overflow:hidden;page-break-after:always}.wrap:last-child{page-break-after:auto}img{${imgCss}}</style></head><body data-label-size="${W}x${H}">${Array.from({ length: n }).map(() => one).join('')}<script>window.onload=()=>{setTimeout(()=>{window.print();},300);};<\/script></body></html>`;
+}
+// HTML หน้าจอพิมพ์: มีขนาดตามไลน์ → buildSizedLabelHTML · ไม่มี → buildLabel 100×75 เดิมทุกอย่าง
+const screenLabelHTML = (data, copies, settings, size) => {
+  const rot = !!(settings || {}).labelRotate;
+  return size ? buildSizedLabelHTML(data, copies, { ...printerOpts(settings), ...size }, rot) : buildLabel(data, copies, rot);
+};
 
 // canvas → บิตแมป 1 บิต (MSB = ซ้ายสุด) · ห้าม dither (ตัวไทย/บาร์โค้ดจะแตก) · blackIsOne: ESC/POS=true, TSPL=false
 function canvasToBits(cv, threshold, blackIsOne){
@@ -1117,8 +1168,11 @@ function useUSBPrinter(opts){
     finally { setBusy(''); }
   };
   const viaLabel = () => TRANSPORT_LABEL[transport] || 'USB';
-  const printLabel = (data, settings, copies) => run('กำลังพิมพ์ฉลาก…', async () => {
-    const opt = printerOpts(settings);
+  // 🆕 (2026.11.02) size {wmm,hmm} (ผ่าน normLabelSize แล้ว) = ขนาดตามไลน์ ทับกว้าง/สูงของเครื่อง · gap/density/direction ตามเครื่องเดิม
+  const printLabel = (data, settings, copies, size) => run('กำลังพิมพ์ฉลาก…', async () => {
+    // 🆕 WLS verify 1: ESC/POS = กระดาษม้วนต่อเนื่อง กว้างตามหัวพิมพ์ที่ตั้งในเครื่อง → ไม่ทับขนาด (กว้าง 60 จะเกินหัว 58 มม./ภาพเพี้ยน)
+    const base = printerOpts(settings);
+    const opt = { ...base, ...(size && base.lang !== 'escpos' ? { wmm: size.wmm, hmm: size.hmm } : {}) };
     const cv = renderLabelCanvas(data, opt);
     const job = opt.lang==='escpos' ? buildESCPOS(cv, opt, copies||1) : buildTSPL(cv, opt, copies||1);
     await send(job);
@@ -1291,8 +1345,9 @@ function App(){
         //    ไม่ผ่าน select-recipe → ไม่มี confirm "เปลี่ยนสูตรจะล้างทิ้ง" · LOT ที่ชั่งจากเครื่องอื่น/ล้างข้อมูลแล้วก็พิมพ์ได้
         const log = d.log, st = stateRef.current, pr = printerRef.current;
         const copies = Math.max(1, Math.min(10, Number(d.copies)||1));
-        if(pr && pr.connected) pr.printLabel(log, st.settings, copies).catch(e => alert('🖨️ พิมพ์ไม่สำเร็จ: ' + e.message));
-        else printHTML(buildLabel(log, copies, !!(st.settings||{}).labelRotate));
+        const size = normLabelSize(d.size);   // 🆕 (2026.11.02) ขนาดตามไลน์ของ log (ไม่มี/ผิด = ขนาดเครื่อง)
+        if(pr && pr.connected) pr.printLabel(log, st.settings, copies, size).catch(e => alert('🖨️ พิมพ์ไม่สำเร็จ: ' + e.message));
+        else printHTML(screenLabelHTML(log, copies, st.settings, size));
       }
     };
     embedListeners.add(fn);
@@ -1963,12 +2018,20 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   // 🆕 เส้นทางพิมพ์: มีเครื่องพิมพ์ต่ออยู่ (USB/Bluetooth) → ส่ง TSPL/ESC-POS ตรง · ไม่มี → หน้าจอพิมพ์ของระบบ (คอม/PDF)
   const usbReady = printer && printer.connected;
   const willPrint = usbReady ? (settings.usbAutoPrint !== false) : autoPrint;
-  const doPrint = (data) => {
+  const curLblSize = recipeLabelSize(recipe);   // 🆕 (2026.11.02) ขนาดฉลากตามไลน์ของสูตรนี้ (null = ขนาดเครื่อง)
+  // 🆕 (2026.11.02 UAT S1) ป้ายขนาดม้วนข้างชื่อสูตร — โชว์ทุกสูตรเมื่อมีสูตรใดสูตรหนึ่งกำหนดขนาด (เครื่องเดียวสลับ 60×40 ↔ ขนาดเครื่อง → เตือนเปลี่ยนม้วนก่อนพิมพ์อัตโนมัติ)
+  const anyLineSize = EMBED && (!!curLblSize || (recipes || []).some(r => normLabelSize(r && r.labelSize)));
+  const devOpt = printerOpts(settings);
+  const lblBadge = anyLineSize && recipe
+    ? (curLblSize ? { w: curLblSize.wmm, h: curLblSize.hmm, src: 'line' } : { w: devOpt.wmm, h: devOpt.hmm, src: 'device' })
+    : null;
+  // 🆕 (2026.11.02) size = ขนาดฉลากตามไลน์ของสูตร (recipeLabelSize) · null = ขนาดเครื่องเหมือนเดิม
+  const doPrint = (data, size) => {
     if(usbReady){
-      printer.printLabel(data, settings, copies).catch(e => { showToast('🖨️ พิมพ์ไม่สำเร็จ: ' + e.message); buzz([200]); });
+      printer.printLabel(data, settings, copies, size || null).catch(e => { showToast('🖨️ พิมพ์ไม่สำเร็จ: ' + e.message); buzz([200]); });
       return true;
     }
-    return printHTML(buildLabel(data, copies, labelRotate));
+    return printHTML(size ? screenLabelHTML(data, copies, settings, size) : buildLabel(data, copies, labelRotate));
   };
 
   // 🆕 เลข LOT: ชื่อสูตร-วันที่ท้องถิ่น-ลำดับของวันนี้-รหัสเครื่อง (เดิมใช้วันที่ UTC → ก่อน 7 โมงเช้าเป็นวันเมื่อวาน · 3 หลักท้าย ms สุ่มชนกันได้)
@@ -2047,12 +2110,14 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       ...(portionLog ? { portion: portionLog } : {}) };   // 🆕 ชั่งแยกชิ้น (ส่งแม่/กล่องขาออก = แบบเต็ม มี pieces)
     const logEntry = { ...data, id:'log_'+Date.now().toString(36) };
     // 🆕 ประวัติในเครื่องเก็บแบบย่อ: pieces → pieceG (กันโควตา localStorage ~5 MB · LOG_CAP 3000)
-    const stored = portionLog ? { ...logEntry, portion: portionCompact(portionLog) } : logEntry;
+    const lblSize = recipeLabelSize(recipe);   // 🆕 (2026.11.02) ขนาดฉลากตามไลน์ · เก็บใน log ของเครื่อง (ให้หน้าประวัติพิมพ์ซ้ำขนาดเดิม) ไม่ส่งแม่
+    const stored0 = portionLog ? { ...logEntry, portion: portionCompact(portionLog) } : logEntry;
+    const stored = lblSize ? { ...stored0, labelSize: lblSize } : stored0;
     update({ logs:[stored, ...(state.logs||[])].slice(0,LOG_CAP),
       settings:{ ...settings, lastOperator:operator } });
     if(job){ outboxAdd(logEntry); outboxSent.add(logEntry.id); }   // 🆕 เข้ากล่องขาออกก่อนส่ง — ออกเมื่อแม่ตอบ finished-ack เท่านั้น (เขียนลงเครื่องไม่ได้ → ถือไว้ในหน่วยความจำ + เตือน)
     embedPost({ type:'finished', log: logEntry });
-    if(willPrint) doPrint(data);
+    if(willPrint) doPrint(data, lblSize);
     resetForNext();
     if(job) onJobDone && onJobDone();   // งานนี้จบ (1 batch = 1 งาน) → กลับเป็นชั่งอิสระ
     const pcs = portionLog ? ` · ${portionLog.count} ชิ้น` : '';
@@ -2198,6 +2263,13 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
           replaceMode && recipes.length===0 ? NO_EMBED_RECIPES : 'เลือกสูตรเพื่อเริ่มชั่ง')
       : h('div', { className:'space-y-2' },
           h('div', { className:'text-2xl font-bold text-gray-800 px-1' }, recipe.name),
+          // 🆕 (2026.11.02 UAT S1) ป้ายขนาดม้วนฉลาก — โชว์ทันทีที่เลือกสูตร ตัวใหญ่ · ตามไลน์ = สีเหลือง "ใส่ม้วน … ก่อนพิมพ์" · ตามเครื่อง = สีเทา
+          lblBadge && h('div', { 'data-label-size-badge': lblBadge.w + 'x' + lblBadge.h, 'data-label-size-src': lblBadge.src,
+            className: cls('inline-block mx-1 text-base font-bold px-3 py-1 rounded-lg border-2',
+              lblBadge.src === 'line' ? 'bg-amber-100 text-amber-900 border-amber-400' : 'bg-gray-100 text-gray-800 border-gray-400') },
+            ...(lblBadge.src === 'line'
+              ? ['🏷️ ใส่ม้วน ', fmt(lblBadge.w), '×', fmt(lblBadge.h), ' มม. ก่อนพิมพ์ (ตามไลน์)']
+              : ['🏷️ ฉลาก ', fmt(lblBadge.w), '×', fmt(lblBadge.h), ' มม. (ตามเครื่อง)'])),
           portion ? h(PortionPanel, { pCount, pTarget, pTolEff, pieces, armed, zeroRef, status: pStatus, scale, items, totalG, countdown,
               stale: scale.connected && scale.mode!=='mock' && scale.packetAge() > STALE_MS,
               modal: pModal, pSwitch, openModal: openPModal, closeModal: closePModal, parentCancel, jobLabel: job ? (job.label || job.id) : '',
@@ -2544,8 +2616,10 @@ function LogsTab({ state, printer, outboxVer }){
     // 🆕 ฝังใน ERP → แจ้งแอปแม่ว่าพิมพ์ซ้ำ (ERP บันทึกร่องรอยบน log/audit) · ฉลากซ้ำมีคำว่า "พิมพ์ซ้ำ" ที่หมายเหตุ
     if(EMBED) embedPost({ type:'reprinted', log:{ id: log.id, deviceId: log.deviceId || getDeviceId(), lot: log.lot } });
     const lg = EMBED ? { ...log, note: (log.note ? log.note + ' · ' : '') + 'พิมพ์ซ้ำ' } : log;
-    if(printer && printer.connected){ printer.printLabel(lg, state.settings, 1).catch(e=>alert('🖨️ พิมพ์ไม่สำเร็จ: '+e.message)); return; }
-    printHTML(buildLabel(lg, 1, !!state.settings?.labelRotate));
+    // 🆕 (2026.11.02) ขนาดตามไลน์: log.labelSize ที่เก็บตอนชั่ง · log เก่าไม่มี → หาจากสูตรปัจจุบัน (recipeId) · เปิดเดี่ยว = ขนาดเครื่อง
+    const size = EMBED ? (normLabelSize(log.labelSize) || recipeLabelSize(activeRecipes(state).find(r => r.id === log.recipeId))) : null;
+    if(printer && printer.connected){ printer.printLabel(lg, state.settings, 1, size).catch(e=>alert('🖨️ พิมพ์ไม่สำเร็จ: '+e.message)); return; }
+    printHTML(screenLabelHTML(lg, 1, state.settings, size));
   };
   return h('div', { className:'space-y-2' },
     h('h2', { className:'font-bold text-lg' }, '📜 ประวัติการชั่ง (', logs.length, ')'),
@@ -2824,7 +2898,7 @@ function SettingsTab({ state, update, printer }){
 
 ReactDOM.createRoot(document.getElementById('root')).render(h(App));
 // เปิดเผยตัวช่วยสำหรับทดสอบอัตโนมัติ (เฉพาะ ?debug=1)
-if(DEBUG) window.__weighTest = { buildLabel, portionInfo, renderLabelCanvas, renderLotLabelCanvas, buildLotLabelsHTML, buildTSPL, buildESCPOS, canvasToBits, code128Widths, printerOpts, buildTestText, WEIGH_VERSION };
+if(DEBUG) window.__weighTest = { buildLabel, normLabelSize, buildSizedLabelHTML, screenLabelHTML, portionInfo, renderLabelCanvas, renderLotLabelCanvas, buildLotLabelsHTML, buildTSPL, buildESCPOS, canvasToBits, code128Widths, barcodeMod, C128: _C128, printerOpts, buildTestText, WEIGH_VERSION };
 })();
 </script>
 </body></html>

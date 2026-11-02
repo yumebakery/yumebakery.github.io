@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="ba12435a4825";window.__ERP_BUILT_AT__="2026-11-02T09:35:36";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="55a8dd38ee79";window.__ERP_BUILT_AT__="2026-11-02T15:30:29";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -6432,6 +6432,36 @@ const KPI_COLOR_TONE = { blue:'blue', red:'red', green:'green', amber:'amber', o
 //   · ไม่มีเครื่องพิมพ์ต่ออยู่ → ผู้เรียก (printLotLabels ใน mod-stock) ใช้หน้าพิมพ์ HTML เดิม
 const LOT_LABEL_SIZES = { '60x40':{ wmm:60, hmm:40, label:'60×40 มม.' }, '50x30':{ wmm:50, hmm:30, label:'50×30 มม.' }, '100x75':{ wmm:100, hmm:75, label:'100×75 มม.' }, '80x50':{ wmm:80, hmm:50, label:'80×50 มม.' }, '100x50':{ wmm:100, hmm:50, label:'100×50 มม.' } };
 function lotLabelSizeOf(state){ const k = state && state.settings && state.settings.lotLabelSize; return LOT_LABEL_SIZES[k] || LOT_LABEL_SIZES['60x40']; }
+// 🆕 WEIGH_LABEL_SIZE (WLS1 · D1) — ขนาดฉลากหน้าชั่งตามไลน์ผลิต
+//   · ไลน์ชั่ง/วัด/ตวง (pl_weigh หรือ dept 'weigh' ของสาขาใดก็ได้) = null (ใช้ค่าตั้งเครื่อง = ขนาดเดิม)
+//   · ไลน์อื่นทุกไลน์ = 60×40 · lineId ว่าง = null (ไม่เดา)
+//   · ตั้งค่าเองได้ settings.weighLabelSizeByLine[lineId] = 'device' | id ใน LOT_LABEL_SIZES (ค่าอื่น = ตกไปค่าเริ่มต้น)
+function isWeighDeptLine(state, lineId){
+  if(!lineId) return false;
+  if(lineId === 'pl_weigh') return true;
+  return ((state && state.branches) || []).some(b => ((b && b.productionLines) || []).some(l => l && l.id === lineId && l.dept === 'weigh'));
+}
+function weighLabelSizeFor(state, lineId){
+  if(!lineId) return null;
+  const map = (state && state.settings && state.settings.weighLabelSizeByLine) || {};
+  const v = (map && typeof map === 'object') ? map[lineId] : undefined;
+  const mk = (id) => { const s = LOT_LABEL_SIZES[id]; return { id, wmm:s.wmm, hmm:s.hmm, label:s.label }; };
+  if(v === 'device') return null;
+  if(typeof v === 'string' && Object.prototype.hasOwnProperty.call(LOT_LABEL_SIZES, v)) return mk(v);
+  return isWeighDeptLine(state, lineId) ? null : mk('60x40');
+}
+// 🆕 WLS verify 1: ไลน์ "หน้าชั่งที่ชั่งจริง" (เครื่องพิมพ์/ม้วนฉลากอยู่ที่นี่) — ไม่ใช่ไลน์ผลิตของสูตร (bom.lineId)
+//   src = BOM หรือสูตรในหน้าชั่ง ({ lineId, weighLineIds }) · sub = ไลน์ย่อยที่เปิดอยู่ / log.weighLineId
+//   1) sub ใช้ได้ถ้าสูตรไม่ได้ระบุหน้าชั่ง หรือ sub อยู่ใน weighLineIds  2) หน้าชั่งเดียว = อันนั้น
+//   3) หลายหน้าชั่ง → มีไลน์ชั่ง/วัด/ตวง = ไลน์นั้น (คงขนาดเดิม · ปลอดภัยกับม้วนเดิม) · ไม่งั้นอันแรก
+function weighStationLineFor(state, src, sub){
+  const explicit = ((src && src.weighLineIds) || []).filter(Boolean);
+  if(sub && sub !== '__all__' && (!explicit.length || explicit.includes(sub))) return String(sub);
+  const wl = bomWeighLines(src);
+  if(wl.length === 1) return String(wl[0]);
+  const wd = wl.find(id => isWeighDeptLine(state, id));
+  return wd || wl[0] || null;
+}
 const LabelDock = (() => {
   let frame = null, panel = null, ready = false, seq = 0;
   let status = { connected:false, name:null, transport:null, busy:'', error:'' };
@@ -16509,7 +16539,7 @@ Object.assign(global.ERP, {
   usePaneActive, FOCUS_SCOPES, FOCUS_EVENT, focusScopeAllowed, focusScopeOf, requestFocus, useFocusSet, useFocusId, useFocusRow, useFocusRows, focusPendingIds, FOCUS_ROW_CLS, TodoBanner, TodoCta, goTarget, toneOf, ToneTile, SectionHead, KpiCard, QuickTile, StatusPill, NegBadge, DocChip, STATUS_TONE,
   // 🆕 UI-v2 เฟส 3 (TABLE_V2_CONTRACT §3)
   STATUS_MAPS, StatusBadge, DataTable, KPI_COLOR_TONE, RowActions, EmptyState, FilterBar, SearchInput, FilterChips, presetOf, BottomSheet, KpiStrip, PageHeader, Fab, TableBoundary, useTableV2, TABLE_V2_PAGES, useMediaQuery, useIsNarrow, canNavigate,
-  LabelDock, PrinterStatusRow, LOT_LABEL_SIZES, lotLabelSizeOf,
+  LabelDock, PrinterStatusRow, LOT_LABEL_SIZES, lotLabelSizeOf, isWeighDeptLine, weighLabelSizeFor, weighStationLineFor,
   code128Widths, code128SVG, inDateRange, exportCSV, buildXLSX, exportXLSX,
   // Business helpers
   getPOReceiveStatus, genDocNumber, fmtDayDocNo,
@@ -26068,7 +26098,7 @@ function _reducerCore(s, a){
       const _old = s.settings || {}, _new = { ..._old, ...(a.data || {}) };
       const _WATCH = ['gmSelfApprove', 'posBackflushPhantomOnly','productionLive','periodLockUntil','futureDateLimit','siRequirePrice','stockValueRoles','allowNegativeStock',
         'weighOrderJobs', 'vatLockUntil', 'capitalizeThreshold',
-        'priceKeyInEnabled', 'priceKeyInTolAbs', 'priceKeyInTolPct', 'priceKeyInBlockPct', 'priceKeyInVolatileTolAbs', 'priceKeyInVolatileTolPct', 'priceKeyInWarnPct', 'lineTrStockHints', 'priceFixInvDiscEnabled', 'whtGroupEnabled', 'prepSetGateEnabled', 'lineSelfStart'];   /* 🆕 LSS D1: สวิตช์ ▶ เริ่มผลิตเอง ลงประวัติ */   /* 🆕 SET_PREP: สวิตช์ฉุกเฉินด่านชุดชั่งเตรียม ลงประวัติ */   /* 🆕 WHT_GROUP S3 (D6): สวิตช์ออก 50 ทวิ รวม ลงประวัติ */   /* UAT S2: สวิตช์โชว์ยอดที่ไลน์ตอนขอของเข้าไลน์ ลงประวัติ */   // 🆕 PRICE-FIX UAT M2: สวิตช์/เกณฑ์ไม่ต้องอนุมัติ ลงประวัติ (กันขยับเกณฑ์ชั่วคราวแล้วคืนเงียบ) ·   💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · B18 gmSelfApprove · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
+        'priceKeyInEnabled', 'priceKeyInTolAbs', 'priceKeyInTolPct', 'priceKeyInBlockPct', 'priceKeyInVolatileTolAbs', 'priceKeyInVolatileTolPct', 'priceKeyInWarnPct', 'lineTrStockHints', 'priceFixInvDiscEnabled', 'whtGroupEnabled', 'prepSetGateEnabled', 'lineSelfStart', 'weighLabelSizeByLine'];   /* 🆕 WLS UAT S2: ขนาดฉลากหน้าชั่งต่อไลน์ ลงประวัติ (ใคร/เมื่อไร เปลี่ยนไลน์ไหน) */   /* 🆕 LSS D1: สวิตช์ ▶ เริ่มผลิตเอง ลงประวัติ */   /* 🆕 SET_PREP: สวิตช์ฉุกเฉินด่านชุดชั่งเตรียม ลงประวัติ */   /* 🆕 WHT_GROUP S3 (D6): สวิตช์ออก 50 ทวิ รวม ลงประวัติ */   /* UAT S2: สวิตช์โชว์ยอดที่ไลน์ตอนขอของเข้าไลน์ ลงประวัติ */   // 🆕 PRICE-FIX UAT M2: สวิตช์/เกณฑ์ไม่ต้องอนุมัติ ลงประวัติ (กันขยับเกณฑ์ชั่วคราวแล้วคืนเงียบ) ·   💎 FA-S1 capitalizeThreshold (เกณฑ์ทรัพย์สิน) · B18 gmSelfApprove · 🆕 WEIGH-ORDER E6: สวิตช์ปิดงานชั่งตามใบสั่งทั้งระบบ — ลงประวัติ (ใคร/เมื่อไร)
       const _chg = _WATCH.filter(k => a.data && Object.prototype.hasOwnProperty.call(a.data, k) && JSON.stringify(_old[k]) !== JSON.stringify(a.data[k]));
       if(!_chg.length) return { ...s, settings:_new };
       const _by = (s.currentUser && s.currentUser.username) || (a.data && a.data._by) || 'system', _now = Date.now();
@@ -67229,16 +67259,40 @@ function MyStationWeighPointer({ state, dispatch, user, branchId, hidden }){
 const WEIGH_JOB_START_TIMEOUT_MS = 5000;
 const WEIGH_CLAIM_WAIT_MS = 15000;   // 🆕 verify (should): รอจองงาน (cloud-first) ไม่เกิน 15 วิ — เกิน = บอกเน็ตไม่พอ + ลองใหม่/ทาง ผจก.   // รอ job-started (แอปชั่งไม่เปิด dialog ตอน start-job → 5 วิพอ)
 // ข้อความ start-job (§C2) — สูตรงานคิดใหม่จาก state ปัจจุบันทุกครั้ง · srcQty/srcUnit อยู่ใน ERP เท่านั้น · สูตรใช้ไม่ได้ = null
-function weighStartJobPayload(state, row){
+// 🆕 WEIGH_LABEL_SIZE (WLS1 · D2): ขนาดฉลากตามไลน์ → { labelSize:{wmm,hmm} } หรือ {} (null = ขนาดเครื่องเดิม · ไม่ใส่ฟิลด์)
+//   ค่าคำนวณจาก settings + ไลน์ล้วน ๆ (ไม่มีเวลา/สุ่ม) → ส่ง config ซ้ำได้ค่าเดิม ไม่ทำให้แอปชั่งเห็นว่าสูตรเปลี่ยน
+function weighLabelSizeField(state, lineId, key){
+  const fn = global.ERP.weighLabelSizeFor;
+  const s = fn ? fn(state, lineId) : null;
+  return s ? { [key || 'labelSize']: { wmm: s.wmm, hmm: s.hmm } } : {};
+}
+// 🆕 WLS verify 1: ไลน์หน้าชั่งของสูตรในหน้าชั่ง (r.weighLineIds/r.lineId + ไลน์ย่อยที่เปิด) และของผลชั่ง (พิมพ์ซ้ำ)
+function weighRecipeStationLine(state, r, sub){
+  const fn = global.ERP.weighStationLineFor;
+  return fn ? fn(state, { lineId: r && r.lineId, weighLineIds: (r && r.weighLineIds) || [] }, sub) : (r && r.lineId) || null;
+}
+function weighLogStationLine(state, log){
+  if(!log) return null;
+  const bom = log.bomId ? ((state && state.boms) || []).find(b => b && b.id === log.bomId) : null;
+  const fn = global.ERP.weighStationLineFor;
+  const src = { lineId: (bom && bom.lineId) || log.lineId || null, weighLineIds: (bom && bom.weighLineIds) || [] };
+  return fn ? fn(state, src, log.weighLineId) : (log.weighLineId || log.lineId || null);
+}
+function weighStartJobPayload(state, row, sub){
   const o = _wjOrder(state, row);
   if(!o) return null;
   const rec = weighJobRecipe(state, o, _wjBatch(o, row), row.opId);
   if(!rec || !(rec.items || []).length || rec.portionError) return null;
+  // 🆕 WLS verify 1: ขนาดตามไลน์หน้าชั่งที่ชั่งจริง (weighLineIds / ไลน์ย่อยที่เปิด) ไม่ใช่ bom.lineId — กติกาเดียวกับ config/พิมพ์ซ้ำ
+  const _bom = ((state && state.boms) || []).find(b => b && b.id === rec.bomId);
+  const _st = global.ERP.weighStationLineFor;
+  const _src = { lineId: (_bom && _bom.lineId) || o.lineId || null, weighLineIds: (_bom && _bom.weighLineIds) || [] };
+  const _lineId = _st ? _st(state, _src, sub) : _src.lineId;
   return { id: row.jobId, label: row.orderNumber + (row.batchSeq != null ? (row.round ? ` · รอบ ${row.batchNo}/${row.batchCount}` : ` · B${row.batchNo}/${row.batchCount}`) : ''),
     orderNumber: row.orderNumber, batchNo: row.batchNo, batchCount: row.batchCount, lockMult:true,
     recipe:{ id: rec.id, code: rec.code, name: rec.name,
       items: rec.items.map(i => ({ name:i.name, target:i.target, unit: i.unit === 'ml' ? 'ml' : 'g', tol:i.tol, ...(i.itemId ? { itemId:i.itemId } : {}), ...(i.fixed ? { fixed:true } : {}) })),
-      ...(rec.portion ? { portion: rec.portion } : {}) } };
+      ...(rec.portion ? { portion: rec.portion } : {}), ...weighLabelSizeField(state, _lineId) } };
 }
 // มีผลชั่งของงานนี้แล้ว (ในระบบ · คิวส่งซ้ำบนเครื่องนี้ · pendingJobLogs ที่กำลังลง) → ห้ามปล่อยงาน (§B2.9)
 function _wjHasLogFor(state, jobId, busyIds){
@@ -67778,7 +67832,9 @@ function WeighStationTab({ state, dispatch, user, branchId }){
     return seesAll ? shown0.map(r => open[r.bomId] ? { ...r, name: `${r.name} — มีใบสั่ง ${open[r.bomId]} batch · กด ▶ ในคิวงานชั่ง` } : r)
       : shown0.filter(r => !open[r.bomId]);
   }, [recipesShown, jobsAll, seesAll, prepBlocked]);
-  const recipesSig = useMemo(() => weighRecipesSig(recipesCfg), [recipesCfg]);
+  // 🆕 WLS1 D2: ขนาดฉลากตามไลน์อยู่ใน sig ด้วย → เปลี่ยนค่าตั้งแล้วส่ง config ใหม่ · ค่าเดิม = sig เดิม (ไม่ส่งซ้ำ)
+  const _wlsMap = state.settings && state.settings.weighLabelSizeByLine;
+  const recipesSig = useMemo(() => weighRecipesSig(recipesCfg) + '|' + JSON.stringify(recipesCfg.map(r => weighLabelSizeField(state, weighRecipeStationLine(state, r, activeSub)).labelSize || 0)), [recipesCfg, _wlsMap, state.branches, activeSub]);
   const skippedHints = recipes.filter(r => (r.skipped||[]).length);
 
   // ---- iframe (mount ครั้งเดียวต่อ src · ไม่ remount ทุก render) ----
@@ -67860,7 +67916,7 @@ function WeighStationTab({ state, dispatch, user, branchId }){
     try { fr.contentWindow.postMessage({ target:'weigh-system', ...msg }, '*'); return true; } catch(_e){ return false; }
   };
   const sendConfig = () => {
-    const { user:u, branchId:b, recipesCfg:rs } = latest.current;   // 🆕 E5b: รายการที่ตัดสูตรที่มีงานใบสั่งแล้ว (§B2.13)
+    const { user:u, branchId:b, recipesCfg:rs, state:stCfg, activeSub:subCfg } = latest.current;   // 🆕 E5b: รายการที่ตัดสูตรที่มีงานใบสั่งแล้ว (§B2.13)
     if(!u) return;
     postToWeigh({ type:'config',
       operator: u.name || u.username || '',
@@ -67870,7 +67926,7 @@ function WeighStationTab({ state, dispatch, user, branchId }){
       // 🆕 T3 ซ่อน BOM: แท็บ 📋 สูตร ในเครื่องชั่ง (โชว์สูตรชั่งทุกสูตร) เฉพาะคนมี production.bom.view · คนไลน์เห็นแค่ ⚖️ ชั่ง (ขั้นที่กำลังชั่งของ batch นี้)
       permissions: { recipes: (hasPerm(u,'production','bom','view') || isSuperUser(u)) ? 'view' : 'none', logs:'view', settings:'none', offSpec:true },
       // 🆕 WEIGH UAT: unit 'ml' สำหรับปริมาตร (สถานีโชว์ "ตวงเป็นกรัม 1 มล.=1 ก.") · fixed = ไม่คูณตามตัวคูณ (scaleType 'fixed') · itemId ติดไปกับ log
-      recipes: rs.map(r => ({ id:r.id, code:r.code, name:r.name, ...(r.category ? { category: r.category } : {}), items: r.items.map(i => ({ name:i.name, target:i.target, unit: i.unit === 'ml' ? 'ml' : 'g', tol:i.tol, ...(i.itemId ? { itemId:i.itemId } : {}), ...(i.fixed ? { fixed:true } : {}) })) })),
+      recipes: rs.map(r => ({ id:r.id, code:r.code, name:r.name, ...(r.category ? { category: r.category } : {}), items: r.items.map(i => ({ name:i.name, target:i.target, unit: i.unit === 'ml' ? 'ml' : 'g', tol:i.tol, ...(i.itemId ? { itemId:i.itemId } : {}), ...(i.fixed ? { fixed:true } : {}) })), ...weighLabelSizeField(stCfg, weighRecipeStationLine(stCfg, r, subCfg)) })),   // 🆕 WLS1 D2: labelSize ตามไลน์ (null = ไม่ใส่)
       recipesMode: 'replace',   // ระบบชั่งรุ่นใหม่: ใช้รายการนี้แทนสูตรในเครื่อง (รุ่นเก่า ignore = รวมตาม id เหมือนเดิม)
       // 🆕 WEIGH UAT: เกณฑ์เครื่องชั่งที่ ERP บังคับ (ทับค่าที่ถูกแก้จากโหมดเปิดเดี่ยวบนเครื่องเดียวกัน) — ไม่แตะ autoPrint (แท็บเล็ตตัดสินเองตามเครื่องพิมพ์ที่มี)
       settings: WEIGH_FORCED_SETTINGS,
@@ -68027,7 +68083,7 @@ function WeighStationTab({ state, dispatch, user, branchId }){
       const b0 = weighJobStartBlock(getCur() || st, u, row, { ...jobEnvRef.current, claimPending:null });
       if(b0 && (b0.code === 'other_device' || b0.code === 'sent_wait' || b0.code === 'busy')){ setLastMsg({ ok:false, text:`⛔ ${weighJobLabel(row)} — ${b0.text}` }); return; }
     }
-    const job = weighStartJobPayload(getCur() || st, row);
+    const job = weighStartJobPayload(getCur() || st, row, latest.current.activeSub);
     if(!job){ setLastMsg({ ok:false, text:`⛔ ${weighJobLabel(row)} — สร้างสูตรงานชั่งไม่ได้ (ใบ/สูตรเปลี่ยน) ชั่งที่หน้างานแทน หรือแจ้งผจก.` }); return; }
     let pre = [];
     if(takeover){
@@ -68139,7 +68195,7 @@ function WeighStationTab({ state, dispatch, user, branchId }){
       const n = (log.reprints||[]).length + 1;
       const ok = postToWeigh({ type:'print-label', copies:1, log:{ recipeName: log.recipeName || '', recipeCode: log.recipeCode || '', lot: log.lot || '', total: Number(log.total)||0,
         operator: log.operator || '', ts: log.ts || Date.now(), note: (log.note ? log.note + ' · ' : '') + `พิมพ์ซ้ำ #${n}`, offSpec: !!log.offSpec, multiplier: log.multiplier || 1, items: log.items || [],
-        ...weighReprintExtra(state, log) } });   // 🆕 WEIGH-ORDER E7 (§B2.14 · [P] §G.9): ฉลากงานใบสั่ง = job.label · ชั่งแยกชิ้น = "25 ชิ้น" ตัวใหญ่
+        ...weighReprintExtra(state, log) }, ...weighLabelSizeField(state, weighLogStationLine(state, log), 'size') });   // 🆕 WLS1 D2: size ตามไลน์ของ log · 🆕 WEIGH-ORDER E7 (§B2.14 · [P] §G.9): ฉลากงานใบสั่ง = job.label · ชั่งแยกชิ้น = "25 ชิ้น" ตัวใหญ่
       if(ok){ dispatch({ type:'MARK_WEIGH_REPRINT', data:{ deviceId: log.deviceId || '', id: log.id, lot: log.lot || '', by: user.username } }); _notify(`🖨️ ส่งพิมพ์ฉลาก ${log.lot || ''} แล้ว (สำเนา #${n})`, 'success'); return; }
     }
     const okSel = postToWeigh({ type:'select-recipe', recipeId: log.recipeId, code: log.recipeCode });
@@ -76917,7 +76973,7 @@ global.ERP._postOrderOutput = postOrderOutput;   // 🆕 S/M/L H3: ให้เ�
 global.ERP._weighOrder = { _weighClaimDeviceId, weighForeignClaim, buildWeighJobAction, roFor, RO_STAMP, _closeStamp, _weighParseJobId, _weighReplayValid, _weighClaimCommit, _weighReplayPending,
   _weighPushReplay, _weighLoadReplay, _weighSaveReplay, _weighQueueJobLabel, postOrderOutput,
   weighJobStartBlock, weighJobShortage, weighJobLabel, weighJobCurrent, weighJobDoneBatches,
-  weighStartJobPayload, weighJobResultMsg, weighDriftScrapInit, _wjHasLogFor,
+  weighStartJobPayload, weighLabelSizeField, weighRecipeStationLine, weighLogStationLine, weighJobResultMsg, weighDriftScrapInit, _wjHasLogFor,
   _legacyConsumedIds, _weighClaimMine, _weighRelClaimOf, weighManagerRelease, _weighReplayJobCount,   // 🆕 verify ชุด 3 (weigh_order_verify3_unit.py)
   weighOrderProgress, weighRouteToMyStation, weighRouteBack, weighPendingFinalize, setWeighOrderJobs, canWeighRouteOverride, weighStationPointerText,
   WeighOrderProgress, OrderDetailModal, BOMEditModal, WeighRecipePreviewModal,
@@ -118778,6 +118834,39 @@ function StateAppendPolicy({ st, dispatch, user }){
 //    1) productionLive: false = โหมด go-live (จัดซื้อ/คลัง/บัญชี ก่อน) → พนักงานหน้างาน/สาขาเห็นเฉพาะ 🧺 เบิกวัตถุดิบ ในเมนูผลิต
 //       (ผู้จัดการผลิต/GM/Admin ยังเห็นครบ — ตาม goLivePrivileged ใน mod-production) · true = เปิดระบบผลิตเต็มรูปแบบตามสิทธิ์ปกติ · ค่า undefined (state เก่า) = เปิด
 //    2) warehouseSeeValue: role คลังสินค้า เห็นมูลค่า (฿) ของสต๊อกหรือไม่ (เดิม SV-7)
+// 🆕 WEIGH_LABEL_SIZE (WLS1 · D3) — กล่องเลือกขนาดฉลากหน้าชั่ง 1 แถว/ไลน์ผลิต (active ทุกสาขา · กันซ้ำตาม id)
+function WeighLabelSizeBox({ state, dispatch }){
+  const SIZES = global.ERP.LOT_LABEL_SIZES || {};
+  const map = (state.settings && state.settings.weighLabelSizeByLine && typeof state.settings.weighLabelSizeByLine === 'object') ? state.settings.weighLabelSizeByLine : {};
+  const seen = new Set(); const lines = [];
+  (state.branches || []).forEach(b => ((b && b.productionLines) || []).forEach(l => {
+    if(!l || !l.id || l.active === false || seen.has(l.id)) return;
+    seen.add(l.id); lines.push({ ...l, _branchName: (b && (b.name || b.id)) || '' });   // 🆕 WLS UAT S3: เก็บชื่อสาขา (ไลน์ b2/b3 ชื่อซ้ำกัน)
+  }));
+  // ค่าที่แสดง: ค่าตั้ง (ถ้าถูกต้อง) หรือค่าเริ่มต้นตาม D1
+  const valOf = (id) => {
+    const v = map[id];
+    if(v === 'device' || (typeof v === 'string' && Object.prototype.hasOwnProperty.call(SIZES, v))) return { v, isDefault:false };
+    const d = global.ERP.weighLabelSizeFor ? global.ERP.weighLabelSizeFor({ ...state, settings:{ ...(state.settings||{}), weighLabelSizeByLine:{} } }, id) : null;
+    return { v: d ? d.id : 'device', isDefault:true };
+  };
+  const setLine = (id, v) => dispatch({ type:'UPDATE_SETTINGS', data:{ weighLabelSizeByLine: { ...map, [id]: v } } });
+  return h('div', { className:'bg-sky-50 border-2 border-sky-300 rounded p-4', 'data-testid':'policy-weigh-label-size' },
+    h('div', { className:'font-bold text-sky-900 mb-1' }, '🏷️ ขนาดฉลากหน้าชั่ง (ต่อไลน์ผลิต)'),
+    h('div', { className:'text-xs text-sky-800 mb-2' }, 'ใช้กับฉลากที่พิมพ์จากหน้า ⚖️ ชั่ง · ม้วนสติ๊กเกอร์ในเครื่องพิมพ์ต้องเป็นขนาดเดียวกัน'),
+    lines.length === 0 ? h('div', { className:'text-xs text-gray-500' }, 'ยังไม่มีไลน์ผลิต') :
+    h('div', { className:'space-y-2' }, lines.map(l => {
+      const cur = valOf(l.id);
+      return h('div', { key:l.id, className:'flex flex-wrap items-center gap-2' },
+        h('span', { className:'text-sm min-w-[10rem]' }, (l.icon ? l.icon + ' ' : '') + (l.name || l.id),
+          l._branchName ? h('span', { className:'text-xs text-gray-500 ml-1', 'data-testid':'weigh-label-size-branch-' + l.id }, '· ' + l._branchName) : null),
+        h('select', { value: cur.v, onChange: e => setLine(l.id, e.target.value), className:'px-3 py-1 border-2 rounded text-sm', 'data-testid':'weigh-label-size-' + l.id },
+          h('option', { value:'device' }, 'ตามเครื่อง (ขนาดเดิม)'),
+          Object.keys(SIZES).map(k => h('option', { key:k, value:k }, SIZES[k].label))),
+        cur.isDefault ? h('span', { className:'text-xs text-gray-500', 'data-testid':'weigh-label-size-default-' + l.id }, '(ค่าเริ่มต้น)') : null);
+    })));
+}
+
 function SystemPolicyToggles({ state, dispatch }){
   const st = state.settings || {};
   const prodLive = st.productionLive !== false;
@@ -119091,6 +119180,10 @@ function SystemPolicyToggles({ state, dispatch }){
       h('div', { className:'text-xs text-sky-800 mb-2' }, 'ใช้เมื่อหน้ารับของ/พิมพ์ซ้ำต่อเครื่องพิมพ์ Bluetooth/USB อยู่ (แผง 🖨️ มุมขวาล่าง) · ต้องตรงกับม้วนที่ใส่ในเครื่อง · สถานีชั่งใช้ 100×75 แยกต่างหาก'),
       h('select', { value: st.lotLabelSize || '60x40', onChange: e => dispatch({ type:'UPDATE_SETTINGS', data:{ lotLabelSize: e.target.value } }), className:'px-3 py-2 border-2 rounded text-sm', 'data-testid':'select-lot-label-size' },
         Object.keys(global.ERP.LOT_LABEL_SIZES || {}).map(k => h('option', { key:k, value:k }, global.ERP.LOT_LABEL_SIZES[k].label)))),
+
+    // 🆕 WEIGH_LABEL_SIZE (WLS1 · D3) — ขนาดฉลากหน้าชั่งต่อไลน์ผลิต · settings.weighLabelSizeByLine[lineId] = 'device' | id ใน LOT_LABEL_SIZES
+    //   ค่าเริ่มต้น (D1): ไลน์ชั่ง/วัด/ตวง = ตามเครื่อง (ขนาดเดิม) · ไลน์อื่น = 60×40
+    h(WeighLabelSizeBox, { state, dispatch }),
 
     // 🆕 ACCT-V2 (user 2026-09-18): เงินสดย่อย = บันทึกอย่างเดียว (ไม่ต้องเติมเงินเข้าระบบก่อนจ่าย) — settings.pettyRecordOnly (default true)
     h('div', { className:'bg-emerald-50 border-2 border-emerald-300 rounded p-4', 'data-testid':'policy-petty-record-only' },
