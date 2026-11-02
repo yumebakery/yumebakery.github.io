@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="19dbd9e95d45";window.__ERP_BUILT_AT__="2026-10-30T18:16:40";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="ba12435a4825";window.__ERP_BUILT_AT__="2026-11-02T09:35:36";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -249,6 +249,39 @@ function metricAutoUnits(item){
   if(fams.has('w')) out.push('กรัม', 'กก.');
   if(fams.has('v')) out.push('มล.', 'ลิตร');
   return out.filter(n => !units.some(u => u && u.name === n));
+}
+// 🆕 LSS3 D6: นำเข้าสินค้า CSV ช่อง gramsPerUnit (G = กรัมต่อ 1 หน่วยฐาน) → หน่วย "กรัม" รูปเดียวกับฟอร์มหน่วย "1 ชุด = G กรัม"
+//   ใช้ร่วม: transform/พรีวิว (mod-settings) + reducer IMPORT_ITEMS (deterministic · ส่งซ้ำไม่เพิ่มซ้ำ)
+function importGramsParse(v){
+  const s = String(v == null ? '' : v).replace(/,/g, '').trim();
+  if(s === '') return { empty:true };
+  const n = Number(s);
+  return (isFinite(n) && n > 0) ? { g:n } : { bad:true };
+}
+function importGramsUnit(baseName, g){
+  return { name:'กรัม', equalTo:{ unit:baseName, qty: 1 / g }, equalToInput:{ dir:'inv', qty:g }, purposes:['bom'] };
+}
+// แผนเพิ่มหน่วยกรัมให้สินค้า (item = สินค้าเดิม หรือ null = รหัสใหม่ใช้ baseName) → { add, unit?, msg }
+function importGramsPlan(item, baseName, raw){
+  const p = importGramsParse(raw);
+  if(p.empty) return { add:false, msg:'' };
+  if(p.bad) return { add:false, warn:true, msg:'ค่า gramsPerUnit "' + raw + '" ไม่ใช่ตัวเลขที่มากกว่า 0 — ไม่เพิ่มหน่วยกรัม (ช่องอื่นนำเข้าตามเดิม)' };
+  const units = item ? (Array.isArray(item.units) ? item.units : []) : [];
+  if(item && !units.length) return { add:false, warn:true, msg:'สินค้าไม่มีตารางหน่วย — ไม่เพิ่มหน่วยกรัม (เพิ่มในฟอร์มสินค้า)' };
+  // verify 1: หาหน่วยฐานแบบเดียวกับ getBaseUnit · ฐานต้องเป็นชื่อหน่วยที่มีจริง (กัน equalTo.unit ว่าง = 1 กรัม = 1 ฐาน ผิด G เท่า)
+  const base = item ? ((units.find(u => u && u.isBase) || {}).name || item.issueUnit || (units[0] || {}).name || '') : (baseName || 'ชิ้น');
+  if(item && !(base && units.some(u => u && u.name === base)))
+    return { add:false, warn:true, msg:'หาหน่วยฐานไม่ได้ — ไม่เพิ่มหน่วยกรัม (แก้ในฟอร์มสินค้า)' };
+  const isW = (n) => { const m = _metricFam(n); return !!(m && m.fam === 'w'); };
+  if(isW(base)) return { add:false, msg:'หน่วยฐาน "' + base + '" เป็นหน่วยน้ำหนักอยู่แล้ว — ไม่เพิ่ม (ระบบแปลงกรัมเอง)' };
+  // UAT S3 + verify 2: มีหน่วยน้ำหนักอยู่แล้ว (กรัม/กก./กิโล · equalTo/toBase/ทิศใดก็ได้) → เทียบตัวคูณจริงกับไฟล์ (กันพิมพ์ผิด 10 เท่าเงียบ ๆ · ไม่แก้หน่วยเดิม)
+  if(units.some(u => u && isW(u.name))){
+    const f = resolveToBase(units, 'กรัม');
+    if(isFinite(f) && f > 0 && Math.abs(f * p.g - 1) > 1e-6)
+      return { add:false, warn:true, msg:'มีหน่วยน้ำหนักอยู่แล้ว: ในระบบ 1 ' + base + ' = ' + (+(1 / f).toPrecision(10)) + ' กรัม · ในไฟล์ = ' + p.g + ' — ไม่แก้ (แก้ในฟอร์มสินค้า → หน่วยนับ)' };
+    return { add:false, msg:'มีหน่วยน้ำหนักอยู่แล้ว — ไม่เพิ่ม' };
+  }
+  return { add:true, unit: importGramsUnit(base, p.g), msg:'จะเพิ่มหน่วย: 1 ' + base + ' = ' + p.g + ' กรัม' };
 }
 
 function resolveToBase(units, unitName, _seen){
@@ -764,7 +797,8 @@ function isReversalPair(m){
     || (m.type === 'adjust_in' && /^VOID-/.test(String(m.ref || '')))
     || m.type === 'adjust_reverse'
     || m.type === 'sale_void'          // 🆕 SALES: ยกเลิกใบกำกับ/บันทึกขาย (คู่กับ sale_out ที่ถูก mark reversed)
-    || m.type === 'sale_light_void';
+    || m.type === 'sale_light_void'
+    || !!m.locMerge;                   // 🆕 LSS3 D4: ย้ายของคลังไลน์เข้าคลังกลาง (mi_out/mi_in คู่ · มูลค่าไม่เปลี่ยน) ไม่ใช่รับ/จ่ายจริง
 }
 // 🆕 2026-09-23 (user): หน้าไหนที่ map ออกมาเป็น "หลายตารางในหน้าเดียว" (กลุ่มละตาราง เช่น ต่อ supplier/ต่อวันที่)
 //   ถ้าปล่อยให้เบราว์เซอร์จัดความกว้างเอง แต่ละก้อนจะกว้างตามเนื้อหาของก้อนนั้น → หัวคอลัมน์ชื่อเดียวกันเยื้องกัน อ่านข้ามก้อนไม่ได้
@@ -958,6 +992,11 @@ function getLineOwnLocations(state, branchId, lineId){
   const b = _plBranch(state, branchId);
   if(!b || !lineId || _plSimple(b)) return [];
   const line = (b.productionLines || []).find(l => l && l.id === lineId);
+  // 🆕 LSS3 D2: ไลน์ "ใช้คลังกลางร่วม" (sharedMainStore) → คลังกลางอย่างเดียว (raw · ไม่ผูกไลน์ · active) · ไม่มีคลังกลาง → [] (missing เหมือนเดิม)
+  if(line && line.sharedMainStore){
+    const m = getMainStorage(state, branchId);
+    return (m && m.type === 'raw' && !m.lineId && m.active !== false) ? [m] : [];
+  }
   const out = [];
   const sl = line && line.stockLocId ? _plLoc(b, line.stockLocId) : null;
   // 🆕 review D: stockLocId ต้องเป็นคลังที่ผูกไลน์นี้ หรือชนิด wip/line (ไม่ผูกไลน์อื่น) — ชี้คลังกลาง (raw/fg ไม่ผูกไลน์) = ถือว่ายังไม่มีคลังของตัวเอง
@@ -965,7 +1004,112 @@ function getLineOwnLocations(state, branchId, lineId){
   for(const l of (b.locations || [])){
     if(l && l.lineId === lineId && l.type !== 'fg' && !out.includes(l)) out.push(l);
   }
-  return out;
+  // 🆕 LSS3 verify 1: ข้ามคลังที่ปิดรวมแล้ว (กันไลน์อื่นที่เคยชี้คลังเดียวกันเขียนล็อตลงคลังที่ปิด)
+  return out.filter(l => !(l.active === false && l.mergedInto));
+}
+// 🆕 LSS3 D1: ไลน์นี้ "ใช้คลังกลางร่วม" จริงไหม (ติ๊กไว้ + สาขาหลายคลัง) — ใช้ซ่อน/บล็อกการขอของเข้าไลน์ · ข้ามงานค้างคลังไลน์
+function isLineSharedMainStore(state, branchId, lineId){
+  const b = _plBranch(state, branchId);
+  if(!b || !lineId || _plSimple(b)) return false;
+  const line = (b.productionLines || []).find(l => l && l.id === lineId);
+  return !!(line && line.sharedMainStore);
+}
+// 🆕 LSS3 D4: คลังที่ "ปิดรวมเข้าคลังอื่นแล้ว" (mergedInto) → คลังปลายทาง (ตามต่อได้หลายชั้น · ปลายทางต้องยังเปิด) · ไม่ได้รวม/ไม่เจอ = คืน locId เดิม
+//   ใช้ทุกทาง "คืนของเข้าคลังเดิมที่บันทึกไว้" (ยกเลิกผลชั่ง/ใบผลิต/ใบเบิก/ยกเลิกปรับ) — ห้ามสร้างล็อตในคลังที่ปิดแล้ว
+function resolveMergedLoc(state, branchId, locId){
+  if(!locId) return locId;
+  const b = _plBranch(state, branchId);
+  if(!b) return locId;
+  let cur = locId;
+  for(let i = 0; i < 6; i++){
+    const l = _plLoc(b, cur);
+    if(!l || !l.mergedInto || l.active !== false) return cur;
+    const nx = _plLoc(b, l.mergedInto);
+    if(!nx) return cur;
+    cur = nx.id;
+  }
+  return cur;
+}
+// 🆕 LSS3 verify 2: เหตุผลที่ "ลบคลังนี้ไม่ได้" (null = ลบได้) — คลังที่ปิดรวมแล้ว (mergedInto) หรือยังมีล็อตจำว่ามาจากคลังนี้ (locMergedFrom)
+//   ต้องเก็บเรคคอร์ดไว้ ไม่งั้น resolveMergedLoc หาไม่เจอ → ทางคืนของเข้าคลังเดิมจะสร้างล็อตในคลังที่ไม่มีอยู่ + ยกเลิกติ๊กใช้ร่วมเปิดคืนไม่ได้
+function locDeleteBlockReason(state, branchId, locId){
+  if(!locId) return null;
+  const b = _plBranch(state, branchId);
+  const l = _plLoc(b, locId);
+  if(l && l.mergedInto){
+    const m = _plLoc(b, l.mergedInto);
+    return `ลบไม่ได้ — คลัง "${l.name || l.id}" ปิดและรวมเข้า ${m ? (m.name || m.id) : l.mergedInto} แล้ว (ต้องเก็บไว้ให้ระบบคืนของเข้าคลังกลางตอนยกเลิกเอกสารเก่า/เปิดคืนได้)`;
+  }
+  const ref = ((state && state.fifoLayers) || []).some(L => L && L.branch === branchId && L.locMergedFrom === locId);
+  if(ref) return `ลบไม่ได้ — ยังมีล็อตสต๊อกที่ย้ายมาจากคลัง "${(l && l.name) || locId}" (ระบบใช้ตรวจย้อน)`;
+  return null;
+}
+// 🆕 LSS3 D4: ใครกด "ย้ายของคลังไลน์เข้าคลังกลาง" ได้ — สิทธิ์ตั้งค่าเต็ม (= isFullSettings ของ mod-settings) หรือ GM/เจ้าของ · บัญชีต้องใช้งานอยู่
+function canLineShareMainStore(user){
+  if(!user || user.active === false) return false;
+  if(isSuperUser(user)) return true;
+  if(user.permissions == null && ['gm','admin','manager'].includes(user.role)) return true;
+  return canOverrideAdjCost(user);
+}
+// คลังของไลน์ "ก่อนติ๊กใช้ร่วม" (กติกาเดียวกับ getLineOwnLocations ทางไม่ติ๊ก) ไม่รวมคลังกลาง · ไม่ข้ามคลังที่ปิดแล้ว (ไว้ตรวจส่งซ้ำ)
+function _lssOwnLocsRaw(b, line, mainId){
+  const out = [];
+  const sl = line.stockLocId ? _plLoc(b, line.stockLocId) : null;
+  if(sl && (sl.lineId === line.id || (!sl.lineId && (sl.type === 'wip' || sl.type === 'line')))) out.push(sl);
+  for(const l of (b.locations || [])) if(l && l.lineId === line.id && l.type !== 'fg' && !out.includes(l)) out.push(l);
+  return out.filter(l => l.id !== mainId);
+}
+// 🆕 LSS3 D4: แผน "ย้ายของคลังไลน์เข้าคลังกลาง + ใช้คลังร่วม" (จอสรุป + reducer ใช้ตัวเดียวกัน · pure)
+//   → { ok, done, main, line, locs, layers, rows:[{itemId,qty,value}], posItems, negItems, value, blocks:[ข้อความไทย] }
+//   done = เคยทำแล้ว (ไลน์ติ๊กแล้ว + คลังเดิมปิดรวมหมด + ไม่มีล็อตค้าง) → ส่งซ้ำไม่ทำอะไร
+function lineShareMainStorePlan(state, branchId, lineId){
+  const P = { ok:false, done:false, main:null, line:null, locs:[], layers:[], rows:[], posItems:0, negItems:0, value:0, netValueDiff:0, blocks:[] };
+  const b = _plBranch(state, branchId);
+  if(!b){ P.blocks.push('ไม่พบสาขา'); return P; }
+  if(_plSimple(b)){ P.blocks.push('สาขาคลังเดียว — ไม่มีคลังไลน์ให้ย้าย'); return P; }
+  const line = (b.productionLines || []).find(l => l && l.id === lineId);
+  if(!line){ P.blocks.push('ไม่พบไลน์ผลิต'); return P; }
+  P.line = line;
+  const m = getMainStorage(state, branchId);
+  P.main = (m && m.type === 'raw' && !m.lineId && m.active !== false) ? m : null;
+  if(!P.main){ P.blocks.push('สาขานี้ยังไม่มีคลังกลาง (วัตถุดิบ · ไม่ผูกไลน์ · เปิดใช้)'); return P; }
+  const all = _lssOwnLocsRaw(b, line, P.main.id);
+  P.locs = all.filter(l => !(l.active === false && l.mergedInto));
+  const ids = new Set(P.locs.map(l => l.id)), allIds = new Set(all.map(l => l.id));
+  P.layers = ((state && state.fifoLayers) || []).filter(L => L && L.branch === branchId && allIds.has(L.locId) && Math.abs(Number(L.remaining) || 0) > 1e-9);
+  if(line.sharedMainStore && !P.locs.length && !P.layers.length){ P.done = true; return P; }
+  const by = {};
+  for(const L of P.layers){ const r = by[L.itemId] || (by[L.itemId] = { itemId:L.itemId, qty:0, value:0 }); const q = Number(L.remaining) || 0; r.qty += q; r.value += q * (Number(L.unitCost) || 0); }
+  P.rows = Object.values(by).map(r => ({ ...r, qty:Number(r.qty.toFixed(4)), value:Math.round(r.value * 100) / 100 }));
+  P.posItems = P.rows.filter(r => r.qty > 1e-9).length;
+  P.negItems = P.rows.filter(r => r.qty < -1e-9).length;
+  P.value = Math.round(P.rows.reduce((t, r) => t + r.value, 0) * 100) / 100;
+  // 🆕 LSS3 UAT ชุด 1 S1: ผลต่างมูลค่า FIFO จากการหักล้างบวก/ลบที่คลังกลาง (ต้นทุนต่างกัน · ไม่ลง JE) — ตัวเดียวกับ reducer
+  P.netValueDiff = (global.ERP && global.ERP.lineShareNetValueDiff) ? global.ERP.lineShareNetValueDiff(state, branchId, P) : 0;
+  // 🆕 LSS3 verify 1: คลังเดิมที่ไลน์อื่น (ไม่ได้ใช้ร่วม) ชี้เป็น stockLocId อยู่ → ห้ามปิด (ของไลน์นั้นจะถูกย้ายไปคลังกลาง + ไลน์นั้นเขียนลงคลังที่ปิด)
+  for(const ol of (b.productionLines || [])){
+    if(!ol || ol.id === line.id || ol.sharedMainStore || !ol.stockLocId || !ids.has(ol.stockLocId)) continue;
+    const L = P.locs.find(x => x.id === ol.stockLocId);
+    P.blocks.push(`คลัง "${(L && L.name) || ol.stockLocId}" ใช้ร่วมกับไลน์ "${ol.name || ol.id}" — แยกคลังก่อน (ตั้งค่า → ไลน์ผลิต → เปลี่ยนคลังของไลน์นั้น)`);
+  }
+  // ด่านเอกสารค้าง (บอกเลขเอกสาร)
+  const touches = (x) => !!x && (ids.has(x.fromLocId) || ids.has(x.toLocId) || ids.has(x.srcLocId));
+  const trs = ((state && state.transferRequests) || []).filter(t => t && !t._migrated && t.fromBranch === branchId && touches(t)
+    && (t.status === 'pending' || (t.status === 'approved' && !((state.transferOrders || []).some(o => o && (o.id === t.toId || o.trId === t.id) && o.status === 'received')))));
+  if(trs.length) P.blocks.push('ใบขอโอน (TR) ที่ยังเปิด เข้า/ออกคลังไลน์นี้: ' + trs.map(t => t.trNumber || t.id).join(', ') + ' — ส่ง/รับให้จบหรือยกเลิกก่อน');
+  const tos = ((state && state.transferOrders) || []).filter(t => t && !t._migrated && (t.status === 'shipping' || t.status === 'partial')
+    && ((t.fromBranch === branchId && ids.has(t.fromLocId || t.srcLocId)) || (t.toBranch === branchId && ids.has(t.toLocId))));
+  if(tos.length) P.blocks.push('ใบโอน/ใบส่งมอบ (TO) ที่ยังไม่รับครบ เข้า/ออกคลังไลน์นี้: ' + tos.map(t => t.toNumber || t.id).join(', ') + ' — รับให้ครบหรือยกเลิกก่อน');
+  const claimed = (o) => [...(o.operationStates || []), ...((o.batches || []).flatMap(x => (x && x.opStates) || []))].some(st => st && st.weighClaim);
+  const ords = ((state && state.productionOrders) || []).filter(o => o && o.branchId === branchId && o.lineId === lineId
+    && !['completed','cancelled'].includes(o.status) && (o.status === 'in_progress' || claimed(o)));
+  if(ords.length) P.blocks.push('ใบสั่งผลิตของไลน์นี้ที่กำลังทำ/มีงานชั่งถูกจอง: ' + ords.map(o => o.orderNumber || o.id).join(', ') + ' — ปิดงาน/ปล่อยงานชั่งก่อน');
+  // 🆕 LSS3 UAT ชุด 1 M1: คำขอปรับ/นับสต๊อกระดับคลัง (locAdjust) ที่ยังไม่จบ ชี้คลังไลน์นี้ → อนุมัติ/ปฏิเสธให้จบก่อน (reducer ส่งต่อคลังกลางให้อยู่แล้ว แต่ยอดนับอิงคลังเดิม)
+  const reqs = ((state && state.approvalRequests) || []).filter(r => r && r.action === 'adjust_stock' && !['executed','blocked','cancelled','rejected'].includes(r.status || 'pending')
+    && r.payload && r.payload.locId && String(r.payload.branch) === String(branchId) && allIds.has(r.payload.locId));
+  if(reqs.length) P.blocks.push('คำขอปรับ/นับสต๊อกคลังไลน์นี้ที่ยังรออนุมัติ: ' + reqs.map(r => (r.entityRef ? String(r.entityRef).trim() + ' ' : '') + '(' + r.id + ')').join(', ') + ' — อนุมัติ/ปฏิเสธให้จบก่อน');
+  P.ok = !P.blocks.length;
+  return P;
 }
 
 // 🆕 PRODUCTION-LIVE (review B): ยกเลิกออเดอร์ "คืน stock" → ตัดผลผลิตคืนจากคลังที่ล็อตนั้นอยู่ "ตอนนี้"
@@ -1017,9 +1161,9 @@ function getBomOutputLocation(state, branchId, bom, outputItemId, opts){
     const outs = Array.isArray(bom.outputs) ? bom.outputs : [];
     const pid = outputItemId || (outs[0] && outs[0].productId) || bom.productId;
     const o = outs.find(x => x && x.productId === pid);
-    const oId = o && o.locByBranch && o.locByBranch[branchId];
+    const oId = resolveMergedLoc(state, branchId, o && o.locByBranch && o.locByBranch[branchId]);   // 🆕 LSS3 verify 1: คลังที่ปิดรวมแล้ว → คลังปลายทาง
     if(oId){ const l = _plLoc(b, oId); if(l) return { loc:l, source:'output' }; setButGone = true; }
-    const bId = bom.outputLocByBranch && bom.outputLocByBranch[branchId];
+    const bId = resolveMergedLoc(state, branchId, bom.outputLocByBranch && bom.outputLocByBranch[branchId]);
     if(bId){ const l = _plLoc(b, bId); if(l) return { loc:l, source:'bom' }; setButGone = true; }
   }
   const lineId = (opts && opts.lineId) || (bom ? getBomLineId(bom, state, branchId) : null);
@@ -1549,8 +1693,18 @@ function isBomPhantom(state, bom){
 //   คลังที่ผูกไลน์ → คนในไลน์นั้น (assignedLineIds) + production_manager/manager · คลังที่ไม่ผูกไลน์ → warehouse/manager · superuser ได้หมด
 //   ship ต้องมี transfer.tr.approve · receive ต้องมี transfer.receive.receive · request ต้องมี transfer.tr.create · locId null (pool) = ดูสิทธิ์อย่างเดียว
 //   handover (ใบส่งมอบ B12 ข้อ 3) = คลังผูกไลน์ → คนในไลน์นั้น/production_manager/manager ไม่ต้องมีสิทธิ์ TR อนุมัติ · คลังไม่ผูกไลน์ = ใช้กติกา ship
+// 🆕 LSS3 verify 1: คลังที่ "ปิดรวมเข้าคลังกลางแล้ว" (active:false + mergedInto) — ห้ามขอ/ส่ง/รับ/ส่งมอบ เข้า-ออก (ล็อตจะไปค้างในคลังที่ไม่มีใครอ่าน)
+function isLocMergedClosed(state, branchId, locId){
+  const l = locId ? _plLoc(_plBranch(state, branchId), locId) : null;
+  return !!(l && l.active === false && l.mergedInto);
+}
+function lssClosedLocMsg(state, branchId, locId){
+  const b = _plBranch(state, branchId), l = _plLoc(b, locId), m = l && _plLoc(b, l.mergedInto);
+  return `⛔ คลัง "${(l && l.name) || locId}" ปิดรวมเข้า${(m && m.name) ? ' "' + m.name + '"' : 'คลังกลาง'}แล้ว — ไลน์นี้ใช้คลังกลางร่วม ไม่ต้องขอ/ส่งของเข้า-ออกไลน์ (ใช้ของที่คลังกลางได้เลย)`;
+}
 function canActOnLocation(state, user, branchId, locId, action){
   if(!user) return false;
+  if(isLocMergedClosed(state, branchId, locId)) return false;   // 🆕 LSS3 verify 1
   if(action === 'handover'){
     const hl = _plLoc(_plBranch(state, branchId), locId);
     if(hl && hl.lineId) return isSuperUser(user) || ['production_manager','manager'].includes(user.role) || getUserAssignedLines(user).includes(hl.lineId);
@@ -1569,6 +1723,7 @@ function canActOnLocation(state, user, branchId, locId, action){
 function locActDenyReason(state, user, branchId, locId, action){
   if(!user) return '⛔ ไม่พบผู้ใช้ที่ทำรายการ';
   if(canActOnLocation(state, user, branchId, locId, action)) return null;
+  if(isLocMergedClosed(state, branchId, locId)) return lssClosedLocMsg(state, branchId, locId);   // 🆕 LSS3 verify 1
   const loc = _plLoc(_plBranch(state, branchId), locId);
   const nm = (loc && loc.name) || locId || 'คลังสาขา';
   if(action === 'handover' && loc && loc.lineId) return `⛔ ส่งมอบของออกจาก "${nm}" ได้เฉพาะคนในไลน์นี้ / ผู้จัดการผลิต / ผู้จัดการ`;
@@ -16269,14 +16424,14 @@ Object.assign(global.ERP, {
   weighSeesAll, weighManagesOrder, weighStationOpId, weighOrderShape, isWeighStationWork, weighJobLines, weighJobId, weighJobRecipe, weighJobsFor,   // 🆕 WEIGH-ORDER E1
   bomPortionCheck, _portionCount, PORTION_MAX, weighPortionDrift, weighDriftOpen, weighDriftByItem,   // 🆕 UAT ชุด 2
   PORTION_JOB_MAX, portionRoundSizes, portionLaborOh,   // 🆕 WEIGH-ORDER E0p (§G.14 ชั่งแยกชิ้น = ไม่แบ่ง batch)   // 🆕 WEIGH-ORDER E1p (bomPortionOn export ไว้แล้วตั้งแต่ H1b)
-  metricAutoUnits, photoSrc,
+  metricAutoUnits, photoSrc, importGramsParse, importGramsUnit, importGramsPlan,   // 🆕 LSS3 D6
   getStockUnitsRanked, getAllUnitsRanked, formatQtyMulti, multiUnitsToBase,
   resolveDisplayUnit,
   qcTemplateAppliesTo,
   productRequiresQC, getUnQCdFGLots, collectUnQCdForLines, fgLayerOrderRef,
   getLineStockLocation, getFGDestinationLocation, getRawWarehouseLocation,
   // 🆕 PRODUCTION-LIVE คลื่น 0 (สัญญา B2/B10.5/B11)
-  isBomAvailable, getLineOwnLocations, getLineConsumeLocs, planFgReversal, getBomOutputLocation, getItemHomeLocations, suggestBomOutputLocation,
+  isBomAvailable, getLineOwnLocations, isLineSharedMainStore, resolveMergedLoc, locDeleteBlockReason, isLocMergedClosed, lssClosedLocMsg, canLineShareMainStore, lineShareMainStorePlan, getLineConsumeLocs, planFgReversal, getBomOutputLocation, getItemHomeLocations, suggestBomOutputLocation,
   negUnitCost, isSellOnlyItem, isSupplierRecvLoc, supplierRecvLocs, bomOutputCandidates, producibleItems, orderOutputLines, orderLiveHandoverTOs, buildBackflushLines, prepSetGateOn, prepSetBomFor, prepSetBomKey, prepSetBomInUse, prepSetLocMisconfig, prepSetOnHand, prepSetStale, prepSetReserved, prepSetBatchShort, prepSetConsumeShort, prepSetNeeds, prepSetWindow, prepSetOutOfWindow, prepSetPlanCheck, prepSetConsumed: _psConsumed, orderRecipeScale, orderUnitFactor, resolveOrderOutputLoc, isBomPhantom,
   canActOnLocation, getLineBomItemIds, locActDenyReason, isIntraTO, userHandlesIncomingTO, getLocStockFIFO,
   toLinePieces, slicePieces, isInTransitTO, getInTransit, getInTransitSummary, getInTransitValue, getNegStockValue,
@@ -24698,6 +24853,11 @@ function _weighFreeWithdraw(s, w, key, mode, by, at){
     neg: lines.some(l => l.negQty > 1e-9), skipped: lines.some(l => l.skipped) };
 }
 // ⚖️ FW5 ยกเลิกผลชั่ง: คืนวัตถุดิบที่ตัดเข้าคลังเดิม @ต้นทุนที่ตัดจริง (หักล้าง NEG ก่อน · adjust_in ref VOID- = คู่กลับรายการ)
+// 🆕 LSS3 D4: locId ที่บันทึกไว้ → คลังปลายทางถ้าคลังนั้นปิดรวม (mergedInto) แล้ว · ใช้ทุกทาง "คืนของเข้าคลังเดิม"
+// 🆕 LSS3 verify 1: ด่านคลังที่ปิดรวมแล้ว (active:false + mergedInto) → ข้อความไทย | null · ใช้กับ TR/TO/ส่งมอบ/ส่งตรงไลน์ (ไม่ขึ้นกับ session)
+function _lssClosedDeny(s, branchId, ...locIds){ const E = global.ERP || {}; for(const id of locIds) if(id && E.isLocMergedClosed && E.isLocMergedClosed(s, branchId, id)) return E.lssClosedLocMsg(s, branchId, id); return null; }
+function _locDelBlock(s, branchId, locId){ const E = global.ERP || {}; return E.locDeleteBlockReason ? E.locDeleteBlockReason(s, branchId, locId) : null; }
+function _rml(s, branchId, locId){ const E = global.ERP || {}; return (locId && E.resolveMergedLoc) ? E.resolveMergedLoc(s, branchId, locId) : locId; }
 function _weighFreeReturn(s, w, key, by, at){
   const st = w.stock || {};
   const date = _effDate(s), sk = _sanId(key), ref = 'VOID-' + (w.lot || w.id);
@@ -24712,8 +24872,9 @@ function _weighFreeReturn(s, w, key, by, at){
     const f = c.unit ? (resolveToBase(it.units, c.unit) || 1) : 1;
     const qb = Number((q * f).toFixed(4));
     // 🆕 verify 1 (should): มี parts = คืนทีละคลังที่ตัดจริง (parts เก็บเป็นหน่วยฐาน) · ไม่มี = คลังหลักของไลน์ทั้งก้อน (ผลชั่งเดิม)
-    const ps = Array.isArray(c.parts) && c.parts.length ? c.parts.map(p => ({ locId: p.locId || null, qb: Number(p.qty) || 0, cost: Number(p.cost) || 0 })).filter(p => p.qb > 0)
-      : [{ locId: st.locId || null, qb, cost: Number(c.cost) || 0 }];
+    // 🆕 LSS3 D4: คลังเดิมปิดรวมเข้าคลังกลางแล้ว → คืนเข้าคลังปลายทาง (_rml) ไม่สร้างล็อตในคลังที่ปิด
+    const ps = Array.isArray(c.parts) && c.parts.length ? c.parts.map(p => ({ locId: _rml(s, w.branchId, p.locId || null), qb: Number(p.qty) || 0, cost: Number(p.cost) || 0 })).filter(p => p.qb > 0)
+      : [{ locId: _rml(s, w.branchId, st.locId || null), qb, cost: Number(c.cost) || 0 }];
     ps.forEach((p, j) => {
       const sfx = sk + '_' + i + (j ? '_' + j : ''), uc = p.cost / p.qb;
       incoming.push({ id: 'fl_wv_' + sfx, itemId: c.itemId, branch: w.branchId, locId: p.locId, qty: p.qb, remaining: p.qb, unitCost: uc, totalCost: p.cost,
@@ -25728,6 +25889,84 @@ function _adjustInvPrice(s, a){
 const _ADJ_MV_TYPES = Object.freeze(['adjust', 'adjust_in', 'adjust_out', 'adjust_reverse', 'opening']);
 const _ADJ_MV_MAKERS = new Set(['ADJUST_STOCK', 'REVERSE_ADJUST', 'VOID_QUICK_ISSUE', 'VOID_WEIGH_LOG_STOCK', 'REVIEW_WEIGH_LOG',
   'IMPORT_STATE', 'MERGE_IMPORT', 'RESET_STATE', 'MIGRATION_WIPE', 'CLEAR_TRANSACTIONS']);
+// 🆕 LSS3 D4: LINE_SHARE_MAIN_STORE — ย้ายของทุกล็อตในคลังไลน์เข้าคลังกลาง + ติ๊กไลน์ใช้คลังร่วม (ครั้งเดียว atomic · ไม่มี JE: คลังเดียวกันในบัญชี 1300)
+//   d: { id, branchId, lineId, reason, by, at, date } · แผนจาก ERP.lineShareMainStorePlan (ตัวเดียวกับจอ) · ส่งซ้ำ = no-op (auditLog al_lsm_<id> / ทำไปแล้ว)
+// 🆕 LSS3 UAT ชุด 1 S1: จำลอง "ย้ายล็อตเข้าคลังกลาง + หักล้างบวก/ลบ" → ผลต่างมูลค่า FIFO (ไม่ลง JE) · ใช้ทั้งจอสรุป (แผน) และ reducer = ตัวเลขเดียวกัน
+//   layers = สำเนา (แก้ในที่ได้) · คืน netValueDiff (บาท ปัด 2 ตำแหน่ง)
+function _lsmNetValueDiff(layers, br, oldIds, mainId){
+  const itemIds = [ ...new Set(layers.filter(L => L && L.branch === br && oldIds.has(L.locMergedFrom || '') && L.locId === mainId && Math.abs(Number(L.remaining) || 0) > 1e-9).map(L => L.itemId)) ];
+  const _vOf = () => layers.reduce((t, L) => t + ((L && L.branch === br && L.locId === mainId && itemIds.includes(L.itemId)) ? (Number(L.remaining) || 0) * (Number(L.unitCost) || 0) : 0), 0);
+  const _v0 = _vOf();
+  for(const it of itemIds) _selfNetAtLoc(layers, it, br, mainId);
+  return Math.round((_vOf() - _v0) * 100) / 100;
+}
+function lineShareNetValueDiff(state, branchId, P){
+  if(!P || !P.main || !(P.layers || []).length) return 0;
+  const mainId = P.main.id, oldIds = new Set([ ...(P.locs || []).map(l => l.id), ...P.layers.map(L => L.locId) ]);
+  const layers = ((state && state.fifoLayers) || []).filter(L => L && L.branch === branchId)
+    .map(L => oldIds.has(L.locId) ? { ...L, locId:mainId, locMergedFrom:L.locId } : { ...L });
+  return _lsmNetValueDiff(layers, branchId, oldIds, mainId);
+}
+function _lineShareMainStore(s, d){
+  const E = global.ERP || {};
+  if(!d || !d.id || !d.branchId || !d.lineId) return s;
+  if((s.auditLog || []).some(x => x && x.id === 'al_lsm_' + d.id)) return s;   // ส่งซ้ำ
+  const u0 = _actorOf(s, d.by), u = u0 ? (_userByRef(s, u0.username) || u0) : null;   // สิทธิ์สดจาก s.users
+  if(!(E.canLineShareMainStore && E.canLineShareMainStore(u))){ try { alert('⛔ ย้ายของคลังไลน์เข้าคลังกลางได้เฉพาะผู้มีสิทธิ์ตั้งค่าเต็ม/GM/เจ้าของ'); } catch(_e){} return s; }
+  const reason = String(d.reason || '').trim();
+  if(!reason){ try { alert('⛔ ต้องใส่เหตุผลการย้ายของเข้าคลังกลาง'); } catch(_e){} return s; }
+  const P = E.lineShareMainStorePlan ? E.lineShareMainStorePlan(s, d.branchId, d.lineId) : { blocks:['ระบบยังไม่พร้อม'] };
+  if(P.done) return s;   // ทำไปแล้ว (อีกเครื่อง/ส่งซ้ำ id ใหม่)
+  if(!P.ok){ try { alert('⛔ ย้ายของเข้าคลังกลางไม่ได้\n• ' + (P.blocks || []).join('\n• ')); } catch(_e){} return s; }
+  const br = d.branchId, mainId = P.main.id, by = (u && u.username) || d.by || '', at = Number(d.at) || 0, date = d.date || getToday();
+  { const _dl = _checkDateLock(s, date, 'ย้ายของคลังไลน์เข้าคลังกลาง'); if(_dl) return _dl; }   // 🆕 LSS3 UAT ชุด 1 S2: งวดปิด (date มาจาก client)
+  const oldIds = new Set([ ...P.locs.map(l => l.id), ...P.layers.map(L => L.locId) ]);
+  const ref = 'LOC-MERGE-' + d.lineId;
+  // 1) ล็อต → คลังกลาง (คง id/lot/วันที่/ต้นทุน/จำนวน/ธงทั้งหมด) · จำ locMergedFrom ไว้ตรวจย้อน
+  const grp = {};   // itemId|locId → { qty, cost }
+  const layers = (s.fifoLayers || []).map(L => {
+    if(!L || L.branch !== br) return L;
+    if(!oldIds.has(L.locId)) return { ...L };   // clone ก่อน _selfNetAtLoc แก้ในที่ (ห้ามแตะ object ของ state เดิม)
+    const q = Number(L.remaining) || 0;
+    if(Math.abs(q) > 1e-9){ const k = L.itemId + '|' + L.locId; const g = grp[k] || (grp[k] = { itemId:L.itemId, locId:L.locId, qty:0, cost:0 }); g.qty += q; g.cost += q * (Number(L.unitCost) || 0); }
+    return { ...L, locId:mainId, locMergedFrom:L.locId };
+  });
+  // 2) หักล้างบวก/ลบที่คลังกลาง (ยอดรวมไม่เปลี่ยน)
+  //   ล็อตบวก/ลบต้นทุนต่างกัน → มูลค่า FIFO ขยับ Σ(จำนวนที่หักล้าง × ส่วนต่างต้นทุน) (กติกาเดียวกับนับระดับคลัง · ไม่มี JE) → จดไว้ใน auditLog.netValueDiff
+  //   (ตัวเดียวกับจอสรุป ERP.lineShareNetValueDiff · UAT ชุด 1 S1)
+  const netValueDiff = _lsmNetValueDiff(layers, br, oldIds, mainId);
+  // 3) ยอดต่อคลัง byLoc: คลังไลน์ → คลังกลาง (ยอดรวมสาขาเท่าเดิม · สาขาเก็บเป็นตัวเลข = ไม่แตะ)
+  const items = (s.items || []).map(it => {
+    const sb = it && it.stockByBranch && it.stockByBranch[br];
+    if(!sb || typeof sb !== 'object' || !sb.byLoc) return it;
+    const keys = Object.keys(sb.byLoc).filter(k => oldIds.has(k));
+    if(!keys.length) return it;
+    const byLoc = { ...sb.byLoc }; let q = 0;
+    for(const k of keys){ q += Number(byLoc[k]) || 0; delete byLoc[k]; }
+    byLoc[mainId] = Number(((Number(byLoc[mainId]) || 0) + q).toFixed(4));
+    return { ...it, stockByBranch:{ ...it.stockByBranch, [br]:{ ...sb, byLoc } } };
+  });
+  // 4) movement คู่ mi_out (คลังไลน์) / mi_in (คลังกลาง) ติด locMerge → isReversalPair = true (รายงานรับ/จ่ายข้ามทั้งคู่)
+  const movements = []; let k = 0;
+  for(const g of Object.values(grp)){
+    const q = Number(g.qty.toFixed(4)), cost = Math.round(g.cost * 100) / 100;
+    if(Math.abs(q) < 1e-9) continue;
+    const uc = cost / q, base = { itemId:g.itemId, branch:br, date, ref, note:'ย้ายของคลังไลน์เข้าคลังกลาง (ใช้คลังร่วม) · ' + reason, by, unitCost:uc, locMerge:true, createdAt:at };
+    movements.push({ ...base, id:`mv_lsm_${d.id}_${k}_o`, type:'mi_out', qty:-q, locId:g.locId, cost:-cost });
+    movements.push({ ...base, id:`mv_lsm_${d.id}_${k}_i`, type:'mi_in', qty:q, locId:mainId, cost });
+    k++;
+  }
+  // 5) ไลน์ติ๊กใช้ร่วม · คลังไลน์เดิมปิด + mergedInto
+  const branches = (s.branches || []).map(b => b && b.id === br ? { ...b,
+    productionLines:(b.productionLines || []).map(l => l && l.id === d.lineId ? { ...l, sharedMainStore:true } : l),
+    locations:(b.locations || []).map(l => l && P.locs.some(x => x.id === l.id) ? { ...l, active:false, mergedInto:mainId, mergedAt:at, mergedBy:by } : l) } : b);
+  // 6) auditLog
+  const al = { id:'al_lsm_' + d.id, ts:at, type:'line_share_main_store', by, entityId:d.lineId, entityRef:(P.line && P.line.name) || d.lineId,
+    branchId:br, mainLocId:mainId, locIds:[ ...oldIds ], layerCount:P.layers.length, itemCount:P.rows.length, posItems:P.posItems, negItems:P.negItems,
+    value:P.value, netValueDiff, note:reason };
+  return { ...s, fifoLayers:layers, items, branches, movements:movements.length ? [ ...(s.movements || []), ...movements ] : (s.movements || []),
+    auditLog:[ ...(s.auditLog || []), al ] };
+}
 function reducer(s, a){
   const n = _reducerCore(s, a);
   if(n === s || !n || !s || !a || _ADJ_MV_MAKERS.has(a.type)) return n;
@@ -25909,23 +26148,56 @@ function _reducerCore(s, a){
       const newLine = a.data.line;
       // auto-create wip location ผูกกับไลน์ — ถ้ายังไม่มี
       const hasLineLoc = (b.locations||[]).some(l => l.lineId === newLine.id);
+      // 🆕 LSS3 UAT ชุด 1 M2: ไลน์ใหม่ติ๊กใช้คลังกลางร่วม → คลังไลน์อัตโนมัติสร้างแบบ "ปิดรวมเข้าคลังกลาง" (ไม่โผล่เป็นปลายทาง TR · เลิกติ๊ก = เปิดคืน)
+      const _mainL = (newLine.sharedMainStore && b.warehouseMode !== 'simple' && global.ERP && global.ERP.getMainStorage) ? global.ERP.getMainStorage(s, b.id) : null;
+      const _mOk = !!(_mainL && _mainL.type === 'raw' && !_mainL.lineId && _mainL.active !== false);
       const newLocations = hasLineLoc ? (b.locations||[]) : [
         ...(b.locations||[]),
         { id: 'loc_' + newLine.id, name: 'คลังไลน์ ' + (newLine.name||newLine.id),
-          type:'wip', dept: newLine.dept, lineId: newLine.id, autoCreated: true },
+          type:'wip', dept: newLine.dept, lineId: newLine.id, autoCreated: true,
+          ...(_mOk ? { active:false, mergedInto:_mainL.id, mergedAt:Number(a.data.at) || 0, mergedBy:a.data.by || '' } : {}) },
       ];
       return { ...b,
         productionLines:[ ...(b.productionLines||[]), newLine ],
         locations: newLocations };
     }) };
-    case 'UPDATE_PRODUCTION_LINE': return { ...s, branches: s.branches.map(b =>
-      b.id === a.data.branchId ? { ...b, productionLines:(b.productionLines||[]).map(l => l.id === a.data.line.id ? { ...l, ...a.data.line } : l) } : b) };
+    case 'UPDATE_PRODUCTION_LINE': {
+      // 🆕 LSS3 D1: เลิกใช้คลังกลางร่วม (true → false) → คลังไลน์เดิมที่ปิดรวมไว้กลับมาใช้ (เปิดคืน · ไม่ย้ายของกลับ)
+      const _ln0 = ((s.branches.find(b => b.id === a.data.branchId) || {}).productionLines || []).find(l => l && l.id === a.data.line.id);
+      const _reopen = !!(_ln0 && _ln0.sharedMainStore && a.data.line.sharedMainStore === false);
+      // 🆕 LSS3 UAT ชุด 1 M2: ด่านใน reducer (ไม่พึ่งจอ — rebase/แท็บค้าง/console ก็ต้องผ่านด่านเดียวกัน)
+      const _turnOn = !!(_ln0 && !_ln0.sharedMainStore && a.data.line.sharedMainStore === true);
+      let _P = null, _lssAl = null;
+      if(_turnOn || _reopen){
+        const E = global.ERP || {}, u0 = _actorOf(s, a.data.by), u = u0 ? (_userByRef(s, u0.username) || u0) : null;   // สิทธิ์สดจาก s.users
+        if(_reopen && !(E.canLineShareMainStore && E.canLineShareMainStore(u))){ try { alert('🔒 เลิกใช้คลังกลางร่วมได้เฉพาะผู้มีสิทธิ์ตั้งค่าเต็ม (GM/เจ้าของ)'); } catch(_e){} return s; }
+        if(_turnOn){
+          _P = E.lineShareMainStorePlan ? E.lineShareMainStorePlan(s, a.data.branchId, _ln0.id) : { blocks:['ระบบยังไม่พร้อม'], layers:[], locs:[] };
+          if(_P.main && (_P.layers || []).length){ try { alert('⛔ คลังไลน์เดิมยังมีของ/ติดลบอยู่ — ห้ามติ๊กใช้คลังกลางร่วมแล้วทิ้งของค้าง\nกด 🏬 ย้ายของในคลังไลน์เข้าคลังกลาง (ตั้งค่า → ไลน์ผลิต) แทน'); } catch(_e){} return s; }
+          if(!_P.ok){ try { alert('⛔ ติ๊กใช้คลังกลางร่วมไม่ได้\n• ' + (_P.blocks || []).join('\n• ')); } catch(_e){} return s; }
+        }
+        const by = (u && u.username) || a.data.by || '';
+        _lssAl = { id:'al_lsl_' + _ln0.id + '_' + (_turnOn ? 'on' : 'off') + '_' + (Number(a.data.at) || 0), ts:Number(a.data.at) || 0,
+          type:'line_share_main_store_toggle', by, entityId:_ln0.id, entityRef:_ln0.name || _ln0.id, branchId:a.data.branchId, on:_turnOn,
+          ...(_turnOn ? { mainLocId:_P.main.id, locIds:_P.locs.map(l => l.id) } : {}),
+          note: _turnOn ? 'ติ๊กใช้คลังกลางร่วม (คลังไลน์ว่าง → ปิดรวมเข้าคลังกลาง)' : 'เลิกใช้คลังกลางร่วม (เปิดคลังไลน์เดิมคืน · ไม่ย้ายของกลับ)' };
+      }
+      const _closeIds = _turnOn ? new Set(_P.locs.map(l => l.id)) : null, _at = Number(a.data.at) || 0;
+      const _s2 = { ...s, branches: s.branches.map(b =>
+        b.id === a.data.branchId ? { ...b, productionLines:(b.productionLines||[]).map(l => l.id === a.data.line.id ? { ...l, ...a.data.line } : l),
+          ...(_reopen ? { locations:(b.locations || []).map(l => l && l.lineId === a.data.line.id && l.mergedInto && l.active === false
+            ? (({ mergedInto:_mi, ...r }) => ({ ...r, active:true, unmergedFrom:_mi }))(l) : l) } : {}),
+          ...(_turnOn ? { locations:(b.locations || []).map(l => l && _closeIds.has(l.id) ? { ...l, active:false, mergedInto:_P.main.id, mergedAt:_at, mergedBy:_lssAl.by } : l) } : {}) } : b) };
+      return _lssAl ? { ..._s2, auditLog:[ ...(s.auditLog || []), _lssAl ] } : _s2;
+    }
+    case 'LINE_SHARE_MAIN_STORE': return _lineShareMainStore(s, a.data);
     case 'DELETE_PRODUCTION_LINE': return { ...s, branches: s.branches.map(b => {
       if(b.id !== a.data.branchId) return b;
       // ลบไลน์ — auto-clean location ที่ผูก (ถ้า autoCreated)
       return { ...b,
         productionLines:(b.productionLines||[]).filter(l => l.id !== a.data.lineId),
-        locations:(b.locations||[]).filter(l => !(l.lineId === a.data.lineId && l.autoCreated)),
+        // 🆕 LSS3 verify 2: คลังที่ปิดรวมแล้ว/ยังมีล็อตอ้างถึง → เก็บไว้ (ไม่ auto-clean)
+        locations:(b.locations||[]).filter(l => !(l.lineId === a.data.lineId && l.autoCreated && !_locDelBlock(s, b.id, l.id))),
       };
     }) };
 
@@ -25935,8 +26207,12 @@ function _reducerCore(s, a){
       b.id === a.data.branchId ? { ...b, locations:[ ...(b.locations||[]), a.data.location ] } : b) };
     case 'UPDATE_LOCATION': return { ...s, branches: s.branches.map(b =>
       b.id === a.data.branchId ? { ...b, locations:(b.locations||[]).map(l => l.id === a.data.location.id ? { ...l, ...a.data.location } : l) } : b) };
-    case 'DELETE_LOCATION': return { ...s, branches: s.branches.map(b =>
-      b.id === a.data.branchId ? { ...b, locations:(b.locations||[]).filter(l => l.id !== a.data.locationId) } : b) };
+    case 'DELETE_LOCATION': {
+      // 🆕 LSS3 verify 2: ห้ามลบคลังที่ปิดรวมแล้ว (mergedInto) หรือยังมีล็อต locMergedFrom อ้างถึง
+      if(_locDelBlock(s, a.data && a.data.branchId, a.data && a.data.locationId)) return s;
+      return { ...s, branches: s.branches.map(b =>
+        b.id === a.data.branchId ? { ...b, locations:(b.locations||[]).filter(l => l.id !== a.data.locationId) } : b) };
+    }
 
     case 'DELETE_BRANCH': {
       // ป้องกันลบ HQ เดียวที่เหลืออยู่
@@ -26354,6 +26630,10 @@ function _reducerCore(s, a){
       // 🆕 ต้นทุนจริงต่อล็อต: deductFIFO คืน cost + breakdown ของชั้นที่ตัดจริงอยู่แล้ว
       //    เดิมทิ้งไปเฉย ๆ → ต้นทุน FG ถูกคิดใหม่จากสูตรแทนที่จะใช้ของที่เบิกจริง
       //    ตอนนี้สะสมไว้บนใบสั่งผลิต เพื่อให้ตอนบันทึกผลผลิตคิดจากของจริง
+      // 🆕 LSS3 D4: ตัด/ถอนที่คลังเดิมที่บันทึกไว้ (เช่น ยกเลิกออเดอร์ถอนผลผลิต) แต่คลังปิดรวมแล้ว → ทำที่คลังปลายทาง
+      if(a.data && a.data.locId){ const _rl = _rml(s, a.data.branch, a.data.locId);
+        if(_rl !== a.data.locId){ const _m0 = a.data.movement;
+          a = { ...a, data:{ ...a.data, locId:_rl, ...(_m0 && !Array.isArray(_m0) && _m0.locId === a.data.locId ? { movement:{ ..._m0, locId:_rl } } : {}) } }; } }
       const { branch, locId, allowNegative, items: matItems, movement, orderId } = a.data;
       let layers = s.fifoLayers.map(l => ({...l}));
       let items = s.items.slice();
@@ -26412,6 +26692,10 @@ function _reducerCore(s, a){
       // 🆕 PRODUCTION-LIVE คลื่น 1 (B3.2): unit? = qty เป็นหน่วยนั้น (แปลงเป็นหน่วยฐาน) · plannedQtyBase?/orderPlannedQtyBase? = ตัวหารต้นทุนจริง · batchSeq?
       //   · layer ใหม่หักล้าง NEG ที่คลังเดียวกันก่อน (ยกเว้น autoTransfer ที่หักเต็มจำนวนออกทันที) · มี orderId → ต่อ order.fgReceipts ทุกครั้ง
       //   · มี dedupeKey → id layer/movement ผูกกับ key (fl_prod_<key> / mv_p_<key>) เล่นซ้ำได้ผลเดิม
+      // 🆕 LSS3 D4: คืนของเข้าคลังเดิมที่บันทึกไว้ (ยกเลิกออเดอร์คืนวัตถุดิบ ฯลฯ) แต่คลังนั้นปิดรวมเข้าคลังกลางแล้ว → รับเข้าคลังปลายทาง
+      if(a.data && a.data.locId){ const _rl = _rml(s, a.data.branch, a.data.locId);
+        if(_rl !== a.data.locId){ const _m0 = a.data.movement;
+          a = { ...a, data:{ ...a.data, locId:_rl, ...(_m0 && !Array.isArray(_m0) && _m0.locId === a.data.locId ? { movement:{ ..._m0, locId:_rl } } : {}) } }; } }
       const { branch, locId, fgItemId, unitCost, lot, expiryDate, movement: _mvIn, autoTransfer, dedupeKey } = a.data;
       // 🆕 FIX-4 (PROD-C3): กัน FG เข้าสต๊อกซ้ำ — ถ้า dedupeKey เคย dispatch แล้ว → ข้าม (idempotent)
       //   ใช้ key = orderId[·batchSeq] เพื่อให้ทุกเส้นทาง finalize (MyStation / OperationsPipeline / tray) เพิ่ม FG ได้ครั้งเดียว
@@ -26582,6 +26866,10 @@ function _reducerCore(s, a){
     // a.data: { itemId, branch, delta, locId?, reason, movement, newLayer (ปรับเพิ่ม), costRule? ('neg'), costOverride? }
     //   🆕 ADJ_IN_COST_GUARD: ต้นทุนปรับเพิ่มใน newLayer/movement ที่ส่งมา = ค่าอ้างอิงเท่านั้น — reducer คิดเอง (stockAdjInUnitCost)
     case 'ADJUST_STOCK': {
+      // 🆕 LSS3 UAT ชุด 1 M1: คำขอปรับ/นับที่สร้างก่อนรวมคลัง (หรือฟอร์มค้างแท็บเก่า) ชี้คลังไลน์ที่ปิดรวมแล้ว → ทำที่คลังปลายทาง (ห้ามสร้างล็อตในคลังที่ปิด)
+      if(a.data && typeof a.data.locId === 'string' && a.data.locId && typeof a.data.branch === 'string'){ const _rl = _rml(s, a.data.branch, a.data.locId);
+        if(_rl !== a.data.locId){ const _m0 = a.data.movement;
+          a = { ...a, data:{ ...a.data, locId:_rl, locMergedFrom:a.data.locId, ...(_m0 && typeof _m0 === 'object' && !Array.isArray(_m0) && _m0.locId === a.data.locId ? { movement:{ ..._m0, locId:_rl } } : {}) } }; } }
       const { itemId, branch, delta, movement } = a.data;
       // 🆕 ADJ_IN_COST_GUARD verify: รูปข้อมูลพื้นฐาน (ตรวจจาก payload อย่างเดียว · rebase ไม่พลิก · ทางปกติส่งถูกเสมอ)
       //   รหัส = string ไม่ว่าง ไม่ใช่ชื่อใน Object.prototype ('__proto__'/'constructor' = ปนเปื้อน prototype) · delta = ตัวเลขจำกัด · movement = object มี id
@@ -31920,10 +32208,11 @@ function _reducerCore(s, a){
       const _rDate = getToday();
       { const locked = _checkDateLock(s, _rDate, 'ยกเลิกการปรับสต๊อก'); if(locked) return locked; }
       const delta = -(Number(mv.qty)||0);
+      const _mvLoc = _rml(s, mv.branch, mv.locId || null);   // 🆕 LSS3 D4: คลังเดิมปิดรวมเข้าคลังกลางแล้ว → ทำที่คลังปลายทาง
       let items = s.items;
       if(mv.itemId && mv.branch != null){
         items = items.map(it => it.id === mv.itemId
-          ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, mv.branch, mv.locId||null, delta) } : it);  // 🆕 FT shape-safe
+          ? { ...it, stockByBranch: adjustBranchStock(it.stockByBranch, mv.branch, _mvLoc, delta) } : it);  // 🆕 FT shape-safe
       }
       // 🆕 BUGFIX #9: คืน FIFO layer ให้ตรงกับ stockByBranch (เดิมแตะแค่ stockByBranch → FIFO desync, มูลค่าคงเหลือเพี้ยน)
       let fifoLayers = s.fifoLayers.map(l => ({...l}));
@@ -31952,7 +32241,7 @@ function _reducerCore(s, a){
         }
         if(_nq > 0.0001){
           const _nTake = Math.min(_nq, _need); const _nUc = _nVal / _nq;
-          fifoLayers.push({ id:'fl_revadj_neg_'+mv.id, itemId: mv.itemId, branch: mv.branch, locId: (_ownAny && _ownAny.locId) || mv.locId || null,
+          fifoLayers.push({ id:'fl_revadj_neg_'+mv.id, itemId: mv.itemId, branch: mv.branch, locId: (_ownAny && _ownAny.locId) || _mvLoc,
             qty: -_nTake, remaining: -_nTake, unitCost: _nUc, cost: -_nTake*_nUc, totalCost: -_nTake*_nUc, date: getToday(),
             lot:'NEG', isNegative:true, ref:'REV-'+(mv.ref||mv.id), source:'adjust_reverse', note:'ติดลบคืน: ยกเลิกการนับที่ล้างยอดติดลบ' });
           _need = Number((_need - _nTake).toFixed(4)); _cutCost += _nTake * _nUc;
@@ -31960,7 +32249,7 @@ function _reducerCore(s, a){
         }
         const _own = (_ownAny && (_ownAny.remaining||0) > 0) ? _ownAny : null;
         if(_own){ const _t = Math.min(_own.remaining, _need); _own.remaining -= _t; _need -= _t; _cutCost += _t * (Number(_own.unitCost)||0); }
-        const _resRa = _need > 0.0001 ? deductFIFO(fifoLayers, mv.itemId, _need, mv.branch, mv.locId||null) : { cost:0, shortage:0 };
+        const _resRa = _need > 0.0001 ? deductFIFO(fifoLayers, mv.itemId, _need, mv.branch, _mvLoc) : { cost:0, shortage:0 };
         _cutCost += (_resRa && _resRa.cost) || 0;
         // ส่วนขาด (ของถูกใช้ไปแล้ว) คิด @ต้นทุนเดิมของการปรับ (JE ไม่ต่ำกว่าจริง) + บันทึก auditLog (เดิมแค่ console.warn)
         //   🆕 COST_FORGE_GUARD B4: ไม่มี JE เดิม = การปรับนี้ไม่เคยลงมูลค่า → ส่วนขาดคิด 0
@@ -31968,7 +32257,7 @@ function _reducerCore(s, a){
         if(_resRa && _resRa.shortage > 0.0001){
           _cutCost += _resRa.shortage * _ucOrig; _raShort = _resRa.shortage;
           // 🆕 COST_FORGE_GUARD (UAT ผจก.คลัง S2): ของถูกใช้ไปแล้ว → ส่วนขาด = NEG layer (สต๊อกติดลบเท่าไร FIFO ติดลบเท่านั้น · ล้างเองเมื่อของเข้า)
-          fifoLayers.push({ id:'fl_revadj_short_' + mv.id, itemId: mv.itemId, branch: mv.branch, locId: mv.locId || null,
+          fifoLayers.push({ id:'fl_revadj_short_' + mv.id, itemId: mv.itemId, branch: mv.branch, locId: _mvLoc,
             qty: -_resRa.shortage, remaining: -_resRa.shortage, unitCost: _ucOrig, cost: -_resRa.shortage * _ucOrig, totalCost: -_resRa.shortage * _ucOrig, date: _rDate,
             lot:'NEG', isNegative:true, ref:'REV-'+(mv.ref||mv.id), source:'adjust_reverse', note:'ติดลบ: ยกเลิกการปรับเพิ่มที่ของถูกใช้ไปแล้ว' });
         }
@@ -31984,7 +32273,7 @@ function _reducerCore(s, a){
         // UAT ผจก.คลัง S3: ล้าง NEG ที่เกิดระหว่างนั้นแบบเดียวกับ ADJUST_STOCK/รับของ
         fifoLayers = _netIncomingLayers(fifoLayers, [{
           id:'fl_revadj_' + mv.id,   // COST_FORGE_GUARD B5: id ตายตัว (เล่นซ้ำได้ผลเดิม)
-          itemId: mv.itemId, branch: mv.branch, locId: mv.locId||null,
+          itemId: mv.itemId, branch: mv.branch, locId: _mvLoc,
           qty: delta, remaining: delta, unitCost: _unitRa, cost: _unitRa*delta,
           date: _rDate, ref:'REV-'+(mv.ref||mv.id), source:'adjust_reverse',
         }]);
@@ -31992,7 +32281,7 @@ function _reducerCore(s, a){
       const _at = Number(d.at) || Date.now();
       const counterMv = {
         id: 'mv_revadj_' + mv.id,   // COST_FORGE_GUARD B5: id ตายตัว
-        type:'adjust_reverse', itemId:mv.itemId, qty:delta, branch:mv.branch, ...(mv.locId ? { locId:mv.locId } : {}),
+        type:'adjust_reverse', itemId:mv.itemId, qty:delta, branch:mv.branch, ...(_mvLoc ? { locId:_mvLoc } : {}),
         date:_rDate, ref:mv.ref||mv.id,
         note:`ยกเลิกการปรับสต๊อก ${mv.ref||''} — ${reason}`, by, ..._claim,
       };
@@ -32585,22 +32874,36 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       const incoming = (a.data && a.data.items) || a.data || [];   // รับทั้ง [..] และ { items:[..] } (ImportCSVTab ส่งแบบหลัง)
       for(const raw of incoming){
         if(!raw) continue;
-        const { __new, ...it } = raw;
+        const { __new, gramsPerUnit, ...it } = raw;   // 🆕 LSS3 D6: gramsPerUnit = คำสั่งเพิ่มหน่วยกรัม (ไม่เก็บลงสินค้า)
         ((it.tags || (__new && __new.tags) || [])).forEach(t => tags.add(t));
         const idx = items.findIndex(x => (x.code||'').toLowerCase() === (it.code||'').toLowerCase() && it.code);
         if(idx >= 0){
           const prev = items[idx];
           const next = { ...prev, ...it, id: prev.id };
           next.stockByBranch = prev.stockByBranch;        // สต๊อกเดิมคงไว้เสมอ
+          next.units = prev.units;                         // หน่วยเดิมห้ามแก้/ลบ
+          // 🆕 LSS3 D6 กับดักเดิม: issueUnit ที่สินค้าไม่มี → เดิมต่อ {name,toBase:1} (เช่น "กรัม 1:1 ชุด" ผิด) → ข้าม คงหน่วยเบิกเดิม
           if(it.issueUnit && Array.isArray(prev.units) && prev.units.length
-             && !prev.units.some(u => u && u.name === it.issueUnit)){
-            next.units = [...prev.units, { name: it.issueUnit, toBase: 1 }];  // เพิ่มหน่วยใหม่ ไม่ล้างของเดิม
-          } else {
-            next.units = prev.units;
+             && !prev.units.some(u => u && u.name === it.issueUnit)
+             && !global.ERP.metricAutoUnits(prev).includes(it.issueUnit)){
+            next.issueUnit = prev.issueUnit;
           }
+          const gp = gramsPerUnit != null ? global.ERP.importGramsPlan(next, '', gramsPerUnit) : null;
+          if(gp && gp.add) next.units = [...(next.units || []), gp.unit];   // ตรวจซ้ำใน reducer: มีหน่วยน้ำหนักแล้ว = ไม่เพิ่ม (ส่งซ้ำไม่ซ้ำ)
+          if(!('issueUnit' in prev) && next.issueUnit === undefined) delete next.issueUnit;
           items[idx] = next;
         } else {
-          items.push({ ...(__new || {}), ...it });
+          const ni = { ...(__new || {}), ...it };
+          // 🆕 LSS3 D6: id ห้ามซ้ำกับสินค้าที่มีอยู่/ในชุดเดียวกัน → ต่อท้าย _dN แบบ deterministic
+          const _ids = new Set(items.map(x => x && x.id));
+          if(!ni.id || _ids.has(ni.id)){
+            const b0 = ni.id || ('i_imp_' + String(ni.code || items.length));
+            let k = 1; while(_ids.has(b0 + '_d' + k)) k++;
+            ni.id = (ni.id || _ids.has(b0)) ? b0 + '_d' + k : b0;
+          }
+          const gp = gramsPerUnit != null && Array.isArray(ni.units) ? global.ERP.importGramsPlan(ni, '', gramsPerUnit) : null;
+          if(gp && gp.add) ni.units = [...ni.units, gp.unit];
+          items.push(ni);
         }
       }
       return { ...s, items, itemTags: [...tags] };
@@ -32804,6 +33107,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       const now = Date.now();
       let items = s.items.slice(); const layers = s.fifoLayers.slice(); const movements = [];
       const number = mi.number || mi.slipNumber;
+      const _src = _rml(s, mi.branchId, mi.sourceLocId || null);   // 🆕 LSS3 D4: คลังเดิมปิดรวมแล้ว → คืนเข้าคลังปลายทาง
       for(const l of (mi.items||[])){
         const it = items.find(x => x.id === l.itemId); if(!it) continue;
         const qty = Number(l.baseQty)||0; if(qty <= 0) continue;
@@ -32813,15 +33117,15 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
         const _pushBack = (q, locId, sfx) => layers.push({ id:'fl_void_'+now.toString(36)+Math.random().toString(36).slice(2,6)+sfx, itemId:l.itemId, branch: mi.branchId, locId,
           qty:q, remaining:q, unitCost:_uc, totalCost: q * _uc, date: getToday(), lot:'VOID-'+number, grRef:'VOID-'+number,
           note:'คืนของจากยกเลิกใบเบิก ' + number });
-        if(qty - _fromDefault > 0) _pushBack(Number((qty - _fromDefault).toFixed(4)), mi.sourceLocId || null, '');
+        if(qty - _fromDefault > 0) _pushBack(Number((qty - _fromDefault).toFixed(4)), _src, '');
         if(_fromDefault > 0) _pushBack(_fromDefault, null, 'd');
         items = items.map(x => {
           if(x.id !== l.itemId) return x;
-          let sb = adjustBranchStock(x.stockByBranch, mi.branchId, mi.sourceLocId || null, Number((qty - _fromDefault).toFixed(4)));
+          let sb = adjustBranchStock(x.stockByBranch, mi.branchId, _src, Number((qty - _fromDefault).toFixed(4)));
           if(_fromDefault > 0) sb = adjustBranchStock(sb, mi.branchId, null, _fromDefault);
           return { ...x, stockByBranch: sb };
         });
-        movements.push({ id:'mv_'+now.toString(36)+Math.random().toString(36).slice(2,6), type:'adjust_in', itemId:l.itemId, qty, branch: mi.branchId, locId: mi.sourceLocId || null,
+        movements.push({ id:'mv_'+now.toString(36)+Math.random().toString(36).slice(2,6), type:'adjust_in', itemId:l.itemId, qty, branch: mi.branchId, locId: _src,
           date:getToday(), ref:'VOID-'+number, note:'ยกเลิกใบเบิก ' + number + ' — ' + (reason||''), by, unitCost:Number(l.unitCost)||0, cost:Number(l.lineCost||l.cost||0), createdAt: now });
       }
       const prev = (s.movements||[]).map(m => (m.ref === number && m.type === 'production_out') ? { ...m, reversed:true, reversedAt: now, reversedBy: by } : m);
@@ -33057,6 +33361,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       // 🆕 TR_DATE D1: trDate = วันที่ต้องการของ (เลือกได้วันนี้/อนาคต — ตรวจที่ UI) · reducer ตรวจแค่รูปแบบ YYYY-MM-DD (ไม่เทียบนาฬิกา = replay deterministic)
       if(d.trDate != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(d.trDate))){ alert('วันที่ของใบ TR ไม่ถูกรูปแบบ (ต้องเป็น ปปปป-ดด-วว)'); return s; }
       { const _xd = _xlLinesDeny(s, d.lines); if(_xd){ alert(_xd); return s; } }   // 🆕 FREIGHT_EXPENSE verify 2
+      if(_isIntraDoc(d)){ const _cd = _lssClosedDeny(s, d.fromBranch, d.fromLocId) || _lssClosedDeny(s, d.toBranch, d.toLocId); if(_cd){ alert(_cd); return s; } }   // 🆕 LSS3 verify 1
       if(_isIntraDoc(d) && s.currentUser){
         if(d.fromLocId === d.toLocId){ alert('คลังต้นทางกับคลังปลายทางต้องต่างกัน'); return s; }
         const _deny = global.ERP.locActDenyReason && global.ERP.locActDenyReason(s, s.currentUser, d.toBranch, d.toLocId, 'request');
@@ -33229,7 +33534,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       if(!u){ alert('⛔ ไม่พบผู้ใช้ที่ทำรายการ'); return s; }
       const date = getToday();
       { const locked = _checkDateLock(s, date, 'คืนของเข้าต้นทาง'); if(locked) return locked; }
-      const sid = _sanId(to.id), locId = to.fromLocId || null, incoming = [], movements = [];
+      const sid = _sanId(to.id), locId = _rml(s, to.fromBranch, to.fromLocId || null), incoming = [], movements = [];   // 🆕 LSS3 D4: _rml
       let items = s.items;
       (to.lines||[]).forEach((l, i) => {
         if(!l || !l.itemId || l.finalQty == null) return;
@@ -33262,6 +33567,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       if(!tr){ alert('ไม่พบ TR'); return s; }
       if(tr.status !== 'pending'){ alert(`TR ${tr.trNumber} สถานะ "${tr.status}" แล้ว — ส่งของตามใบนี้ไม่ได้`); return s; }
       if(!_isIntraDoc(tr)){ alert('ใบนี้ไม่ใช่ TR ภายในสาขา (ต้องมีคลังต้นทาง+ปลายทาง)'); return s; }
+      { const _cd = _lssClosedDeny(s, tr.fromBranch, tr.fromLocId) || _lssClosedDeny(s, tr.toBranch, tr.toLocId); if(_cd){ alert(_cd + ' — ยกเลิกใบ TR นี้'); return s; } }   // 🆕 LSS3 verify 1
       const u = _actorOf(s, d.by);
       const _deny = global.ERP.locActDenyReason ? global.ERP.locActDenyReason(s, u, tr.fromBranch, tr.fromLocId, 'ship') : (u ? null : 'ไม่พบผู้ใช้');
       if(_deny){ alert(_deny); return s; }
@@ -33293,6 +33599,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       const locs = (b && b.locations) || [];
       const fromLoc = locs.find(l => l && l.id === d.fromLocId), toLoc = locs.find(l => l && l.id === d.toLocId);
       if(!b || !fromLoc || !toLoc || fromLoc.id === toLoc.id){ alert('ใบส่งมอบต้องมีคลังต้นทางและปลายทางในสาขาเดียวกัน (คนละคลัง)'); return s; }
+      { const _cd = _lssClosedDeny(s, b.id, fromLoc.id, toLoc.id); if(_cd){ alert(_cd); return s; } }   // 🆕 LSS3 verify 1
       if(!fromLoc.lineId){ alert('ใบส่งมอบส่งออกจากคลังของไลน์เท่านั้น'); return s; }
       if(toLoc.lineId){ alert('ส่งมอบเข้าคลังของไลน์ไม่ได้ — ไลน์ที่จะใช้ต้องเปิด TR ขอเอง'); return s; }
       { const _xd = _xlLinesDeny(s, d.lines); if(_xd){ alert(_xd); return s; } }   // 🆕 FREIGHT_EXPENSE verify 2
@@ -33339,6 +33646,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       const locs = (b && b.locations) || [];
       const fromLoc = locs.find(l => l && l.id === d.fromLocId), toLoc = locs.find(l => l && l.id === d.toLocId);
       if(!b || !fromLoc || !toLoc || fromLoc.id === toLoc.id){ alert('ส่งเข้าไลน์ต้องมีคลังต้นทางและคลังไลน์ปลายทางในสาขาเดียวกัน'); return s; }
+      { const _cd = _lssClosedDeny(s, b.id, fromLoc.id, toLoc.id); if(_cd){ alert(_cd); return s; } }   // 🆕 LSS3 verify 1
       if(fromLoc.lineId){ alert('⛔ ต้นทางเป็นคลังของไลน์ — ส่งของระหว่างไลน์ต้องเปิด TR (หรือใช้ 📤 ส่งมอบ)'); return s; }
       { const _xd = _xlLinesDeny(s, d.lines); if(_xd){ alert(_xd); return s; } }   // 🆕 FREIGHT_EXPENSE verify 2
       if(!toLoc.lineId){ alert('⛔ ปลายทางต้องเป็นคลังของไลน์ — ย้ายระหว่างคลังอื่นใช้ TR'); return s; }
@@ -33406,6 +33714,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       if(!_isSup && !_returnOnly && to.shippedBy && to.shippedBy === u.username){
         alert(`⛔ คุณเป็นคนส่ง ${to.toNumber} เอง — รับ/ตัดปิดใบเดียวกันเองไม่ได้ (ให้คนดูแลคลังปลายทางคนอื่นกดรับ)`); return s; }
       if(!_returnOnly && !_lossApproved){
+        { const _cd = _lssClosedDeny(s, to.toBranch, to.toLocId); if(_cd){ alert(_cd + ' — คืนต้นทาง/ตัดปิดใบ ' + to.toNumber + ' แทนการรับ'); return s; } }   // 🆕 LSS3 verify 1
         const _deny = global.ERP.locActDenyReason ? global.ERP.locActDenyReason(s, u, to.toBranch, to.toLocId, 'receive') : null;
         if(_deny){ alert(_deny); return s; }
       }
@@ -37299,6 +37608,7 @@ const ACTION_MERGE = Object.freeze({
   SET_EXPENSE_EXTCODE_MAP: { kind:'delta' },   // 🆕 BRANCH_EXPENSE_REPORT R2: จับคู่รหัส Ecount → รายการรายจ่าย (settings.expenseExtCodeMap) · ส่งซ้ำ = no-op (al_xmap_<id>)
   CAP_GR_CHARGE_INTO_ASSET: { kind:'delta' },   // 🆕 OFF_INV_DISC_ASSET A4: รวมค่าส่งเข้าราคาทุน 💎 / undo · ส่งซ้ำ = no-op (auditLog al_cap_<id>)
   EXPENSE_BELOW_THRESHOLD_ASSET: { kind:'delta' },   // 🆕 STOCK_TO_ASSET S4: ทรัพย์สินต่ำกว่าเกณฑ์ → ลงค่าใช้จ่าย / undo · ส่งซ้ำ = no-op (auditLog al_bte_<id>)
+  LINE_SHARE_MAIN_STORE: { kind:'delta' },   // 🆕 LSS3 D4: ย้ายของคลังไลน์เข้าคลังกลาง + ใช้คลังร่วม · แผนคิดใหม่บนก้อนล่าสุด · ส่งซ้ำ = no-op (auditLog al_lsm_<id> / ทำแล้ว)
   RECLASS_STOCK_TO_ASSET: { kind:'delta' },   // 🆕 STOCK_TO_ASSET S1: ย้ายสต๊อกเป็นทรัพย์สิน 💎 / undo · ส่งซ้ำ = no-op (auditLog al_s2a_<id>)   // 🆕 OFF_INV_DISC_ASSET A4: รวมค่าส่งเข้าราคาทุน 💎 / undo · ส่งซ้ำ = no-op (auditLog al_cap_<id>)
   VOID_INV: { kind:'delta' },
   VOID_POS_IMPORT: { kind:'delta' },
@@ -37437,6 +37747,10 @@ const ACTION_READS = Object.freeze({
   SET_EXPENSE_EXTCODE_MAP: ['auditLog','expenseItems'],   // 🆕 BRANCH_EXPENSE_REPORT R2 (settings = หมวดคุม)
   CAP_GR_CHARGE_INTO_ASSET: ['assets','auditLog','fifoLayers','grs','invoices','items','movements','returns'],   // 🆕 OFF_INV_DISC_ASSET A4
   EXPENSE_BELOW_THRESHOLD_ASSET: ['assetCategories','assets','auditLog','grs','invoices','items','journalEntries','movements','returns'],   // 🆕 STOCK_TO_ASSET S4
+  LINE_SHARE_MAIN_STORE: ['approvalRequests','auditLog','fifoLayers','items','movements','productionOrders','transferOrders','transferRequests'],   // 🆕 LSS3 D4 · UAT ชุด 1 M1: approvalRequests = ด่านคำขอนับ/ปรับคลังไลน์ค้าง
+  DELETE_LOCATION: ['fifoLayers'],   // 🆕 LSS3 verify 2: ห้ามลบคลังที่ยังมีล็อต locMergedFrom อ้างถึง
+  DELETE_PRODUCTION_LINE: ['fifoLayers'],   // 🆕 LSS3 verify 2: auto-clean ข้ามคลังที่ยังมีล็อต locMergedFrom อ้างถึง
+  UPDATE_PRODUCTION_LINE: ['approvalRequests','auditLog','fifoLayers','productionOrders','transferOrders','transferRequests'],   // 🆕 LSS3 UAT ชุด 1 M2: ติ๊กใช้คลังร่วม = แผนเดียวกับ LINE_SHARE_MAIN_STORE (ของค้าง/เอกสารค้าง) · auditLog ต่อท้ายอย่างเดียว
   RECLASS_STOCK_TO_ASSET: ['assetCategories','assets','auditLog','fifoLayers','grs','invoices','items','journalEntries','movements','returns','transferOrders','transferRequests'],   // 🆕 STOCK_TO_ASSET S1   // 🆕 OFF_INV_DISC_ASSET A4
   ADD_JE: ['auditLog','invoices','journalEntries'],   // DEPOSIT-VAT E-5 R5: JE ของใบตั้งหนี้ต้องมีใบจริง
   ADJUST_INV_VAT: ['auditLog','grs','invoices','journalEntries','payments','pos','returns'],
@@ -37544,6 +37858,7 @@ const APPEND_ONLY_READS = Object.freeze({
   ADD_MATERIAL_ISSUE: ['movements'],
   ADD_MOVEMENT: ['movements'],
   VOID_QUICK_ISSUE: ['auditLog'],
+  UPDATE_PRODUCTION_LINE: ['auditLog'],   // 🆕 LSS3 UAT ชุด 1 M2: ต่อท้าย audit ติ๊ก/เลิกติ๊กใช้คลังร่วม (id คงที่ al_lsl_<ไลน์>_<on|off>_<at>) ไม่อ่านหา
   ADJUST_STOCK: ['auditLog', 'movements'],   // APPEND_ONLY_READS: ต่อท้าย movement + audit (fifo_shortage / 🆕 adjust_cost_override id คงที่ al_aco_<mv.id>) อย่างเดียว ไม่อ่านหา
   ADD_WEIGH_LOG: ['movements','weighLogs'],   // 🆕 WEIGH_FREE_STOCK: movement ตัด/รับของต่อท้ายอย่างเดียว
   REVIEW_WEIGH_LOG: ['auditLog','movements'],   // 🆕 FW5: movement scrap ต่อท้ายอย่างเดียว
@@ -37581,6 +37896,7 @@ Object.assign(global.ERP, {
   ACTION_READS, MERGE_GUARD_KEYS, capLogsForSave: _capLogsForSave,   // 🆕 คลื่น 3 (WAVE3_CONTRACT §B4.1)
   APPEND_KEYS, SEQ_BUMP_KEYS, SEQ_BUMPS, APPEND_ONLY_READS, PATCH_READS, CAP_LIMITS: Object.freeze({ auditLog:AUDIT_LOG_CAP, weighLogs:WEIGH_LOG_CAP }),   // 🌊 คลื่น 4 (WAVE4_CONTRACT §B4.1)
   PUSH_LINE_REASONS,   // 🆕 TR_PUSH_FAV (A2)
+  lineShareNetValueDiff,   // 🆕 LSS3 UAT ชุด 1 S1: ผลต่างมูลค่าจากการหักล้างบวก/ลบ (จอสรุป = reducer)
   whtGroupPayDeny,   // 🆕 WHT_GROUP S2: ด่านจ่ายบิลในชุด 50 ทวิ รวม (UI ใช้ตัวเดียวกับ reducer)
   WEIGH_FREE_SKIP_TH, weighFreeSkipLabel: _weighFreeSkipLabel,   // 🆕 WEIGH_FREE_STOCK UAT M1: ป้ายเหตุผลที่ชั่งอิสระไม่ได้ตัดสต๊อก (ประวัติชั่ง/ข้อความหลังชั่ง)
   nextDayDocNo: _dayDocNo,   // 🆕 เลข TO/GR ที่ SHIP_TR/ADD_HANDOVER_TO/RECEIVE_INTRA_TO จะออก (หน้าจอใช้บอกผู้ใช้)
@@ -53369,14 +53685,16 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
   const pfIntra = pf.intra || null;
   const intraBranchId = (pfIntra && pfIntra.branchId) || currentBranch;
   const intraBranch = getBranch(state, intraBranchId);
-  const intraLocs = (intraBranch && intraBranch.warehouseMode !== 'simple' && intraBranch.locations) || [];
+  // 🆕 LSS3 verify 1: ไม่เสนอคลังที่ปิดรวมเข้าคลังกลางแล้ว (active:false + mergedInto) ทั้งต้นทาง/ปลายทาง
+  const intraLocs = ((intraBranch && intraBranch.warehouseMode !== 'simple' && intraBranch.locations) || []).filter(l => l && !(l.active === false && l.mergedInto));
   const intraToOpts = useMemo(() => intraLocs.filter(l => l && canActOnLocation(state, user, intraBranchId, l.id, 'request')), [intraLocs, user, intraBranchId]);
   const canIntra = intraLocs.length >= 2 && intraToOpts.length > 0;
   const [mode, setMode] = useState(() => (pfIntra && canIntra) ? 'intra' : 'cross');
   const isIntra = mode === 'intra' && canIntra;
   const [toLocId, setToLocId] = useState(() => {
     if(pfIntra && intraToOpts.some(l => l.id === pfIntra.toLocId)) return pfIntra.toLocId;
-    const own = myLineIds.map(lid => (getLineOwnLocations(state, intraBranchId, lid) || [])[0]).find(l => l && intraToOpts.some(o => o.id === l.id));
+    // 🆕 LSS3 D3: ไลน์ใช้คลังกลางร่วม = ไม่มีคลังไลน์ให้ขอเข้า → ไม่ตั้งคลังกลางเป็นปลายทางเริ่มต้นแทน
+    const own = myLineIds.filter(lid => !(global.ERP.isLineSharedMainStore && global.ERP.isLineSharedMainStore(state, intraBranchId, lid))).map(lid => (getLineOwnLocations(state, intraBranchId, lid) || [])[0]).find(l => l && intraToOpts.some(o => o.id === l.id));
     return (own || intraToOpts[0] || {}).id || '';
   });
   const [srcByItem, setSrcByItem] = useState({});   // itemId → คลังต้นทางที่ผู้ใช้เลือกเอง
@@ -53549,6 +53867,10 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
 
   // 🆕 ภายในสาขา: สลับโหมด · เลือกคลังปลายทาง · เลือกต้นทางต่อรายการ (แยกใบตามต้นทาง)
   const locOpt = (l) => h('option', { key:l.id, value:l.id }, `${_LOC_ICON[l.type] || '📍'} ${l.name}`);
+  // 🆕 LSS3 verify 1: คนไลน์ที่ทุกไลน์ใช้คลังกลางร่วม + ไม่มีคลังให้ขอเข้า → บอกว่าไม่ต้องขอของเข้าไลน์ (แทนคลังที่ปิดแล้ว)
+  const lssAllShared = myLineIds.length > 0 && myLineIds.every(lid => global.ERP.isLineSharedMainStore && global.ERP.isLineSharedMainStore(state, intraBranchId, lid));
+  const lssNote = lssAllShared && !intraToOpts.length && h('div', { className:'bg-teal-50 border-2 border-teal-300 rounded-lg p-3 text-sm text-teal-900', 'data-lss3-tr-note':'1' },
+    '🏬 ไลน์นี้ใช้คลังกลางร่วม — ไม่ต้องขอของเข้าไลน์ (ของที่คลังกลางใช้ได้เลย)');
   const modeToggle = canIntra && !pf.relatedTrId && h('div', { className:'flex gap-1 bg-gray-100 rounded p-0.5 text-sm' },
     h('button', { type:'button', onClick:()=>setMode('cross'), 'data-tr-mode':'cross',
       className: cls('flex-1 px-3 py-2 rounded font-medium', !isIntra ? 'bg-blue-600 text-white shadow' : 'text-gray-700 hover:bg-gray-200') }, '🚚 ขอจากสาขาอื่น'),
@@ -53591,7 +53913,7 @@ function NewTRModal({ state, dispatch, onClose, prefill }){
       pf.relatedTrId && h('div', { className:'bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-800' },
         '🔗 เปิดเพิ่มเติมจาก ', h('b', null, pf.relatedTrNumber || pf.relatedTrId), ' — ใบเดิมแก้รายการไม่ได้ ใบนี้จะเป็นคำขอใหม่แยกต่างหาก'),
 
-      modeToggle,
+      modeToggle, lssNote,
       h(TRDateField, { value: needDate || getToday(), onChange: setNeedDate, onFarOk: v => { farOkFor.current = v; } }),   // 🆕 TR_DATE D1
       // Branch selection (ข้ามสาขา) · 🆕 ภายในสาขา = เลือกคลังปลายทาง
       isIntra ? intraHeader : h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-3' },
@@ -55299,7 +55621,7 @@ function _pushLineSrcLocs(state, user, branchId){
 }
 function _pushLineDestLocs(state, branchId){
   const b = getBranch(state, branchId);
-  return (((b && b.locations) || []).filter(l => l && l.lineId));
+  return (((b && b.locations) || []).filter(l => l && l.lineId && !(l.active === false && l.mergedInto)));   // 🆕 LSS3 verify 1: ไม่เสนอคลังที่ปิดรวมแล้ว
 }
 const _pushReasons = () => global.ERP.PUSH_LINE_REASONS || [];
 // ป้าย "📤 ส่งตรง ไม่มี TR" (+ เหตุผล) — TOList / TODetailModal / รายการรอรับของไลน์
@@ -56516,10 +56838,14 @@ function splitAfterOpen(state, orderId){
   alert('⛔ ' + (o.orderNumber || orderId) + ' ถูกแบ่งเป็น ' + bs.length + ' batch แล้ว (ระหว่างที่หน้านี้เปิดค้าง) — ไม่ได้ปิดขั้น ไม่ได้ตัดวัตถุดิบ และไม่ได้รับผลผลิต\n\nปิดหน้านี้ แล้วทำต่อทีละ batch ที่ 🧑‍🍳 หน้างาน');
   return true;
 }
+// 🆕 LSS3 D3: ไลน์ใช้คลังกลางร่วม — ปลายทาง = ต้นทาง ไม่ต้องขอ TR เข้าไลน์
+const LSS3_SHARED_TR_MSG = 'ไลน์นี้ใช้คลังกลางร่วม — ไม่ต้องขอของเข้าไลน์ (ของที่คลังกลางใช้ได้เลย)';
 function lineStockBlock(state, order){
   if(!order || !global.ERP.getLineConsumeLocs) return null;
   if(!global.ERP.getLineConsumeLocs(state, order.branchId, order.lineId).missing) return null;
   const ln = findLine(state, order.branchId, order.lineId);
+  // 🆕 LSS3 D2: ไลน์ใช้คลังกลางร่วม แต่สาขาไม่มีคลังกลาง (raw ไม่ผูกไลน์) → บอกตรง ๆ (สร้างคลังไลน์ไม่ช่วย)
+  if(ln && ln.sharedMainStore) return `ไลน์ "${ln.name || order.lineId}" ตั้งให้ใช้คลังกลางร่วม แต่สาขานี้ยังไม่มีคลังกลาง (วัตถุดิบ · ไม่ผูกไลน์ · เปิดใช้) — ตั้งค่า → 📍 Sub-Locations เพิ่ม/เปิดคลังกลางก่อน`;
   return `ไลน์ "${(ln && ln.name) || order.lineId || '-'}" ยังไม่มีคลังของตัวเอง — ระบบตัดวัตถุดิบ/รับผลผลิตได้เฉพาะคลังของไลน์ที่ผลิต (ไม่ยืมคลังไลน์อื่น)`
     + '\n\n👉 ให้ผู้ดูแลไปที่ ตั้งค่า → 📍 Sub-Locations → กด "🏭 สร้างคลังไลน์ให้ไลน์ที่ยังไม่มี" แล้วค่อยเริ่มงาน';
 }
@@ -60195,6 +60521,7 @@ function StockShortageModal({ order, shortages, lineLoc, lineId: lineIdProp, bra
   const srcQtyOf = (itemId, src) => (global.ERP.getLocStockFIFO && src) ? global.ERP.getLocStockFIFO(state, branchId, src, itemId) : 0;
   const stockHints = global.ERP.lineTrStockHintsOn(state);   // 🆕 LINE_TR_NOHINT N3: ปิด = ไม่โชว์ "มีที่ไลน์ …" ทุกจุดในหน้าต่างนี้
   const trBlock = isSimpleBr ? 'สาขานี้ใช้คลังเดียวร่วมกันทั้งสาขา — ไม่ต้องขอของเข้าไลน์'
+    : (global.ERP.isLineSharedMainStore && global.ERP.isLineSharedMainStore(state, branchId, lineId)) ? LSS3_SHARED_TR_MSG   // 🆕 LSS3 D3
     : !toLoc ? 'ไลน์นี้ยังไม่มีคลังของตัวเอง — ตั้งค่า → 📍 Sub-Locations → กด "🏭 สร้างคลังไลน์ให้ไลน์ที่ยังไม่มี" (ระบบไม่ยืมตู้ของไลน์อื่น)'
     : !hasPerm(user, 'transfer','tr','create') ? '🔒 คุณไม่มีสิทธิ์เปิด TR ("🔀 TR สร้าง") — แจ้งหัวหน้าไลน์/ผู้จัดการผลิต'
     : ((global.ERP.locActDenyReason && global.ERP.locActDenyReason(state, user, branchId, toLoc.id, 'request')) || null);
@@ -72832,6 +73159,10 @@ function LineStockTab({ state, dispatch, user, branchId }){
   const isSimpleBranch = branch?.warehouseMode === 'simple';
   const stockReady = !!lineLoc || isSimpleBranch;   // พร้อมแสดง/นับ (มี loc หรือ branch-level)
   const stockLocId = lineLoc ? lineLoc.id : null;   // null = pool รวมทั้งสาขา
+  // 🆕 LSS3 D3: ไลน์ใช้คลังกลางร่วม → หน้านี้ = คลังกลาง · นับ/ปรับ = นับคลังกลาง → ต้องเป็นคนดูแลคลังกลาง (ฝ่ายคลัง/ผู้จัดการ · กติกาเดิม canActOnLocation)
+  const sharedLine = !!(global.ERP.isLineSharedMainStore && global.ERP.isLineSharedMainStore(state, branchId, selectedLineId));
+  const sharedCountDeny = (sharedLine && lineLoc && !canAct(lineLoc.id, 'count'))
+    ? `🔒 ไลน์นี้ใช้คลังกลางร่วม — นับ/ปรับจากหน้านี้ = นับ "${lineLoc.name || lineLoc.id}" ได้เฉพาะฝ่ายคลัง / ผู้จัดการ (แจ้งคลังให้นับ)` : null;
 
   // 📊 Stock per item ที่ lineLoc (จาก FIFO layers)
   //   🆕 simple mode (line=branch) → lineLoc=null → รวมสต๊อกทั้งสาขา (branch-level pool)
@@ -72865,7 +73196,8 @@ function LineStockTab({ state, dispatch, user, branchId }){
       if(b.outputs?.length === 0 && b.productId) itemIds.add(b.productId);
     }
     // เพิ่ม items ที่มี stock อยู่ที่ lineLoc แม้ไม่อยู่ใน BOM (เผื่อมีของค้าง)
-    for(const iid of Object.keys(lineStock)) itemIds.add(iid);
+    //   🆕 LSS3 UAT ชุด 1 S3: ไลน์ใช้คลังกลางร่วม → lineStock = ทั้งคลังกลาง → ไม่รวม (แสดงเฉพาะของในสูตร + วัตถุดิบใบสั่งที่เปิด · ไม่ยาวทั้งคลัง)
+    if(!sharedLine) for(const iid of Object.keys(lineStock)) itemIds.add(iid);
     // 🆕 UAT S8: วัตถุดิบของออเดอร์ที่ยังไม่เริ่ม (planned/materials_issued) ของไลน์นี้ = ที่มาเดียวกับงานค้าง "คลังไลน์มีวัตถุดิบไม่พอ" → แถวที่ขาดต้องมีเสมอ
     for(const o of (state.productionOrders||[])){
       if(!o || o.branchId !== branchId || o.lineId !== selectedLineId || !['planned','materials_issued'].includes(o.status)) continue;
@@ -72874,7 +73206,7 @@ function LineStockTab({ state, dispatch, user, branchId }){
     // 🆕 LSS D3: สินค้าไม่นับสต๊อก (น้ำ/น้ำแข็ง · ธง 📦) ไม่โชว์/ไม่นับ/ไม่ขอ TR ที่คลังไลน์
     const items = [...itemIds].map(iid => (state.items||[]).find(i => i.id === iid)).filter(i => i && !i.expenseItemId);
     return items.sort((a,b) => (a.name||'').localeCompare(b.name||''));
-  }, [state.boms, state.items, state.productionOrders, branchId, selectedLineId, lineStock]);
+  }, [state.boms, state.items, state.productionOrders, branchId, selectedLineId, lineStock, sharedLine]);
 
   // 🆕 TODO-DEEPLINK: focus 'production.linestock' (ids = 'lineId|itemId') → สลับไปไลน์ที่ขาด + เหลือเฉพาะสินค้านั้น (ข้ามค้นหา/ตัวกรอง) · ปุ่ม 🔁 ขอเติมไลน์ ขอเฉพาะตัวที่เหลือ
   //   UAT S8: คนสังกัดหลายไลน์ เดิมตกไลน์แรกเสมอ (รายการว่าง/ผิดไลน์ เสี่ยงขอ TR ผิดไลน์) → onFocus เลือกไลน์จาก id
@@ -73003,6 +73335,7 @@ function LineStockTab({ state, dispatch, user, branchId }){
   }, [counts, lineStock, state.items, lineLoc]);
 
   const commitCounts = () => {
+    if(sharedCountDeny) return alert(sharedCountDeny);   // 🆕 LSS3 D3
     if(variances.length === 0) return alert('ยังไม่มีรายการที่นับ');
     const realVariances = variances.filter(v => Math.abs(v.delta) >= 0.001);
     if(realVariances.length === 0) return alert('ทุกรายการตรงกับระบบ — ไม่มีอะไรต้องปรับ');
@@ -73103,7 +73436,10 @@ function LineStockTab({ state, dispatch, user, branchId }){
               ? h('select', { value:lineLoc.id, onChange:e=>setLocPick(e.target.value), className:'px-2 py-1 border rounded text-xs font-medium' },
                   ownLocs.map((l, i) => h('option', { key:l.id, value:l.id }, l.name + (i === 0 ? ' (คลังหลัก)' : ''))))
               : h('b', null, lineLoc.name),
-            h('span', { className:'ml-2 text-gray-400' }, '(', lineLoc.id, ')'))
+            h('span', { className:'ml-2 text-gray-400' }, '(', lineLoc.id, ')'),
+            sharedLine && h('span', { className:'ml-2 px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold', 'data-lss3-banner':'1',
+              title:'ไลน์นี้ไม่มีคลังไลน์ของตัวเอง — ตัด/รับของที่คลังกลางโดยตรง · ไม่ต้องขอ TR เข้าไลน์' }, '🏬 ใช้คลังกลางร่วม — ไม่ต้องขอของเข้าไลน์'),
+            sharedCountDeny && h('div', { className:'mt-1 text-amber-800', 'data-lss3-count-note':'1' }, sharedCountDeny))
         : isSimpleBranch
           ? h('div', { className:'flex-1 text-xs text-gray-600' },
               '📍 ', h('b', null, 'คลังสาขา'), ' — รวมทั้งสาขา (โหมดคลังเดียว · line=branch)')
@@ -73111,7 +73447,10 @@ function LineStockTab({ state, dispatch, user, branchId }){
               '⚠️ ไลน์นี้ยังไม่มีคลังของตัวเอง (ระบบไม่ยืมตู้ของไลน์อื่น) — ตั้งค่า → 📍 Sub-Locations → กด "🏭 สร้างคลังไลน์ให้ไลน์ที่ยังไม่มี"')),
 
     // 🆕 PRODUCTION-LIVE คลื่น 1: ของเข้า/ออกไลน์ (TR → TO → GR ภายในสาขา) + 📤 ส่งมอบของผลิตเสร็จไปคลัง FG/คลังเตรียมออก (B11)
-    lineLoc && !isSimpleBranch && h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-2', 'data-line-transfers':'1' },
+    // 🆕 LSS3 verify 1: ไลน์ใช้คลังกลางร่วม — คลังกลางไม่ใช่คลังของไลน์ → ไม่แสดงรอรับ/รอส่ง (จะลิสต์ทั้งคลังกลาง) · ไม่มีส่งมอบ · ห้ามแนะนำผูกคลังกลางกับไลน์
+    lineLoc && !isSimpleBranch && sharedLine && h('div', { className:'bg-teal-50 border-2 border-teal-300 rounded-lg p-2 text-xs text-teal-900', 'data-lss3-no-handover':'1' },
+      '🏬 ไลน์นี้ใช้คลังกลางร่วม — ผลผลิตอยู่คลังกลางแล้ว ไม่ต้องส่งมอบ (คลังส่งต่อเอง) · ไม่ต้องขอของเข้าไลน์ (ใบ TR/TO ของคลังกลางดูที่หน้า 🔀 โอน)'),
+    lineLoc && !isSimpleBranch && !sharedLine && h('div', { className:'grid grid-cols-1 md:grid-cols-2 gap-2', 'data-line-transfers':'1' },
       h('div', { className:'bg-white rounded-lg shadow p-2 border-l-4 border-cyan-500', 'data-line-in':'1' },
         h('div', { className:'flex items-center justify-between gap-2 mb-1' },
           h('div', { className:'text-sm font-bold text-cyan-900' }, `📥 รอรับเข้าไลน์ (${inTOs.length + inTRs.length})`),
@@ -73167,7 +73506,7 @@ function LineStockTab({ state, dispatch, user, branchId }){
 
     // 🆕 TR_SUMMARY T2 (เจ้าของ 2026-09-30): 📋 TR ที่เปิดแล้ว ของไลน์นี้ (ปลายทาง = คลังของไลน์ + ที่ฉันเปิดเอง) · ค่าเริ่ม ยังไม่จบ
     //   🔧 verify: includeMine:false = เฉพาะใบที่ปลายทางเป็นคลังของไลน์นี้ (ตรงหัวข้อ) · collapsible = พับไว้บนมือถือ (ไม่ดันตารางสต๊อกลง)
-    selectedLineId && global.ERP.LineTRList && h(global.ERP.LineTRList, { key:'ltr:' + selectedLineId, state, dispatch, user, branchId, locIds: ownLocIds,
+    selectedLineId && !sharedLine && global.ERP.LineTRList && h(global.ERP.LineTRList, { key:'ltr:' + selectedLineId, state, dispatch, user, branchId, locIds: ownLocIds,
       includeMine:false, collapsible:true, title: `📋 TR ที่เปิดแล้ว — ${selectedLine?.name || ''}` }),
 
     // ===== KPI Bar =====
@@ -73213,7 +73552,8 @@ function LineStockTab({ state, dispatch, user, branchId }){
       h('button', { onClick:()=>{ if(confirm('ล้างผลนับทั้งหมด?')) setCounts({}); },
         className:'text-xs px-2 py-1 bg-gray-200 rounded' }, '🗑 ล้าง'),
       // 🆕 WEIGH UAT (คลัง): บันทึกผลนับปรับสต๊อกตรง (ไม่ผ่านอนุมัติ) → ต้องมีสิทธิ์ stock.list.adjust ทุกโหมด · คนอื่นดู/ขอเติมได้อย่างเดียว
-      (hasPerm(user,'stock','list','adjust') || isSuperUser(user))
+      sharedCountDeny ? h('span', { className:'text-xs text-amber-800', 'data-lss3-count-deny':'1' }, sharedCountDeny)   // 🆕 LSS3 D3
+      : (hasPerm(user,'stock','list','adjust') || isSuperUser(user))
         ? h('button', { onClick:commitCounts,
             className:'px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs rounded font-bold' },
             '✅ บันทึกผลนับทั้งหมด')
@@ -122286,12 +122626,17 @@ function ItemImportModal({ state, dispatch, onClose }){
   const [csvText, setCsvText] = useState('');
   const [rows, setRows] = useState([]);
   const [errors, setErrors] = useState([]);
+  // UAT S1 (LSS3 D6): ข้อความต่อแถว (หน่วยกรัม/หน่วยที่ข้าม) แยกจากข้อผิดพลาด — [{ msg, warn, add }]
+  const [notes, setNotes] = useState([]);
+  const [rowMeta, setRowMeta] = useState([]);   // verify 2: ขนานกับ rows — หน่วยเบิกที่ข้าม + กรัม/หน่วยฐาน
   const fileRef = useRef(null);
 
-  const sample = `code,name,type,issueUnit,costPrice,salePrice,minStock,maxStock,tags,barcode
-RM-010,กลูโคสไซรัป,material,กก.,75,0,5,50,"แช่เย็น,ของเหลว",8851234567890
-FG-010,บราวนี่ช็อกโกแลต,finished,ชิ้น,0,85,0,30,"บราวนี่,ขายดี,แช่เย็น",
-PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,500,,`;
+  // 🆕 LSS3 D6: + gramsPerUnit (ไม่บังคับ · 1 หน่วยฐาน = G กรัม)
+  const sample = `code,name,type,issueUnit,costPrice,salePrice,minStock,maxStock,tags,barcode,gramsPerUnit
+RM-010,กลูโคสไซรัป,material,กก.,75,0,5,50,"แช่เย็น,ของเหลว",8851234567890,
+FG-010,บราวนี่ช็อกโกแลต,finished,ชิ้น,0,85,0,30,"บราวนี่,ขายดี,แช่เย็น",,
+PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,500,,,
+SET-010,ชุดแป้งขนมปัง,semi_fg,ชุด,0,0,0,0,ชุดชั่งเตรียม,,4135`;
 
   // ตัวอย่างไฟล์ "อัปเดตราคาขายอย่างเดียว" — ใช้กับสินค้าที่มีอยู่แล้ว (จับคู่ด้วย code)
   const priceSample = (() => {
@@ -122304,10 +122649,12 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
 
   const parseCSV = (text) => {
     const lines = text.trim().split(/\r?\n/);
-    if(lines.length < 2) return { rows:[], errors:['ไฟล์ว่างหรือไม่มีข้อมูล'] };
+    if(lines.length < 2) return { rows:[], errors:['ไฟล์ว่างหรือไม่มีข้อมูล'], notes:[] };
     const headers = parseCSVLine(lines[0]);
     const parsed = [];
     const errs = [];
+    const notesOut = [];
+    const metaOut = [];   // verify 2 (LSS3 D6): ข้อมูลหน่วยต่อแถว (ขนานกับ parsed) สำหรับตารางพรีวิว — ไม่ส่งเข้า reducer
     if(csvHasMojibake(text)) errs.push('⚠️ ไฟล์อาจไม่ใช่ UTF-8 (ภาษาไทยเพี้ยน) — เปิดใน Excel แล้ว Save As → CSV UTF-8 ก่อนนำเข้า');
     for(let i=1; i<lines.length; i++){
       if(!lines[i].trim()) continue;
@@ -122342,13 +122689,20 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
       if(hasCol('minStock')) row.minStock = csvNum(obj.minStock);
       if(hasCol('maxStock')) row.maxStock = csvNum(obj.maxStock);
       if(hasCol('tags')) row.tags = csvTags;
+      // 🆕 LSS3 D6: gramsPerUnit (ไม่บังคับ) — กฎเดียวกับ ตั้งค่า→นำเข้า (importGramsPlan) · ข้อความต่อแถวขึ้นในรายการแจ้งเตือน
+      const _gp = hasCol('gramsPerUnit') ? global.ERP.importGramsParse(obj.gramsPerUnit) : null;
+      if(_gp && _gp.g) row.gramsPerUnit = _gp.g;
+      const _notes = IMPORT_TYPES.items.rowNotes(obj, state);
+      _notes.forEach(n => notesOut.push({ warn: !!n.warn, add: !!n.add, msg:`บรรทัด ${i+1}: ${obj.code || ''} · ${n.msg}` }));
+      const _gu = _gp && _gp.g ? global.ERP.importGramsPlan(null, obj.issueUnit || 'ชิ้น', _gp.g) : null;
       // ค่าตั้งต้น ใช้เฉพาะตอนสร้างสินค้าใหม่เท่านั้น (ของเดิมที่ code ซ้ำจะไม่โดน)
       row.__new = {
         id: genId('i'),
         barcode: obj.barcode || '',
         type: typeId || 'material',
         issueUnit: obj.issueUnit || 'ชิ้น',
-        units: [{ name: obj.issueUnit||'ชิ้น', toBase:1, isBase:true, purposes:['stock','bom','transfer','sale'] }],
+        units: [{ name: obj.issueUnit||'ชิ้น', toBase:1, isBase:true, purposes:['stock','bom','transfer','sale'] }]
+          .concat(_gu && _gu.add ? [_gu.unit] : []),
         costPrice: csvNum(obj.costPrice),
         salePrice: csvNum(obj.salePrice),
         minStock: csvNum(obj.minStock),
@@ -122358,15 +122712,20 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         stockByBranch: Object.fromEntries(state.branches.map(b => [b.id, 0])),
       };
       parsed.push(row);
+      const _un = _notes.find(n => n.kind === 'unit'), _gn = _notes.find(n => n.kind === 'grams');
+      metaOut.push({ unitSkip: _un ? { from: obj.issueUnit, to: _un.prevUnit } : null,
+        gRaw: String(obj.gramsPerUnit ?? '').trim(), gTone: _gn ? (_gn.warn ? 'warn' : (_gn.add ? 'add' : 'info')) : '', gMsg: _gn ? _gn.msg : '' });
     }
-    return { rows:parsed, errors:errs };
+    // แถวเตือน (warn) ขึ้นก่อน — เรียงคงที่ตามลำดับบรรทัด
+    notesOut.sort((a,b) => (b.warn?1:0) - (a.warn?1:0));
+    return { rows:parsed, errors:errs, notes:notesOut, meta:metaOut };
   };
 
   const onTextChange = (text) => {
     setCsvText(text);
-    if(!text.trim()) { setRows([]); setErrors([]); return; }
-    const { rows:r, errors:e } = parseCSV(text);
-    setRows(r); setErrors(e);
+    if(!text.trim()) { setRows([]); setErrors([]); setNotes([]); setRowMeta([]); return; }
+    const { rows:r, errors:e, notes:nt, meta:mt } = parseCSV(text);
+    setRows(r); setErrors(e); setNotes(nt || []); setRowMeta(mt || []);
   };
 
   const onFileChange = (e) => {
@@ -122386,7 +122745,12 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
 
   const doImport = () => {
     if(rows.length === 0) return alert('ไม่มีข้อมูล');
-    const msg = `นำเข้า ${rows.length} รายการ?\n• เพิ่มใหม่ ${newCount}\n• อัปเดตของเดิม (code ซ้ำ) ${updCount}\n\nอัปเดตเฉพาะคอลัมน์ที่มีในไฟล์เท่านั้น\nสต๊อกคงเหลือและหน่วยนับเดิมไม่ถูกแก้`;
+    const gramsAdd = notes.filter(n => n.add).length;
+    const noteWarn = notes.filter(n => n.warn).length;   // verify 3: บอกรายการเหลืองในหน้ายืนยันด้วย
+    const msg = `นำเข้า ${rows.length} รายการ?\n• เพิ่มใหม่ ${newCount}\n• อัปเดตของเดิม (code ซ้ำ) ${updCount}`
+      + (gramsAdd ? `\n+ เพิ่มหน่วยกรัม ${gramsAdd} รายการ` : '')
+      + (noteWarn ? `\n⚠️ มี ${noteWarn} รายการที่ไม่ถูกนำเข้าหน่วย (ดูรายการสีเหลือง)` : '')
+      + `\n\nอัปเดตเฉพาะคอลัมน์ที่มีในไฟล์เท่านั้น\nสต๊อกคงเหลือไม่ถูกแก้ · หน่วยเดิมไม่ถูกแก้/ลบ · อาจเพิ่มหน่วยกรัมให้สินค้าที่ยังไม่มีหน่วยน้ำหนัก`;
     if(!confirm(msg)) return;
     dispatch({ type:'IMPORT_ITEMS', data:rows });
     alert(`เรียบร้อย — เพิ่มใหม่ ${newCount} · อัปเดต ${updCount}`);
@@ -122399,11 +122763,11 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
       h('div', { className:'bg-blue-50 border border-blue-200 rounded p-3 text-sm' },
         h('div', { className:'font-bold text-blue-900 mb-1' }, '📋 รูปแบบไฟล์ CSV'),
         h('div', { className:'text-blue-800 text-xs mb-2' },
-          'คอลัมน์ที่รองรับ (เรียงตามลำดับได้): code, name *, type (material/finished/packaging/custom), issueUnit, costPrice, salePrice, minStock, maxStock, tags (คั่น , ใน " "), barcode'
+          'คอลัมน์ที่รองรับ (เรียงตามลำดับได้): code, name *, type (material/finished/packaging/custom), issueUnit, costPrice, salePrice, minStock, maxStock, tags (คั่น , ใน " "), barcode, gramsPerUnit (ไม่บังคับ · กรัมต่อ 1 หน่วยฐาน)'
         ),
         h('div', { className:'text-blue-900 text-xs mb-2 bg-white/70 border border-blue-200 rounded p-2' },
           h('div', { className:'font-medium mb-0.5' }, '✅ ใส่เฉพาะคอลัมน์ที่อยากแก้ก็ได้'),
-          h('div', null, 'ถ้า code ซ้ำกับสินค้าเดิม = อัปเดตทับ "เฉพาะช่องที่กรอกค่ามาจริง" · คอลัมน์ที่ไม่ใส่ หรือเว้นว่างไว้ = ไม่แก้ค่าเดิม · สต๊อกคงเหลือและหน่วยนับ/ตัวแปลงหน่วยไม่ถูกแก้'),
+          h('div', null, 'ถ้า code ซ้ำกับสินค้าเดิม = อัปเดตทับ "เฉพาะช่องที่กรอกค่ามาจริง" · คอลัมน์ที่ไม่ใส่ หรือเว้นว่างไว้ = ไม่แก้ค่าเดิม · สต๊อกคงเหลือไม่ถูกแก้ · หน่วยเดิมไม่ถูกแก้/ลบ · อาจเพิ่มหน่วยกรัมให้สินค้าที่ยังไม่มีหน่วยน้ำหนัก'),
           h('div', { className:'mt-1 font-mono text-[11px] text-blue-700' }, 'เช่น อัปเดตราคาขายอย่างเดียว → code,salePrice')
         ),
         h('div', { className:'flex gap-2 flex-wrap' },
@@ -122419,7 +122783,7 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         h('div', { className:'flex gap-2 mb-2' },
           h('input', { type:'file', ref:fileRef, accept:'.csv,.txt', onChange:onFileChange,
             className:'text-sm' }),
-          h(Button, { variant:'secondary', size:'sm', onClick:()=>{ setCsvText(''); setRows([]); setErrors([]); if(fileRef.current) fileRef.current.value=''; } }, 'ล้าง')
+          h(Button, { variant:'secondary', size:'sm', onClick:()=>{ setCsvText(''); setRows([]); setErrors([]); setNotes([]); if(fileRef.current) fileRef.current.value=''; } }, 'ล้าง')
         ),
         h('textarea', {
           value:csvText, onChange:e=>onTextChange(e.target.value),
@@ -122437,19 +122801,29 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
         )
       ),
 
+      // UAT S1 (LSS3 D6): หน่วยกรัมที่จะเพิ่ม (เขียว) / ไม่เพิ่ม-ข้าม (เหลือง) — ครบทุกแถว เลื่อนดูได้ · ไม่นับเป็นข้อผิดพลาด
+      // verify 3: มีเตือน → กล่องสีเหลือง + หัวบอกทั้งจำนวนที่จะเพิ่ม/ข้าม-เตือน
+      notes.length > 0 && h('div', { className:(notes.some(n => n.warn) ? 'bg-amber-50 border border-amber-300' : 'bg-emerald-50 border border-emerald-200') + ' rounded p-3 text-xs max-h-48 overflow-y-auto', 'data-testid':'item-import-notes' },
+        h('div', { className:'font-bold mb-1 text-sm ' + (notes.some(n => n.warn) ? 'text-amber-900' : 'text-emerald-900'), 'data-testid':'item-import-notes-head' },
+          `📏 หน่วยนับ: จะเพิ่ม ${notes.filter(n => n.add).length} · ⚠️ ข้าม/เตือน ${notes.filter(n => n.warn).length}`),
+        h('ul', { className:'list-disc ml-5' }, notes.map((n,i) => h('li', { key:i, 'data-note-warn': n.warn ? '1' : '0',
+          className: n.warn ? 'text-amber-800' : (n.add ? 'text-emerald-800' : 'text-gray-600') }, n.msg)))
+      ),
+
       rows.length > 0 && h('div', null,
         h('div', { className:'text-sm font-medium mb-2' }, `2️⃣ ตัวอย่าง ${rows.length} รายการ`),
         h('div', { className:'max-h-60 overflow-y-auto border rounded' },
           h('table', { className:'w-full text-xs' },
             h('thead', { className:'bg-gray-50 sticky top-0' },
               h('tr', null,
-                ['สถานะ','code','name','type','unit','ต้นทุน','ขาย','tags'].map(k =>
+                ['สถานะ','code','name','type','unit','กรัม/หน่วยฐาน','ต้นทุน','ขาย','tags'].map(k =>
                   h('th', { key:k, className:'px-2 py-1 text-left' }, k))
               )
             ),
             h('tbody', null,
               rows.slice(0,20).map((r,i) => {
                 const upd = isUpdateRow(r);
+                const m = rowMeta[i] || {};
                 const cell = (v) => (v === undefined || v === null || v === '')
                   ? h('span', { className:'text-gray-300' }, '—')
                   : v;
@@ -122464,7 +122838,17 @@ PK-010,กล่องเค้ก 2 ปอนด์,packaging,ใบ,18,0,50,50
                     r.name || h('span', { className:'text-gray-500' },
                       (codeMap[String(r.code).toLowerCase()] || {}).name || '—')),
                   h('td', { className:'px-2 py-1' }, cell(r.type)),
-                  h('td', { className:'px-2 py-1' }, cell(r.issueUnit)),
+                  // verify 2: หน่วยเบิกที่จะถูกข้าม → ขีดฆ่า + หน่วยเดิมที่คงไว้ (ตรงกับข้อความเหลือง)
+                  h('td', { className:'px-2 py-1', 'data-testid':'item-import-unit-cell' },
+                    (upd && m.unitSkip)
+                      ? h('span', { title:'ข้าม — คงหน่วยเบิกเดิม' },
+                          h('span', { className:'line-through text-amber-700' }, r.issueUnit), ' → ',
+                          h('span', { className:'font-medium' }, m.unitSkip.to || '—'))
+                      : cell(r.issueUnit)),
+                  // verify 2: กรัมต่อ 1 หน่วยฐาน · เขียว = จะเพิ่ม · เหลือง = ข้าม/เตือน · เทา = ไม่เพิ่ม (มีน้ำหนักแล้ว)
+                  h('td', { className:'px-2 py-1 text-right ' + (m.gTone === 'add' ? 'text-emerald-700 font-medium' : m.gTone === 'warn' ? 'text-amber-700 line-through' : 'text-gray-500'),
+                    title: m.gMsg || '', 'data-testid':'item-import-grams-cell', 'data-tone': m.gTone || '' },
+                    (r.gramsPerUnit || m.gRaw) ? String(r.gramsPerUnit || m.gRaw) : h('span', { className:'text-gray-300' }, '—')),
                   h('td', { className:'px-2 py-1 text-right' }, cell(r.costPrice)),
                   h('td', { className:'px-2 py-1 text-right' }, cell(r.salePrice)),
                   h('td', { className:'px-2 py-1 text-indigo-700' }, cell((r.tags||[]).join(', ')))
@@ -125103,11 +125487,26 @@ function ApprovalRuleEditor({ rule, state, dispatch, onClose }){
 const IMPORT_TYPES = {
   items: {
     label:'📦 Items (สินค้า/วัตถุดิบ)',
-    fields:['code','name','type','tags','issueUnit','costPrice','salePrice','minStock','maxStock','barcode'],
+    fields:['code','name','type','tags','issueUnit','costPrice','salePrice','minStock','maxStock','barcode','gramsPerUnit'],   // 🆕 LSS3 D6: gramsPerUnit ไม่บังคับ
     required:['code','name'],
     addAction:'ADD_ITEM',
     // 🆕 code ซ้ำ = อัปเดตของเดิม (ไม่สร้างซ้ำ) · ส่งเฉพาะช่องที่กรอกค่ามาจริง · __new = ค่าตั้งต้นตอนสร้างใหม่เท่านั้น
     batchAction:'IMPORT_ITEMS',
+    // 🆕 LSS3 D6: ข้อความพรีวิวต่อแถว — หน่วยกรัมที่จะเพิ่ม/ไม่เพิ่ม + issueUnit ที่สินค้าเดิมไม่มี (ข้าม) → [{ msg, warn }]
+    rowNotes: (row, state) => {
+      const code = String(row.code || '').trim().toLowerCase();
+      const prev = code ? (state.items || []).find(x => String(x.code || '').toLowerCase() === code) : null;
+      const out = [];
+      const iu = String(row.issueUnit || '').trim();
+      const gp = global.ERP.importGramsPlan(prev, iu || 'ชิ้น', row.gramsPerUnit);
+      // verify 4: บอกชัดว่าข้ามเฉพาะหน่วยเบิก (คงของเดิม) · ช่องอื่นนำเข้าตามเดิม · ถ้ารอบนี้เพิ่มกรัม → นำเข้าอีกรอบเพื่อตั้งหน่วยเบิกเป็นกรัม
+      if(prev && iu && Array.isArray(prev.units) && prev.units.length && !prev.units.some(u => u && u.name === iu)
+         && !global.ERP.metricAutoUnits(prev).includes(iu))
+        out.push({ warn:true, kind:'unit', prevUnit: prev.issueUnit || '', msg:'หน่วยเบิก "' + iu + '" ไม่มีในสินค้า — คงหน่วยเบิกเดิม "' + (prev.issueUnit || '') + '" (ช่องอื่นนำเข้าตามเดิม · ต้องการเปลี่ยนหน่วยเบิก: เพิ่มหน่วยในฟอร์มสินค้าก่อน)'
+          + (gp.add && iu === 'กรัม' ? ' · นำเข้ารอบนี้จะเพิ่มหน่วยกรัมแล้ว นำเข้าอีกครั้งเพื่อตั้งหน่วยเบิกเป็นกรัม' : '') });
+      if(gp.msg) out.push({ warn: !!gp.warn, add: !!gp.add, kind:'grams', msg: gp.msg });   // verify 2: kind ให้ตารางพรีวิวรู้ว่าเตือนเรื่องอะไร
+      return out;
+    },
     transform: (row, state) => {
       const has = (k) => String(row[k] ?? '').trim() !== '';
       const tags = has('tags') ? row.tags.split('|').map(t => t.trim()).filter(Boolean) : [];
@@ -125121,8 +125520,13 @@ const IMPORT_TYPES = {
       if(has('minStock')) out.minStock = Number(row.minStock)||0;
       if(has('maxStock')) out.maxStock = Number(row.maxStock)||0;
       if(has('tags')) out.tags = tags;
+      // 🆕 LSS3 D6: gramsPerUnit ถูกต้อง → ส่งให้ reducer เพิ่มหน่วยกรัม (ค่าผิด = ไม่ส่ง · พรีวิวแจ้งเตือน)
+      const _gp = has('gramsPerUnit') ? global.ERP.importGramsParse(row.gramsPerUnit) : null;
+      if(_gp && _gp.g) out.gramsPerUnit = _gp.g;
+      const _base = row.issueUnit || 'ชิ้น';
+      const _gu = _gp && _gp.g ? global.ERP.importGramsPlan(null, _base, _gp.g) : null;
       out.__new = {
-        id: 'i_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,5),
+        id: genId('i'),   // 🆕 LSS3 D6: เดิม Date.now()+สุ่ม 3 ตัว ทุกแถวเวลาเดียวกัน → ชนได้
         type: typeId || (state.itemTypes||[])[0]?.id || '',
         tags,
         issueUnit: row.issueUnit || 'ชิ้น',
@@ -125132,7 +125536,8 @@ const IMPORT_TYPES = {
         maxStock: Number(row.maxStock)||0,
         barcode: row.barcode || '',
         stockByBranch: {},
-        units: [{ name: row.issueUnit||'ชิ้น', toBase:1, isBase:true, purposes:['stock','bom','transfer','sale','purchase'] }],
+        units: [{ name: _base, toBase:1, isBase:true, purposes:['stock','bom','transfer','sale','purchase'] }]
+          .concat(_gu && _gu.add ? [_gu.unit] : []),
         active: true,
       };
       return out;
@@ -125347,6 +125752,7 @@ function ImportCSVTab({ state, dispatch }){
     const rows = [];
     const errors = [];
     const taxBad = [];   // UAT M1: แถวเลขภาษีไม่ครบ 13 หลัก (แสดงแดงครบทุกแถว)
+    const notes = [];    // 🆕 LSS3 D6
     if(csvHasMojibake(text)) errors.push('⚠️ ไฟล์อาจไม่ใช่ UTF-8 (ภาษาไทยเพี้ยน) — Save As → CSV UTF-8 ก่อนนำเข้า');
     for(let i=1; i<lines.length; i++){
       const cells = parseCSVLine(lines[i]);
@@ -125371,8 +125777,10 @@ function ImportCSVTab({ state, dispatch }){
           : `บรรทัด ${i+1}: ${row.name} · เลขภาษี "${row.taxId}" (${n} หลัก) — ไม่ครบ 13 หลัก นำเข้าพร้อมเลขนี้ (ติดธง ต้องแก้)`);
       }
       rows.push(row);
+      // 🆕 LSS3 D6: ข้อความพรีวิวต่อแถว (สินค้า: หน่วยกรัม / หน่วยที่ข้าม)
+      if(cfg.rowNotes) cfg.rowNotes(row, state).forEach(n => notes.push({ ...n, msg:`บรรทัด ${i+1}: ${row.code} · ${n.msg}` }));
     }
-    return { headers, rows, errors, taxBad };
+    return { headers, rows, errors, taxBad, notes };
   };
 
   const doParse = () => {
@@ -125382,7 +125790,11 @@ function ImportCSVTab({ state, dispatch }){
 
   const doImport = () => {
     if(!preview || preview.rows.length === 0) return alert('ไม่มีข้อมูลที่ valid');
-    if(!confirm(`Import ${preview.rows.length} แถวเข้า ${cfg.label}?`)) return;
+    // verify 3: บอกหน่วยกรัมที่จะเพิ่ม + รายการเหลืองที่ไม่ถูกนำเข้าหน่วย ในหน้ายืนยันด้วย
+    const _pn = preview.notes || [], _pnAdd = _pn.filter(n => n.add).length, _pnWarn = _pn.filter(n => n.warn).length;
+    if(!confirm(`Import ${preview.rows.length} แถวเข้า ${cfg.label}?`
+      + (_pnAdd ? `\n+ เพิ่มหน่วยกรัม ${_pnAdd} รายการ` : '')
+      + (_pnWarn ? `\n⚠️ มี ${_pnWarn} รายการที่ไม่ถูกนำเข้าหน่วย (ดูรายการสีเหลือง)` : ''))) return;
 
     if(cfg.addAction === '__custom_line'){
       // Production lines — branch.productionLines += line
@@ -125436,7 +125848,8 @@ function ImportCSVTab({ state, dispatch }){
 
   const exampleCSV = (() => {
     const examples = {
-      items:           'code,name,type,tags,issueUnit,costPrice,sellPrice,minStock,maxStock,barcode\nP001,กระดาษ A4,material,กระดาษ|สำนักงาน,รีม,80,100,5,50,1234567890\nP002,ปากกา,material,เครื่องเขียน,กล่อง,120,150,2,20,',
+      // 🆕 LSS3 D6: gramsPerUnit (ไม่บังคับ) = 1 หน่วยฐาน หนักกี่กรัม → เพิ่มหน่วย "กรัม" ให้ชั่งทวน
+      items:           'code,name,type,tags,issueUnit,costPrice,sellPrice,minStock,maxStock,barcode,gramsPerUnit\nP001,กระดาษ A4,material,กระดาษ|สำนักงาน,รีม,80,100,5,50,1234567890,\nP002,ปากกา,material,เครื่องเขียน,กล่อง,120,150,2,20,,\nSET-01,ชุดแป้งขนมปัง,semi_fg,ชุดชั่งเตรียม,ชุด,,,,,,4135',
       suppliers:       'code,name,taxId,branchCode,address,phone,email,credit\nSUP01,บจก. กระดาษไทย,0105501234567,00000,123 ถ.สาทร กรุงเทพ 10120,02-123-4567,info@paper.co.th,30',
       customers:       'code,name,taxId,branchCode,address,phone,email,credit\nCUS01,บจก. ลูกค้าดี,0105509876543,00150,456 ถ.พระราม 4,02-987-6543,contact@cust.co.th,15',
       branches:        'id,name,branchType,branchCode,address,phone\nb4,สาขาทองหล่อ,store,00003,123 ทองหล่อ,02-111-2222',
@@ -125481,7 +125894,8 @@ function ImportCSVTab({ state, dispatch }){
         className:'w-full px-2 py-2 border rounded font-mono text-xs' }),
       h('div', { className:'text-xs text-gray-500 mt-1' },
         '⚠️ ', h('b', null, 'จำเป็น'), ': ', cfg.required.join(', '),
-        ' · tags ใช้ | คั่น เช่น "กระดาษ|สำนักงาน"'),
+        ' · tags ใช้ | คั่น เช่น "กระดาษ|สำนักงาน"',
+        type === 'items' && ' · gramsPerUnit (ไม่บังคับ) = 1 หน่วยฐานหนักกี่กรัม → เพิ่มหน่วย "กรัม" (เช่น 1 ชุด = 4135 กรัม)'),
       h('div', { className:'flex gap-2 mt-2' },
         h(Button, { variant:'secondary', onClick:doParse }, '👁️ Preview'),
         preview && h(Button, { variant:'primary', onClick:doImport },
@@ -125497,6 +125911,12 @@ function ImportCSVTab({ state, dispatch }){
         h('div', { className:'font-bold mb-1' }, `ข้อผิดพลาด ${preview.errors.length} รายการ (แถวเหล่านี้ไม่ถูกนำเข้า — แก้ในไฟล์แล้วนำเข้าใหม่):`),
         h('ul', { className:'list-disc ml-5' },
           preview.errors.map((e,i) => h('li', { key:i }, e)))),
+      // 🆕 LSS3 D6: หน่วยกรัมที่จะเพิ่ม (เขียว) / ไม่เพิ่ม-ข้าม (เหลือง) ต่อแถว
+      (preview.notes || []).length > 0 && h('div', { className:'px-3 py-2 text-xs border-b max-h-48 overflow-y-auto ' + (preview.notes.some(n => n.warn) ? 'bg-amber-50' : 'bg-emerald-50'), 'data-testid':'csv-item-notes' },
+        h('div', { className:'font-bold mb-1 ' + (preview.notes.some(n => n.warn) ? 'text-amber-900' : 'text-emerald-900'), 'data-testid':'csv-item-notes-head' },
+          `📏 หน่วยนับ: จะเพิ่ม ${preview.notes.filter(n => n.add).length} · ⚠️ ข้าม/เตือน ${preview.notes.filter(n => n.warn).length}`),
+        h('ul', { className:'list-disc ml-5' }, preview.notes.map((n,i) => h('li', { key:i, 'data-note-warn': n.warn ? '1' : '0',
+          className: n.warn ? 'text-amber-800' : (n.add ? 'text-emerald-800' : 'text-gray-600') }, n.msg)))),
       // 🆕 UAT M1: แถวที่เลขภาษีไม่ครบ 13 หลัก — แสดงครบทุกแถว (สีแดง)
       (preview.taxBad || []).length > 0 && h('div', { className:'px-3 py-2 bg-red-100 text-xs text-red-800 border-b max-h-40 overflow-y-auto', 'data-testid':'csv-taxbad' },
         h('div', { className:'font-bold mb-1' }, `⚠️ เลขผู้เสียภาษีไม่ถูกต้อง (ไม่ครบ 13 หลัก/หลักตรวจสอบไม่ตรง) ${preview.taxBad.length} แถว — นำเข้าพร้อมเลขนี้ แล้วขึ้นชิป "⚠️ เลขภาษีไม่ถูกต้อง" (ตั้งค่า → 🤝 คู่ค้า) + หน้างานค้าง ต้องแก้ก่อนบันทึกครั้งถัดไป · หรือแก้เลขในไฟล์ก่อนนำเข้า`),
@@ -125602,7 +126022,7 @@ function ProductionLinesSettings({ state, dispatch }){
         ),
 
     showModal && h(LineEditModal, {
-      line:edit, branchId:selBranch, branch, dispatch,
+      line:edit, branchId:selBranch, branch, dispatch, state,
       onClose:()=>setShowModal(false)
     }),
     favLine && h(FavoritesEditorModal, { key:'fav:line:' + favLine.id, state, dispatch, user:state.currentUser, scope:'line', scopeId:favLine.id,
@@ -125610,7 +126030,74 @@ function ProductionLinesSettings({ state, dispatch }){
   );
 }
 
-function LineEditModal({ line, branchId, branch, dispatch, onClose }){
+// 🆕 LSS3 D1: ข้อมูลช่อง "🏬 ใช้คลังกลางร่วม" ของไลน์ → { show, main, blockOn, stockCount, canUntick }
+//   blockOn = เหตุผลที่ติ๊กเปิดเฉย ๆ ไม่ได้ (ไม่มีคลังกลาง / คลังไลน์เดิมยังมีของ — ต้องย้ายของเข้าคลังกลางก่อน ห้ามทิ้งของค้าง)
+function lss3SharedInfo(state, branch, line){
+  const E = global.ERP;
+  const user = state && state.currentUser;
+  const out = { show:false, main:null, blockOn:null, stockCount:0, canUntick: !!(global.ERP.canLineShareMainStore && global.ERP.canLineShareMainStore(user)) };   // 🆕 LSS3 verify 2: กฎเดียวกับ reducer
+  if(!branch || branch.warehouseMode === 'simple' || !line || !line.id) return out;
+  out.show = true;
+  out.main = E.getMainStorage ? E.getMainStorage(state, branch.id) : null;
+  if(!out.main || out.main.lineId || out.main.active === false) out.main = null;
+  const locIds = new Set((branch.locations || []).filter(l => l && l.lineId === line.id && l.type !== 'fg').map(l => l.id));
+  if(line.stockLocId){ const sl = (branch.locations || []).find(l => l && l.id === line.stockLocId); if(sl && (sl.lineId === line.id || (!sl.lineId && (sl.type === 'wip' || sl.type === 'line')))) locIds.add(sl.id); }
+  if(out.main) locIds.delete(out.main.id);
+  const its = new Set();
+  for(const L of ((state && state.fifoLayers) || [])) if(L && L.branch === branch.id && locIds.has(L.locId) && Math.abs(Number(L.remaining) || 0) > 1e-9) its.add(L.itemId);
+  out.stockCount = its.size;
+  out.blockOn = !out.main ? 'สาขานี้ยังไม่มีคลังกลาง (วัตถุดิบ · ไม่ผูกไลน์ · เปิดใช้) — เพิ่ม/เปิดคลังกลางที่ 📍 Sub-Locations ก่อน'
+    : out.stockCount ? `คลังไลน์เดิมยังมีของ/ติดลบอยู่ ${out.stockCount} รายการ — ต้องย้ายของเข้าคลังกลางก่อน (ห้ามติ๊กแล้วทิ้งของค้างในคลังไลน์) · กด 🏬 ย้ายของในคลังไลน์เข้าคลังกลาง ด้านล่าง (สิทธิ์ตั้งค่าเต็ม/GM/เจ้าของ) หรือโอนออก/นับปรับให้เป็น 0 แล้วค่อยติ๊ก`
+    : null;
+  return out;
+}
+
+// 🆕 LSS3 D4: ปุ่ม "🏬 ย้ายของในคลังไลน์เข้าคลังกลาง แล้วใช้คลังร่วม" — เฉพาะสิทธิ์ตั้งค่าเต็ม/GM/เจ้าของ · สรุปก่อนยืนยัน (บวก/ลบ · มูลค่าเฉพาะคนเห็นมูลค่า · เอกสารค้าง) + เหตุผล
+function Lss3MergePanel({ state, branchId, line, lss3, open, setOpen, reason, setReason, dispatch, onDone }){
+  const E = global.ERP, user = state && state.currentUser;
+  if(!line || !lss3 || !lss3.show || line.sharedMainStore || !lss3.main) return null;
+  if(!(E.canLineShareMainStore && E.canLineShareMainStore(user))) return null;
+  const P = open && E.lineShareMainStorePlan ? E.lineShareMainStorePlan(state, branchId, line.id) : null;
+  const showVal = !!(E.canSeeStockValue && E.canSeeStockValue(user, state));
+  const go = () => {
+    const r = String(reason || '').trim();
+    if(!r) return alert('ใส่เหตุผลการย้ายของเข้าคลังกลางก่อน');
+    if(!P || !P.ok) return alert('⛔ ย้ายไม่ได้\n• ' + ((P && P.blocks) || []).join('\n• '));
+    const _id = genId('lsm');
+    dispatch({ type:'LINE_SHARE_MAIN_STORE', data:{ id: _id, branchId, lineId: line.id, reason: r, by: user && user.username, at: Date.now(), date: E.getToday() } });
+    // 🆕 LSS3 UAT ชุด 1 S1: แจ้งผลต่างมูลค่าจริง (อ่านจาก auditLog ที่ reducer จดไว้ · ไม่เจอ = ไม่แจ้ง) ให้บัญชีจดไว้
+    setTimeout(() => { try {
+      const _st = (E.__getState && E.__getState()) || state;
+      const _al = ((_st && _st.auditLog) || []).find(x => x && x.id === 'al_lsm_' + _id);
+      if(!_al) return;
+      const _d = Number(_al.netValueDiff) || 0;
+      _toastInfo('✅ ย้ายของคลังไลน์เข้าคลังกลางแล้ว' + (showVal && Math.abs(_d) >= 0.005 ? ` · ผลต่างมูลค่าจากการหักล้างติดลบ ${_d > 0 ? '+' : ''}${fmtCur(_d)} บาท (ไม่ลง JE — จดไว้ใน audit log)` : ''));
+    } catch(_e){} }, 400);
+    setOpen(false); setReason('');
+    if(onDone) onDone();
+  };
+  return h('div', { className:'border-t border-emerald-200 pt-2 mt-1 space-y-1', 'data-lss3-merge':'1' },
+    !open && h('button', { type:'button', className:'px-2 py-1 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700', 'data-lss3-merge-btn':'1', onClick:() => setOpen(true) },
+      '🏬 ย้ายของในคลังไลน์เข้าคลังกลาง แล้วใช้คลังร่วม'),
+    open && P && h('div', { className:'bg-emerald-50 border border-emerald-300 rounded p-2 text-[12px] space-y-1', 'data-lss3-merge-sum':'1' },
+      h('div', null, `ย้ายจาก ${P.locs.map(l => l.name || l.id).join(', ') || '—'} → ${P.main ? (P.main.name || P.main.id) : '—'}`),
+      h('div', { 'data-lss3-merge-counts':'1' }, `รายการคงเหลือบวก ${P.posItems} · ติดลบ ${P.negItems} (หักล้างกับของที่คลังกลาง ยอดรวมเท่าเดิม)`),
+      showVal && h('div', { 'data-lss3-merge-value':'1' }, `มูลค่ารวมที่ย้าย ${fmtCur(P.value)}`,
+        Math.abs(Number(P.netValueDiff) || 0) >= 0.005
+          ? h('span', { className:'text-amber-800', 'data-lss3-merge-netdiff':String(P.netValueDiff) }, ` · ผลต่างมูลค่าจากการหักล้างติดลบ ${P.netValueDiff > 0 ? '+' : ''}${fmtCur(P.netValueDiff)} บาท (ไม่ลง JE)`)
+          : ' (ไม่เปลี่ยน · ไม่มีรายการบัญชี)'),
+      h('div', { className:'text-gray-600' }, 'หลังย้าย: คลังไลน์เดิมปิด · ไลน์นี้ชั่ง/ผลิตตัดและรับของที่คลังกลางโดยตรง · ไลน์อื่นขอของจากคลังกลาง'),
+      (P.blocks || []).length > 0 && h('div', { className:'text-red-700 bg-red-50 border border-red-200 rounded p-1', 'data-lss3-merge-block':'1' },
+        '⛔ ยังย้ายไม่ได้: ', (P.blocks || []).map((b, i) => h('div', { key:i }, '• ' + b))),
+      h('input', { type:'text', className:'w-full border rounded px-2 py-1', placeholder:'เหตุผล (บังคับ) เช่น ใช้คลังร่วมตามที่เจ้าของสั่ง', value:reason, 'data-lss3-merge-reason':'1',
+        onChange:e => setReason(e.target.value) }),
+      h('div', { className:'flex gap-2' },
+        h('button', { type:'button', className:'px-2 py-1 text-xs rounded bg-emerald-700 text-white disabled:opacity-40', 'data-lss3-merge-go':'1',
+          disabled: !P.ok || !String(reason || '').trim(), onClick:go }, '✅ ยืนยันย้ายของ + ใช้คลังร่วม'),
+        h('button', { type:'button', className:'px-2 py-1 text-xs rounded border', onClick:() => setOpen(false) }, 'ยกเลิก'))));
+}
+
+function LineEditModal({ line, branchId, branch, dispatch, onClose, state }){
   const isEdit = !!line;
   const [id, setId] = useState(line?.id || '');
   const [name, setName] = useState(line?.name || '');
@@ -125622,7 +126109,13 @@ function LineEditModal({ line, branchId, branch, dispatch, onClose }){
   // 🆕 fgDestLocId: คลังปลายทางของ FG ที่ผลิตเสร็จ
   const [stockLocId, setStockLocId] = useState(line?.stockLocId || '');
   const [fgDestLocId, setFgDestLocId] = useState(line?.fgDestLocId || '');
+  // 🆕 LSS3 D1: ใช้คลังกลางร่วม (sharedMainStore) — ติ๊กออกได้เฉพาะสิทธิ์ตั้งค่าเต็ม
+  const [shared, setShared] = useState(!!line?.sharedMainStore);
+  // 🆕 LSS3 D4: ปุ่มย้ายของคลังไลน์เข้าคลังกลาง แล้วใช้คลังร่วม (สรุปก่อนยืนยัน + เหตุผล)
+  const [lsmOpen, setLsmOpen] = useState(false);
+  const [lsmReason, setLsmReason] = useState('');
   const branchLocs = branch?.locations || [];
+  const lss3 = lss3SharedInfo(state, branch, line);
   // 🆕 PRODUCTION-LIVE คลื่น 0 (B10.6): คลังที่ตัดวัตถุดิบเลือกได้เฉพาะ "คลังของไลน์นี้" (ผูก lineId เดียวกัน · ไม่ใช่ FG)
   //   เดิมเลือกตู้ wip ของไลน์ไหนก็ได้ = ยืมตู้ไลน์อื่น → ตัดของผิดไลน์ · ค่าเดิมที่ไม่ใช่ของไลน์นี้โชว์เป็น ⚠️ ให้เลือกใหม่
   const ownLocs = isEdit ? branchLocs.filter(l => l.lineId === line.id && l.type !== 'fg') : [];
@@ -125640,8 +126133,14 @@ function LineEditModal({ line, branchId, branch, dispatch, onClose }){
       stockLocId: stockLocId || null,
       fgDestLocId: fgDestLocId || null,
     };
+    // 🆕 LSS3 D1: เปลี่ยนเฉพาะเมื่อแตะจริง (ไม่มีค่า = เดิม) · เปิดบนไลน์ที่ยังมีของในคลังไลน์ = ห้าม (ต้องย้ายของก่อน)
+    if(shared !== !!line?.sharedMainStore){
+      if(shared && lss3.blockOn) return alert(lss3.blockOn);
+      if(!shared && !lss3.canUntick) return alert('🔒 เลิกใช้คลังกลางร่วมได้เฉพาะผู้มีสิทธิ์ตั้งค่าเต็ม (GM/เจ้าของ)');
+      data.sharedMainStore = shared ? true : false;
+    }
     dispatch({ type: isEdit ? 'UPDATE_PRODUCTION_LINE' : 'ADD_PRODUCTION_LINE',
-      data:{ branchId, line:data } });
+      data:{ branchId, line:data, by: state.currentUser?.username || '', at: Date.now() } });   // 🆕 LSS3 UAT M2: reducer ตรวจสิทธิ์สด + auditLog
     onClose();
   };
 
@@ -125684,6 +126183,18 @@ function LineEditModal({ line, branchId, branch, dispatch, onClose }){
         h('div', { className:'text-sm font-bold text-blue-900' }, '📦 คลังสำหรับการผลิต'),
         h('div', { className:'text-[11px] text-blue-700' },
           '💡 ระบบสร้าง "คลังไลน์" อัตโนมัติเมื่อสร้างไลน์ใหม่ — ระบุ override ได้ถ้าต้องการ'),
+        // 🆕 LSS3 D1: ใช้คลังกลางร่วม
+        isEdit && lss3.show && h('div', { className:'bg-white border border-emerald-300 rounded p-2 space-y-1', 'data-lss3-shared':'1' },
+          h('label', { className:'flex items-start gap-2 text-sm' },
+            h('input', { type:'checkbox', checked:shared, 'data-lss3-shared-cb':'1',
+              disabled: shared ? (!!line?.sharedMainStore && !lss3.canUntick) : !!lss3.blockOn,
+              onChange:e => setShared(e.target.checked) }),
+            h('span', null, h('b', null, '🏬 ใช้คลังกลางร่วม'), ' — ไม่มีคลังไลน์ของตัวเอง ไม่ต้องโอนเข้า/ออก')),
+          h('div', { className:'text-[11px] text-emerald-800' }, 'ชั่ง/ผลิตตัดและรับของที่คลังกลาง' + (lss3.main ? ` (${lss3.main.name || lss3.main.id})` : '') + 'โดยตรง · ไลน์อื่นขอของจากคลังกลาง'),
+          !shared && lss3.blockOn && h('div', { className:'text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded p-1', 'data-lss3-block':'1' }, '⚠️ ', lss3.blockOn),
+          !!line?.sharedMainStore && !lss3.canUntick && h('div', { className:'text-[11px] text-gray-600' }, '🔒 เลิกใช้คลังกลางร่วมได้เฉพาะผู้มีสิทธิ์ตั้งค่าเต็ม (GM/เจ้าของ)'),
+          !!line?.sharedMainStore && !shared && h('div', { className:'text-[11px] text-amber-800' }, 'เลิกใช้ร่วม = คลังไลน์เดิมกลับมาใช้ · ระบบไม่ย้ายของจากคลังกลางกลับเข้าคลังไลน์ให้ (ขอ TR เอง)'),
+          h(Lss3MergePanel, { state, branchId, line, lss3, open:lsmOpen, setOpen:setLsmOpen, reason:lsmReason, setReason:setLsmReason, dispatch, onDone:onClose })),
         h(Field, { label:'🏭 คลังที่ตัด stock ตอนผลิต',
           hint: isSimpleBranch ? 'สาขาคลังเดียว — ผลิตตัดจากคลังสาขารวม (ช่องนี้ไม่มีผล)'
             : !isEdit ? 'บันทึกแล้วระบบสร้าง "คลังไลน์" ของไลน์นี้ให้อัตโนมัติ'
@@ -125693,7 +126204,7 @@ function LineEditModal({ line, branchId, branch, dispatch, onClose }){
             h('option', { value:'' }, '— อัตโนมัติ (คลังของไลน์นี้ตัวแรก) —'),
             ownLocs.map(l => h('option', { key:l.id, value:l.id }, `⭐ ${l.name}`)),
             legacyStock && h('option', { key:'legacy', value:legacyStock.id }, `⚠️ ${legacyStock.name} — ไม่ใช่คลังของไลน์นี้ (เลือกใหม่)`))),
-        isEdit && !isSimpleBranch && ownLocs.length === 0 && h('div', { className:'text-[11px] text-red-700 bg-red-50 border border-red-200 rounded p-2' },
+        isEdit && !isSimpleBranch && !shared && ownLocs.length === 0 && h('div', { className:'text-[11px] text-red-700 bg-red-50 border border-red-200 rounded p-2' },
           '⚠️ ไลน์นี้ยังไม่มีคลังของตัวเอง — ไปที่ 📍 Sub-Locations กด "🏭 สร้างคลังไลน์ให้ไลน์ที่ยังไม่มี" (หรือเพิ่ม Location แล้วผูกกับไลน์นี้)'),
         h(Field, { label:'🎂 คลังปลายทางของ FG (ผลิตเสร็จไปอยู่ที่ไหน)', hint:'default = คลัง FG หลักของ branch' },
           h('select', { value:fgDestLocId, onChange:e=>setFgDestLocId(e.target.value),
@@ -125830,7 +126341,10 @@ function LocationsSettings({ state, dispatch }){
                 const fid = focusLocFid.get(loc.id);
                 return h('tr', { key:loc.id, 'data-row-id': F.focus && fid ? fid : loc.id, className: cls('hover:bg-gray-50', fid && F.hl(fid) && 'bg-blue-50') },
                   h('td', { className:'px-3 py-2 font-mono text-xs' }, loc.id, fid && _focusDoneMark(F, fid)),
-                  h('td', { className:'px-3 py-2 font-medium' }, loc.name),
+                  h('td', { className:'px-3 py-2 font-medium' }, loc.name,
+                    // 🆕 LSS3 verify 2: ป้ายคลังที่ปิดรวมแล้ว
+                    loc.mergedInto && h('span', { 'data-lss3-merged-badge': loc.id, className:'ml-2 inline-block px-2 py-0.5 rounded text-xs bg-gray-200 text-gray-700' },
+                      '🔒 ปิด · รวมเข้า ' + (((branch && branch.locations) || []).find(x => x && x.id === loc.mergedInto) || {}).name || loc.mergedInto)),
                   h('td', { className:'px-3 py-2 text-center' },
                     ltype && h('span', { className: cls('inline-block px-2 py-0.5 rounded text-xs font-medium',
                       `bg-${ltype.color}-100 text-${ltype.color}-700`) }, ltype.label)),
@@ -125844,6 +126358,8 @@ function LocationsSettings({ state, dispatch }){
                       h(Button, { variant:'danger', size:'sm',
                         onClick:()=>{
                           if(itemCount > 0) return alert(`ลบไม่ได้ — มี ${itemCount} ชนิดสินค้าอยู่ (ย้ายออกก่อน)`);
+                          const _blk = global.ERP.locDeleteBlockReason && global.ERP.locDeleteBlockReason(state, selBranch, loc.id);   // 🆕 LSS3 verify 2
+                          if(_blk) return alert(_blk);
                           if(confirm(`ลบ location "${loc.name}"?`))
                             dispatch({ type:'DELETE_LOCATION', data:{ branchId:selBranch, locationId:loc.id } });
                         }
@@ -129277,6 +129793,7 @@ global.ERP.registerModule('settings', { main: SettingsModule, PartiesSettings })
 global.ERP.PartyEditModal = PartyEditModal;
 global.ERP.PartyTable = PartyTable;           // 🆕 แท็บคู่ค้าในหน้าบัญชี (mod-accounting) reuse ตารางเดิม — ไม่ส่ง deleteAction = ไม่มีปุ่มลบ
 global.ERP.SUPPLIER_FIELDS = SUPPLIER_FIELDS;
+global.ERP.IMPORT_TYPES = IMPORT_TYPES;   // 🆕 LSS3 D6: เทสต์เรียก transform/rowNotes ของนำเข้าสินค้า CSV ตรง ๆ
 global.ERP.CUSTOMER_FIELDS = CUSTOMER_FIELDS;
 // 🆕 ฟอร์มสินค้า — ให้ mod-purchase (PO quick-add, purposeScope:'purchase') / mod-production (BOM, purposeScope:'bom') เรียก quick-edit ได้
 //    props: { item|null, state, dispatch, onClose, purposeScope?, onSaved?(data) }
@@ -129543,6 +130060,7 @@ function calcInventoryMovement(state, period){
   const movByMonth = new Map(); // itemId → { in, out, scrap }
   for(const m of (state.movements||[])){
     if(!m.date || m.date < startISO || m.date > endISO) continue;
+    if(m.locMerge) continue;   // 🆕 LSS3 D4: ย้ายของคลังไลน์เข้าคลังกลาง (คู่ mi_out/mi_in) ไม่ใช่รับ/จ่ายจริง
     const cur = movByMonth.get(m.itemId) || { in:0, out:0, scrap:0 };
     const q = Number(m.qty)||0;
     if(m.type === 'gr_in') cur.in += q;
@@ -131422,6 +131940,8 @@ function lss2ShortOrders(ctx){
       if(!ack || !Array.isArray(ack.items) || !ack.items.length) continue;
       const pd = String(o.plannedDate || '').slice(0, 10);
       if(!pd || pd < since) continue;
+      // 🆕 LSS3 D3: ไลน์ใช้คลังกลางร่วม — ไม่มี "ส่งของเข้าไลน์" (คลังกลางคือคลังไลน์) · ขาดจริง/ติดลบ → wh_neg_stock + ของขาดระดับสาขาดูแล
+      if(E.isLineSharedMainStore && E.isLineSharedMainStore(st, o.branchId, o.lineId)) continue;
       const cl = E.getLineConsumeLocs ? E.getLineConsumeLocs(st, o.branchId, o.lineId) : null;
       if(!cl || cl.missing) continue;
       const ids = cl.locs.map(l => l ? l.id : null), pool = ids[0] === null;
@@ -134516,6 +135036,8 @@ C.registerGroup({
           if(!br || br.warehouseMode !== 'multi') continue;
           // 🆕 PRODUCTION-LIVE คลื่น 0: ยอดในคลังของไลน์เอง (ทุกตู้ของไลน์) — เดิมใช้ getLineStockLocation ที่ยืมตู้ wip ตัวแรกของสาขา
           //   ไลน์ที่ไม่มีคลังของตัวเอง → line_no_stock_loc ดูแล (ข้าม)
+          // 🆕 LSS3 D3: ไลน์ใช้คลังกลางร่วม = "ของยังอยู่คลังกลาง" ไม่มีความหมาย (ขาดจริง → ของขาดระดับสาขาเดิม) → ข้าม
+          if(global.ERP.isLineSharedMainStore && global.ERP.isLineSharedMainStore(ctx.state, o.branchId, o.lineId)) continue;
           const ownLocs = getLineOwnLocations(ctx.state, o.branchId, o.lineId);
           if(!ownLocs.length) continue;
           const lineLoc = ownLocs[0];
