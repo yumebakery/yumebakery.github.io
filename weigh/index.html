@@ -12,9 +12,9 @@
 <script>
 (function(){
 'use strict';
-const WEIGH_VERSION = '2026.11.02';   // 🆕 (2026.11.02) ขนาดฉลากผลชั่งตามไลน์ (recipes[].labelSize / job.recipe.labelSize / print-label.size) · ก่อนหน้า: (2026.10.30) แถวปุ่มหมวดสูตร (recipes[].category) ตอนฝัง · ก่อนหน้า: 🆕 (2026.10.29) ตัดปุ่มตัวคูณ ×0.5/×2/×3 ทิ้งทั้งหมด — ปริมาณตามสูตรเสมอ (×1)
+const WEIGH_VERSION = '2026.11.02.2';   // 🆕 (2026.11.02.2) ตัดเครื่องชั่งที่กำลังต่อ (ไม่ลองซ้ำ) + ตัดเครื่องชั่ง/พิมพ์พร้อมกันจบ < 1.5 วิ · ก่อนหน้า: (2026.11.02.1) release-devices + pagehide ตัดเครื่องก่อนหน้าถูกทำลาย + visibility หยุดล็อกตอนซ่อน · ก่อนหน้า: (2026.11.02) ขนาดฉลากผลชั่งตามไลน์ (recipes[].labelSize / job.recipe.labelSize / print-label.size) · ก่อนหน้า: (2026.10.30) แถวปุ่มหมวดสูตร (recipes[].category) ตอนฝัง · ก่อนหน้า: 🆕 (2026.10.29) ตัดปุ่มตัวคูณ ×0.5/×2/×3 ทิ้งทั้งหมด — ปริมาณตามสูตรเสมอ (×1)
 // ความสามารถของรุ่นนี้ — ส่งไปกับ ready ให้แอปแม่เช็คได้ตรง ๆ ไม่ต้องเทียบเลขเวอร์ชัน
-const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode', 'job', 'portion', 'recipe-category', 'label-size'];   // 🆕 'job' = รับงานใบสั่ง start-job/cancel-job · 'portion' = งานชั่งแยกชิ้น (job.recipe.portion) · 'recipe-category' = แถวปุ่มหมวดจาก recipes[].category (2026.10.30) · 'label-size' = ขนาดฉลากตามไลน์ {wmm,hmm} (2026.11.02)
+const WEIGH_FEATURES = ['print-label', 'fixed-items', 'operator-guard', 'recipesMode', 'recipe-change-guard', 'print-lot-labels', 'printer-mode', 'job', 'portion', 'recipe-category', 'label-size', 'device-release', 'visibility'];   // 🆕 'job' = รับงานใบสั่ง start-job/cancel-job · 'portion' = งานชั่งแยกชิ้น (job.recipe.portion) · 'recipe-category' = แถวปุ่มหมวดจาก recipes[].category (2026.10.30) · 'label-size' = ขนาดฉลากตามไลน์ {wmm,hmm} (2026.11.02) · 'device-release' = release-devices→devices-released + pagehide · 'visibility' = แม่บอกซ่อน/แสดง (2026.11.02.1)
 const h = React.createElement;
 const { useState, useEffect, useRef, useMemo } = React;
 const cls = (...a)=>a.filter(Boolean).join(' ');
@@ -143,7 +143,10 @@ const resolvePerms = (settings) => {
 //                    ← 🆕 recipe.portion:{ count, target, tol, unitLabel? } = ชั่งแยกชิ้น (feature 'portion') — วางทีละชิ้น ระบบนับเอง
 //                  { target:'weigh-system', type:'cancel-job', reqId?, jobId, reason? }   ← 🆕 ล้างงาน (ถาม confirm เมื่อมีค่าล็อก ยกเว้น reason 'parent-invalid') · ตอบ job-cancelled
 //                  { target:'weigh-system', type:'finished-ack', deviceId, id, status }  ← 🆕 แม่รับ log งานใบสั่งแล้ว → เอาออกจากกล่องขาออก (jobOutbox)
+//                  { target:'weigh-system', type:'release-devices', reqId }   ← 🆕 (2026.11.02.1) ตัดเครื่องชั่ง+เครื่องพิมพ์ก่อนแม่ทำลาย iframe · ไม่ถาม · ตอบ devices-released เสมอ
+//                  { target:'weigh-system', type:'visibility', visible }      ← 🆕 (2026.11.02.1) pane ซ่อน = ไม่ล็อก/เลื่อน/จบชุด/พิมพ์อัตโนมัติ + วาดน้ำหนักห่าง ๆ · กลับมา = ค่าค้างต้องเปลี่ยนก่อนล็อก
 //   เรา → แอปแม่ : { source:'weigh-system', type:'ready', version, features:[…] }   ← features = ความสามารถของรุ่น เช่น 'print-label','fixed-items'
+//                  { source:'weigh-system', type:'devices-released', reqId, ok, released:['scale'|'printer'…], error? }   ← 🆕 (2026.11.02.1)
 //                  { source:'weigh-system', type:'finished', log }        ← ชั่งครบ 1 ชุด (log เดียวกับที่เก็บในประวัติ · มี deviceId ให้แม่ dedupe · สูตรจาก BOM → log.bomId/lineId + items[].itemId)
 //                  { source:'weigh-system', type:'reprinted', log:{id,deviceId,lot} }  ← พิมพ์ฉลากซ้ำจาก 📜 ประวัติ ในเครื่อง (แม่บันทึกร่องรอย)
 //                  { source:'weigh-system', type:'scale', connected, device }
@@ -159,6 +162,11 @@ const EMBED = (()=>{ try { return window.parent && window.parent !== window && /
 const PRINTER_MODE = EMBED && /[?&]mode=printer/.test(location.search);
 const embedPost = (msg) => { if(!EMBED) return; try { window.parent.postMessage({ source:'weigh-system', version:WEIGH_VERSION, ...msg }, '*'); } catch(e){} };
 const embedListeners = new Set();
+// 🆕 (2026.11.02.1) รอ promise ไม่เกิน ms (ไม่ throw) — ใช้ตอนตัดอุปกรณ์ (stopNotifications/close บน Android ค้างได้ → ห้ามรอไม่รู้จบ)
+const settleWithin = (p, ms) => new Promise(res => { let done = false; const fin = () => { if(!done){ done = true; res(); } };
+  try { Promise.resolve(typeof p === 'function' ? p() : p).then(fin, fin); } catch(e){ fin(); } setTimeout(fin, ms); });
+// 🆕 ตัวนับ debug ให้ e2e ตรวจลำดับการตัดเครื่อง (BLE/Serial/USB mock) — เขียนเฉพาะ ?debug=1
+const devTrace = (x) => { try { if(DEBUG){ const T = window.__weighTest || (window.__weighTest = {}); (T.devTrace || (T.devTrace = [])).push(x); } } catch(e){} };
 // 🆕 งานใบสั่ง (start-job) — ตรวจรูปร่างก่อนรับ · คืน null = ใช้ได้ · ไม่งั้นคืน detail (ส่งกลับใน bad_job)
 //    settings = ตั้งค่าเครื่องนี้ (minTolG/zeroTol) — ใช้ตรวจงานชั่งแยกชิ้นว่าชิ้นไม่เล็กจนแยกกับจานเปล่าไม่ออก
 const PORTION_MAX = 200;   // ชิ้นต่อ batch สูงสุด (ตรงกับฝั่ง ERP)
@@ -275,8 +283,16 @@ function parseScaleLine(line, unitHint){
 function useScale(){
   const [connected, setConnected] = useState(false);
   const [device, setDevice] = useState(null);
-  const [liveWeight, setLiveWeight] = useState(null);  // grams
-  const [stable, setStable] = useState(false);
+  const [liveWeight, setLiveWeightS] = useState(null);  // grams
+  const [stable, setStableS] = useState(false);
+  // 🆕 (2026.11.02.1) แม่บอกว่าหน้าชั่งซ่อนอยู่ (visibility:false) → รับค่าไว้ใน ref แต่ไม่วาดใหม่ทุกแพ็กเก็ต (เฟลชทุก 1 วิ + ตอนกลับมาแสดง)
+  const pausedRef = useRef(false), lwRef = useRef(null), stRef = useRef(false), renderedAtRef = useRef(0);
+  const rLW = (w) => { if(DEBUG && window.__weighTest) window.__weighTest.scaleRenders = (window.__weighTest.scaleRenders || 0) + 1; setLiveWeightS(w); };   // นับให้ e2e ตรวจการวาด
+  const flush = () => { renderedAtRef.current = Date.now(); rLW(lwRef.current); setStableS(stRef.current); };
+  const maybeRender = () => { if(!pausedRef.current || Date.now() - renderedAtRef.current >= 1000) flush(); };
+  const setLiveWeight = (w) => { lwRef.current = w; if(w == null || !pausedRef.current) rLW(w); else maybeRender(); };
+  const setStable = (v) => { stRef.current = !!v; if(!pausedRef.current) setStableS(!!v); else maybeRender(); };
+  const setPaused = (on) => { const was = pausedRef.current; pausedRef.current = !!on; if(was && !on) flush(); };
   const [mode, setMode] = useState(null);
   const [rawLog, setRawLog] = useState([]);
   const [baudRate, setBaudRate] = useState(9600);
@@ -371,7 +387,10 @@ function useScale(){
         } catch(e){ appendLog('read error: '+e.message); }
       };
       loop();
-      cleanupRef.current = async()=>{ try{ await reader.cancel(); reader.releaseLock(); await port.close(); }catch{} };
+      // 🆕 (2026.11.02.1) ปล่อย reader ก่อน → close port · แต่ละขั้นแยก try + รอไม่เกิน 800 ms
+      const serCleanup = async()=>{ devTrace('serial:cancel'); await settleWithin(() => reader.cancel(), 800); try{ reader.releaseLock(); }catch{} devTrace('serial:close'); await settleWithin(() => port.close(), 800); };
+      serCleanup.sync = ()=>{ try{ const p = reader.cancel(); p && p.catch && p.catch(()=>{}); }catch{} try{ reader.releaseLock(); }catch{} try{ const p = port.close(); p && p.catch && p.catch(()=>{}); }catch{} devTrace('serial:sync'); };
+      cleanupRef.current = serCleanup;
     } catch(e){ if(e.name!=='NotFoundError') alert('❌ Serial: '+e.message); }
   };
 
@@ -385,16 +404,23 @@ function useScale(){
 
   const attachBLE = async (dev, label) => {
     let server = null;
+    // 🆕 (2026.11.02.2) ถูก release/ตัดระหว่างกำลังต่อ → เลิกทันที (ไม่ลองซ้ำ ไม่ค้าง GATT) · เช็กทุกครั้งหลัง await
+    const chk = () => { if(devRef.current !== dev){ try{ dev.gatt && dev.gatt.disconnect(); }catch{} devTrace('ble:abort'); const e = new Error('released'); e.released = true; throw e; } };
     for(let attempt=1; attempt<=4; attempt++){
       try {
+        chk();
         setConnecting(`${label||'กำลังเชื่อมต่อ'}… (ครั้งที่ ${attempt}/4)`);
         appendLog(`⏳ GATT connect... (ครั้งที่ ${attempt}/4)`);
         server = await dev.gatt.connect();
+        chk();
         if(server && server.connected){ appendLog('✅ GATT connected'); break; }
       } catch(err){
+        if(err && err.released) throw err;
+        chk();   // connect ล้มเพราะถูกตัด → ไม่ลองซ้ำ
         appendLog(`⚠️ ครั้งที่ ${attempt} ล้ม: ${err.message}`);
         if(attempt < 4){
           await new Promise(r=>setTimeout(r, 600*attempt));  // backoff 0.6/1.2/1.8s
+          chk();
           try{ dev.gatt.disconnect(); }catch{}
         } else {
           throw new Error(`เชื่อมเครื่องชั่งไม่ได้ (ลอง 4 ครั้ง) — ${err.message}\n\n💡 ลอง:\n• เปิดเครื่องชั่ง + วางใกล้แท็บเล็ต + เช็คแบต\n• ปิด-เปิด Bluetooth\n• ถ้าเคยจับคู่ไว้ในตั้งค่าเครื่อง ให้ลบการจับคู่ออกแล้วต่อผ่านหน้านี้อย่างเดียว`);
@@ -404,10 +430,12 @@ function useScale(){
     if(!server) throw new Error('GATT connect ไม่สำเร็จ');
     setConnecting('กำลังค้นหาสัญญาณน้ำหนัก…');
     const services = await server.getPrimaryServices();
+    chk();
     let nc=null;
     const std = services.find(s=>s.uuid.toLowerCase().includes('0000181d'));
     if(std){ try{ const cs=await std.getCharacteristics(); const w=cs.find(c=>c.uuid.toLowerCase().includes('00002a9d')); if(w&&w.properties.notify) nc=w; }catch{} }
-    if(!nc){ for(const s of services){ try{ const cs=await s.getCharacteristics(); for(const c of cs){ if(c.properties.notify||c.properties.indicate){ nc=c; break; } } if(nc) break; }catch{} } }
+    chk();
+    if(!nc){ for(const s of services){ try{ const cs=await s.getCharacteristics(); for(const c of cs){ if(c.properties.notify||c.properties.indicate){ nc=c; break; } } if(nc) break; }catch{} chk(); } }
     if(!nc) throw new Error('ไม่พบสัญญาณน้ำหนักจากเครื่องนี้ — อาจเลือกผิดเครื่อง หรือเครื่องชั่งรุ่นนี้ไม่รองรับ Web Bluetooth');
     const judge = mkStableJudge();
     const onVal = (ev)=>{
@@ -428,7 +456,14 @@ function useScale(){
     await nc.startNotifications();
     nc.addEventListener('characteristicvaluechanged', onVal);
     appendLog('✅ subscribed');
-    cleanupRef.current=async()=>{ try{ nc.removeEventListener('characteristicvaluechanged',onVal); await nc.stopNotifications(); dev.gatt.disconnect(); }catch{} };
+    // 🆕 (2026.11.02.1) ลำดับตัดที่ถูก: ถอด listener → stopNotifications (รอไม่เกิน 800 ms — Android ค้างได้) → gatt.disconnect
+    //    แต่ละขั้นมี try ของตัวเอง (เดิม stopNotifications ล้ม = ไม่เคยถึง disconnect → GATT ค้างตอน frame ถูกทำลาย)
+    const offVal = () => { try{ nc.removeEventListener('characteristicvaluechanged',onVal); }catch{} devTrace('ble:off'); };
+    const gattOff = () => { try{ if(dev.gatt && dev.gatt.connected) dev.gatt.disconnect(); }catch{} devTrace('ble:disconnect'); };
+    const bleCleanup = async()=>{ offVal(); devTrace('ble:stop'); await settleWithin(() => nc.stopNotifications(), 800); gattOff(); };
+    bleCleanup.sync = ()=>{ offVal(); try{ const p = nc.stopNotifications(); p && p.catch && p.catch(()=>{}); }catch{} gattOff(); };   // pagehide: ไม่รอ
+    cleanupRef.current = bleCleanup;
+    if(devRef.current !== dev){ cleanupRef.current = null; await bleCleanup(); chk(); }   // ถูกสั่งตัด (release/disconnect) ระหว่างกำลังต่อ → ตัดแล้วโยน released (ไม่ค้างต่อไว้)
     setMode('bluetooth'); setDevice({ name:dev.name||'BLE', id:dev.id }); setConnected(true); setConnecting('');
   };
 
@@ -447,7 +482,7 @@ function useScale(){
       appendLog('🔵 '+(dev.name||dev.id));
       devRef.current = dev;
       // หลุด → แจ้งหน้าชั่ง + พยายามต่อใหม่เองจากเครื่องเดิม (ไม่ต้องเลือกใหม่)
-      dev.addEventListener('gattserverdisconnected', async ()=>{
+      const onGattDrop = async ()=>{
         if(devRef.current !== dev) return;   // ผู้ใช้กด "ตัด" เอง / เปลี่ยนเครื่องแล้ว
         setConnected(false); setLiveWeight(null); setStable(false);
         try{ onDropRef.current && onDropRef.current(); }catch(e){}
@@ -457,23 +492,47 @@ function useScale(){
           for(let i=1;i<=3;i++){
             if(devRef.current !== dev) return;
             await new Promise(r=>setTimeout(r, 1500*i));
+            if(devRef.current !== dev) return;   // 🆕 ถูก release ระหว่างรอ → ไม่ต่อใหม่
             try { await attachBLE(dev, `สัญญาณหลุด — ต่อใหม่อัตโนมัติ`); return; }
-            catch(e){ appendLog('↻ ต่อใหม่ล้ม: '+e.message); }
+            catch(e){ if(e && e.released) return; appendLog('↻ ต่อใหม่ล้ม: '+e.message); }
           }
           // ต่อใหม่ไม่ได้ → ปล่อยให้ผู้ใช้กดต่อเอง (เครื่องชั่งอาจปิดจริง)
           setDevice(null); setMode(null); setConnecting('');
         } finally { reconnectingRef.current = false; }
-      });
+      };
+      dev.addEventListener('gattserverdisconnected', onGattDrop);
+      dropLsnRef.current = { dev, fn: onGattDrop };   // 🆕 ถอดตอน release (ไม่ให้ตัดแล้วเด้งไปต่อใหม่เอง)
       await attachBLE(dev, 'กำลังเชื่อมต่อ ' + (dev.name||''));
     } catch(e){
       setConnecting('');
+      if(e && e.released) return;   // 🆕 ถูก release ระหว่างต่อ (ERP สั่งปล่อยเครื่อง) — ไม่ต้องแจ้ง
       if(e.name!=='NotFoundError') alert('❌ ' + e.message
         + (IS_MOBILE ? '\n\n💡 บน Android: เปิด Bluetooth + เปิด "ตำแหน่ง (Location)" ด้วย ไม่งั้นรายการเครื่องจะว่าง · ใช้ Chrome ตัวจริง (ไม่ใช่เบราว์เซอร์ในแอปแชท)' : ''));
     }
   };
 
-  const disconnect=()=>{ devRef.current = null; if(cleanupRef.current) try{cleanupRef.current();}catch{} cleanupRef.current=null;
-    setConnected(false); setDevice(null); setLiveWeight(null); setStable(false); setMode(null); setRawLog([]); setConnecting(''); };
+  const dropLsnRef = useRef(null);
+  const offDrop = () => { const x = dropLsnRef.current; dropLsnRef.current = null; if(x) try { x.dev.removeEventListener('gattserverdisconnected', x.fn); } catch(e){} };
+  const resetUi = () => { setConnected(false); setDevice(null); setLiveWeight(null); setStable(false); setMode(null); setRawLog([]); setConnecting(''); };
+  const disconnect=()=>{ devRef.current = null; offDrop(); if(cleanupRef.current) try{cleanupRef.current();}catch{} cleanupRef.current=null; resetUi(); };
+  // 🆕 (2026.11.02.1) release-devices: ตัดแบบรอให้จบตามลำดับ (มี timeout ในแต่ละขั้น) · คืน true = มีเครื่องต่อ/กำลังต่ออยู่จริง
+  const release = async () => {
+    const had = !!(devRef.current || cleanupRef.current || connectedRef.current);
+    const dev = devRef.current;   // 🆕 (2026.11.02.2) จับไว้ก่อนล้าง — กำลังต่ออยู่ (ยังไม่มี cleanup) ต้อง disconnect เอง
+    devRef.current = null; offDrop();
+    const c = cleanupRef.current; cleanupRef.current = null;
+    if(c) await settleWithin(() => c(), 1200);
+    else if(dev){ try{ dev.gatt && dev.gatt.disconnect(); }catch(e){} devTrace('ble:disconnect-pending'); }
+    resetUi(); return had;
+  };
+  // 🆕 pagehide: ตัดทันทีไม่รอ (frame กำลังถูกทำลาย) — ถอด listener + disconnect/close แบบไม่ await
+  const releaseSync = () => {
+    const c = cleanupRef.current; const dev = devRef.current; devRef.current = null; offDrop(); cleanupRef.current = null;
+    if(c) try { (c.sync || c)(); } catch(e){}
+    else if(dev){ try{ dev.gatt && dev.gatt.disconnect(); }catch(e){} devTrace('ble:disconnect-pending'); }   // 🆕 กำลังต่ออยู่
+    return !!(c || dev);
+  };
+  const connectedRef = useRef(false); connectedRef.current = connected;
   // (เดิมมีปุ่ม Tare ในแอปที่แค่เขียนค่า 0 ทับบนจอ ไม่ได้สั่งเครื่อง → เปิด zero-gate ผิดได้ทั้งที่มีของบนเครื่อง — ถอดออกแล้ว)
 
   // 🆕 กันจอดับตอนต่อเครื่องชั่งอยู่ (แท็บเล็ต/มือถือหน้างาน) — ปล่อยเองเมื่อตัดการเชื่อมต่อ
@@ -497,7 +556,7 @@ function useScale(){
   // อายุของแพ็กเก็ตล่าสุด (ms) — ให้หน้าชั่งตัดสินว่าสัญญาณค้างไหม
   const packetAge = () => lastPacketRef.current ? (Date.now() - lastPacketRef.current) : Infinity;
   return { connected, connecting, device, liveWeight, stable, mode, rawLog, baudRate, setBaudRate,
-    connectMock, connectSerial, connectBLE, disconnect, packetAge, onDropRef };
+    connectMock, connectSerial, connectBLE, disconnect, packetAge, onDropRef, release, releaseSync, setPaused };
 }
 
 // 🆕 ชั่งแยกชิ้น — สรุปจาก log.portion ได้ทุกแบบ: เต็ม (pieces) · ย่อในประวัติ (pieceG) · แม่พิมพ์ซ้ำ (count/total/avg/planned/reason)
@@ -1110,14 +1169,29 @@ function useUSBPrinter(opts){
   };
   const disconnect = async () => {
     const d = devRef.current; devRef.current=null; epRef.current=null;
-    try { if(d){ if(ifaceRef.current!=null) await d.releaseInterface(ifaceRef.current); await d.close(); } } catch(e){}
+    // 🆕 (2026.11.02.2) แต่ละขั้นรอไม่เกิน 500 ms (เดิม 800 — รวมแล้วเกินที่ ERP รอ 1.5 วิ) · USB: releaseInterface → close · Serial: ปล่อย writer → close
+    if(d){ if(ifaceRef.current!=null){ devTrace('usb:release'); await settleWithin(() => d.releaseInterface(ifaceRef.current), 500); } devTrace('usb:close'); await settleWithin(() => d.close(), 500); }
     const w = writerRef.current; writerRef.current=null;
     try { if(w){ w.releaseLock(); } } catch(e){}
     const pt = portRef.current; portRef.current=null;
-    try { if(pt) await pt.close(); } catch(e){}
+    if(pt){ devTrace('bt:close'); await settleWithin(() => pt.close(), 500); }
     const b = bleRef.current; bleRef.current=null; bleCharRef.current=null;
-    try { if(b){ if(bleDisRef.current) b.removeEventListener('gattserverdisconnected', bleDisRef.current); if(b.gatt && b.gatt.connected && !(opts.isScaleDevice && opts.isScaleDevice(b))) b.gatt.disconnect(); } } catch(e){}
+    try { if(b){ if(bleDisRef.current) b.removeEventListener('gattserverdisconnected', bleDisRef.current); if(b.gatt && b.gatt.connected && !(opts.isScaleDevice && opts.isScaleDevice(b))){ b.gatt.disconnect(); devTrace('pble:disconnect'); } } } catch(e){}
     setConnected(false); setName(''); setTransport('');
+  };
+  // 🆕 (2026.11.02.1) release-devices / pagehide — คืน true = มีเครื่องพิมพ์ต่ออยู่จริง
+  const hasDevice = () => !!(devRef.current || portRef.current || bleRef.current);
+  const release = async () => { const had = hasDevice(); if(had) await settleWithin(() => disconnect(), 1200); return had; };   // 🆕 (2026.11.02.2) 2000→1200 ให้รวมกับเครื่องชั่ง (ทำพร้อมกัน) จบก่อน ERP รอ 1.5 วิ
+  const releaseSync = () => {   // ไม่ await — frame กำลังถูกทำลาย
+    const had = hasDevice();
+    const d = devRef.current; devRef.current = null; epRef.current = null;
+    try { if(d){ const p = d.close(); p && p.catch && p.catch(()=>{}); } } catch(e){}
+    const w = writerRef.current; writerRef.current = null; try { w && w.releaseLock(); } catch(e){}
+    const pt = portRef.current; portRef.current = null; try { if(pt){ const p = pt.close(); p && p.catch && p.catch(()=>{}); } } catch(e){}
+    const b = bleRef.current; bleRef.current = null; bleCharRef.current = null;
+    try { if(b){ if(bleDisRef.current) b.removeEventListener('gattserverdisconnected', bleDisRef.current); if(b.gatt && b.gatt.connected) b.gatt.disconnect(); } } catch(e){}
+    if(had) devTrace('printer:sync');
+    return had;
   };
   useEffect(()=>{
     reconnect();
@@ -1191,7 +1265,7 @@ function useUSBPrinter(opts){
   const testText = (settings) => run('พิมพ์ทดสอบ…', async () => { await send(buildTestText({ ...printerOpts(settings), via: viaLabel() })); });
   const testLabel = (settings) => printLabel({ recipeName:'ทดสอบพิมพ์ฉลาก ภาษาไทย', lot:'TEST-690912-01', total:2410.5, operator:(settings && settings.lastOperator) || 'ทดสอบ', note:'พิมพ์ทดสอบ ' + viaLabel(), ts:Date.now() }, settings, 1);   // 🆕 ชื่อผู้ชั่งจริงบนฉลากทดสอบ
   return { supported, supportedUSB, supportedBT, supportedBLE, connected, name, busy, lastErr, transport, transportLabel: viaLabel(),
-    connect, connectBT, connectBLE, disconnect, printLabel, printLotLabels, testText, testLabel };
+    connect, connectBT, connectBLE, disconnect, release, releaseSync, printLabel, printLotLabels, testText, testLabel };
 }
 
 // ==================== MAIN APP ====================
@@ -1251,11 +1325,38 @@ function App(){
   // 🆕 listener ข้างล่างสมัครครั้งเดียว (deps=[]) → ต้องอ่าน printer/state ล่าสุดผ่าน ref (ไม่งั้นได้ค่าตอน mount ค้าง)
   const printerRef = useRef(printer), stateRef = useRef(state);
   printerRef.current = printer; stateRef.current = state;
+  const scaleRef = useRef(scale); scaleRef.current = scale;
+  // 🆕 (2026.11.02.1) แม่บอกว่า pane หน้าชั่งซ่อนอยู่ (visibility:false) → หยุดล็อก/เลื่อน/จบชุด/พิมพ์อัตโนมัติ + ลดการวาดน้ำหนักสด · ไม่เคยส่ง = แสดงเสมอ (เดิม)
+  const [paneHidden, setPaneHidden] = useState(false);
+  // 🆕 pagehide สำรอง — ทางที่แม่ไม่ได้ส่ง release-devices (ปิดแท็บ · ดึงจอลงรีเฟรช · frame ถูกถอดเอง) → ตัดแบบไม่รอ
+  useEffect(()=>{
+    const onHide = () => { try { scaleRef.current.releaseSync(); } catch(e){} try { printerRef.current.releaseSync(); } catch(e){} devTrace('pagehide'); };
+    window.addEventListener('pagehide', onHide);   // (ไม่ใช้ unload — Chrome เลิกรองรับ/ทำให้ bfcache ใช้ไม่ได้ · pagehide ยิงตอน iframe ถูกถอดด้วย)
+    return ()=>{ window.removeEventListener('pagehide', onHide); };
+  }, []);
 
   // ---- EMBED: รับค่าจากแอปแม่ + รายงานสถานะ ----
   useEffect(()=>{
     if(!EMBED) return;
     const fn = (d) => {
+      if(d.type === 'release-devices'){
+        // 🆕 (2026.11.02.1) แม่กำลังจะทำลาย frame (โหลดใหม่/ออกจากระบบ/สลับคน/โหลดหน้าชั่งใหม่) → ตัดเครื่องชั่งก่อน แล้วเครื่องพิมพ์ · ไม่ถาม confirm
+        //    ตอบ devices-released เสมอ (ไม่มีอะไรต่อ = ok, released:[]) · งานใบสั่ง/กล่องขาออกอยู่ใน localStorage ไม่แตะ
+        const reqId = d.reqId || null;
+        (async () => {
+          const released = [], errors = [];
+          // 🆕 (2026.11.02.2) ตัดเครื่องชั่ง+เครื่องพิมพ์พร้อมกัน (เดิมทีละตัว รวมแย่สุด ~3.2 วิ > ERP รอ 1.5 วิ) · แต่ละตัวมีเพดาน 1.2 วิ
+          const rs = await Promise.allSettled([ scaleRef.current.release(), printerRef.current.release() ]);
+          ['scale','printer'].forEach((k, i) => { const r = rs[i]; if(r.status === 'fulfilled'){ if(r.value) released.push(k); } else errors.push(k + ': ' + (r.reason && r.reason.message || r.reason)); });
+          embedPost({ type:'devices-released', reqId, ok: !errors.length, released, ...(errors.length ? { error: errors.join(' · ') } : {}) });
+        })();
+        return;
+      }
+      if(d.type === 'visibility'){
+        const hide = d.visible === false;
+        scaleRef.current.setPaused(hide); setPaneHidden(hide);
+        return;
+      }
       if(d.type === 'config'){
         setState(s => {
           let recipes = s.recipes || [];
@@ -1426,7 +1527,7 @@ function App(){
       // WeighTab ไม่ถูก unmount ตอนสลับแท็บ (ซ่อนแทน) → ชุดที่ชั่งอยู่ไม่หาย
       h('div', { hidden: tab!=='weigh' }, h(WeighTab, { state, update, scale, printer, perms, replaceMode, visible: tab==='weigh', embedSelect, onEmbedSelected: ()=>setEmbedSelect(null),
         job: embedJob, onJobCancel: cancelJobLocal, onJobDone: ()=>{ setJob(null); setOutboxVer(v => v + 1); },
-        parentCancel, onParentCancel: resolveParentCancel })),
+        parentCancel, onParentCancel: resolveParentCancel, paneHidden })),
       tab==='recipes'  && perms.recipesView && h(RecipesTab, { state, update, perms, replaceMode }),
       tab==='logs'     && perms.logsView && h(LogsTab, { state, printer, outboxVer }),
       tab==='settings' && perms.settingsEdit && h(SettingsTab, { state, update, printer }))
@@ -1626,7 +1727,7 @@ const beep = (kind) => {
 // 🆕 job = งานใบสั่งจากแอปแม่ (start-job) | null — มีงาน: ใช้สูตรของงาน (ปริมาณ 1 batch) · เลือกสูตรอื่นไม่ได้
 //    onJobCancel(reason) = WeighTab ยกเลิกงานเอง (แจ้งแม่ job-cancelled) · onJobDone() = ชั่งครบแล้ว ล้างงาน (ไม่ใช่การยกเลิก)
 //    🆕 parentCancel = แม่ขอยกเลิกงานตอนนับชิ้นไปแล้ว { reqId, jobId, reason, at } → dialog ในแอป · onParentCancel(ok) = คำตอบของพนักงาน
-function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, embedSelect, onEmbedSelected, job, onJobCancel, onJobDone, parentCancel, onParentCancel }){
+function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, embedSelect, onEmbedSelected, job, onJobCancel, onJobDone, parentCancel, onParentCancel, paneHidden }){
   const canOffSpec = !perms || perms.offSpec;
   const recipes = activeRecipes(state);   // 🆕 ฝัง+replace → สูตรของแอปแม่ · อื่น ๆ → สูตรในเครื่อง
   const settings = state.settings||{};
@@ -1703,6 +1804,12 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   const dwellRef = useRef(null);        // { idx, value, since } — กันล็อกค่าตอนยังเทไม่เสร็จ
   const maxSeenRef = useRef(null);      // 🆕 { idx, max } — น้ำหนักสูงสุดที่เห็นหลังตั้ง 0 (จับ TARE/auto-zero กลางคัน)
   const advanceTimerRef = useRef(null);
+  // 🆕 (2026.11.02.1) pane ซ่อน (แม่ส่ง visibility:false) — hiddenRef อ่านใน timer · resumeRef = กันล็อกค่าที่วางค้างไว้ระหว่างซ่อน { w }
+  //    pendingAdvRef = ตัวถัดไปที่ต้องเลื่อนไป แต่ถูกพักไว้ตอนซ่อน (เลื่อนให้ตอนกลับมาแสดง)
+  const hiddenRef = useRef(!!paneHidden), resumeRef = useRef(null), pendingAdvRef = useRef(null);
+  // 🆕 (UAT M1) ติดด่านค่าค้างหลังกลับมาหน้าชั่ง → โชว์บอกเหตุ (แสดงผลอย่างเดียว · ตรรกะ W3 เดิม)
+  const [resumeHold, setResumeHold] = useState(false);
+  if(DEBUG && window.__weighTest) window.__weighTest.paneGuard = () => ({ hidden: hiddenRef.current, resume: resumeRef.current, pendingAdv: pendingAdvRef.current, hold: resumeHold });
   const [tick, setTick] = useState(0);  // บังคับ re-check ทุก 400ms แม้เครื่องชั่งหยุดสตรีมค่า
 
   const showToast = (m) => { setToast(m); setTimeout(()=>setToast(''), 2500); };
@@ -1815,12 +1922,32 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   const lockDwellMs = Math.max(1000, (Number(settings.lockDwellSec ?? 2.5)||0) * 1000);
   const STALE_MS = 2500;   // แพ็กเก็ตเก่ากว่านี้ = สัญญาณค้าง ห้ามล็อก
 
-  // ticker
+  // ticker (หยุดตอน pane ซ่อน — ไม่ re-render ทุก 400 ms เบื้องหลัง)
   useEffect(()=>{
-    if((activeIdx==null && !portion) || !scale.connected) return;   // 🆕 ชั่งแยกชิ้นต้องเช็คตลอด (ไม่มี activeIdx)
+    if((activeIdx==null && !portion) || !scale.connected || paneHidden) return;   // 🆕 ชั่งแยกชิ้นต้องเช็คตลอด (ไม่มี activeIdx)
     const iv = setInterval(()=>setTick(t=>(t+1)%100000), 400);
     return ()=>clearInterval(iv);
-  }, [activeIdx, scale.connected, !!portion]);
+  }, [activeIdx, scale.connected, !!portion, paneHidden]);
+
+  // 🆕 (2026.11.02.1) ซ่อน → ล้างตัวจับเวลานิ่ง · กลับมาแสดง → ตั้งด่าน "ค่าค้าง" (ต้องเห็นน้ำหนักเปลี่ยน > 3 ก. หรือกลับศูนย์ก่อนล็อก)
+  //    ชั่งแยกชิ้น: ปลด arm → ต้องเห็น 0 นิ่งสดใหม่ก่อนนับชิ้นถัดไป (ชิ้นที่วางค้างระหว่างซ่อนไม่ถูกนับ) · ตัวถัดไปที่พักไว้ → เลื่อนตอนนี้
+  useEffect(()=>{
+    const was = hiddenRef.current; hiddenRef.current = !!paneHidden;
+    dwellRef.current = null; pDwellRef.current = null;
+    if(paneHidden){ setResumeHold(false); return; }
+    if(!was) return;
+    resumeRef.current = { w: scale.connected && scale.liveWeight != null ? Number(scale.liveWeight) : null };
+    if(portion){ setArmed(false); setZeroRef(null); }
+    const nx = pendingAdvRef.current; pendingAdvRef.current = null;
+    if(nx != null) setActiveIdx(nx);
+  }, [paneHidden]);
+  // คืน true = ยังติดด่านค่าค้าง (ห้ามล็อก) · เห็นศูนย์ หรือค่าเปลี่ยน > max(3, zeroTol) ก. = ผ่านด่าน · ยังไม่มีค่าตอนกลับมา = ค่าแรกที่ได้คือค่าอ้างอิง
+  const resumeBlocked = (v) => {
+    const g = resumeRef.current; if(!g) return false;
+    if(g.w == null){ g.w = v; return true; }
+    if(Math.abs(v) <= zeroTol || Math.abs(v - g.w) > Math.max(3, zeroTol)){ resumeRef.current = null; return false; }
+    return true;
+  };
 
   // 🆕 เปลี่ยนตัวที่ชั่ง — ถ้าตัวเดิมยังไม่ล็อกแต่ผ่านตั้ง 0 ไปแล้ว ต้องล้าง zero-gate (เดิมค้างไว้ → กลับมาเทซ้ำโดยไม่รู้)
   //    ถ้าบนเครื่องยังมีของค้างอยู่ให้ถามก่อน
@@ -1875,6 +2002,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
   useEffect(()=>{
     if(portion) return;   // 🆕 ชั่งแยกชิ้นมี arming ของตัวเอง (portionTick) — กลับ 0 ระหว่างชิ้นเป็นเรื่องปกติ
     if(!requireZero) return;
+    if(hiddenRef.current) return;   // 🆕 pane ซ่อน → ไม่ผ่านด่านตั้ง 0 เบื้องหลัง
     if(!scale.connected || activeIdx==null || scale.liveWeight==null) return;
     const e = entries[activeIdx]||{};
     if(e.zeroOk || e.locked) return;
@@ -1892,12 +2020,15 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     if(portion) return;   // 🆕 ชั่งแยกชิ้นไม่ล็อกรายวัตถุดิบ
     if(pModal){ dwellRef.current=null; return; }   // 🆕 dialog ในแอปเปิดอยู่ (นอกเกณฑ์/ชั่งใหม่/เปลี่ยนคน …) → ไม่ล็อกเองระหว่างรอตอบ
     if(!scale.connected){ dwellRef.current=null; return; }
+    if(hiddenRef.current){ dwellRef.current=null; return; }   // 🆕 (2026.11.02.1) pane ซ่อน → ห้ามล็อก/เลื่อนเอง
     if(activeIdx==null || scale.liveWeight==null) return;
     const it = items.find(x=>x.idx===activeIdx); if(!it) return;
     const e = entries[activeIdx]||{};
     if(e.locked) return;
     if(requireZero && !e.zeroOk){ dwellRef.current=null; return; }
     const v = Number(scale.liveWeight);
+    const held = resumeBlocked(v);   // 🆕 ค่าที่วางค้างไว้ระหว่างซ่อน — ต้องเปลี่ยน/กลับศูนย์ก่อน
+    if(held !== resumeHold) setResumeHold(held);   // 🆕 (UAT M1) โชว์/ซ่อนบรรทัดบอกเหตุ
     // 🆕 จำน้ำหนักสูงสุดที่เห็นหลังตั้ง 0 — ถ้าตกกลับเป็น 0 ทั้งที่เทไปแล้ว = มีคนกด TARE/เครื่อง auto-zero กลางคัน
     const ms = maxSeenRef.current;
     if(!ms || ms.idx!==activeIdx) maxSeenRef.current = { idx:activeIdx, max:Math.max(0,v) };
@@ -1912,6 +2043,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       }
       return;
     }
+    if(held){ dwellRef.current=null; return; }
     if(scale.packetAge() > STALE_MS){ dwellRef.current=null; return; }   // สัญญาณค้าง — ค่าที่เห็นอาจไม่ใช่ของจริง
     const inRange = Math.abs(v - it.target) <= it.tol;
     if(!scale.stable || !inRange){ dwellRef.current=null; return; }
@@ -1930,7 +2062,9 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       buzz([80]);
       const nxt = nextUnlocked(activeIdx, { ...entries, [activeIdx]:{ locked:true } });
       if(advanceTimerRef.current) clearTimeout(advanceTimerRef.current);
-      if(nxt) advanceTimerRef.current = setTimeout(()=>{ advanceTimerRef.current=null; setActiveIdx(nxt.idx); }, 600);
+      if(nxt) advanceTimerRef.current = setTimeout(()=>{ advanceTimerRef.current=null;
+        if(hiddenRef.current){ pendingAdvRef.current = nxt.idx; return; }   // 🆕 ซ่อนอยู่ → เลื่อนตอนกลับมาแสดง
+        setActiveIdx(nxt.idx); }, 600);
     }
   }, [scale.stable, scale.liveWeight, activeIdx, tick]);
 
@@ -1946,6 +2080,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       setPStatus(scale.connected ? 'รอค่าจากเครื่องชั่ง…' : '🔌 ต่อเครื่องชั่งก่อน'); return;
     }
     if(pModal != null){ clear(); return; }                                 // 0) มี dialog เปิด → หยุดนับ
+    if(hiddenRef.current){ clear(); return; }                              // 0b) 🆕 pane ซ่อน → ไม่นับ/ไม่ arm (กลับมาต้องเห็น 0 สดใหม่)
     if(pieces.length >= pCount){ clear(); setPStatus(''); return; }       // 1) ครบแล้ว → รอบันทึก
     const v = Number(scale.liveWeight), st = scale.stable;
     if(scale.packetAge() >= STALE_MS){                                     // 2) สัญญาณค้าง → ไม่ arm (0 ค้างห้ามเปิดนับ) + ต้องเห็น 0 สดใหม่
@@ -1959,12 +2094,14 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
       clear(); pWarnRef.current = false;
       if(!armed) setArmed(true);
       if(zeroRef !== v) setZeroRef(v);
+      resumeRef.current = null;   // 🆕 (UAT M1) เห็น 0 แล้ว = ผ่านด่านกลับมา
       setPStatus(`วางชิ้นที่ ${pieces.length + 1} ได้เลย`); return;
     }
     if(!armed){                                                            // 4) ยังไม่ arm — บอกเหตุ ไม่นับเด็ดขาด
       clear();
       if(v < -zeroTol) warn();
       setPStatus(v < -zeroTol ? NEG
+        : resumeRef.current ? '✋ ยกชิ้นออกให้ตาชั่งเป็น 0 ก่อน'   // 🆕 (UAT M1) เพิ่งกลับมาหน้าชั่ง — ต้องเห็น 0 สดใหม่
         : !pieces.length ? '⏳ ตั้ง 0 ก่อนเริ่ม — ยกของออก หรือกด TARE ที่เครื่อง'
         : v < pTarget - pTolEff ? `🧽 มีเศษค้างบนจาน ${fmt(v)} ก. — เช็ดจานหรือกด TARE`
         : '✋ ยกชิ้นเดิมออกก่อน');
@@ -2055,6 +2192,7 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
 
   const resetForNext = () => {
     if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current=null; }
+    pendingAdvRef.current = null;
     dwellRef.current = null; maxSeenRef.current = null;
     setEntries({}); setCountdown(0); setNote('');
     setActiveIdx(items.length ? items[0].idx : null);
@@ -2131,18 +2269,18 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
     if(!allDone){ finishedRef.current = false; if(countdown>0) setCountdown(0); }
   }, [allDone, autoFinish, pModal]);
   useEffect(()=>{
-    if(countdown<=0) return;
+    if(countdown<=0 || paneHidden) return;   // 🆕 pane ซ่อน → พักนับถอยหลัง (ไม่จบชุด/ไม่พิมพ์อัตโนมัติเบื้องหลัง) · กลับมาแสดงนับต่อ
     if(countdown===1){ const t = setTimeout(()=>{ setCountdown(0); finish(); }, 1000); return ()=>clearTimeout(t); }
     const t = setTimeout(()=>setCountdown(c=>c-1), 1000);
     return ()=>clearTimeout(t);
-  }, [countdown]);
+  }, [countdown, paneHidden]);
   const cancelAuto = ()=>{ setCountdown(0); };
 
   const pickRecipe = (id) => {
     if(job) return showToast('กำลังชั่งงานใบสั่ง — กด "ยกเลิกงานนี้" ก่อนเลือกสูตรอื่น');
     if(hasAny && !confirm('มีค่าที่ชั่งไว้แล้วในชุดนี้ — เปลี่ยนสูตรจะล้างทิ้งทั้งหมด ยืนยัน?')) return;
     if(advanceTimerRef.current){ clearTimeout(advanceTimerRef.current); advanceTimerRef.current=null; }
-    dwellRef.current = null; maxSeenRef.current = null;
+    dwellRef.current = null; maxSeenRef.current = null; pendingAdvRef.current = null;
     setRecipeId(id); setEntries({}); setCountdown(0);
     const r = recipes.find(x=>x.id===id);
     setActiveIdx(r && r.items.length ? 0 : null);   // เริ่มที่ตัวแรกเลย ไม่ต้องแตะเพิ่ม
@@ -2294,6 +2432,10 @@ function WeighTab({ state, update, scale, printer, perms, replaceMode, visible, 
             onSwitchContinue: () => { setPSwitch(null); setPModal(null); showToast(`ทำต่อจาก ${lockedCount} รายการ — ตัวถัดไปเป็นของ ${operator || 'คนนี้'}`); },
             onSwitchCancel: () => { const r = (pSwitch && pSwitch.reason) || 'operator-switch'; setPSwitch(null); setPModal(null);
               onJobCancel && onJobCancel(r); showToast('ยกเลิกชุดนี้แล้ว — ของที่เทลงชามแล้วต้องเททิ้ง/แจ้งหัวหน้า'); } }),
+          // 🆕 (UAT M1) ติดด่านค่าค้างหลังกลับมา — บอกเหตุตัวใหญ่ ไม่ให้คิดว่าเครื่องค้าง
+          resumeHold && activeIdx != null && !(entries[activeIdx]||{}).locked && h('div', { 'data-resume-hint':'1',
+            className:'text-xl font-bold text-amber-900 bg-amber-100 border-2 border-amber-400 rounded-lg px-3 py-2' },
+            '✋ ยกของขึ้นแล้ววางใหม่ (หรือเติม/ตักออกเล็กน้อย) เพื่อให้ระบบล็อกค่า'),
           items.map(it=>{
             const e = entries[it.idx]||{};
             const v = Number(e.value);
