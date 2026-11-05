@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="41a09607b629";window.__ERP_BUILT_AT__="2026-11-05T15:17:25";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="e2966aa093d3";window.__ERP_BUILT_AT__="2026-11-05T15:49:27";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -8767,6 +8767,77 @@ function partyIsDup(p, list){
   const n = _thNorm(p.name).replace(/\s+/g, ''), t = String(p.taxId || '').replace(/\D/g, '');
   return (n && (d.name[n] || 0) > 1) || (t.length === 13 && (d.tax[t] || 0) > 1);
 }
+// 🆕 PARTY_DUP_LOCK (PDL1 · เจ้าของ 5 พ.ย. 2569) ล็อก 2 ชั้น: ชื่อซ้ำ + เลขภาษีซ้ำ + สาขาเดียวกัน = ตั้งไม่ได้
+//   ชื่อเหมือน เลขต่าง = ได้ · ชื่อต่าง เลขเหมือน = ได้ · สาขาต่าง = ได้ · ไม่มีเลข 13 หลัก = ไม่บังคับ
+//   ชื่อ: ตัดคำนำหน้านิติบุคคล (บจก./บริษัท…จำกัด/หจก./(มหาชน)/Co., Ltd.) ผ่าน partyNameKey · ไม่สนช่องว่าง/ตัวพิมพ์/จุด/วงเล็บ/ขีด · ํา=ำ
+//   สาขา: ว่าง/สำนักงานใหญ่ = 00000
+function partyDupName(name){
+  const n = String(name == null ? '' : name);
+  let k = '';
+  try { const f = global.ERP && global.ERP.partyNameKey; if(typeof f === 'function'){ const r = String(f(n) || ''); k = r.slice(r.indexOf('|') + 1); } } catch(e){ k = ''; }
+  if(!k) k = n;
+  return _thNorm(k).replace(/[\s.()\[\]\-,'"\/]/g, '');
+}
+function partyDupKey(p){
+  if(!p) return '';
+  const t = String(p.taxId == null ? '' : p.taxId).replace(/\D/g, '');
+  if(t.length !== 13) return '';
+  const n = partyDupName(p.name);
+  if(!n) return '';
+  // verify 1: แยกชั้น บุคคล (นาย/นาง/น.ส.…) กับ ร้าน/นิติบุคคล — "นายสมชาย ใจดี" (เจ้าของ) ไม่ชน "ร้านสมชาย ใจดี" เลขภาษีเดียวกัน
+  let cls = 'J';
+  try { const f = global.ERP && global.ERP.partyNameKey; if(typeof f === 'function' && String(f(String(p.name)) || '').indexOf('person|') === 0) cls = 'P'; } catch(e){}
+  return cls + ':' + n + '|' + t + '|' + (normalizeBranchCode(p.branchCode) || '00000');
+}
+// kind: 'customer'|'cus'|'CS' → ลูกค้า · อื่น ๆ → ผู้ขาย · คืนรายเดิมที่ยังใช้งาน (active !== false) ที่คีย์ตรงกัน หรือ null
+//   excludeId ไม่ส่ง = ข้าม party.id เอง (แก้ไขรายเดิมไม่ชนตัวเอง)
+function findPartyDup(state, kind, party, excludeId){
+  const key = partyDupKey(party);
+  if(!key) return null;
+  const cus = kind === 'customer' || kind === 'cus' || kind === 'CS' || kind === 'customers';
+  const list = (state ? (cus ? state.customers : state.suppliers) : null) || [];   // ไม่ใช้ state[...] (w3_reads สแกน static)
+  const ex = excludeId !== undefined ? excludeId : (party && party.id);
+  return list.find(x => x && x.id !== ex && x.active !== false && partyDupKey(x) === key) || null;
+}
+// 🆕 PDL1 UAT S2: quick-add ปิดฟอร์มทันทีหลัง dispatch — ถ้า 2 เครื่องตั้งรายเดียวกันพร้อมกัน ตอน rebase reducer ปัดตกของเรา
+//   → เอกสารยังถือ id ที่ไม่มีจริง · จำข้อมูลที่ส่ง ADD_* ในเครื่องนี้ไว้ แล้วให้เอกสารสลับไปใช้รายเดิมที่ชน (findPartyDup) เอง
+const _pdlPending = {};
+function partyNotePending(kind, data){
+  if(!data || !data.id) return;
+  _pdlPending[String(data.id)] = { kind, data:{ name:data.name, taxId:data.taxId, branchCode:data.branchCode } };
+}
+// คืน id ที่ใช้ได้จริง: มีในทะเบียน = id เดิม · ไม่มี + เคยตั้งจากเครื่องนี้ + ชนรายเดิม = id รายเดิม · อื่น ๆ = id เดิม (ให้ด่าน ⚠️ ไม่พบ ของเอกสารจัดการ)
+function partyResolveId(state, kind, id){
+  if(!id) return id;
+  const cus = kind === 'customer' || kind === 'cus' || kind === 'CS' || kind === 'customers';
+  const list = (state ? (cus ? state.customers : state.suppliers) : null) || [];
+  if(list.some(x => x && x.id === id)) return id;
+  const p = _pdlPending[String(id)];
+  if(!p) return id;
+  const hit = findPartyDup(state, cus ? 'customer' : 'supplier', { ...p.data, id }, id);
+  return hit ? hit.id : id;
+}
+// hook ฝั่งเอกสาร: id ที่เลือกหายไปเพราะถูกปัดตกตอน rebase → สลับเป็นรายเดิม + แจ้ง
+function usePartyIdHeal(state, kind, id, setId){
+  const cus = kind === 'customer' || kind === 'cus' || kind === 'CS' || kind === 'customers';
+  const list = state ? (cus ? state.customers : state.suppliers) : null;
+  useEffect(() => {
+    const r = partyResolveId(state, kind, id);
+    if(r && r !== id && typeof setId === 'function'){
+      setId(r);
+      const d = (list || []).find(x => x && x.id === r);
+      try { toast('🔁 มีผู้ตั้ง' + (cus ? 'ลูกค้า' : 'ผู้ขาย') + 'รายนี้ไว้แล้วจากอีกเครื่อง — เปลี่ยนไปใช้รายเดิม "' + ((d && d.name) || r) + '"', 'warning'); } catch(e){}
+    }
+  }, [list, id]);
+}
+// ข้อความไทยบอกรายที่ซ้ำ (ใช้ร่วม reducer + ฟอร์ม)
+function partyDupMsg(kind, dup){
+  const cus = kind === 'customer' || kind === 'cus' || kind === 'CS' || kind === 'customers';
+  const br = normalizeBranchCode(dup && dup.branchCode) || '00000';
+  return `⛔ ${cus ? 'ลูกค้า' : 'ผู้ขาย'}ซ้ำ — ชื่อ + เลขผู้เสียภาษี + สาขา ตรงกับ "${(dup && dup.name) || '-'}" (${(dup && (dup.code || dup.extCode)) || '-'}) `
+    + `เลขภาษี ${(dup && dup.taxId) || '-'} · ${br === '00000' ? 'สำนักงานใหญ่ 00000' : 'สาขา ' + br}\n`
+    + 'ใช้รายเดิมแทน · ถ้าเป็นคนละสาขา แก้เลขสาขา (ภาษี) ให้ตรงใบกำกับ';
+}
 // โชว์สาขาในตาราง/รายการเมื่อ "ระบุสาขา" หรือ "ชื่อ/เลขภาษีซ้ำหลายระเบียน" (ไม่ระบุ + ไม่ซ้ำ → ไม่รก)
 function partyShowBranch(p, list){ return !!p && (_partyBranchKind(p) !== 'none' || partyIsDup(p, list)); }
 // ข้อความ "ชื่อ (สาขา 00150)" สำหรับข้อความล้วน (toast / ค้นหา / CSV ทั่วไป)
@@ -15160,6 +15231,7 @@ function WhtLinePayeeChip({ state, dispatch, user, supplierId, payeeId, onChange
   // 🆕 R4-1: เลือกรายใหม่ = ไม่ติ๊กจำให้เอง (บัญชีติ๊กเองเมื่อต้องการ)
   const pick = (id, obj) => { const p = id ? (sups.find(x => x && x.id === id) || obj || null) : null;
     onChange && onChange(id && id !== supplierId ? id : '', p); setOpen(false); };
+  usePartyIdHeal(state, 'supplier', pid, (r) => pick(r));   // 🆕 PDL1 UAT S2: ผู้ถูกหักที่ ➕ เพิ่มใหม่ถูกปัดตกตอน rebase → ใช้รายเดิม
   const mis = party ? whtFormMismatch(party, form).replace('ผู้ขายรายนี้', 'ผู้ถูกหักรายนี้') : '';
   // ผู้ขายบุคคล/ร้านที่ยังหักในนามตัวเอง → ใบ 50 ทวิ ควรเป็นเจ้าของตามบัตร (ไม่บล็อก) · ชื่อบุคคลรุ่นเก่า (whtPersonName) = ไม่เตือน
   const selfInd = !pid && sup && partyIsIndividual(sup) && !whtPersonName(sup);
@@ -17142,7 +17214,7 @@ Object.assign(global.ERP, {
   // Thai BE date picker
   BEDateInput, fmtDateBE, TH_MONTHS_FULL, TH_MONTHS_SHORT, TH_DAYS,
   // UI atoms
-  SB, Modal, Spinner, Button, Combobox, supplierComboProps, customerComboProps, partyComboProps, partyBranchLabel, partyLocation, sellerAddress, sellerPhone, sellerBranchCode, partyOptionText, partyBranchParen, PartyBranchConfirm, normalizeBranchCode, partyBranchCode5, partyTaxBranchText, partyIsDup, partyShowBranch, partyNameWithBranch, PartyBranchChip, partySearchText, partyMatches, isDisallowedExpense, payEffectiveDate, invNonClaimVat, invNonClaimVatBase, invClaimableVat, invMigCloseVatCut, invMigCloseVatCutBase,
+  SB, Modal, Spinner, Button, Combobox, supplierComboProps, customerComboProps, partyComboProps, partyBranchLabel, partyLocation, sellerAddress, sellerPhone, sellerBranchCode, partyOptionText, partyBranchParen, PartyBranchConfirm, normalizeBranchCode, partyBranchCode5, partyTaxBranchText, partyIsDup, partyDupName, partyDupKey, findPartyDup, partyDupMsg, partyNotePending, partyResolveId, usePartyIdHeal, partyShowBranch, partyNameWithBranch, PartyBranchChip, partySearchText, partyMatches, isDisallowedExpense, payEffectiveDate, invNonClaimVat, invNonClaimVatBase, invClaimableVat, invMigCloseVatCut, invMigCloseVatCutBase,
   // 🆕 DEPOSIT-VAT (§C-5)
   vatLockOf, vatPeriodLocked, depositKindOf, depositAvail, depositEligible, planDepositApplication, depositVatSplit, invDepositVatOffset, invDepositBaseOffset, invClaimableVatBase, invVatConflictOpen,
   normTaxInvNo, taxInvKey, taxInvKey2, findDupTaxInv, findTaxInvGrant, taxInvClaimWindow, TAX_INV_OVERRIDE_ANYOF, taxInvOverrideApprover,
@@ -20201,6 +20273,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     var E = global.ERP, pol = E.ACTION_MERGE || {}, red = E.reducer;
     if(!red) return { ok:false, reason:'no-reducer' };
     var s = base, renum = [], msgs = [], numMap = Object.assign({}, numMap0 || {}), dropped = [];
+    var partyMap = {};   // 🆕 PDL1 verify 1: id คู่ค้าของเรา → id รายเดิมที่ชน
     var _vgDropInv = {};   // 🆕 VOID-GR VG3: id ใบตั้งหนี้ที่ทิ้งเพราะ GR ยกเลิก
     var cmp = cmpBase || base;
     var dataBySeq = {};   // verify: payload หลังเปลี่ยนเลข (ต่อ seq) — ให้ผู้เรียกเขียนกลับลงสมุด (รวมงานรอบหน้าไม่ใช้เลขเดิมซ้ำ)
@@ -20274,7 +20347,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         }
         var rn = _renumberIfClash(s, e.type, data, renum, numMap, e.data);   // ทุกชนิดที่อยู่ใน DOC_NUMBERS (ไม่ใช่แค่ add)
         if(!rn.ok) return rn;
-        data = rn.data;
+        data = _swapPartyIds(rn.data, partyMap);   // 🆕 PDL1 verify 1: เอกสารที่อ้างคู่ค้าที่ถูกรวม → ชี้รายเดิม
         if(data !== e.data && e.seq != null) dataBySeq[e.seq] = data;
         var t0 = e.t || _dn();
         Date.now = function(){ return t0; };                    // เวลาที่ reducer ประทับ = เวลาที่ผู้ใช้กดจริง ไม่ใช่เวลาเล่นซ้ำ
@@ -20333,6 +20406,15 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
             }
             continue;
           }
+          // 🆕 PDL1 verify 1: เครื่องอื่นตั้งคู่ค้าเดียวกัน (ชื่อ+เลขภาษี+สาขา) ไปก่อน → ใช้รายเดิม + เอกสารถัดไปชี้รายเดิม (ไม่เทงานทั้งสมุด)
+          if((e.type === 'ADD_SUPPLIER' || e.type === 'ADD_CUSTOMER') && data && data.id && E.findPartyDup){
+            var _ph = null; try { _ph = E.findPartyDup(s, e.type === 'ADD_CUSTOMER' ? 'customer' : 'supplier', data, data.id); } catch(_pf){ _ph = null; }
+            if(_ph && _ph.id){
+              partyMap[data.id] = _ph.id;
+              dropped.push({ type:e.type, id:data.id, why:'party_dup_merged', ref:_ph.name || _ph.id, note:data.name || '', by:(data && data.createdBy) || e.by || null });
+              continue;
+            }
+          }
           return { ok:false, reason:'rejected:' + e.type, msg: msgs[msgs.length - 1] || '' };
         }
         s = n;
@@ -20341,6 +20423,16 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       return { ok:false, reason:'throw:' + (err && err.message || err) };
     } finally { global.alert = _alert; Date.now = _dn; }
     return { ok:true, state:s, renum:renum, numMap:numMap, dataBySeq:dataBySeq, dropped:dropped };
+  }
+  // 🆕 PDL1 verify 1: แทน id คู่ค้าที่ถูกรวมเข้ารายเดิม (2 เครื่องตั้งรายเดียวกันพร้อมกัน) ทั้งก้อน payload · จับเฉพาะค่าที่เป็น "id" ทั้งสตริง (supplierId/customerId/payeeId/whtPayeeId ฯลฯ)
+  function _swapPartyIds(data, map){
+    var keys = Object.keys(map); if(!keys.length || data == null) return data;
+    var js; try { js = JSON.stringify(data); } catch(e){ return data; }
+    var re = new RegExp('"(' + keys.map(function(k){ return k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join('|') + ')"', 'g');
+    var changed = false;
+    js = js.replace(re, function(m, k){ changed = true; return JSON.stringify(map[k]); });
+    if(!changed) return data;
+    try { return JSON.parse(js); } catch(e){ return data; }
   }
   function _sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
   function _liveEntries(){ return _journal.filter(function(e){ return !e.noop; }); }
@@ -20431,6 +20523,12 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         line = '🏷️ แก้แท็ก ' + (x.ref || x.id || '-') + ' ไม่ถูกบันทึก — เอกสารถูกยกเลิก/ลบจากเครื่องอื่น หรือสิทธิ์เปลี่ยน (เงินไม่เปลี่ยน)';
         lines.push(line);
         try { logAudit({ ts:new Date().toISOString(), action:x.why, label:line.slice(0, 240), ref:String(x.ref || x.id || ''), device:deviceId(), detail:{ by:x.by || null } }); } catch(_l3){}
+        return;
+      }
+      if(x.why === 'party_dup_merged'){   // 🆕 PDL1 verify 1
+        line = '🔁 ' + (x.type === 'ADD_CUSTOMER' ? 'ลูกค้า' : 'ผู้ขาย') + ' "' + (x.note || x.ref || '-') + '" มีผู้ตั้งไว้แล้วจากอีกเครื่อง — ใช้รายเดิม "' + (x.ref || '-') + '" แทน · เอกสารที่บันทึกพร้อมกันชี้รายเดิมให้แล้ว';
+        lines.push(line);
+        try { logAudit({ ts:new Date().toISOString(), action:x.why, label:line.slice(0, 240), ref:String(x.id || ''), device:deviceId(), detail:{ by:x.by || null, ref:x.ref || null } }); } catch(_l6){}
         return;
       }
       if(x.why === 'inv_gr_voided'){   // 🆕 VOID-GR VG3
@@ -24653,6 +24751,15 @@ function _memoSupSnap(s, supplierId, given){
 }
 // ขั้น 2b ฝั่งซื้อ: PI (+ ใบ 50 ทวิ ในใบ) และ CN/DN ของผู้ขายรายนี้ที่ยังไม่มี snapshot → ตรึงข้อมูลเดิม
 //   คืน patch เฉพาะหมวดที่เปลี่ยนจริง (หมวดที่ไม่มีใบให้ตรึง = ref เดิม ไม่ถูกเขียน)
+// 🆕 PARTY_DUP_LOCK (PDL1): next ชนรายอื่น (ชื่อ+เลขภาษี 13 หลัก+สาขา) → คืนรายที่ชน · ไม่ชน/ไม่บังคับ → null
+//   แก้รายเดิมที่คีย์ไม่เปลี่ยน (ข้อมูลเก่าที่ซ้ำอยู่แล้ว แก้ช่องอื่น) = ได้ · เปิดใช้งานรายที่ปิดอยู่ให้ไปชน = นับเป็นซ้ำใหม่
+//   รายที่ปิดใช้งาน (active === false) ไม่ชนใคร
+function _pdlDup(L, kind, next, prev){   // L = { suppliers } หรือ { customers } (ผู้เรียกส่งเฉพาะหมวดที่ใช้)
+  const E = global.ERP || {};
+  if(!next || next.active === false || typeof E.findPartyDup !== 'function') return null;
+  if(prev && E.partyDupKey(prev) === E.partyDupKey(next) && !(prev.active === false)) return null;
+  return E.findPartyDup(L, kind, next, next.id);
+}
 function _freezeSupDocs(s, prev, next){
   if(!prev || !next || !_partyIdentityChanged(prev, next)) return {};
   const snap = _partySnapOf(prev);
@@ -34374,7 +34481,9 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
     }
 
     // ---------- Suppliers / Customers ----------
+    // 🆕 PDL1: ด่านชื่อ+เลขภาษี+สาขาซ้ำ (_pdlDup อยู่ก่อน _freezeSupDocs) — ชนรายเดิมที่ใช้งานอยู่ = ปฏิเสธ
     case 'ADD_SUPPLIER': {
+      { const _dp = _pdlDup({ suppliers:s.suppliers }, 'supplier', a.data, null); if(_dp){ alert(global.ERP.partyDupMsg('supplier', _dp)); return s; } }
       // 🆕 BRANCH_EXPENSE_REPORT R1: สาขาประจำผู้ขาย (defaultCostBranch) ตั้งได้ทาง SET_SUPPLIER_COST_BRANCH เท่านั้น
       if(a.data && 'defaultCostBranch' in a.data){ const { defaultCostBranch:_x, ...rest } = a.data; return { ...s, suppliers:[...(s.suppliers||[]), rest] }; }
       return { ...s, suppliers:[...(s.suppliers||[]), a.data] };
@@ -34382,6 +34491,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
     case 'UPDATE_SUPPLIER': {
       // 🔒 PARTY-FORM 2b: ชื่อ/ที่อยู่/เลขภาษี/สาขาเปลี่ยน → ใบเก่าที่ยังไม่มี snapshot ได้ข้อมูลเดิม (พิมพ์ซ้ำ/รายงานงวดที่ยื่นแล้วไม่เปลี่ยน)
       const _prevSup = (s.suppliers||[]).find(x => x.id === a.data.id);
+      { const _dp = _pdlDup({ suppliers:s.suppliers }, 'supplier', a.data, _prevSup); if(_dp){ alert(global.ERP.partyDupMsg('supplier', _dp)); return s; } }   // 🆕 PDL1
       // 🆕 BRANCH_EXPENSE_REPORT R1: defaultCostBranch คงตามผู้ขายใน state (ฟอร์มคู่ค้า/แท็บเก่าแก้ทับไม่ได้ — ใช้ SET_SUPPLIER_COST_BRANCH)
       if(_prevSup && (_prevSup.defaultCostBranch || 'defaultCostBranch' in a.data) && (_prevSup.defaultCostBranch || null) !== (a.data.defaultCostBranch || null)){
         const _d = { ...a.data }; if(_prevSup.defaultCostBranch) _d.defaultCostBranch = _prevSup.defaultCostBranch; else delete _d.defaultCostBranch; a = { ...a, data:_d }; }
@@ -34424,10 +34534,14 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       if(_used){ alert('ลบไม่ได้ — supplier นี้มีเอกสาร/ยอดผูกอยู่ (PO/GR/INV/CN/จ่าย/มัดจำ/RTV/เครดิตคงเหลือ/ผู้ถูกหัก ณ ที่จ่าย) ให้ตั้งเป็น "ไม่ใช้งาน" แทน'); return s; }
       return { ...s, suppliers:(s.suppliers||[]).filter(x => x.id!==a.data) };
     }
-    case 'ADD_CUSTOMER':     return { ...s, customers:[...(s.customers||[]), a.data] };
+    case 'ADD_CUSTOMER': {
+      { const _dp = _pdlDup({ customers:s.customers }, 'customer', a.data, null); if(_dp){ alert(global.ERP.partyDupMsg('customer', _dp)); return s; } }   // 🆕 PDL1
+      return { ...s, customers:[...(s.customers||[]), a.data] };
+    }
     case 'UPDATE_CUSTOMER': {
       // 🔒 PARTY-FORM 2b: ใบกำกับ/ใบเสนอราคา/ใบวางบิล ที่ยังไม่มี customerSnapshot ได้ข้อมูลลูกค้าเดิม
       const _prevCus = (s.customers||[]).find(x => x.id === a.data.id);
+      { const _dp = _pdlDup({ customers:s.customers }, 'customer', a.data, _prevCus); if(_dp){ alert(global.ERP.partyDupMsg('customer', _dp)); return s; } }   // 🆕 PDL1
       return { ...s, ..._freezeCusDocs(s, _prevCus, a.data), ..._partyIdentityAudit(s, 'customer', _prevCus, a.data, a.by),   // UAT S6
         customers:(s.customers||[]).map(x => x.id===a.data.id ? a.data : x) };
     }
@@ -34548,8 +34662,11 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       // a.data = [supplier, ...] — merge โดย id (ซ้ำ=อัปเดตทับ field ที่มา, ไม่ซ้ำ=เพิ่ม) · pattern เดียวกับ IMPORT_ITEMS
       let sups = [...(s.suppliers||[])];
       let st = s;   // UAT S5: นำเข้าทับรายเดิมที่ชื่อ/ที่อยู่/เลขภาษี/สาขาเปลี่ยน → ตรึงใบเก่าที่ยังไม่มี snapshot ก่อน (เหมือน UPDATE_SUPPLIER)
+      const _pdlSkip = [];   // 🆕 PDL1: แถวที่ชื่อ+เลขภาษี+สาขาชนรายอื่น (รวมแถวก่อนหน้าในไฟล์เดียวกัน) = ข้าม
       for(const sp of a.data){
         const idx = sups.findIndex(x => x.id === sp.id);
+        const _dp = _pdlDup({ suppliers:sups }, 'supplier', idx >= 0 ? { ...sups[idx], ...sp } : sp, idx >= 0 ? sups[idx] : null);
+        if(_dp){ _pdlSkip.push((sp.name || sp.id) + ' ≈ ' + (_dp.name || _dp.id)); continue; }
         if(idx >= 0){
           const next = { ...sups[idx], ...sp };
           st = { ...st, ..._freezeSupDocs(st, sups[idx], next) };
@@ -34557,6 +34674,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
         }
         else sups.push(sp);
       }
+      if(_pdlSkip.length) alert('⛔ ข้าม ' + _pdlSkip.length + ' แถวที่ชื่อ + เลขผู้เสียภาษี + สาขา ซ้ำกับรายเดิม:\n• ' + _pdlSkip.slice(0, 15).join('\n• ') + (_pdlSkip.length > 15 ? '\n…' : ''));
       return { ...st, suppliers: sups };
     }
     // 🆕 นำเข้าลูกค้า (Ecount) — pattern เดียวกับ IMPORT_SUPPLIERS
@@ -34564,8 +34682,11 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
       // a.data = [customer, ...] — merge โดย id (ซ้ำ=อัปเดตทับ field ที่มา, ไม่ซ้ำ=เพิ่ม)
       let custs = [...(s.customers||[])];
       let st = s;   // UAT S5: ตรึง SI/QT/BN เก่าที่ยังไม่มี customerSnapshot ก่อนนำเข้าทับ
+      const _pdlSkip = [];   // 🆕 PDL1
       for(const c of a.data){
         const idx = custs.findIndex(x => x.id === c.id);
+        const _dp = _pdlDup({ customers:custs }, 'customer', idx >= 0 ? { ...custs[idx], ...c } : c, idx >= 0 ? custs[idx] : null);
+        if(_dp){ _pdlSkip.push((c.name || c.id) + ' ≈ ' + (_dp.name || _dp.id)); continue; }
         if(idx >= 0){
           const next = { ...custs[idx], ...c };
           st = { ...st, ..._freezeCusDocs(st, custs[idx], next) };
@@ -34573,6 +34694,7 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
         }
         else custs.push(c);
       }
+      if(_pdlSkip.length) alert('⛔ ข้าม ' + _pdlSkip.length + ' แถวที่ชื่อ + เลขผู้เสียภาษี + สาขา ซ้ำกับรายเดิม:\n• ' + _pdlSkip.slice(0, 15).join('\n• ') + (_pdlSkip.length > 15 ? '\n…' : ''));
       return { ...st, customers: custs };
     }
 
@@ -83316,6 +83438,7 @@ function poNoVatLines(state, supplierId, lines){
 function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
   // ไม่ auto-pick, ผู้ใช้ต้องเลือกเอง · 🆕 WHT-PAYEE รอบ 4 (UAT M1): เจ้าของร้าน whtPayeeOnly ไม่รับเป็นค่าตั้งต้น · 🆕 UI-v2: ยกเว้นมาจากปุ่ม "สร้าง PO" บนแถวผู้ขายใน palette (presetSupplierId) — เลือกให้ก่อน แก้ได้
   const [supplierId, setSupplierId] = useState(() => (presetSupplierId && (state.suppliers||[]).some(s => s.id === presetSupplierId && (!global.ERP.supplierPickable || global.ERP.supplierPickable(s)))) ? presetSupplierId : '');
+  if(global.ERP.usePartyIdHeal) global.ERP.usePartyIdHeal(state, 'supplier', supplierId, setSupplierId);   // 🆕 PDL1 UAT S2: quick-add ถูกปัดตกตอน rebase → ใช้รายเดิม
   const [showAddSup, setShowAddSup] = useState(false);  // 🆕 quick-add supplier
   const [destinationBranch, setDestinationBranch] = useState(state.currentBranch);
   // 📍 เลือก sub-location ปลายทาง — default = ตัวแรก type 'raw' ของ branch
@@ -90242,6 +90365,7 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
 // ================================================================
 function CombinedINVModal({ state, dispatch, user, onClose }){
   const [supplierId, setSupplierId] = useState('');
+  if(global.ERP.usePartyIdHeal) global.ERP.usePartyIdHeal(state, 'supplier', supplierId, setSupplierId);   // 🆕 PDL1 UAT S2: quick-add ถูกปัดตกตอน rebase → ใช้รายเดิม
   const [showAddSup, setShowAddSup] = useState(false);  // 🆕 quick-add supplier
   const [selectedGRs, setSelectedGRs] = useState([]);
   const [invDate, setInvDate] = useState(getToday());
@@ -97911,6 +98035,7 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
 
   // ---- header ----
   const [supplierId, setSupplierId] = useState('');
+  if(global.ERP.usePartyIdHeal) global.ERP.usePartyIdHeal(state, 'supplier', supplierId, setSupplierId);   // 🆕 PDL1 UAT S2: quick-add ถูกปัดตกตอน rebase → ใช้รายเดิม
   const [supplierName, setSupplierName] = useState('');   // freeform เมื่อไม่มี supplier ในระบบ (PP30 อ่าน supplierNameFreeform)
   const [showAddSup, setShowAddSup] = useState(false);
   const [branch, setBranch] = useState(() => (allowedBranches.some(b => b.id === state.currentBranch) ? state.currentBranch : (allowedBranches[0]?.id || state.currentBranch)));
@@ -101359,6 +101484,11 @@ function PartiesTab({ state, dispatch, user }){
   const _taxBad = global.ERP.partyTaxBad || ((p) => { if(!p || p.addrForeign === true) return false; const r = String(p.taxId == null ? '' : p.taxId).trim(); return !!r && !/^\d{13}$/.test(r.replace(/[\s-]/g, '')); });
   const badOnly = pf === 'badtax';
   const badCount = useMemo(() => list.filter(_taxBad).length, [list]);
+  // 🆕 PDL1: รายเดิมที่ชื่อ+เลขภาษี+สาขาชนกันเอง → ป้าย ⚠️ ซ้ำ + ชิป "เฉพาะที่ซ้ำ" (ไม่รวม/ไม่ปิดให้อัตโนมัติ)
+  const dupOnly = pf === 'pdldup';
+  const dupMap = useMemo(() => { const m = new Map(), K2 = global.ERP.partyDupKey; if(typeof K2 !== 'function') return m;
+    const g = {}; list.forEach(x => { if(!x || x.active === false) return; const k = K2(x); if(k) (g[k] = g[k] || []).push(x); });
+    Object.values(g).forEach(arr => { if(arr.length > 1) arr.forEach(x => m.set(x.id, arr.filter(y => y !== x))); }); return m; }, [list]);
   // 🆕 TODO-DEEPLINK: งานค้างส่ง ids คู่ค้า (ผู้ขายหรือลูกค้า) → สลับฝั่งให้ตรง · คง badtax เฉพาะเมื่อ focus.status='badtax'
   const F = useAcctFocus('acct.parties', list, p => p.id, { state, user, onFocus: (f) => {
     setQ(''); setPf(f.status === 'badtax' ? 'badtax' : 'all');
@@ -101367,12 +101497,12 @@ function PartiesTab({ state, dispatch, user }){
   } });
   const rows = useMemo(() => {
     const t = q.trim().toLowerCase();
-    const src = F.rows.filter(p => !badOnly || _taxBad(p)).sort((a, b) => String(a.name||'').localeCompare(String(b.name||''), 'th'));
+    const src = F.rows.filter(p => (!badOnly || _taxBad(p)) && (!dupOnly || dupMap.has(p.id))).sort((a, b) => String(a.name||'').localeCompare(String(b.name||''), 'th'));
     if(!t) return src;
     return src.filter(p => [p.code, p.extCode, p.name, p.taxId, p.contact, p.phone, p.email]
       .some(v => v != null && String(v).toLowerCase().includes(t))
       || (global.ERP.partyMatches ? global.ERP.partyMatches(p, t) : false));   // 🆕 PARTY-BRANCH (UAT): เลขสาขา/ที่อยู่
-  }, [F.rows, q, badOnly]);
+  }, [F.rows, q, badOnly, dupOnly, dupMap]);
   const pg = usePaged(rows, 50);
 
   const openAdd  = () => { if(!canP('create')) return alert('ไม่มีสิทธิ์เพิ่มคู่ค้า'); setEdit(null); setShowModal(true); };
@@ -101398,7 +101528,12 @@ function PartiesTab({ state, dispatch, user }){
           title: isSup ? 'ไม่จด VAT → ลบเลขออก + เอาติ๊กจด VAT ออก · ต่างประเทศ → เลือก 🌐 ต่างประเทศ ในช่องจังหวัด' : 'ต้องได้เลขจริง 13 หลักจากลูกค้า/บัญชี · ต่างประเทศ → เลือก 🌐 ต่างประเทศ ในช่องจังหวัด',
           className: cls('px-3 py-1.5 text-xs rounded font-medium ml-2',
             badOnly ? 'bg-red-600 text-white' : 'bg-red-50 hover:bg-red-100 text-red-700 border border-red-200') },
-        '⚠️ เลขภาษีไม่ถูกต้อง ', h('span', { className:'opacity-75' }, `(${badCount.toLocaleString()})`))),
+        '⚠️ เลขภาษีไม่ถูกต้อง ', h('span', { className:'opacity-75' }, `(${badCount.toLocaleString()})`)),
+      (dupMap.size > 0 || dupOnly) && h('button', { onClick:()=>setPf(dupOnly ? 'all' : 'pdldup'), 'data-testid':'acct-parties-pdldup',
+          title:'ชื่อ + เลขผู้เสียภาษี + สาขา ตรงกับรายอื่น (ข้อมูลเก่า) — ตรวจแล้วปิดใช้งานรายที่ไม่ใช้ หรือแก้เลขสาขา',
+          className: cls('px-3 py-1.5 text-xs rounded font-medium ml-2',
+            dupOnly ? 'bg-amber-600 text-white' : 'bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300') },
+        '⚠️ เฉพาะที่ซ้ำ ', h('span', { className:'opacity-75' }, `(${dupMap.size.toLocaleString()})`))),
     badOnly && h('div', { className:'bg-red-50 border border-red-200 rounded p-2 mb-3 text-xs text-red-800' },
       `⚠️ แสดงเฉพาะ${isSup ? 'ผู้ขาย' : 'ลูกค้า'}ที่เลขผู้เสียภาษีไม่ถูกต้อง (ไม่ครบ 13 หลัก/หลักตรวจสอบไม่ตรง) — บันทึกรายนั้นไม่ได้จนกว่าจะแก้ · `,
       isSup ? 'ใส่เลข 13 หลักให้ครบ/ถูกต้อง (ไม่รู้เลข ถามผู้ขาย) · ผู้ขายไม่จด VAT → ลบเลขออก + เอาติ๊กจด VAT ออก'
@@ -101446,6 +101581,8 @@ function PartiesTab({ state, dispatch, user }){
                         partyCode(p) || h('span', { className:'text-gray-300' }, '-'), _todoDoneMark(F, p.id),
                         !p.code && p.extCode && h('span', { className:'ml-1 text-[10px] text-gray-400', title:'รหัสเดิมจาก Ecount (extCode)' }, 'Ecount')),
                       h('td', { className:'px-3 py-2 font-medium' }, p.name || '-',
+                        dupMap.has(p.id) && h('span', { 'data-tid':'party-pdl-dup', title:'ชื่อ + เลขผู้เสียภาษี + สาขา ตรงกับรายอื่น', className:'ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-900 text-[10px] whitespace-nowrap' },
+                          '⚠️ ซ้ำกับ ' + dupMap.get(p.id).map(x => x.code || x.extCode || x.name || x.id).slice(0, 3).join(', ')),   // 🆕 PDL1
                         // R4-2: ป้ายเจ้าของร้าน (ผู้ถูกหักเท่านั้น · ไม่ขึ้นในช่องเลือกผู้ขาย)
                         isSup && p.whtPayeeOnly && h('span', { 'data-tid':'party-wht-only', className:'ml-1.5 px-1.5 py-0.5 rounded-full bg-sky-50 border border-sky-300 text-sky-900 text-[10px] whitespace-nowrap' }, '🧾 ผู้ถูกหักภาษีเท่านั้น')),
                       h('td', { className:'px-3 py-2 font-mono text-xs' }, p.taxId || '-',
@@ -101474,6 +101611,7 @@ function PartiesTab({ state, dispatch, user }){
       existing: list,                      // ให้ PartyEditModal เช็คซ้ำ taxId/ชื่อ + ออกรหัส AP/AR ถัดไป
       costBranch: K.addAction === 'ADD_SUPPLIER' ? { state, user } : null,   // 🆕 BRANCH_EXPENSE_REPORT verify 3 (R1): 📍 สาขาประจำ (ค่าใช้จ่าย)
       onClose: () => { setShowModal(false); setEdit(null); },
+      onOpenExisting: (dp) => { if(canP('edit')) setEdit(dp); else { setShowModal(false); setEdit(null); setQ(dp.code || dp.extCode || dp.name || ''); } },   // 🆕 PDL1 📂 เปิดรายเดิม
     })
   );
 }
@@ -115760,6 +115898,7 @@ function ContractEditModal({ state, dispatch, user, ctId, onClose, onSaved }){
   const vr = Number(f.vatRate) || 0;
   const [insts, setInsts] = useState(() => old ? old.installments.map(i => ({ ...i, amount:String(f.priceMode === 'inclusive' ? r2(i.amountExVat * (1 + vr / 100)) : i.amountExVat) })) : [_ctNewInst(1)]);
   const set = (k, v) => setF(p => ({ ...p, [k]:v }));
+  if(E.usePartyIdHeal) E.usePartyIdHeal(state, 'supplier', f.supplierId, (v) => set('supplierId', v));   // 🆕 PDL1 UAT S2: quick-add ถูกปัดตกตอน rebase → ใช้รายเดิม
   const [ctTags, setCtTags] = useState(() => old ? E.docTagsOf(state, old) : []);   // 🆕 MT4 [{id,name}]
   const setIn = (k, kk, v) => setF(p => ({ ...p, [k]:{ ...(p[k] || {}), [kk]:v } }));
   const exOf = (amt) => f.priceMode === 'inclusive' ? r2((Number(amt) || 0) / (1 + vr / 100)) : r2(amt);
@@ -117386,6 +117525,7 @@ function NewSIModal({ state, dispatch, user, onClose, fromQuote, fromSi, onSaveE
     return b.id === state.currentBranch;
   });
   const [customerId, setCustomerId] = useState(fromQuote ? (fromQuote.customerId || '') : '');
+  if(global.ERP.usePartyIdHeal) global.ERP.usePartyIdHeal(state, 'customer', customerId, setCustomerId);   // 🆕 PDL1 UAT S2: quick-add ถูกปัดตกตอน rebase → ใช้รายเดิม
   const [showAddCust, setShowAddCust] = useState(false);  // 🆕 quick-add ลูกค้า
   const [sourceBranch, setSourceBranch] = useState((fromQuote && fromQuote.branch) || state.currentBranch);
   // ⚠️ วันที่ใบกำกับ = วันที่แปลง (วันส่งมอบ) ไม่ใช่วันที่ใบเสนอราคา — ม.78 จุดความรับผิดทางภาษี
@@ -120622,8 +120762,14 @@ function CustomersMiniList({ state, dispatch, user }){
     || hasPerm(user, 'settings', 'customers', act));
   const canAdd = canC('create'), canEdit = canC('edit');
   const all = state.customers || [];
-  const F = usePageFocus('sales.customers', all, c => c.id, { state, user, onFocus: () => setQ('') });
-  const base = F.ids ? F.rows : all;
+  const F = usePageFocus('sales.customers', all, c => c.id, { state, user, onFocus: () => { setQ(''); setDupOnly(false); } });
+  // 🆕 PDL1 verify 2: รายเดิมที่ชื่อ+เลขภาษี+สาขาชนกันเอง → ป้าย ⚠️ ซ้ำ + ชิป "เฉพาะที่ซ้ำ" (กติกาเดียวกับทะเบียนบัญชี · ไม่รวม/ไม่ปิดให้อัตโนมัติ)
+  const [dupOnly, setDupOnly] = useState(false);
+  const dupMap = useMemo(() => { const m = new Map(), K2 = global.ERP.partyDupKey; if(typeof K2 !== 'function') return m;
+    const g = {}; all.forEach(x => { if(!x || x.active === false) return; const k = K2(x); if(k) (g[k] = g[k] || []).push(x); });
+    Object.values(g).forEach(arr => { if(arr.length > 1) arr.forEach(x => m.set(x.id, arr.filter(y => y !== x))); }); return m; }, [all]);
+  const base0 = F.ids ? F.rows : all;
+  const base = dupOnly ? base0.filter(c => dupMap.has(c.id)) : base0;
   const cs = useMemo(() => {
     const t = q.trim().toLowerCase();
     if(!t) return base;
@@ -120646,7 +120792,10 @@ function CustomersMiniList({ state, dispatch, user }){
           placeholder:'🔍 ค้นหาลูกค้า — ชื่อ / เลขผู้เสียภาษี / รหัส CS / เบอร์',
           className:'flex-1 px-3 py-1.5 border-2 rounded text-sm' }),
         h('div', { className:'text-sm text-gray-600 whitespace-nowrap' },
-          q ? `พบ ${cs.length.toLocaleString()} จาก ${base.length.toLocaleString()}` : `${base.length.toLocaleString()} ราย`)),
+          q ? `พบ ${cs.length.toLocaleString()} จาก ${base.length.toLocaleString()}` : `${base.length.toLocaleString()} ราย`),
+        (dupMap.size > 0 || dupOnly) && h('button', { onClick:()=>setDupOnly(v => !v), 'data-testid':'sales-cust-pdldup',
+          className:'px-2 py-1 rounded text-xs whitespace-nowrap ' + (dupOnly ? 'bg-amber-600 text-white' : 'bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300') },
+          '⚠️ เฉพาะที่ซ้ำ ', h('span', { className:'opacity-75' }, `(${dupMap.size.toLocaleString()})`))),
       canAdd && h(Button, { variant:'primary', size:'sm', onClick:()=>setModal({ party:null }), disabled: !PEM, 'data-testid':'sales-cust-add' }, '➕ เพิ่มลูกค้า')),
     (canAdd || canEdit) && !PEM && (loadErr
       ? h('div', { className:'text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 mb-2 flex items-center gap-2', 'data-testid':'sales-cust-loaderr' },
@@ -120671,6 +120820,8 @@ function CustomersMiniList({ state, dispatch, user }){
             h('tbody', { className:'divide-y' },
               pg.shown.map(c => h('tr', { key:c.id, 'data-row-id':c.id, className: F.hl(c.id) ? 'bg-blue-50' : '' },
                 h('td', { className:'px-3 py-2' }, c.name, _focusDoneMark(F, c.id),
+                  dupMap.has(c.id) && h('span', { 'data-tid':'party-pdl-dup', title:'ชื่อ + เลขผู้เสียภาษี + สาขา ตรงกับรายอื่น', className:'ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-900 text-[10px] whitespace-nowrap' },
+                    '⚠️ ซ้ำกับ ' + dupMap.get(c.id).map(x => x.code || x.extCode || x.name || x.id).slice(0, 3).join(', ')),   // 🆕 PDL1 verify 2
                   (c.code || c.extCode) && h('div', { className:'text-[10px] text-gray-400 font-mono' }, c.code || c.extCode)),
                 h('td', { className:'px-3 py-2 text-xs font-mono' }, c.taxId||'-'),
                 h('td', { className:'px-3 py-2 text-xs' }, c.address||'-'),
@@ -120688,6 +120839,8 @@ function CustomersMiniList({ state, dispatch, user }){
       existing: all, settings: state.settings,
       notice: modal.party ? SNAP_NOTE : null,
       onClose: () => setModal(null),
+      // 🆕 PDL1 verify 2: 📂 เปิดรายเดิม อยู่ในแท็บนี้ (ไม่เด้งไปตั้งค่า — ฝ่ายขายไม่มีเมนูตั้งค่า) · แก้ไม่ได้ = ปิดฟอร์ม+ค้นหารายเดิมในตาราง
+      onOpenExisting: (dp) => { if(canEdit) setModal({ party: dp }); else { setModal(null); setDupOnly(false); setQ(dp.code || dp.extCode || dp.name || ''); } },
     })
   );
 }
@@ -125929,15 +126082,26 @@ function PartiesSettings({ state, dispatch, type, setType }){
     || (global.ERP.partyMatches ? global.ERP.partyMatches(d, t) : false);
   // ⚠️ เลขภาษีไม่ครบ 13 หลัก (กฎเจ้าของ 2026-09-28: บันทึกแก้ไขรายนั้นไม่ได้จนกว่าจะแก้) — ดูทั้งแถวหลักและแฝด
   const badTax = (d) => _partyTaxBad(d) || (!!d._twin && _partyTaxBad(d._twin));
+  // 🆕 PDL1: รายเดิมที่ชื่อ+เลขภาษี+สาขาชนกันเอง (ข้อมูลเก่า) → ป้าย ⚠️ ซ้ำ + ชิปกรอง · ไม่รวม/ไม่ปิดให้อัตโนมัติ (ผู้ดูแลจัดการเอง)
+  const pdlMap = useMemo(() => {
+    const m = new Map(), K = global.ERP.partyDupKey;
+    if(typeof K !== 'function') return m;
+    [['SP', state.suppliers], ['CS', state.customers]].forEach(([t, L]) => {
+      const g = {}; (L || []).forEach(x => { if(!x || x.active === false) return; const k = K(x); if(k) (g[k] = g[k] || []).push(x); });
+      Object.values(g).forEach(arr => { if(arr.length > 1) arr.forEach(x => m.set(t + ':' + x.id, arr.filter(y => y !== x))); });
+    });
+    return m;
+  }, [state.suppliers, state.customers]);
+  const pdlDupOf = (d) => pdlMap.get(d._t + ':' + d.id) || (d._twin ? pdlMap.get(d._twin._t + ':' + d._twin.id) : null) || null;
   // 🆕 TODO-DEEPLINK: focus 'settings.suppliers' / 'settings.customers' (ids = supplier id / customer id) → เหลือเฉพาะรายนั้น (ข้ามชิป/ค้นหา)
   //   แถวแฝด (ผู้ขาย+ลูกค้าแถวเดียว) จับได้ทั้ง id หลักและ id แฝด → ขยายเป็น 2 รายการให้ useFocusRows แล้วรวมกลับ
   const focusBase = useMemo(() => { const out = []; for(const d of rows){ out.push({ d, fid:d.id }); if(d._twin) out.push({ d, fid:d._twin.id }); } return out; }, [rows]);
   // verify 1: งานค้างเลขภาษี (status 'badtax') → ตั้งชิป (setTimeout: หลัง effect แท็บ suppliers→SP ของ SettingsModule) ⚠️ เลขภาษีไม่ถูกต้อง ไว้ด้วย (ปิดแถบ/ids เกินเพดาน ยังเห็นเฉพาะรายที่ผิด)
   const FP = usePageFocus(['settings.suppliers', 'settings.customers'], focusBase, x => x.fid, { state, user, onFocus:(f) => { if(f && f.status === 'badtax' && setType) setTimeout(() => setType('badtax'), 0); } });
   const fidOf = useMemo(() => { const m = new Map(); for(const x of FP.rows) if(!m.has(x.d)) m.set(x.d, x.fid); return m; }, [FP.rows]);
-  const filtered = useMemo(() => { if(FP.ids) return Array.from(fidOf.keys()); const t = q.trim().toLowerCase(); return rows.filter(d => (type === 'all' || (type === 'badtax' ? badTax(d) : hasSide(d, type))) && matchQ(d, t)); }, [rows, type, q, FP.ids, fidOf]);
+  const filtered = useMemo(() => { if(FP.ids) return Array.from(fidOf.keys()); const t = q.trim().toLowerCase(); return rows.filter(d => (type === 'all' || (type === 'badtax' ? badTax(d) : type === 'pdldup' ? !!pdlDupOf(d) : hasSide(d, type))) && matchQ(d, t)); }, [rows, type, q, FP.ids, fidOf]);
   const counts = useMemo(() => { const t = q.trim().toLowerCase(); const base = rows.filter(d => matchQ(d, t));
-    return { all: base.length, SP: base.filter(d => hasSide(d, 'SP')).length, CS: base.filter(d => hasSide(d, 'CS')).length, badtax: base.filter(badTax).length, badtaxRec: base.reduce((n, d) => n + (_partyTaxBad(d) ? 1 : 0) + (d._twin && _partyTaxBad(d._twin) ? 1 : 0), 0), twins: rows.filter(d => d._twin).length }; }, [rows, q]);
+    return { all: base.length, SP: base.filter(d => hasSide(d, 'SP')).length, CS: base.filter(d => hasSide(d, 'CS')).length, badtax: base.filter(badTax).length, pdldup: base.filter(d => !!pdlDupOf(d)).length, badtaxRec: base.reduce((n, d) => n + (_partyTaxBad(d) ? 1 : 0) + (d._twin && _partyTaxBad(d._twin) ? 1 : 0), 0), twins: rows.filter(d => d._twin).length }; }, [rows, q]);
   // UAT N2: ตัวกรองเลขภาษีไม่ครบ + ฝั่งหลักถูกแต่ฝั่งแฝดผิด → เปิดฝั่งแฝด (ฝั่งที่ต้องแก้) แทน
   const badSide = (d) => (d && type === 'badtax' && !_partyTaxBad(d) && d._twin && _partyTaxBad(d._twin) && can(d._twin._t, 'edit')) ? d._twin : d;
   const openEdit = (d0) => { const d = badSide(d0); if(!d || !can(d._t, 'edit')) return; const meta = PARTY_TYPE_META[d._t]; if(_restoreMin(meta.kind + ':' + d.id)) return; setModal({ type:d._t, party:d }); };
@@ -125962,6 +126126,7 @@ function PartiesSettings({ state, dispatch, type, setType }){
     (counts.badtax > 0 || type === 'badtax') && { key:'badtax', count: counts.badtax,
       // verify: ชิปนับ "แถว" · หน้างานค้างนับ "ราย" แยกฝั่ง → แถวแฝดที่ผิดทั้งสองฝั่ง บอกจำนวนรายด้วย ให้เลขตรงกับหน้างานค้าง
       label: counts.badtaxRec !== counts.badtax ? `⚠️ เลขภาษีไม่ถูกต้อง ${counts.badtaxRec} ราย · แถว` : '⚠️ เลขภาษีไม่ถูกต้อง' }].filter(Boolean);
+  if(counts.pdldup > 0 || type === 'pdldup') chips.push({ key:'pdldup', count: counts.pdldup, label:'⚠️ เฉพาะที่ซ้ำ' });   // 🆕 PDL1 (ชื่อ+เลขภาษี+สาขาชนกัน)
   const columns = [
     { key:'code', label:'รหัส', sticky:true, sortable:true, sortValue: d => d.code || d.extCode || '', card:'title', render: d => h('div', null,
         h('div', { className:'flex items-center gap-1.5' },
@@ -125971,6 +126136,9 @@ function PartiesSettings({ state, dispatch, type, setType }){
         (!d.code && d.extCode) && h('div', { className:'text-xs text-gray-500 mt-0.5' }, 'รหัสจาก Ecount')) },
     { key:'name', label:'ชื่อ', sortable:true, sortValue: d => d.name || '', render: d => h('div', { className:'min-w-0' },
         h('div', { className:'font-medium text-gray-900 truncate max-w-[280px]' }, d.name || '-'),
+        pdlDupOf(d) && h('span', { 'data-tid':'party-pdl-dup', title:'ชื่อ + เลขผู้เสียภาษี + สาขา ตรงกับรายอื่น — ตรวจแล้วปิดใช้งานรายที่ไม่ใช้ หรือแก้เลขสาขา',
+          className:'inline-block mt-0.5 mr-1 px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-900 text-[10px] whitespace-nowrap' },
+          '⚠️ ซ้ำกับ ' + pdlDupOf(d).map(x => x.code || x.extCode || x.name || x.id).slice(0, 3).join(', ')),
         // R4-2: ป้ายเจ้าของร้าน — บอกว่าทำไมไม่ขึ้นในช่องเลือกผู้ขายตอนเปิด PO/จ่าย
         d._t === 'SP' && d.whtPayeeOnly && h('span', { 'data-tid':'party-wht-only', className:'inline-block mt-0.5 px-1.5 py-0.5 rounded-full bg-sky-50 border border-sky-300 text-sky-900 text-[10px] whitespace-nowrap' }, '🧾 ผู้ถูกหักภาษีเท่านั้น'),
         (d.contact || d.phone) && h('div', { className:'text-xs text-gray-500 truncate' }, [d.contact, d.phone].filter(Boolean).join(' · '))) },
@@ -126010,7 +126178,9 @@ function PartiesSettings({ state, dispatch, type, setType }){
           : { icon:'🔍', title:`ไม่พบคู่ค้า${type !== 'all' ? ' ประเภท ' + (type === 'SP' ? 'ผู้ขาย' : 'ลูกค้า') : ''}${q ? ' ที่ตรง "' + q + '"' : ''}`, actions:[{ label:'ล้างตัวกรอง', onClick:()=>{ setType('all'); setQ(''); }, dataTestId:'filter-clear' }] } })),
     // key 'new' คงที่ → สลับ SP↔CS ไม่ remount (ค่าที่พิมพ์ไว้ไม่หาย)
     modal && h(PartyEditModal, { key: modal.party ? modal.party.id : 'new', title: meta.title, party: modal.party, fields: meta.fields, dispatch,
-      addAction: meta.add, updateAction: meta.upd, existing: state[meta.list] || [], onClose: () => setModal(null), settings: state.settings, costBranch: meta.list === 'suppliers' ? { state, user } : null,   // 🆕 PARTY-FORM: partyFormSplit / partyAddrLong · BRANCH_EXPENSE_REPORT verify 3
+      addAction: meta.add, updateAction: meta.upd, existing: state[meta.list] || [], onClose: () => setModal(null), settings: state.settings,
+       onOpenExisting: (dp, t) => { if(can(t, 'edit')) setModal({ type: t, party: { ...dp, _t: t } }); else { setModal(null); setType(t); setQ(dp.code || dp.extCode || dp.name || ''); setHiId(dp.id); } },   // 🆕 PDL1 📂 เปิดรายเดิม
+      costBranch: meta.list === 'suppliers' ? { state, user } : null,   // 🆕 PARTY-FORM: partyFormSplit / partyAddrLong · BRANCH_EXPENSE_REPORT verify 3
       typeChoice: modal.party ? null : { value: modal.type, options: allowedNew, onChange: (v) => { if(!allowedNew.includes(v)){ _toastWarn(`ไม่มีสิทธิ์เพิ่ม${PARTY_TYPE_META[v].label}`); return; } setNewType(v); setModal({ type:v, party:null }); } } }),
     showCredit && h(BulkCreditModal, { state, dispatch, onClose:()=>setShowCredit(false) }));
 }
@@ -126512,7 +126682,7 @@ function PartyAddrOfferPreview({ src, r, long, onUse, onCancel }){
 }
 
 // typeChoice (🆕 หน้าคู่ค้า SP/CS): { value:'SP'|'CS', onChange } — แสดงตัวเลือกประเภทบนสุดตอน "เพิ่มใหม่" · ผู้เรียกสลับ fields/addAction ตามค่า
-function PartyEditModal({ title, party, fields, dispatch, addAction, updateAction, onClose, onSaved, existing, typeChoice, settings, initial, allowSameTax, requirePersonPrefix, notice, costBranch }){
+function PartyEditModal({ title, party, fields, dispatch, addAction, updateAction, onClose, onSaved, existing, typeChoice, settings, initial, allowSameTax, requirePersonPrefix, notice, costBranch, onOpenExisting }){
   const isEdit = !!party;
   // 🆕 BRANCH_EXPENSE_REPORT verify 3 (R1): สาขาประจำผู้ขาย (ค่าใช้จ่าย) ในฟอร์มผู้ขาย — costBranch = { state, user } จากผู้เรียก · บันทึกผ่าน SET_SUPPLIER_COST_BRANCH หลังบันทึกคู่ค้า
   const _cbOn = !!(costBranch && costBranch.state && addAction === 'ADD_SUPPLIER' && global.ERP.canSetExpenseBranch && global.ERP.canSetExpenseBranch(costBranch.user));
@@ -126780,6 +126950,20 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
     //   แก้ไขรายเก่าที่ไม่ได้แตะช่องนี้ (ค่านำเข้าแปลก ๆ) → ไม่บล็อก
     if(hasBr && newBr && !/^\d{5}$/.test(newBr) && (!isEdit || String(values.branchCode == null ? '' : values.branchCode).trim() !== String(party.branchCode == null ? '' : party.branchCode).trim())) return alert(`เลขสาขา (ภาษี) ต้องเป็นตัวเลข 5 หลัก — สำนักงานใหญ่ = 00000 · สาขา เช่น 00150 (ที่กรอก: "${values.branchCode}")`);
     if(hasBr) values.branchCode = newBr;
+    // 🆕 PDL1 (เจ้าของ 5 พ.ย.): ชื่อ + เลขภาษี 13 หลัก + สาขา ตรงรายอื่นที่ใช้งานอยู่ = บันทึกไม่ได้ (ด่านเดียวกับ reducer)
+    //   แก้รายเดิมที่ซ้ำอยู่แล้วโดยไม่เปลี่ยนชื่อ/เลข/สาขา = ได้
+    if(typeof global.ERP.findPartyDup === 'function'){
+      const _pk = isSup ? 'supplier' : 'customer';
+      const _next = { ...(party || {}), ...values };   // values = ชื่อ/ที่อยู่ประกอบแล้ว (_pfCompose)
+      const _keyChanged = !isEdit || party.active === false || global.ERP.partyDupKey(party) !== global.ERP.partyDupKey(_next);
+      const _dp = _keyChanged && _next.active !== false ? global.ERP.findPartyDup({ [isSup ? 'suppliers' : 'customers']: list }, _pk, _next, party && party.id) : null;
+      if(_dp){
+        setTaxErr('ซ้ำกับ "' + (_dp.name || '-') + '" (ชื่อ + เลขภาษี + สาขาเดียวกัน)');
+        // 🆕 PDL1 UAT N1: กล่องแดงใต้ช่องเลขภาษีขึ้นอยู่แล้ว → ไม่ alert ซ้ำ (แท็บเล็ตต้องกดปิดอีกรอบ) · ไม่มีกล่อง (ข้อมูลเปลี่ยนระหว่างนั้น) → alert เหมือนเดิม
+        if(!(_pdl && _pdl.blk)) alert(global.ERP.partyDupMsg(_pk, _dp));
+        return;
+      }
+    }
     // 🔒 กัน "ghost/ซ้ำ vendor" — แยก 2 ระดับด้วย เลขภาษี+เลขสาขา (บริษัทเดียวหลายสาขา เช่น ซีพี แอ็กซ์ตร้า = ปกติ)
     //    (UI-level เท่านั้น ไม่แตะ reducer)
     const taxD = v => String(v == null ? '' : v).replace(/\D/g, '');
@@ -126815,7 +126999,12 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
     const exact = hasBr ? sameTax.find(s => _nb(s.branchCode) === newBr) : null;
     if(custTaxWarn){ /* SP11: เตือนแล้วข้างบน */ }
     else if(exact && (!isEdit || taxD(party.taxId) !== newTax || _nb(party.branchCode) !== newBr)){
-      if(!confirm(`⛔ ${partyWord}ซ้ำจริง — "${exact.name||'-'}" (${exact.code || exact.extCode || '-'}) เลขภาษี ${exact.taxId||'-'} · ${brLab(newBr)} มีอยู่แล้ว\n\nถ้าเป็นสาขาใหม่ ให้แก้ "เลขสาขา (ภาษี)" ให้ตรงใบกำกับก่อน\nยืนยันสร้างซ้ำจริง (ไม่แนะนำ — เสี่ยงจ่ายเงินซ้ำ/ผิดบัญชี)?`)) return;
+      // 🆕 PDL1 verify 1 (เจ้าของ: ชื่อต่าง เลขเหมือน = ตั้งได้): "ซ้ำจริง" เฉพาะชื่อเดียวกัน · ชื่อต่าง (ไทย/อังกฤษ) = แจ้งกลาง ๆ
+      const _dn = global.ERP.partyDupName;
+      const _sameNmEx = typeof _dn === 'function' ? _dn(exact.name) === _dn(values.name) : _keyOf(exact.name) === _keyOf(values.name);
+      if(_sameNmEx){
+        if(!confirm(`⛔ ${partyWord}ซ้ำจริง — "${exact.name||'-'}" (${exact.code || exact.extCode || '-'}) เลขภาษี ${exact.taxId||'-'} · ${brLab(newBr)} มีอยู่แล้ว\n\nถ้าเป็นสาขาใหม่ ให้แก้ "เลขสาขา (ภาษี)" ให้ตรงใบกำกับก่อน\nยืนยันสร้างซ้ำจริง (ไม่แนะนำ — เสี่ยงจ่ายเงินซ้ำ/ผิดบัญชี)?`)) return;
+      } else if(!confirm(`ℹ️ เลขภาษี+สาขาเดียวกับ "${exact.name||'-'}" (${exact.code || exact.extCode || '-'} · ${brLab(newBr)}) แต่ชื่อต่าง (เช่น ชื่อไทย/อังกฤษ) — ตั้งได้\nตรวจว่าไม่ใช่รายเดิม แล้วกดตกลง`)) return;
     } else if(!isEdit && sameTax.length){
       const brs = [...new Set(sameTax.map(s => _nb(s.branchCode) || 'ไม่ระบุ'))].sort().join(', ');
       // ③ บริษัทเดิม สาขาใหม่ → แจ้งเพื่อทราบ
@@ -126874,6 +127063,7 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
       if(_wn){ data.whtPersonName = _wn; if(_wp) data.whtPersonPrefix = _wp; else delete data.whtPersonPrefix; }
       else { delete data.whtPersonName; delete data.whtPersonPrefix; }
     }
+    if(!isEdit && typeof global.ERP.partyNotePending === 'function') global.ERP.partyNotePending(addAction === 'ADD_SUPPLIER' ? 'supplier' : 'customer', data);   // 🆕 PDL1 UAT S2
     dispatch({ type: isEdit ? updateAction : addAction, data });
     if(_cbOn && cbr !== _cbLive) dispatch({ type:'SET_SUPPLIER_COST_BRANCH', data:{ supplierId:data.id, branch:cbr || null, id:genId('scb'), at:Date.now(), by:costBranch.user.username } });   // 🆕 BRANCH_EXPENSE_REPORT verify 3
     if(typeof onSaved === 'function') onSaved(data);   // 🆕 ให้ผู้เรียก (quick-add) เลือกอัตโนมัติ
@@ -126905,7 +127095,8 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
                   inputMode: (splitOn && f.k === 'taxId') ? 'numeric' : undefined,
                   className: cls('w-full px-3 py-2 border-2 rounded', splitOn ? 'text-[16px]' : 'text-sm', f.mono && 'font-mono', (f.k === 'taxId' && taxErr) && 'border-red-400') }),
                   // UAT S3: ข้อความเลขภาษีไม่ครบ ใต้ช่อง
-                  (f.k === 'taxId' && taxErr) ? h('div', { 'data-tid':'pf-tax-err', className:'text-xs text-red-700 mt-1' }, '⛔ ' + taxErr) : null)
+                  (f.k === 'taxId' && taxErr) ? h('div', { 'data-tid':'pf-tax-err', className:'text-xs text-red-700 mt-1' }, '⛔ ' + taxErr) : null,
+                  (f.k === 'taxId') ? _pdlBox : null)
         );
   // 🆕 PARTY-FORM preview หัวเอกสาร (C.6: "เดิม:" เฉพาะเมื่อ clean(ใหม่) ≠ clean(ทะเบียน))
   let _preview = null;
@@ -126920,6 +127111,48 @@ function PartyEditModal({ title, party, fields, dispatch, addAction, updateActio
     _preview = h(PartyDocPreview, { name:pv.name, address:pv.address, branchText:brText, taxId:pv.taxId,
       oldLine: oldChanged ? [String(party.name == null ? '' : party.name).trim() || '—', String(party.address == null ? '' : party.address).trim()] : null, warns });
   }
+  // 🆕 PDL1 (เจ้าของ 5 พ.ย.): ตรวจซ้ำสด ๆ ระหว่างพิมพ์ — แดง = ชื่อ+เลขภาษี+สาขาตรงรายเดิม (บันทึกไม่ได้) · เหลือง = เลขเหมือนชื่อต่าง / ชื่อเหมือนเลขต่าง (ตั้งได้)
+  let _pdl = null;
+  if(typeof global.ERP.findPartyDup === 'function' && addAction !== undefined){
+    try {
+      const _sup = addAction === 'ADD_SUPPLIER', _pk = _sup ? 'supplier' : 'customer';
+      const _L = (Array.isArray(existing) ? existing : (((global.ERP.__getState && global.ERP.__getState()) || {})[_sup ? 'suppliers' : 'customers'] || []))
+        .filter(x => x && x.active !== false && !(party && x.id === party.id));
+      const _nx = { ...(party || {}), ..._pfCompose() };
+      const _keyCh = !isEdit || party.active === false || global.ERP.partyDupKey(party) !== global.ERP.partyDupKey(_nx);
+      const _blk = _keyCh ? global.ERP.findPartyDup({ [_sup ? 'suppliers' : 'customers']: _L }, _pk, _nx, party && party.id) : null;
+      const _t = String(_nx.taxId == null ? '' : _nx.taxId).replace(/\D/g, ''), _n = global.ERP.partyDupName(_nx.name);
+      const _soft = [];
+      if(!_blk && _keyCh){
+        const _sameTax = _t.length === 13 ? _L.filter(x => String(x.taxId || '').replace(/\D/g, '') === _t && global.ERP.partyDupName(x.name) !== _n) : [];
+        const _sameName = _n ? _L.filter(x => global.ERP.partyDupName(x.name) === _n && String(x.taxId || '').replace(/\D/g, '') !== _t) : [];
+        // 🆕 PDL1 verify 1: เลขภาษีซ้ำ + ยังไม่กรอกสาขา → ด่าน ② ตอนบันทึกบังคับกรอกเลขสาขา — บอกตั้งแต่ตอนนี้ (ไม่ให้ "ตั้งได้" แล้วโดนกั้น)
+        const _needBr = hasBrField && _t.length === 13 && !global.ERP.normalizeBranchCode(_nx.branchCode) && !(allowSameTax && !isEdit) && (!isEdit || String(party.taxId || '').replace(/\D/g, '') !== _t)
+          && _L.some(x => String(x.taxId || '').replace(/\D/g, '') === _t);
+        const _brHint = ' — กรอกเลขสาขา (ภาษี) ก่อนบันทึก (หน่วยงานย่อยส่วนใหญ่ = 00000)';
+        if(_sameTax.length) _soft.push('มีรายชื่อเลขภาษีนี้อยู่แล้ว: ' + _sameTax.slice(0, 3).map(x => x.name || x.code || x.id).join(', ') + (_sameTax.length > 3 ? ' …' : '') + ' — ตั้งได้ (เช่น ชื่อไทย/อังกฤษ · คณะในหน่วยงานเดียวกัน)' + (_needBr ? _brHint : ''));
+        else if(_needBr) _soft.push('มีรายชื่อเลขภาษีนี้อยู่แล้ว (คนละสาขา)' + _brHint);
+        if(_sameName.length) _soft.push('มีชื่อนี้อยู่แล้วแต่เลขภาษีต่าง: ' + _sameName.slice(0, 3).map(x => (x.name || '-') + ' (' + (x.taxId || 'ไม่มีเลข') + ')').join(', ') + ' — ตั้งได้');
+      }
+      if(_blk || _soft.length) _pdl = { kind:_pk, blk:_blk, soft:_soft };
+    } catch(e){ _pdl = null; }
+  }
+  const _pdlOpen = (dp) => {
+    if(typeof onOpenExisting === 'function') return onOpenExisting(dp, addAction === 'ADD_SUPPLIER' ? 'SP' : 'CS');
+    // 🆕 PDL1 UAT S1: quick-add ในเอกสาร (PO/PI/สัญญา/ใบกำกับขาย/ผู้ถูกหัก) ส่ง onSaved มา → ✅ ใช้รายนี้ = เลือกรายเดิมในเอกสาร + ปิดฟอร์ม (ไม่พาออกจากเอกสาร · ไม่ต้องมีสิทธิ์ตั้งค่า)
+    if(typeof onSaved === 'function'){ onSaved(dp); onClose && onClose(); return; }
+    const sc = addAction === 'ADD_SUPPLIER' ? 'suppliers' : 'customers';
+    if(global.ERP.goTarget && global.ERP.goTarget({ tab:'settings', subs:{ settings:sc }, focus:{ scope:'settings.' + sc, ids:[dp.id], todo:'รายเดิมที่ชื่อ + เลขภาษี + สาขาตรงกัน', src:'pdl1' } })) onClose && onClose();
+  };
+  const _pdlBox = _pdl ? h('div', { 'data-tid':'pf-pdl', className:'mt-1 space-y-1' },
+    _pdl.blk && h('div', { 'data-tid':'pf-pdl-block', className:'text-xs text-red-800 bg-red-50 border border-red-300 rounded px-2 py-1.5' },
+      h('div', null, '⛔ ซ้ำกับรายเดิม — "' + (_pdl.blk.name || '-') + '" · เลขภาษี ' + (_pdl.blk.taxId || '-') + ' · '
+        + ((global.ERP.normalizeBranchCode(_pdl.blk.branchCode) || '00000') === '00000' ? 'สำนักงานใหญ่ 00000' : 'สาขา ' + global.ERP.normalizeBranchCode(_pdl.blk.branchCode)) + ' — บันทึกไม่ได้'),
+      h('div', { className:'flex items-center gap-2 mt-1' },
+        h('button', { type:'button', 'data-tid':'pf-pdl-open', onClick:() => _pdlOpen(_pdl.blk), className:'px-2 py-0.5 rounded border border-red-400 bg-white text-red-800 hover:bg-red-100' },
+          (typeof onOpenExisting !== 'function' && typeof onSaved === 'function') ? '✅ ใช้รายนี้' : '📂 เปิดรายเดิม'),
+        h('span', { className:'text-red-700' }, 'ถ้าเป็นคนละสาขา แก้เลขสาขา (ภาษี) ให้ตรงใบกำกับ'))),
+    _pdl.soft.map((s, i) => h('div', { key:i, 'data-tid':'pf-pdl-soft', className:'text-xs text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1' }, '⚠️ ' + s))) : null;
   const _docKey = isEdit ? ((addAction === 'ADD_SUPPLIER' ? 'sup' : 'cus') + ':' + party.id) : undefined;
   // WHT-PAYEE CHANGELOG รอบ 3: ช่องชื่อบุคคลตามบัตร (WP1) เอาออก — ผู้ถูกหักเลือกจากทะเบียนคู่ค้า (ชิปผู้ถูกหักตอนคีย์ WHT) · ข้อมูลเก่ายังอ่านได้
   // ➕ เพิ่มเจ้าของร้าน (allowSameTax): เลขภาษีซ้ำกับร้าน = เตือน ไม่บล็อก
@@ -128336,6 +128569,7 @@ function ImportCSVTab({ state, dispatch }){
     const errors = [];
     const taxBad = [];   // UAT M1: แถวเลขภาษีไม่ครบ 13 หลัก (แสดงแดงครบทุกแถว)
     const notes = [];    // 🆕 LSS3 D6
+    const pdlDup = [], pdlSeen = [];   // 🆕 PDL1: แถวชื่อ+เลขภาษี+สาขาซ้ำ (ข้าม) · แถวที่ผ่านแล้วในไฟล์
     if(csvHasMojibake(text)) errors.push('⚠️ ไฟล์อาจไม่ใช่ UTF-8 (ภาษาไทยเพี้ยน) — Save As → CSV UTF-8 ก่อนนำเข้า');
     for(let i=1; i<lines.length; i++){
       const cells = parseCSVLine(lines[i]);
@@ -128359,11 +128593,25 @@ function ImportCSVTab({ state, dispatch }){
           ? `บรรทัด ${i+1}: ${row.name} · เลขภาษี "${row.taxId}" — หลักตรวจสอบไม่ตรง (พิมพ์ผิด 1 ตัว?) นำเข้าพร้อมเลขนี้ (ติดธง ต้องแก้)`
           : `บรรทัด ${i+1}: ${row.name} · เลขภาษี "${row.taxId}" (${n} หลัก) — ไม่ครบ 13 หลัก นำเข้าพร้อมเลขนี้ (ติดธง ต้องแก้)`);
       }
+      // 🆕 PDL1 (เจ้าของ 5 พ.ย.): ชื่อ + เลขภาษี 13 หลัก + สาขา ตรงรายเดิม (หรือแถวก่อนหน้าในไฟล์) = ข้ามแถว + แสดงในพรีวิว (reducer ก็ปฏิเสธซ้ำอีกชั้น)
+      if((type === 'suppliers' || type === 'customers') && typeof global.ERP.findPartyDup === 'function'){
+        let _pd = null; try { _pd = cfg.transform ? cfg.transform(row, state) : row; } catch(e){ _pd = row; }
+        _pd = { ...(_pd || row), id: undefined };
+        const _pk = type === 'customers' ? 'customer' : 'supplier';
+        const _hit = global.ERP.findPartyDup(state, _pk, _pd, '__none__')
+          || global.ERP.findPartyDup({ [type]: pdlSeen }, _pk, _pd, '__none__');
+        if(_hit){
+          const _br = global.ERP.normalizeBranchCode(_hit.branchCode) || '00000';
+          pdlDup.push(`บรรทัด ${i+1}: ${row.name} · เลขภาษี ${row.taxId} · ${_br === '00000' ? 'สำนักงานใหญ่' : 'สาขา ' + _br} — ซ้ำกับ "${_hit.name}"${_hit._csvLine ? ' (บรรทัด ' + _hit._csvLine + ' ในไฟล์)' : ' (' + (_hit.code || _hit.extCode || 'มีในระบบ') + ')'} → ข้าม`);
+          continue;
+        }
+        pdlSeen.push({ ..._pd, id:'__csv' + i, _csvLine: i + 1 });
+      }
       rows.push(row);
       // 🆕 LSS3 D6: ข้อความพรีวิวต่อแถว (สินค้า: หน่วยกรัม / หน่วยที่ข้าม)
       if(cfg.rowNotes) cfg.rowNotes(row, state).forEach(n => notes.push({ ...n, msg:`บรรทัด ${i+1}: ${row.code} · ${n.msg}` }));
     }
-    return { headers, rows, errors, taxBad, notes };
+    return { headers, rows, errors, taxBad, notes, pdlDup };
   };
 
   const doParse = () => {
@@ -128504,6 +128752,10 @@ function ImportCSVTab({ state, dispatch }){
       (preview.taxBad || []).length > 0 && h('div', { className:'px-3 py-2 bg-red-100 text-xs text-red-800 border-b max-h-40 overflow-y-auto', 'data-testid':'csv-taxbad' },
         h('div', { className:'font-bold mb-1' }, `⚠️ เลขผู้เสียภาษีไม่ถูกต้อง (ไม่ครบ 13 หลัก/หลักตรวจสอบไม่ตรง) ${preview.taxBad.length} แถว — นำเข้าพร้อมเลขนี้ แล้วขึ้นชิป "⚠️ เลขภาษีไม่ถูกต้อง" (ตั้งค่า → 🤝 คู่ค้า) + หน้างานค้าง ต้องแก้ก่อนบันทึกครั้งถัดไป · หรือแก้เลขในไฟล์ก่อนนำเข้า`),
         h('ul', { className:'list-disc ml-5' }, preview.taxBad.map((e,i) => h('li', { key:i }, e)))),
+      // 🆕 PDL1: แถวที่ชื่อ + เลขภาษี + สาขา ซ้ำรายเดิม/แถวก่อนหน้า → ข้าม (ไม่นำเข้า)
+      (preview.pdlDup || []).length > 0 && h('div', { className:'px-3 py-2 bg-red-50 text-xs text-red-800 border-b max-h-40 overflow-y-auto', 'data-testid':'csv-pdl-dup' },
+        h('div', { className:'font-bold mb-1' }, `⛔ ข้าม ${preview.pdlDup.length} แถว — ชื่อ + เลขผู้เสียภาษี + สาขา ซ้ำกับรายที่มีอยู่ (คนละสาขา → ใส่เลขสาขาในไฟล์ให้ตรงใบกำกับ)`),
+        h('ul', { className:'list-disc ml-5' }, preview.pdlDup.map((e,i) => h('li', { key:i }, e)))),
       preview.rows.length > 0 && h('div', { className:'overflow-x-auto max-h-64' },
         h('table', { className:'w-full text-xs' },
           h('thead', { className:'bg-gray-50 sticky top-0' },
