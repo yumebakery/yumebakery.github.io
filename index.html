@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="e2966aa093d3";window.__ERP_BUILT_AT__="2026-11-05T15:49:27";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="36ce86a3c0e1";window.__ERP_BUILT_AT__="2026-11-05T17:15:36";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -1584,11 +1584,15 @@ function prepSetNeeds(state, branchId, opts){
   //   ไม่ส่ง = ทุกใบเหมือนเดิม (ด่าน D / prepSetPlanCheck ไม่ใช้ช่วงวัน)
   const until = /^\d{4}-\d{2}-\d{2}$/.test(String(o0.untilDate || '')) ? String(o0.untilDate) : null;
   const since = /^\d{4}-\d{2}-\d{2}$/.test(String(o0.sinceDate || '')) ? String(o0.sinceDate) : null;
+  // 🆕 WNQ2 UAT S3: opts.keepIds (Set/array) = ใบที่ไม่ข้ามแม้ plannedDate ก่อน sinceDate (ใบเริ่มเองกะดึกยังไม่เกิน 12 ชม.) — ผู้เรียกฝั่งจอส่งมา
+  const keep = o0.keepIds ? (o0.keepIds instanceof Set ? o0.keepIds : new Set(o0.keepIds)) : null;
+  // 🆕 WNQ2 verify 1: opts.skipIds = ใบเริ่มเองค้างเกิน 12 ชม. (พับเข้า 🗂 แล้ว) → ข้าม batch ที่ยังไม่เริ่มแม้ plannedDate = วันนี้ (สร้าง 07:30 ดู 19:31)
+  const skip = o0.skipIds ? (o0.skipIds instanceof Set ? o0.skipIds : new Set(o0.skipIds)) : null;
   for(const o of orders){
     if(!o.lineId || (o0.lineId && o.lineId !== o0.lineId)) continue;
     const pd = String(o.plannedDate || '').slice(0, 10);
     if(until && pd && pd > until) continue;
-    const stale = !!(since && pd && pd < since && o.status === 'planned');
+    const stale = !!((since && pd && pd < since && o.status === 'planned' && !(keep && keep.has(o.id))) || (skip && skip.has(o.id)));
     for(const u of _psUnits(o)){
       if(_psDone(state, o, u)) continue;
       const started = _psStarted(u);
@@ -1633,6 +1637,18 @@ function prepSetWindow(today){
   const t0 = Date.parse(d0 + 'T00:00:00Z');
   if(!(t0 > 0)) return {};
   return { sinceDate: d0, untilDate: new Date(t0 + 86400000).toISOString().slice(0, 10) };
+}
+// 🆕 WNQ2 verify 1: ช่วงวันของจอ (แถบ A · B2 · คิวชั่ง · 🔔 · งานค้าง ใช้ตัวเดียวกัน) — ตามกฎ 12 ชม. หลังสร้างใบ
+//   keepIds = ใบเริ่มเองกะดึกที่ยังไม่เกิน 12 ชม. (วันผลิต = เมื่อวาน ยังนับ) · skipIds = ใบเริ่มเองค้างเกิน 12 ชม. (วันผลิต = วันนี้ ก็ไม่นับ)
+//   today ไม่ใช่วันนี้จริง (เทสต์/ดูวันอื่น) และไม่ส่ง nowMs = ช่วงวันล้วนเหมือนเดิม · ห้ามใช้ในด่าน D / prepSetPlanCheck / reducer
+function prepSetWinNow(state, today, nowMs){
+  const t = String(today || getToday()).slice(0, 10);
+  const w = { ...(prepSetWindow(t) || {}) };
+  const now = Number(nowMs) > 0 ? Number(nowMs) : (t === getToday() ? Date.now() : 0);
+  if(!w.sinceDate || !now) return w;
+  w.keepIds = freshSelfStartIds(state, now) || [];
+  try { w.skipIds = (staleUnstartedSelfStart(state, null, { now }) || []).map(o => o.id); } catch(_e){ w.skipIds = []; }
+  return w;
 }
 // ใบที่ไม่อยู่ในช่วง (ล่วงหน้า/เลยกำหนดค้าง) ใช้ชุดเท่าไร → [{ itemId, lineId, name, setBomName, needed, orders }] (needed ทั้งหมด − ในช่วง)
 function prepSetOutOfWindow(state, branchId, opts){
@@ -3186,18 +3202,25 @@ function _lssUnstarted(o){
 }
 // ใบเริ่มเองของผู้ใช้นี้ สูตร+ขนาดเดียวกัน วันเดียวกัน ที่ยังไม่เริ่ม (กันกดซ้ำ — หน้าจอ + reducer ใช้ตัวเดียวกัน) → order | null
 //   exceptId = id ของใบที่กำลังเพิ่ม (ไม่นับตัวเอง)
-function findSelfStartDup(state, user, bomId, profileId, branchId, date, exceptId){
+//   🆕 WNQ2 verify 1: opts.now (ms · จอส่ง Date.now()) = ใบที่สร้างมายังไม่เกิน 12 ชม. นับเป็นใบซ้ำด้วยแม้วันผลิต = เมื่อวาน (กะดึก 22:00 → 01:00)
+//   ไม่ส่ง opts (reducer) = เทียบวันผลิตอย่างเดียวเหมือนเดิม
+function _ssDupDay(o, date, opts){
+  if(String(o.plannedDate || '').slice(0, 10) === String(date || '').slice(0, 10)) return true;
+  const now = Number(opts && opts.now) || 0, c = _ssCreatedMs(o);
+  return !!(now > 0 && c > 0 && c <= now && (now - c) <= SELF_START_STALE_MS);
+}
+function findSelfStartDup(state, user, bomId, profileId, branchId, date, exceptId, opts){
   const un = (user && user.username) || user;
   return ((state && state.productionOrders) || []).find(o => o && o.createdVia === 'self_start' && o.id !== exceptId && o.createdBy === un
-    && o.bomId === bomId && o.branchId === branchId && String(o.plannedDate || '').slice(0, 10) === String(date || '').slice(0, 10)
+    && o.bomId === bomId && o.branchId === branchId && _ssDupDay(o, date, opts)
     && ((o.selfStart && o.selfStart.profileId) || null) === (profileId || null) && _lssUnstarted(o)) || null;
 }
 // 🆕 LSS4 P1: ทุกใบที่เข้าเกณฑ์ findSelfStartDup (เรียงตามเวลาสร้าง) → หน้าจอแสดงรายการให้เลือก "➡️ ไปใบนี้" หรือ "➕ สร้างอีกใบ"
 //   ใบที่ยกเลิก/เริ่มแล้ว ไม่นับ (_lssUnstarted)
-function findSelfStartDups(state, user, bomId, profileId, branchId, date, exceptId){
+function findSelfStartDups(state, user, bomId, profileId, branchId, date, exceptId, opts){
   const un = (user && user.username) || user;
   return ((state && state.productionOrders) || []).filter(o => o && o.createdVia === 'self_start' && o.id !== exceptId && o.createdBy === un
-    && o.bomId === bomId && o.branchId === branchId && String(o.plannedDate || '').slice(0, 10) === String(date || '').slice(0, 10)
+    && o.bomId === bomId && o.branchId === branchId && _ssDupDay(o, date, opts)
     && ((o.selfStart && o.selfStart.profileId) || null) === (profileId || null) && _lssUnstarted(o))
     .sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0));
 }
@@ -3234,30 +3257,61 @@ function prodOrderName(state, o, noFallbackNo){
   const b = o.bomId ? ((state && state.boms) || []).find(x => x && x.id === o.bomId) : null;
   return String(o.productName || out0.productName || (it && it.name) || (b && (b.name || b.productName)) || o.bomName || (noFallbackNo ? '' : (o.orderNumber || o.id)) || '').trim();
 }
-// 🆕 WNQ1 N4: ใบเริ่มเองที่ค้างจากวันก่อน (planned ยังไม่เริ่ม · วันผลิต/วันสร้าง < วันนี้) ที่ผู้ใช้เห็น
-//   → [order] เรียงเก่าก่อน · ไม่ยกเลิกอัตโนมัติ (คำตอบเจ้าของ ก) · opts.branchId / opts.lineIds กรองเพิ่ม · opts.today ใช้ในเทสต์
+// 🆕 WNQ1 N4 + WNQ2: ใบเริ่มเองที่ค้างเกิน 12 ชม. (planned ยังไม่เริ่ม · สร้างมาแล้ว > SELF_START_STALE_MS · วันผลิตไม่ใช่วันอนาคต) ที่ผู้ใช้เห็น
+//   → [order] เรียงเก่าก่อน · ไม่ยกเลิกอัตโนมัติ (คำตอบเจ้าของ ก) · opts.branchId / opts.lineIds กรองเพิ่ม
+//   WNQ2 (เจ้าของ 5 พ.ย. ตอบ ข): กะข้ามคืนนับค้างเมื่อเกิน 12 ชม. หลังสร้างใบ (ไม่ใช่ข้ามเที่ยงคืน)
+//   เวลาอ้างอิง: opts.now (ms · ใช้ในเทสต์) → ถ้าไม่ส่ง now แต่ส่ง opts.today ที่ไม่ใช่วันนี้จริง = ใช้กฎวันเดิม (เทสต์เก่า)
+//   → นอกนั้น now = Date.now() · ใบไม่มี createdAt ที่ใช้ได้ → กฎวันเดิม (วันผลิต/วันสร้าง < วันนี้)
+const SELF_START_STALE_MS = 12 * 3600e3;
+function _ssCreatedMs(o){
+  const c = o && o.createdAt;
+  if(c == null || c === '') return 0;
+  const n = typeof c === 'number' ? c : (/^\d+$/.test(String(c)) ? Number(c) : Date.parse(String(c)));
+  return n > 0 ? n : 0;
+}
+function _ssLocalDay(ms){ const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function staleUnstartedSelfStart(state, user, opts){
   const op = opts || {};
-  const t0 = String(op.today || getToday()).slice(0, 10);
+  const realToday = getToday();
+  const nowMs = (Number(op.now) > 0) ? Number(op.now) : ((op.today && String(op.today).slice(0, 10) !== realToday) ? 0 : Date.now());
+  const t0 = nowMs ? _ssLocalDay(nowMs) : String(op.today || realToday).slice(0, 10);
   const lf = (op.lineIds && op.lineIds.length) ? new Set(op.lineIds) : null;
   const dayOf = (o) => {
     const p = String(o.plannedDate || '').slice(0, 10);
     if(/^\d{4}-\d{2}-\d{2}$/.test(p)) return p;
-    const n = Number(o.createdAt);
-    if(!(n > 0)) return '';
-    const d = new Date(n);
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    const n = _ssCreatedMs(o);
+    return n ? _ssLocalDay(n) : '';
+  };
+  const isStale = (o) => {
+    const d = dayOf(o);
+    const c = _ssCreatedMs(o);
+    if(nowMs && c){
+      const p = String(o.plannedDate || '').slice(0, 10);
+      if(/^\d{4}-\d{2}-\d{2}$/.test(p) && p > t0) return false;   // วันผลิตอนาคต ไม่ค้าง
+      return (nowMs - c) > SELF_START_STALE_MS;
+    }
+    return !!d && d < t0;   // กฎวันเดิม (ไม่มี createdAt / เทสต์ส่ง today อย่างเดียว)
   };
   return ((state && state.productionOrders) || []).filter(o => {
     if(!o || o.createdVia !== 'self_start' || o.status !== 'planned' || !_lssUnstarted(o)) return false;
     if(op.branchId && o.branchId !== op.branchId) return false;
-    const d = dayOf(o);
-    if(!d || d >= t0) return false;
+    if(!isStale(o)) return false;
     if(lf && !weighJobLines(state, o).concat(o.lineId ? [o.lineId] : []).some(id => lf.has(id))) return false;
     if(!user) return true;
     const un = user.username || user;
     return o.createdBy === un || weighJobVisibleTo(state, user, o) || canCancelUnstartedSelfStart(state, user, o);
-  }).sort((a, b) => (dayOf(a) < dayOf(b) ? -1 : dayOf(a) > dayOf(b) ? 1 : (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0)));
+  }).sort((a, b) => (dayOf(a) < dayOf(b) ? -1 : dayOf(a) > dayOf(b) ? 1 : _ssCreatedMs(a) - _ssCreatedMs(b)));
+}
+// 🆕 WNQ2 UAT S3: ใบเริ่มเอง planned ยังไม่เริ่ม ที่สร้างมายังไม่เกิน 12 ชม. (ยังไม่ค้าง) → [id] · ใช้เป็น keepIds ของ prepSetNeeds ช่วงวัน
+//   nowMs ผู้เรียกส่งมา (จอ/🔔) — ไม่เรียกใน reducer
+function freshSelfStartIds(state, nowMs){
+  const now = Number(nowMs) > 0 ? Number(nowMs) : 0;
+  if(!now) return [];
+  return ((state && state.productionOrders) || []).filter(o => {
+    if(!o || o.createdVia !== 'self_start' || o.status !== 'planned' || !_lssUnstarted(o)) return false;
+    const c = _ssCreatedMs(o);
+    return c > 0 && (now - c) <= SELF_START_STALE_MS;
+  }).map(o => o.id);
 }
 function prodOrderSize(o){ return String((o && o.selfStart && o.selfStart.profileLabel) || '').trim(); }
 // opts.withNo = true → ต่อท้าย "(PROD-…)" สำหรับข้อความล้วน (toast/confirm) — บนจอให้แสดงเลขเป็นตัวเล็กแยกเอง
@@ -9278,6 +9332,203 @@ function findDupTaxInv(state, doc, { number, excludeInvId, excludeTi, excludeIds
   }
   return out;
 }
+// 🆕 DUP_SUPINV_BLOCK (DSI1 · เจ้าของ 5 พ.ย. "ใช่"): ผู้ขายเดียวกัน + เลขใบแจ้งหนี้/ใบกำกับซ้ำ = ห้ามบันทึก (ทุกบิล มี/ไม่มี VAT)
+//   ใบยกเลิก/โมฆะทุกรูปแบบ (VOID_INV: voided+voidedAt+paymentStatus 'voided' · ข้อมูลเก่า status 'voided'/'cancelled') = ไม่นับ
+function invIsVoidedAny(i){ return !!i && (i.voided === true || !!i.voidedAt || i.status === 'voided' || i.status === 'cancelled' || i.paymentStatus === 'voided'); }
+// เลขเอกสารทุกช่องของใบ (เลขใบแจ้งหนี้ · เลขใบกำกับ · ใบกำกับเพิ่ม supTaxInvMore ที่ยังไม่ลบ) → [{ field, raw, norm }] · '-' = ไม่กรอก
+// 🆕 DSI1 UAT S6: คำแทน "ไม่มีเลข" ที่ร้านตลาดชอบใส่ (0 · ไม่มี · รอ · N/A · NONE · -) = ไม่กรอก → ไม่เทียบ/ไม่บล็อก
+const _DSI_BLANK_NOS = new Set(['', '0', 'ไม่มี', 'ไม่มีเลข', 'รอ', 'NA', 'NONE', 'NULL']);
+function dupSupInvIsBlankNo(raw){ const r = String(raw == null ? '' : raw).trim(); if(!r || r === '-') return true; return _DSI_BLANK_NOS.has(normTaxInvNo(r)); }
+function dupSupInvNumbers(i){
+  const out = [], add = (field, raw) => { const r = String(raw == null ? '' : raw).trim(); if(dupSupInvIsBlankNo(r)) return; const n = normTaxInvNo(r); if(n) out.push({ field, raw: r, norm: n }); };
+  if(!i) return out;
+  add('supInvNumber', i.supInvNumber); add('supTaxInvNumber', i.supTaxInvNumber);
+  for(const e of (Array.isArray(i.supTaxInvMore) ? i.supTaxInvMore : [])) if(e && !e.removedAt) add('supTaxInvMore', e.number);
+  return out;
+}
+// hook ชุดผูกใบกำกับรวม (TIS1 · อนาคต) — คืน true = ใบคู่นี้ตั้งใจใช้เลขร่วมกัน · ตอนนี้ยังไม่มีชุดแบบนี้ → false เสมอ (ห้ามอ่านธงจาก payload)
+function dupSupInvShareExempt(state, doc, c){ return false; }
+// 🆕 DSI1 UAT S3: ใบแยกตาม WHT เก็บเลขใบแจ้งหนี้เป็น X/1, X/2 (บิลจริงใบเดียว = X) → เลขฐาน X ใช้เทียบด้วย
+//   เฉพาะใบที่มี splitGroup + supInvNumber ลงท้าย '/'+เลข เท่านั้น (ห้ามตัดท่อนท้ายของเลขทั่วไป: 2569/051/06 ≠ 2569/051/05)
+function dupSupInvSplitBase(i, raw){
+  if(!i || !i.splitGroup) return null;
+  const r = String(raw != null ? raw : (i.supInvNumber || '')).trim(), m = r.match(/^(.+?)\s*\/\s*\d{1,2}$/);
+  if(!m || raw != null && r !== String(i.supInvNumber || '').trim()) return null;
+  const n = normTaxInvNo(m[1].trim()); return n ? { field: 'supInvNumber', raw: r, norm: n } : null;
+}
+// 🆕 DSI1 verify 1: key ชื่อผู้รับเงิน/ผู้ขาย — แบบเดียวกับ _taxInvFallbackKey (NFKC · ตัวเล็ก · ตัดช่องว่าง . , ( ) -)
+function dupSupInvNameKey(x){ let t = String(x == null ? '' : x); try { t = t.normalize('NFKC'); } catch(_e){} return t.toLowerCase().replace(/[\s.,()\-]/g, ''); }
+// มัดจำ↔ใบสุดท้ายของ PO เดียวกัน: ฝั่ง deposit_pi ต้องมี depositId ที่มีจริงใน state.deposits (PO + ผู้ขายตรง) — ไม่เชื่อ type/poId จาก payload
+function _dsiDepPairOk(state, doc, c){
+  if((doc.type === 'deposit_pi') === (c.type === 'deposit_pi') || !doc.poId || c.poId !== doc.poId) return false;
+  const dp = doc.type === 'deposit_pi' ? doc : c;
+  const dep = dp.depositId && ((state && state.deposits) || []).find(x => x && x.id === dp.depositId);
+  return !!dep && dep.poId === doc.poId && dep.supplierId === dp.supplierId;
+}
+// ชุดเดียวกันที่ตั้งใจ (ไม่นับเป็นเลขซ้ำ) · ใบใหม่ (ยังไม่อยู่ใน state) ไม่เชื่อ splitGroup/grId/createdAt จาก payload เต็มที่:
+//   (1) เลขใบแจ้งหนี้ชนกัน = ไม่ยกเว้นชุดแยกใบ (ใบแยก WHT จริงใช้ X/1, X/2 เสมอ — ยกเว้นเฉพาะเลขใบกำกับที่ใช้ร่วม)
+//   (2) ชุดแยกใหม่ 'spl_' เท่านั้น (ข้อมูลเก่าไม่ใช่ทางสร้างใบใหม่) · (3) ใบพี่น้องจ่ายแล้ว/อยู่ในชุดแยกที่ปิดแล้วของ GR/PO = ชุดปิด
+function _dsiSetExempt(state, doc, c, m, docNew, nos){
+  if(_dsiDepPairOk(state, doc, c) || _groupExempt(state, doc, c) || dupSupInvShareExempt(state, doc, c)) return true;
+  if(!docNew) return _splitExempt(state, doc, c);
+  const k = dupSupInvIsBlankNo(doc.supInvNumber) ? '' : normTaxInvNo(String(doc.supInvNumber || '').trim());
+  if(m.field === 'supInvNumber' || (k && nos.some(x => x.norm === k) && dupSupInvNumbers(c).some(x => x.norm === k))) return false;
+  if(!String(doc.splitGroup || '').startsWith('spl_') || !_splitExempt(state, doc, c)) return false;
+  if((Number(c.paidAmount) || 0) > 0.005 || c.paymentStatus === 'paid' || c.paymentStatus === 'partial') return false;
+  // (GR.invoiceId ตั้งตั้งแต่ใบแยกใบแรก → ใช้ splitInvoiceIds ที่ตั้งหลังสร้างครบชุดเท่านั้น)
+  const closed = x => !!x && Array.isArray(x.splitInvoiceIds) && x.splitInvoiceIds.includes(c.id) && !x.splitInvoiceIds.includes(doc.id);
+  return !(((state && state.grs) || []).some(closed) || ((state && state.pos) || []).some(closed));
+}
+// คืน [hit] · hit = { id, invNumber, supInvNumber, number, field, paymentStatus, paidAmount, netPayable, createdBy, viaTaxId }
+//   opts.numbers = เลขที่จะตรวจ (ไม่ส่ง = ทุกเลขบน doc) · excludeInvId = ตัวเอง · excludeIds = ใบชุดเดียวกันที่ตั้งใจ (ยังไม่อยู่ใน state เท่านั้น)
+//   opts.pending = ใบในรอบเดียวกันที่ยังไม่ dispatch (เทียบกันเองด้วย) · ใบเดิมที่อยู่ใน state แล้วยกเว้นด้วย excludeIds ไม่ได้
+function findDupSupInvBlock(state, doc, opts = {}){
+  if(!doc || _TAX_MEMO_TYPES.includes(doc.type)) return [];   // ใบลด/เพิ่มหนี้ = เลขคนละชุด
+  const nos = (opts.numbers ? opts.numbers.map(r => ({ raw: String(r||'').trim(), norm: normTaxInvNo(String(r||'').trim()) })) : dupSupInvNumbers(doc))
+    .filter(x => x.norm && !dupSupInvIsBlankNo(x.raw));
+  if(!nos.length) return [];
+  const want = new Set(nos.map(x => x.norm));
+  const _dBase = []; for(const x of nos){ const b = dupSupInvSplitBase(doc, x.raw); if(b) _dBase.push(b.norm); }   // 🆕 S3 เลขฐานของใบแยก
+  const wantB = new Set([...want, ..._dBase]);
+  const invs = (state && state.invoices) || [], have = new Set(invs.map(i => i && i.id));
+  const exIds = new Set((opts.excludeIds || []).filter(id => !have.has(id)));
+  const selfId = opts.excludeInvId || doc.id, st = _supTax(state, doc);
+  // 🆕 DSI1 verify 1: ผู้รับเงินชื่ออิสระ (ไม่มีรหัส) → เทียบชื่อ (NFKC · ตัวเล็ก · ตัดช่องว่าง/เครื่องหมาย) กับชื่ออิสระของใบอื่น + ชื่อ/รหัสผู้ขายในทะเบียน
+  //   ใบมีรหัสผู้ขาย → เทียบใบชื่ออิสระที่ชื่อตรงชื่อ/รหัสผู้ขายรายนี้ด้วย
+  const dName = doc.supplierId ? '' : dupSupInvNameKey(doc.supplierNameFreeform);
+  if(!doc.supplierId && !st && !dName) return [];
+  const _sups = (state && state.suppliers) || [];
+  let _nmSupIds = null, _myNames = null;   // คิดครั้งเดียวเมื่อมีเลขชนจริง (ไม่ไล่ suppliers ทุกครั้งที่พิมพ์)
+  const nameSame = c => {
+    if(dName){
+      if(!c.supplierId) return dupSupInvNameKey(c.supplierNameFreeform) === dName;
+      if(!_nmSupIds) _nmSupIds = new Set(_sups.filter(sp => sp && (dupSupInvNameKey(sp.name) === dName || (sp.code && dupSupInvNameKey(sp.code) === dName))).map(sp => sp.id));
+      return _nmSupIds.has(c.supplierId);
+    }
+    if(c.supplierId || !doc.supplierId) return false;
+    if(!_myNames){ const sp = _sups.find(x => x && x.id === doc.supplierId); _myNames = new Set([sp && sp.name, sp && sp.code].map(dupSupInvNameKey).filter(Boolean)); }
+    const k = dupSupInvNameKey(c.supplierNameFreeform); return !!k && _myNames.has(k);
+  };
+  const docNew = !have.has(doc.id);
+  const out = [], seen = new Set(), _stCache = new Map();   // 🆕 S5: _supTax ต่อผู้ขาย คิดครั้งเดียวต่อการเรียก
+  for(const c of [...invs, ...(opts.pending || []).filter(p => p && !exIds.has(p.id))]){
+    if(!c || c.id === selfId || exIds.has(c.id) || seen.has(c.id) || invIsVoidedAny(c) || _TAX_MEMO_TYPES.includes(c.type)) continue;
+    const same = !!doc.supplierId && c.supplierId === doc.supplierId;
+    if(!same && !(st && c.supplierId) && !dName && c.supplierId) continue;   // 🆕 S5: คนละผู้ขาย + ไม่มีเลขภาษี/ชื่อให้เทียบ → ข้ามเร็ว
+    // 🆕 S5: เทียบเลขก่อน (ถูก) แล้วค่อยหาผู้ขาย (แพง) — ไม่ไล่ suppliers ทุกใบทุกครั้งที่พิมพ์
+    let m = dupSupInvNumbers(c).find(x => want.has(x.norm));
+    // 🆕 S3: เทียบเลขฐานของใบแยก (X/1 ↔ X) · ใบในชุดแยกเดียวกันไม่ชนกันเอง
+    if(!m && !(doc.splitGroup && c.splitGroup === doc.splitGroup)){
+      const cb = dupSupInvSplitBase(c);
+      if(cb && wantB.has(cb.norm)) m = cb;
+      else if(_dBase.length){ m = dupSupInvNumbers(c).find(x => _dBase.includes(x.norm)) || null; }
+    }
+    if(!m) continue;
+    let viaTax = false, viaName = false;
+    if(!same){
+      if(st && c.supplierId){
+        if(!_stCache.has(c.supplierId)) _stCache.set(c.supplierId, _supTax(state, c));
+        const cst = _stCache.get(c.supplierId); viaTax = !!(cst && cst.tax === st.tax && cst.br === st.br);
+      }
+      if(!viaTax){ viaName = nameSame(c); if(!viaName) continue; }
+    }
+    // ชุดเดียวกันที่ตั้งใจ: แยกใบ (WHT/segment) จากบิลเดียว · มัดจำ↔ใบสุดท้าย (taxInvGroup) · มัดจำ↔ใบสุดท้ายของ PO เดียวกัน · hook TIS1
+    if(_dsiSetExempt(state, doc, c, m, docNew, nos)) continue;
+    seen.add(c.id);
+    out.push({ id: c.id, invNumber: c.invNumber || '', supInvNumber: c.supInvNumber || '', number: m.raw, field: m.field,
+      paymentStatus: c.paymentStatus || '', paidAmount: Number(c.paidAmount) || 0, netPayable: Number(c.netPayable != null ? c.netPayable : c.amount) || 0,
+      createdBy: c.createdBy || '', viaTaxId: viaTax, viaName, migLate: !!c.migLate,
+      grId: c.grId || '', grIds: Array.isArray(c.grIds) ? c.grIds.slice() : [], inBatch: !have.has(c.id), grNumber: c._dsiGrNumber || '' });   // 🆕 UAT S1
+  }
+  return out;
+}
+// 🆕 DSI1 D2 (หน้าจอ): ด่านเลขใบซ้ำก่อนกดบันทึก — ข้อความแดงชี้ใบเดิม + ปุ่ม "เปิดใบเดิม" · ผจก.บัญชี/GM เห็นช่องติ๊ก "เลขซ้ำจริง (ใบคนละใบ)" + เหตุผล
+//   useDupSupInvGuard(state, user, doc, opts) → { hits, blocked, override, panel, reset } · doc = { id?, supplierId, supInvNumber, supTaxInvNumber }
+//   override = { reason } ส่งไปกับ payload (dupSupInvOverride) — reducer ตรวจสิทธิ์จาก currentUser เอง · blocked = มีเลขชนและยังไม่ได้ข้าม
+// แก้ใบ: เลขที่ "เพิ่มใหม่" เท่านั้น (ตรงกับ _dsiEditGate ของ reducer) · ใบเดิมที่ซ้ำอยู่แล้วแก้ช่องอื่นได้
+function dupSupInvNewNumbers(oldInv, nums){ const have = new Set(dupSupInvNumbers(oldInv).map(x => x.norm));
+  return (nums || []).map(x => String(x == null ? '' : x).trim()).filter(x => !dupSupInvIsBlankNo(x) && normTaxInvNo(x) && !have.has(normTaxInvNo(x))); }
+// 🆕 DSI1 regression: ใบจ่ายแล้ว/จ่ายบางส่วน/มีคำขอจ่าย (รออนุมัติ/อนุมัติแล้ว ยังไม่กลับรายการ) — reducer (_dsiPaidOrRequested) เรียกตัวนี้ตัวเดียว
+function dupSupInvPaidOrRequested(state, inv){
+  if(!inv) return false;
+  if((Number(inv.paidAmount) || 0) > 0.005 || inv.paymentStatus === 'paid' || inv.paymentStatus === 'partial') return true;
+  return ((state && state.payments) || []).some(p => p && !p.reversed && !p.voided && p.approvalStatus !== 'rejected' && p.approvalStatus !== 'cancelled'
+    && (p.invId === inv.id || (p.invoiceIds || []).includes(inv.id) || (p.allocations || []).some(x => x && x.invId === inv.id)));
+}
+// 🆕 DSI1 regression: ตรวจก่อนกดบันทึก (ตรงกับ _dsiEditGate) — เลขที่ "ถูกลบ/เปลี่ยนออก" จากใบเดิม + ใบจ่ายแล้ว → need = ต้อง ผจก.บัญชี/GM + เหตุผล
+//   คีย์ครั้งแรก (ว่าง → มีเลข) = removed ว่าง → ไม่ต้องใช้เหตุผล
+function dupSupInvRemovedPaid(state, oldInv, newInv){
+  if(!oldInv || !newInv || invIsVoidedAny(newInv)) return { removed: [], paid: false, need: false };
+  const newN = new Set(dupSupInvNumbers(newInv).map(x => x.norm));
+  const removed = dupSupInvNumbers(oldInv).filter(x => !newN.has(x.norm)).map(x => x.raw);
+  const paid = removed.length ? dupSupInvPaidOrRequested(state, oldInv) : false;
+  return { removed, paid, need: removed.length > 0 && paid };
+}
+function dupSupInvOpen(id){ try { requestOpenDoc('pi', id, { tab:'accounting', subs:{ acct:'invAll' } }); } catch(_e){} }
+function useDupSupInvGuard(state, user, doc, opts){
+  // doc เป็น array ได้ (ตั้งหนี้หลายแถว) → รวมผลทุกแถว (ไม่ซ้ำใบ)
+  const o = opts || {}, docs = (Array.isArray(doc) ? doc : [doc]).filter(Boolean);
+  const [ov, setOv] = useState({ tick:false, reason:'' });
+  const key = docs.map(d => [d.id || '', d.supplierId || '', d.supplierNameFreeform || '', d.supInvNumber || '', d.supTaxInvNumber || ''].join('|')).join('¦') + '¦' + (o.numbers || []).join('|') + '¦' + (o.excludeIds || []).join('|');
+  const hits = useMemo(() => { try { const out = [], seen = new Set();
+    // 🆕 UAT S1: o.batch = แถวในรอบเดียวกัน (Batch) เทียบกันเองด้วย (doc ต้องมี id ชั่วคราว + _dsiGrNumber)
+    const grNo = id => { const g = id && ((state && state.grs) || []).find(x => x && x.id === id); return (g && g.grNumber) || ''; };
+    for(const d of docs) for(const x of findDupSupInvBlock(state, d, { numbers: o.numbers, excludeInvId: d.id, excludeIds: o.excludeIds, pending: o.batch ? docs : undefined }))
+      if(!seen.has(x.id) && !(x.inBatch && seen.has('pair:' + [x.id, d.id].sort().join('|')))){
+        seen.add(x.id); if(x.inBatch) seen.add('pair:' + [x.id, d.id].sort().join('|'));
+        out.push({ ...x, grNumber: x.grNumber || grNo(x.grId) || (x.grIds || []).map(grNo).filter(Boolean).join(', '),
+          otherGr: !!(x.inBatch || (d.grId && ((x.grId && x.grId !== d.grId) || (!x.grId && (x.grIds || []).length && !(x.grIds || []).includes(d.grId))))) }); }
+    return out; } catch(_e){ return []; } }, [state && state.invoices, state && state.suppliers, key]);
+  const canOv = !!(global.ERP.dupSupInvOverrideOk && global.ERP.dupSupInvOverrideOk(user));
+  const reasonOk = String(ov.reason || '').trim().length >= 10;
+  // 🆕 DSI1 regression: o.next = ใบหลังแก้ (ใบเดิม = doc ตัวแรก) → เปลี่ยน/ลบเลขใบที่จ่ายแล้ว ต้อง ผจก.บัญชี/GM + เหตุผล (ตรงกับ _dsiEditGate)
+  let rm = { removed: [], paid: false, need: false };
+  try { if(o.next && docs[0]) rm = dupSupInvRemovedPaid(state, docs[0], o.next); } catch(_e){}
+  const dupOk = !hits.length || (canOv && ov.tick && reasonOk);
+  const rmOk = !rm.need || (canOv && reasonOk);
+  const blocked = !(dupOk && rmOk);
+  const override = (hits.length || rm.need) && !blocked ? { reason: String(ov.reason).trim() } : null;
+  const tid = o.testid || 'dsi-block';
+  const rmPanel = rm.need ? h(DupSupInvRmPanel, { state, inv: docs[0], removed: rm.removed, canOv, ov, setOv, reasonOk, tid: tid + '-rm' }) : null;
+  const dupPanel = hits.length ? h(DupSupInvPanel, { hits, canOv, ov, setOv, reasonOk, tid, noReason: rm.need }) : null;
+  const panel = dupPanel && rmPanel ? h('div', null, dupPanel, rmPanel) : (dupPanel || rmPanel);
+  return { hits, blocked, override, panel, canOv, rm, reset: () => setOv({ tick:false, reason:'' }) };
+}
+// 🆕 DSI1 regression: กล่องเปลี่ยน/ลบเลขใบที่จ่ายแล้ว — ผจก.บัญชี/GM = กล่องเหลือง+เหตุผล · คนอื่น = ข้อความแดง (บันทึกไม่ได้ ก่อนกด ไม่ใช่ alert หลังกด)
+function DupSupInvRmPanel({ state, inv, removed, canOv, ov, setOv, reasonOk, tid }){
+  const lbl = (global.ERP.dupSupInvPayLabel && global.ERP.dupSupInvPayLabel(state, { id: inv && inv.id, paymentStatus: (inv && inv.paymentStatus) || '', paidAmount: Number(inv && inv.paidAmount) || 0 })) || 'จ่ายแล้ว';
+  const nos = removed.join(', ');
+  if(!canOv) return h('div', { 'data-testid': tid, 'data-dsi-rm':'deny', className:'bg-red-50 border-2 border-red-400 rounded p-2 text-xs text-red-800 my-2' },
+    h('div', { className:'font-bold' }, '⛔ ใบนี้' + lbl + ' — เปลี่ยน/ลบเลข ' + nos + ' เองไม่ได้ (กันคีย์เลขเดิมซ้ำแล้วจ่ายซ้ำ)'),
+    h('div', { className:'mt-1' }, '→ ถ้าเลขเดิมคีย์ผิดจริง: ให้ ผจก.บัญชี/GM เป็นผู้แก้ (ต้องใส่เหตุผล)'));
+  return h('div', { 'data-testid': tid, 'data-dsi-rm':'reason', className:'bg-amber-50 border-2 border-amber-400 rounded p-2 text-xs text-amber-900 my-2' },
+    h('div', { className:'font-bold' }, '⚠️ ใบนี้' + lbl + ' — เปลี่ยนเลขต้องใส่เหตุผล'),
+    h('div', { className:'mt-0.5' }, 'เลขเดิม ' + nos + ' จะถูกเปลี่ยนออก · ระบบลงประวัติการแก้ + ชื่อผู้แก้'),
+    h('textarea', { 'data-testid': tid + '-reason', rows: 2, className:'w-full border border-amber-300 rounded px-2 py-1 mt-1 bg-white text-gray-800',
+      placeholder:'เหตุผลที่เปลี่ยนเลข (อย่างน้อย 10 ตัวอักษร) — เช่น คีย์เลขผิดหลัก ตรวจกับใบจริงแล้ว',
+      value: ov.reason || '', onChange: e => setOv({ ...ov, reason: e.target.value }) }),
+    !reasonOk ? h('div', { className:'text-red-600 mt-0.5' }, 'ใส่เหตุผลอย่างน้อย 10 ตัวอักษร (ปุ่มบันทึกจะกดได้เมื่อครบ)') : null);
+}
+function DupSupInvPanel({ hits, canOv, ov, setOv, reasonOk, tid, noOv, noReason }){   // noReason = ช่องเหตุผลอยู่ในกล่องเปลี่ยนเลขใบจ่ายแล้ว (ใช้เหตุผลเดียวกัน)
+  const fmt = v => (Number(v) || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const pay = x => x.paymentStatus === 'paid' ? 'จ่ายแล้ว' : (x.paymentStatus === 'partial' || x.paidAmount > 0.005) ? 'จ่ายบางส่วน' : 'ยังไม่จ่าย';
+  return h('div', { 'data-testid': tid, className:'bg-red-50 border-2 border-red-400 rounded p-2 text-xs text-red-800 my-2' },
+    h('div', { className:'font-bold' }, '⛔ เลขเอกสาร ' + Array.from(new Set(hits.map(x => x.number))).join(', ') + ' ของผู้ขายรายนี้มีในระบบแล้ว — บันทึกซ้ำไม่ได้ (กันจ่ายซ้ำ)'),
+    hits.map(x => h('div', { key: x.id, className:'flex items-center gap-2 mt-1 flex-wrap' },
+      x.inBatch ? h('span', null, '• ' + (x.invNumber || 'แถวอื่นในรอบนี้') + ' · เลข ' + (x.supInvNumber || x.number) + ' (ยังไม่ได้บันทึก — ใส่เลขเดียวกัน 2 แถว)') :
+      h('span', null, '• ' + (x.invNumber || x.id) + (x.grNumber ? ' · GR ' + x.grNumber : '') + ' · เลขใบแจ้งหนี้ ' + (x.supInvNumber || '-') + ' · ' + fmt(x.netPayable) + ' ฿ · ' + pay(x) + (x.viaTaxId ? ' · ผู้ขายคนละรหัส เลขผู้เสียภาษีเดียวกัน' : '') + (x.migLate ? ' · 🧾 ยกมาจาก Ecount (เพิ่มภายหลัง) = หนี้ของของล็อตนี้อยู่แล้ว' : '')),
+      x.inBatch ? null : h('button', { type:'button', 'data-testid': tid + '-open', className:'px-2 py-0.5 rounded border border-red-400 bg-white text-red-700 hover:bg-red-100', onClick: () => dupSupInvOpen(x.id) }, '🔎 เปิดใบเดิม'))),
+    h('div', { className:'mt-1 text-red-700' }, 'ใบเดียวกัน = ไม่ต้องบันทึกอีก · ใบเดิมคีย์ผิด = ยกเลิกใบเดิมก่อน'),
+    hits.some(x => x.otherGr) ? h('div', { 'data-testid': tid + '-multigr', className:'mt-1 text-red-800 font-semibold' }, '→ บิลเดียวหลาย GR → ยกเลิกใบเดิมแล้วใช้ 🔗 INV รวมหลาย GR → ใบเดียว (อย่าเติมเลขท้ายเพื่อให้ผ่าน)') : null,
+    canOv ? h('div', { className:'mt-2 bg-white border border-red-200 rounded p-2 text-gray-800' },
+      h('label', { className:'flex items-center gap-1 font-semibold' },
+        h('input', { type:'checkbox', 'data-testid': tid + '-ov-tick', checked: !!ov.tick, onChange: e => setOv({ ...ov, tick: e.target.checked }) }),
+        'เลขซ้ำจริง (ใบคนละใบ) — ผู้ขายใช้เลขซ้ำ'),
+      ov.tick && !noReason ? h('input', { type:'text', 'data-testid': tid + '-ov-reason', className:'w-full border rounded px-2 py-1 mt-1', placeholder:'เหตุผล (อย่างน้อย 10 ตัวอักษร) — ลงประวัติ',
+        value: ov.reason || '', onChange: e => setOv({ ...ov, reason: e.target.value }) }) : null,
+      ov.tick && !reasonOk && !noReason ? h('div', { className:'text-red-600 mt-0.5' }, 'ใส่เหตุผลอย่างน้อย 10 ตัวอักษร') : null)
+    : noOv ? null : h('div', { className:'mt-1 text-gray-600' }, 'ถ้าเป็นบิลคนละใบจริง ให้ ผจก.บัญชี/GM เป็นผู้บันทึก (ติ๊ก "เลขซ้ำจริง" พร้อมเหตุผล)'));
+}
 // E-4 ข้อ 3: ผู้อนุมัติข้ามใบกำกับ "ตรงตัว" (ไม่ใช้ rank) — ผจก.บัญชี หรือ GM · admin/owner ไม่นับ
 const TAX_INV_OVERRIDE_ANYOF = [ { position:'manager', department:'accounting' }, { role:'gm' } ];
 function taxInvOverrideApprover(u){
@@ -11623,14 +11874,15 @@ let _PBA_CACHE = null;
 function prodBellAlerts(state, user, today, inScope){
   const au = prodBellAudience(user);
   if(!au.any || !state) return [];
-  const key = [state.productionOrders, state.fifoLayers, state.boms, state.settings, state.branches, state.items, state.locations, today, user];
+  // WNQ2: ใบค้างเกิน 12 ชม. ขึ้นกับเวลา → ใส่ช่วงเวลา 10 นาทีใน key ให้ cache หมดอายุเอง
+  const key = [state.productionOrders, state.fifoLayers, state.boms, state.settings, state.branches, state.items, state.locations, today, user, Math.floor(Date.now() / 6e5)];
   if(_PBA_CACHE && _PBA_CACHE.key.length === key.length && _PBA_CACHE.key.every((k, i) => k === key[i])) return _PBA_CACHE.out.map(a => ({ ...a }));
   const out = _prodBellBuild(state, au, today, inScope);
   _PBA_CACHE = { key, out };
   return out.map(a => ({ ...a }));
 }
 function _prodBellBuild(state, au, today, inScope){
-  const win = prepSetWindow(today);
+  const win = prepSetWinNow(state, today);   // 🆕 WNQ2 UAT S3 + verify 1 (keepIds + skipIds ตัวเดียวกับแถบ/งานค้าง)
   const gateOn = prepSetGateOn(state);
   const lf = au.lines && au.lines.length ? new Set(au.lines) : null;
   const staleL = [], info = [];
@@ -11656,10 +11908,10 @@ function _prodBellBuild(state, au, today, inScope){
       const names = xs.slice(0, 3).map(x => `${x.setBomName || x.name} ${fmtNum(x.deficit)}`).join(', ') + (xs.length > 3 ? ` +${xs.length - 3}` : '');
       info.push(`${pre}${ln(lid)}: ${gateOn ? 'ต้องชั่งชุดเพิ่ม' : 'ชุดควรชั่งเพิ่ม'} ${xs.length} ชุด (${names}) · ${gateOn ? 'ด่านชุดเปิด — batch ที่ชุดไม่พอเริ่มไม่ได้' : 'ด่านชุดปิด ติดลบได้'}`);
     }
-    // 🗂 ใบเริ่มเองค้างจากวันก่อน (ไม่ยกเลิกอัตโนมัติ — คำตอบเจ้าของ ข้อ 1 ก)
+    // 🗂 ใบเริ่มเองค้างเกิน 12 ชม. (WNQ2 · ไม่ยกเลิกอัตโนมัติ — คำตอบเจ้าของ ข้อ 1 ก)
     let old = [];
     try { old = staleUnstartedSelfStart(state, null, { branchId: b.id, lineIds: au.lines || undefined, today }) || []; } catch(_e){ old = []; }
-    if(old.length){ infoN++; info.push(`${pre}🗂 ใบเริ่มเองค้างจากวันก่อน ${old.length} ใบ ไม่ได้เริ่ม — กด 🗑️ ยกเลิกเองที่ ⚖️ ชั่ง`); }
+    if(old.length){ infoN++; info.push(`${pre}🗂 ใบเริ่มเองค้างเกิน 12 ชม. ${old.length} ใบ ไม่ได้เริ่ม — กด 🗑️ ยกเลิกเองที่ ⚖️ ชั่ง`); }
     // ⚠️ ใบเริ่มเองวันนี้ที่ยืนยันติดลบ (selfStart.shortAck)
     const neg = (state.productionOrders || []).filter(o => o && o.branchId === b.id && o.createdVia === 'self_start' && o.selfStart && o.selfStart.shortAck
       && o.status !== 'cancelled' && String(o.plannedDate || '').slice(0, 10) === today && (!lf || lf.has(o.lineId)));
@@ -17141,7 +17393,7 @@ Object.assign(global.ERP, {
   fixedColGroup, TABLE_FIXED_CLS,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh, bomWeighFree,
   buildProfileManualBatches, lineSelfStartOn, selfStartManager, selfStartLines, canSelfStartProduction, selfStartDenyReason, selfStartProfiles, selfStartBomReason, selfStartRecipes, selfStartWeighFreeHidden, selfStartShortAck, buildSelfStartOrder, selfStartOrderDenyReason, prodOrderLabel, prodOrderName, prodOrderTwin,   // 🆕 LSS D1 · LSS4 P2 prodOrderLabel
-  _lssUnstarted, findSelfStartDup, findSelfStartDups, selfStartParallelOk, canCancelProdOrderMgr, canCancelUnstartedSelfStart, staleUnstartedSelfStart, prodBellAudience, prodBellAlerts, selfStartWeighElsewhere, weighJobVisibleTo, bomOrderWeighVisibleTo,   // 🆕 LSS verify 1
+  _lssUnstarted, findSelfStartDup, findSelfStartDups, selfStartParallelOk, canCancelProdOrderMgr, canCancelUnstartedSelfStart, staleUnstartedSelfStart, SELF_START_STALE_MS, _ssCreatedMs, freshSelfStartIds, prodBellAudience, prodBellAlerts, selfStartWeighElsewhere, weighJobVisibleTo, bomOrderWeighVisibleTo,   // 🆕 LSS verify 1
   bomWeighOnly, bomOnWeighPage, bomWeighLines, _weighBomCode,   // 🆕 WEIGH-IMPORT-V2 verify 1: รหัสชั่งจริง (คำนำหน้า LOT) ให้หน้านำเข้าเช็กชน
   weighSeesAll, weighManagesOrder, weighStationOpId, weighOrderShape, isWeighStationWork, weighJobLines, weighJobId, weighJobRecipe, weighJobsFor,   // 🆕 WEIGH-ORDER E1
   bomPortionCheck, _portionCount, PORTION_MAX, weighPortionDrift, weighDriftOpen, weighDriftByItem,   // 🆕 UAT ชุด 2
@@ -17154,7 +17406,7 @@ Object.assign(global.ERP, {
   getLineStockLocation, getFGDestinationLocation, getRawWarehouseLocation,
   // 🆕 PRODUCTION-LIVE คลื่น 0 (สัญญา B2/B10.5/B11)
   isBomAvailable, getLineOwnLocations, isLineSharedMainStore, resolveMergedLoc, locDeleteBlockReason, isLocMergedClosed, lssClosedLocMsg, canLineShareMainStore, lineShareMainStorePlan, getLineConsumeLocs, planFgReversal, getBomOutputLocation, getItemHomeLocations, suggestBomOutputLocation,
-  negUnitCost, isSellOnlyItem, isSupplierRecvLoc, supplierRecvLocs, bomOutputCandidates, producibleItems, orderOutputLines, orderLiveHandoverTOs, buildBackflushLines, prepSetGateOn, prepStripWording, prepSetBomFor, prepSetBomKey, prepSetBomInUse, prepSetLocMisconfig, prepSetOnHand, prepSetStale, prepSetReserved, prepSetBatchShort, prepSetConsumeShort, prepSetNeeds, prepSetWindow, prepSetOutOfWindow, prepSetPlanCheck, prepSetConsumed: _psConsumed, orderRecipeScale, orderUnitFactor, resolveOrderOutputLoc, isBomPhantom,
+  negUnitCost, isSellOnlyItem, isSupplierRecvLoc, supplierRecvLocs, bomOutputCandidates, producibleItems, orderOutputLines, orderLiveHandoverTOs, buildBackflushLines, prepSetGateOn, prepStripWording, prepSetBomFor, prepSetBomKey, prepSetBomInUse, prepSetLocMisconfig, prepSetOnHand, prepSetStale, prepSetReserved, prepSetBatchShort, prepSetConsumeShort, prepSetNeeds, prepSetWindow, prepSetWinNow, prepSetOutOfWindow, prepSetPlanCheck, prepSetConsumed: _psConsumed, orderRecipeScale, orderUnitFactor, resolveOrderOutputLoc, isBomPhantom,
   canActOnLocation, getLineBomItemIds, locActDenyReason, isIntraTO, userHandlesIncomingTO, getLocStockFIFO,
   toLinePieces, slicePieces, isInTransitTO, getInTransit, getInTransitSummary, getInTransitValue, getNegStockValue,
   // Permissions
@@ -17217,7 +17469,7 @@ Object.assign(global.ERP, {
   SB, Modal, Spinner, Button, Combobox, supplierComboProps, customerComboProps, partyComboProps, partyBranchLabel, partyLocation, sellerAddress, sellerPhone, sellerBranchCode, partyOptionText, partyBranchParen, PartyBranchConfirm, normalizeBranchCode, partyBranchCode5, partyTaxBranchText, partyIsDup, partyDupName, partyDupKey, findPartyDup, partyDupMsg, partyNotePending, partyResolveId, usePartyIdHeal, partyShowBranch, partyNameWithBranch, PartyBranchChip, partySearchText, partyMatches, isDisallowedExpense, payEffectiveDate, invNonClaimVat, invNonClaimVatBase, invClaimableVat, invMigCloseVatCut, invMigCloseVatCutBase,
   // 🆕 DEPOSIT-VAT (§C-5)
   vatLockOf, vatPeriodLocked, depositKindOf, depositAvail, depositEligible, planDepositApplication, depositVatSplit, invDepositVatOffset, invDepositBaseOffset, invClaimableVatBase, invVatConflictOpen,
-  normTaxInvNo, taxInvKey, taxInvKey2, findDupTaxInv, findTaxInvGrant, taxInvClaimWindow, TAX_INV_OVERRIDE_ANYOF, taxInvOverrideApprover,
+  normTaxInvNo, taxInvKey, taxInvKey2, findDupTaxInv, findDupSupInvBlock, dupSupInvNumbers, dupSupInvNameKey, dupSupInvIsBlankNo, invIsVoidedAny, dupSupInvShareExempt, useDupSupInvGuard, DupSupInvPanel, dupSupInvOpen, dupSupInvNewNumbers, dupSupInvPaidOrRequested, dupSupInvRemovedPaid, DupSupInvRmPanel, /* 🆕 DSI1 */ findTaxInvGrant, taxInvClaimWindow, TAX_INV_OVERRIDE_ANYOF, taxInvOverrideApprover,
   // 🆕 VAT-CLAIM (§B1)
   planInvPriceAdjust, priceFixApprovalNeed, grLineDiscGr, grLineDiscEff, pfInvDiscCalc, priceFixInvDiscOn, /* 🆕 PRICE_FIX_DISCOUNT PFD1/PFD5 */ PRICE_FIX_TWO_PERSON_NOTE, pvLineRate, pvRtvAdjustable:_pvRtvAdjustable, rtvRevisedBannerHtml, priceKeyInSetting, PRICE_KEYIN_DEFAULTS, priceFixNonVat, priceFixNonVatBySupplier, priceFixNonVatAfter, priceFixNonVatVatMsg, PRICE_KEYIN_GM_KEYS, PRICE_FIX_NONVAT_VAT_MSG, PRICE_FIX_NODOCVAT_VAT_MSG,   // 🆕 PRICE-FIX ขั้น 2 (+ PV2-1/PV2-2)
   approvalIsProposer, PRICE_FIX_LIVE, priceFixLive, priceFixOpenForInv, invPriceApprovalPending, grPriceApprovalPending, grPriceFixHold, priceFixList, invAmountVsGrDiff, invOverrideDeny,   // 🆕 PRICE-FIX ขั้น 3 (+ invOverrideDeny ขั้น 4)
@@ -21531,6 +21783,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     partial: 'ขึ้นระบบไปบางส่วนแล้ว — ต้องเช็กเอง',
     landed: 'ขึ้นระบบครบแล้ว ไม่ต้องบันทึกอีก',
     rekey: 'อาจคีย์ใหม่ไปแล้ว — เปิดดูก่อน',
+    dupno: 'มีใบเลขนี้แล้ว — ไม่ต้องบันทึกอีก (เปิดดูใบเดิม)',
     'rekey-unknown': 'ระบบเช็กไม่ได้ว่าคีย์ใหม่ไปแล้วหรือยัง — เปิดดูก่อน',
     perm: 'คุณไม่มีสิทธิ์ทำงานนี้ — ให้ผู้มีสิทธิ์ล็อกอินแล้วกด',
     dry: 'ระบบไม่รับเมื่อเทียบกับข้อมูลล่าสุด',
@@ -21590,6 +21843,25 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       }
     }
     return -1;
+  }
+  // 🆕 DSI1 D4: คืน hit แรก (findDupSupInvBlock) ของงานที่สร้าง/แก้เลขใบ · null = ไม่ชน/ไม่ใช่งานใบตั้งหนี้
+  function _dsiReapplyHit(st, a){
+    var E = global.ERP; if(!a || !E.findDupSupInvBlock) return null;
+    var d = a.data || {}, doc = null, old = null;
+    try {
+      if(a.type === 'ADD_INV') doc = d;
+      else if(a.type === 'ADD_COMBINED_INV') doc = d.inv ? Object.assign({}, d.inv, d.dupSupInvOverride ? { dupSupInvOverride: d.dupSupInvOverride } : {}) : null;
+      else if(a.type === 'UPDATE_INV' || a.type === 'PATCH_INV'){
+        var id = d.id; old = (st.invoices || []).find(function(x){ return x && x.id === id; }) || null; if(!old) return null;
+        doc = Object.assign({}, old, a.type === 'PATCH_INV' ? (d.fields || {}) : d, d.dupSupInvOverride ? { dupSupInvOverride: d.dupSupInvOverride } : {});
+      } else return null;
+      if(!doc || doc.dupSupInvOverride || (E.invIsVoidedAny && E.invIsVoidedAny(doc))) return null;
+      var nums = old ? E.dupSupInvNewNumbers(old, E.dupSupInvNumbers(doc).map(function(x){ return x.raw; })) : null;
+      if(old && String(old.supplierId || '') !== String(doc.supplierId || '')) nums = null;
+      if(nums && !nums.length) return null;
+      var hs = E.findDupSupInvBlock(st, doc, { numbers: nums || undefined, excludeInvId: doc.id });
+      return hs.length ? hs[0] : null;
+    } catch(_e){ return null; }
   }
   function opqReapplyPlan(op, jobIdx, state, opts){
     opts = opts || {};
@@ -21660,6 +21932,12 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(res.blockers.length) return fail(res.blockers[0].why);
     if(!res.pending.length) return fail('landed');
     if(res.skipped.length) return fail('partial');   // (d)
+    // 🆕 DSI1 D4: ใบตั้งหนี้/แก้ใบ ที่เลขใบแจ้งหนี้/ใบกำกับชนใบที่มีอยู่แล้วของผู้ขายเดียวกัน (เช่น คีย์มือไปแล้ว) → "มีใบเลขนี้แล้ว" กดบันทึกอีกครั้งไม่ได้ (ยืนยันข้ามก็ไม่ได้)
+    //   คำขอข้ามของ ผจก.บัญชี/GM (dupSupInvOverride) ที่มากับงาน → ให้ reducer ตัดสินใน dry-run (ตรวจสิทธิ์ผู้ล็อกอินเอง)
+    for(var q = 0; q < res.pending.length; q++){
+      var dh = _dsiReapplyHit(st, acts[res.pending[q]]);
+      if(dh){ res.maybeRekeyed = { id: dh.id, number: dh.invNumber || dh.id, coll: 'invoices', dupNo: dh.number }; res.dupSupInv = dh; return fail('dupno', ' (เลข ' + dh.number + ' → ' + (dh.invNumber || dh.id) + ')'); }
+    }
     // (e) อาจคีย์ใหม่ด้วยมือไปแล้ว · final verify 1 F1: งาน add/delta ที่ไม่มีตัวเทียบ = ไม่รู้ → ต้องให้ผู้ใช้ยืนยันเอง (ไม่บอกว่า "เช็กแล้วไม่ซ้ำ")
     var ts = Number(op.ts) || 0, unknown = [];
     for(var k = 0; k < res.pending.length; k++){
@@ -24280,6 +24558,9 @@ function _migLateCheck(s, d, u, ctx){
       const dd = E.findDupSupInv(s, sid, docNo, d.id);
       if(dd.length) return R('ผู้ขายนี้มีเลขใบแจ้งหนี้/ใบกำกับ ' + docNo + ' ในระบบแล้ว (' + (dd[0].invNumber || dd[0].id) + ')' + _migLateSupNote(s, sup, sid));
     }
+    // 🆕 DSI1: ด่านกลาง (normalize แบบ normTaxInvNo + ผู้ขายเลขผู้เสียภาษี/สาขาเดียวกัน) — เพิ่มความเข้ม ไม่มีทางข้าม (ใบยกมา)
+    const _dh = E.findDupSupInvBlock(s, { id: d.id, supplierId: sup.id, supInvNumber: docNo }, {});
+    if(_dh.length) return R('ผู้ขายนี้มีเลขใบแจ้งหนี้/ใบกำกับ ' + docNo + ' ในระบบแล้ว (' + (_dh[0].invNumber || _dh[0].id) + (_dh[0].number !== docNo ? ' · เลข ' + _dh[0].number : '') + ')');
   }
   // 🆕 verify 3 F1: เลขของบิลเป็นเลขใบกำกับภาษีที่รู้แน่เฉพาะ (ก) ยื่นใน Ecount + วันที่ใบกำกับ (เก็บเป็น supTaxInvNumber) — (ข)/ไม่มี VAT = อาจเป็นเลขใบแจ้งหนี้
   const billTax = !!bk && vat > 0.005 && d.vatPlace === 'ecount' && /^\d{4}-\d{2}-\d{2}$/.test(String(d.supDocDate || '').slice(0, 10));
@@ -24390,9 +24671,108 @@ global.ERP.vatClaimDenyReason = function(state, type, data, user){ try { return 
 //   คงไว้: supTaxInvNumber/Date (ตรวจที่นี่) · paidAmount (demo/flow เดิม) · depositUsed (ทางหักมัดจำเดิม) · taxInvRefId (กรณี B · ล็อกใบกำกับอย่างเดียว ไม่ให้ข้อยกเว้น)
 const _INV_CREATE_STRIP = Object.freeze(['supVatClaimDate','supTaxInvHistory','nonDeductibleVat','nonDeductibleVatBase','paymentBlock','dupTaxInvOverride',
   'depositApplications','depositVatOffset','depositBaseOffset','vatConflict','taxInvKey','_migrated','vatClaimHere','vatClaimHereLog',
-  'taxInvGroup', 'supTaxInvMore']);   // 🆕 MULTI-TAXINV: ใบที่ 2+ เพิ่มผ่าน ADD_TAX_INV_ENTRY เท่านั้น · 🆕 DEPOSIT-VAT verify: ยังไม่มีหน้าจอตั้ง taxInvGroup (S4/S5 ให้ reducer ตั้งเอง) — จาก payload = ปลอมคู่ DP+ใบสุดท้ายได้
-// คืน { inv } หรือ { deny } · today มากับ payload (replay ได้ผลเดิม) → fallback createdDate ของใบ
+  'taxInvGroup', 'supTaxInvMore', 'dupSupInvOverrideLog']);   // 🆕 DSI1: ประวัติข้ามด่านเลขซ้ำ — reducer ตั้งเอง   // 🆕 MULTI-TAXINV: ใบที่ 2+ เพิ่มผ่าน ADD_TAX_INV_ENTRY เท่านั้น · 🆕 DEPOSIT-VAT verify: ยังไม่มีหน้าจอตั้ง taxInvGroup (S4/S5 ให้ reducer ตั้งเอง) — จาก payload = ปลอมคู่ DP+ใบสุดท้ายได้
+// 🆕 DUP_SUPINV_BLOCK (DSI1 D2/D3): ด่านกลาง "ผู้ขายเดียวกัน เลขใบแจ้งหนี้/ใบกำกับซ้ำ" ของ reducer ทุกทางที่สร้าง/แก้เลขใบ
+//   doc = ใบหลังบันทึก · ov = payload dupSupInvOverride { reason } · o = { numbers, excludeIds, pending, via }
+//   ทางออก D3: ผจก.บัญชี/GM (taxInvOverrideApprover) หรือ superAdmin — ตรวจจาก currentUser (ไม่เชื่อ payload) + เหตุผล ≥ 10 ตัวอักษร
+//   คืน { deny } | { ok:true, mark?, audit? } · mark = ประวัติข้ามด่านที่ติดกับใบ
+function _dsiPayLabel(s, h){
+  const _rq = (s.payments||[]).some(p => p && !p.reversed && p.approvalStatus === 'pending' && (p.invId === h.id || (p.invoiceIds||[]).includes(h.id)));
+  const st = h.paymentStatus === 'paid' ? 'จ่ายแล้ว' : (h.paymentStatus === 'partial' || h.paidAmount > 0.005) ? 'จ่ายบางส่วน' : 'ยังไม่จ่าย';
+  return st + (_rq ? ' · มีคำขอจ่ายรออนุมัติ' : '');
+}
+function _dsiOverrideOk(u){ return !!u && u.active !== false && (global.ERP.taxInvOverrideApprover(u) || u.superAdmin === true); }
+function _dsiGate(s, doc, ov, o){
+  o = o || {};
+  const hits = global.ERP.findDupSupInvBlock(s, doc, { numbers: o.numbers, excludeInvId: doc && doc.id, excludeIds: o.excludeIds, pending: o.pending });
+  if(!hits.length) return { ok: true };
+  const _fmt = v => (Number(v)||0).toLocaleString('th-TH', { maximumFractionDigits: 2 });
+  const msg = 'เลขเอกสาร ' + Array.from(new Set(hits.map(h => h.number))).join(', ') + ' ของผู้ขายรายนี้ถูกใช้แล้ว (ห้ามบันทึกซ้ำ — กันจ่ายซ้ำ): '
+    + hits.map(h => (h.invNumber || h.id) + ' (เลขใบแจ้งหนี้ ' + (h.supInvNumber || '-') + ' · ' + _fmt(h.netPayable) + ' ฿ · ' + _dsiPayLabel(s, h)
+      + (h.viaTaxId ? ' · ผู้ขายคนละรหัสแต่เลขผู้เสียภาษี+สาขาเดียวกัน' : '') + (h.viaName ? ' · ชื่อผู้รับเงินตรงกัน (พิมพ์ชื่ออิสระ)' : '') + (h.createdBy ? ' · คีย์โดย ' + h.createdBy : '') + ')').join(', ')
+    + '\n→ ถ้าเป็นใบเดียวกัน: ไม่ต้องบันทึกอีก (เปิดใบเดิมดู) · ถ้าใบเดิมคีย์ผิด: ยกเลิกใบเดิมก่อน'
+    + (doc && doc.grId && hits.some(h => h.inBatch || (h.grId && h.grId !== doc.grId)) ? '\n→ บิลเดียวหลาย GR: ยกเลิกใบเดิมแล้วใช้ 🔗 INV รวมหลาย GR → ใบเดียว (อย่าเติมเลขท้ายเพื่อให้ผ่าน)' : '')   // 🆕 DSI1 UAT S1
+    + '\n→ ถ้าเป็นบิลคนละใบจริงที่ผู้ขายใช้เลขซ้ำ: ให้ ผจก.บัญชี/GM ติ๊ก "เลขซ้ำจริง (ใบคนละใบ)" พร้อมเหตุผล';
+  if(!ov) return { deny: msg };
+  const u = _actorOf(s, null), reason = String((ov && ov.reason) || '').trim();
+  if(!_dsiOverrideOk(u)) return { deny: msg + '\n⛔ ติ๊ก "เลขซ้ำจริง" ได้เฉพาะ ผจก.บัญชี/GM (ผู้ล็อกอินตอนนี้ไม่มีสิทธิ์)' };
+  if(reason.length < 10) return { deny: msg + '\n⛔ ข้ามด่านเลขซ้ำต้องใส่เหตุผลอย่างน้อย 10 ตัวอักษร' };
+  const at = Number(o.at) || Number(doc && doc.createdAt) || 0;
+  const mark = { by: u.username, reason, hitIds: hits.map(h => h.id), hitRefs: hits.map(h => h.invNumber || h.id), numbers: Array.from(new Set(hits.map(h => h.number))), at, via: o.via || '' };
+  const audit = { id: 'al_dsi_' + String((doc && doc.id) || '') + '_' + (at || 0).toString(36) + '_' + hits.length, ts: at || Date.now(), type: 'dup_sup_inv_override', by: u.username,
+    entityType: 'inv', entityId: doc && doc.id, entityRef: (doc && doc.invNumber) || (doc && doc.id),
+    note: 'ข้ามด่านเลขใบซ้ำ (' + mark.numbers.join(', ') + ') ชนใบ ' + mark.hitRefs.join(', ') + ' — เหตุผล: ' + reason + (o.via ? ' [' + o.via + ']' : '') };
+  return { ok: true, mark, audit };
+}
+// แก้ใบ (UPDATE_INV/PATCH_INV/SET_TAX_INV): ตรวจเฉพาะเลขที่ "เพิ่มใหม่" (เปลี่ยนผู้ขาย = ทุกเลข) — แก้ช่องอื่นของใบที่ซ้ำอยู่แล้วแต่เดิมยังทำได้
+function _dsiEditGate(s, oldInv, newInv, ov, via, at){
+  if(!oldInv || !newInv || global.ERP.invIsVoidedAny(newInv)) return { ok: true };
+  const E = global.ERP, oldN = new Set(E.dupSupInvNumbers(oldInv).map(x => x.norm));
+  const supChg = String(oldInv.supplierId || '') !== String(newInv.supplierId || '');
+  // 🆕 DSI1 verify 1: เลขที่ "ถูกลบ/เปลี่ยนออก" จากใบที่จ่ายแล้ว/จ่ายบางส่วน/มีคำขอจ่าย → ต้อง ผจก.บัญชี/GM + เหตุผล ≥10 ตัวอักษร
+  //   (กันเปลี่ยนเลขใบเดิมหนีแล้วคีย์เลขเดิมซ้ำ = จ่ายซ้ำ)
+  // เลขที่เพิ่มใหม่ชนใบอื่น → ข้อความเลขซ้ำก่อน (คำขอข้ามเดียวกันใช้ได้ทั้งสองด่าน)
+  const nums = E.dupSupInvNumbers(newInv).filter(x => supChg || !oldN.has(x.norm)).map(x => x.raw);
+  const g = nums.length ? _dsiGate(s, newInv, ov, { numbers: nums, via, at: Number(at) || 0 }) : { ok: true };
+  if(g.deny) return g;
+  const newN = new Set(E.dupSupInvNumbers(newInv).map(x => x.norm));
+  const removed = E.dupSupInvNumbers(oldInv).filter(x => !newN.has(x.norm)).map(x => x.raw);
+  let rmMark = null;
+  if(removed.length && _dsiPaidOrRequested(s, oldInv)){
+    const u = _actorOf(s, null), reason = String((ov && ov.reason) || '').trim();
+    const base = 'ใบ ' + (oldInv.invNumber || oldInv.id) + ' ' + _dsiPayLabel(s, { id: oldInv.id, paymentStatus: oldInv.paymentStatus || '', paidAmount: Number(oldInv.paidAmount) || 0 })
+      + ' — ลบ/เปลี่ยนเลข ' + removed.join(', ') + ' ไม่ได้ (กันคีย์เลขเดิมซ้ำแล้วจ่ายซ้ำ)\n→ ถ้าเลขเดิมคีย์ผิดจริง: ให้ ผจก.บัญชี/GM แก้พร้อมเหตุผล';
+    if(!ov) return { deny: base };
+    if(!_dsiOverrideOk(u)) return { deny: base + '\n⛔ แก้เลขใบที่จ่ายแล้วได้เฉพาะ ผจก.บัญชี/GM (ผู้ล็อกอินตอนนี้ไม่มีสิทธิ์)' };
+    if(reason.length < 10) return { deny: base + '\n⛔ ต้องใส่เหตุผลอย่างน้อย 10 ตัวอักษร' };
+    rmMark = { by: u.username, reason, removed };
+  }
+  return { ...g, rmMark };
+}
+// ใบจ่ายแล้ว/จ่ายบางส่วน/มีคำขอจ่าย (รออนุมัติ/อนุมัติแล้ว ยังไม่กลับรายการ)
+//   🆕 DSI1 regression: ตัวจริงอยู่ที่ global.ERP.dupSupInvPaidOrRequested (00-core) — หน้าจอใช้ตัวเดียวกันตรวจก่อนกดบันทึก
+function _dsiPaidOrRequested(s, inv){ return global.ERP.dupSupInvPaidOrRequested(s || {}, inv); }
+// UPDATE_INV/PATCH_INV: คำขอข้าม (dupSupInvOverride) ไม่ติดใบ · ประวัติข้าม (dupSupInvOverrideLog) คงจากใบเดิม (payload ปลอมไม่ได้)
+function _dsiEditApply(s, oldInv, newInv, ov, via, at){
+  const n = { ...newInv }; delete n.dupSupInvOverride;
+  if(oldInv && oldInv.dupSupInvOverrideLog) n.dupSupInvOverrideLog = oldInv.dupSupInvOverrideLog; else delete n.dupSupInvOverrideLog;
+  const g = _dsiEditGate(s, oldInv, n, ov, via, at);
+  if(g.deny) return { deny: g.deny };
+  if(g.mark) n.dupSupInvOverrideLog = [ ...(n.dupSupInvOverrideLog || []), g.mark ];
+  // 🆕 DSI1 verify 1: เปลี่ยนเลขใบแจ้งหนี้/เลขใบกำกับ → ลง revisionHistory + audit 'sup_inv_no_change' ทุกครั้ง (เลขเดิมไม่หายเงียบ)
+  const audits = g.audit ? [g.audit] : [];
+  let dsiRev = null;
+  const chg = oldInv ? ['supInvNumber','supTaxInvNumber'].filter(f => String(oldInv[f] == null ? '' : oldInv[f]).trim() !== String(n[f] == null ? '' : n[f]).trim()) : [];
+  if(chg.length){
+    const u = _actorOf(s, null), by = (u && u.username) || n._editedBy || n.by || 'system', ts = Number(at) || Date.now();
+    const txt = chg.map(f => f + ': ' + (String(oldInv[f] || '').trim() || '-') + ' → ' + (String(n[f] || '').trim() || '-')).join(' · ');
+    const rev = (n.revisionHistory || []).length + 1;
+    dsiRev = { rev, ts, by, via, wasPaid: _dsiPaidOrRequested(s, oldInv), changes: txt.slice(0, 500), ...(g.rmMark ? { reason: g.rmMark.reason } : {}) };
+    n.revisionHistory = [ ...(n.revisionHistory || []), dsiRev ];
+    audits.push({ id: 'al_dsinc_' + String(oldInv.id || '') + '_' + rev + '_' + ts.toString(36), ts, type: 'sup_inv_no_change', by,
+      entityType: 'inv', entityId: oldInv.id, entityRef: oldInv.invNumber || oldInv.id,
+      old: { supInvNumber: oldInv.supInvNumber || '', supTaxInvNumber: oldInv.supTaxInvNumber || '' },
+      new: { supInvNumber: n.supInvNumber || '', supTaxInvNumber: n.supTaxInvNumber || '' },
+      note: 'เปลี่ยนเลขเอกสาร ' + txt + (g.rmMark ? ' — ใบจ่ายแล้ว/มีคำขอจ่าย · เหตุผล: ' + g.rmMark.reason : '') + ' [' + via + ']' });
+  }
+  return { inv: n, audit: audits[0] || null, audits, rev: dsiRev };
+}
+global.ERP.dupSupInvDeny = function(state, doc, o){ try { const g = _dsiGate(state, doc, null, o); return g.deny || null; } catch(e){ return 'ตรวจเลขใบซ้ำไม่สำเร็จ: ' + (e && e.message); } };
+global.ERP.dupSupInvPayLabel = function(state, hit){ try { return _dsiPayLabel(state || {}, hit || {}); } catch(e){ return ''; } };   // 🆕 DSI1 verify 2: การ์ดงานค้างบอกสถานะจ่ายของใบเดิม
+global.ERP.dupSupInvOverrideOk = function(u){ try { return _dsiOverrideOk(u); } catch(e){ return false; } };
+// 🆕 DSI1: ตัวห่อ — ด่านเลขใบซ้ำ (_dsiGate) ต่อจากด่านเดิมทุกข้อ · dupSupInvOverride จาก payload = คำขอข้าม (ไม่ใช่ผล) · ผลติดใบเป็น dupSupInvOverrideLog
+//   คืนเพิ่ม dsiAudit (ผู้เรียกต่อท้าย auditLog คู่กับ audit เดิม)
 function _invCreatePrep(s, data, popts){
+  let d0 = data, ov = null;
+  if(data && 'dupSupInvOverride' in data){ d0 = { ...data }; ov = d0.dupSupInvOverride || null; delete d0.dupSupInvOverride; }
+  const r = _invCreatePrep0(s, d0, popts);
+  if(r.deny) return r;
+  const g = _dsiGate(s, r.inv, ov, { pending: popts && popts.pending, excludeIds: popts && popts.excludeIds, via: (popts && popts.via) || 'ADD_INV', at: r.inv && r.inv.createdAt });
+  if(g.deny) return { deny: g.deny };
+  if(!g.mark) return r;
+  return { ...r, inv: { ...r.inv, dupSupInvOverrideLog: [g.mark] }, dsiAudit: g.audit };
+}
+function _invCreatePrep0(s, data, popts){
   const inv = { ...data }; delete inv.today;
   const dropped = _INV_CREATE_STRIP.filter(k => k in inv && !_protEmpty(inv[k]));
   for(const k of _INV_CREATE_STRIP) delete inv[k];
@@ -30868,7 +31248,7 @@ function _reducerCore(s, a){
       let _invData = _svg.lines ? { ..._cp.inv, expenseLines:_svg.lines } : _cp.inv;   // 🔧 D12: acctChanged ต่อบรรทัด
       // 🆕 WHT-PAYEE verify 3 + PARTY-SNAP → ตัวกลาง _invPartySnap (WCF1 verify 1: ใช้ร่วมกับ ADD_COMBINED_INV)
       { const _psr = _invPartySnap(s, _invData); if(_psr.deny){ alert(_psr.deny); return s; } _invData = _psr.inv; }
-      if(_cp.audit) _twExtra = { ..._twExtra, auditLog: [ ...((_twExtra.auditLog) || s.auditLog || []), _cp.audit ] };
+      if(_cp.audit || _cp.dsiAudit) _twExtra = { ..._twExtra, auditLog: [ ...((_twExtra.auditLog) || s.auditLog || []), ...[_cp.audit, _cp.dsiAudit].filter(Boolean) ] };   // 🆕 DSI1: + ประวัติข้ามด่านเลขซ้ำ
       return { ...s, invoices:[...s.invoices, _invData], seq: newSeq, ..._twExtra };
     }
     case 'UPDATE_INV': {
@@ -30889,6 +31269,10 @@ function _reducerCore(s, a){
       if(_oldInv){ const _gl = _invGlLockReason(s, _oldInv, a.data); if(_gl){ alert('⛔ ' + _gl); return s; } }
       if(_oldInv){ const _cm = _ctInvMoneyDeny(_oldInv, a.data); if(_cm){ alert('⛔ ' + _cm); return s; } }   // 🆕 EXPENSE_PO P10.2
       if(_oldInv){ const _wg = _whtGroupInvMoneyDeny(_oldInv, a.data); if(_wg){ alert('⛔ ' + _wg); return s; } }   // 🆕 WHT_GROUP S2: บิลในชุด
+      // 🆕 DSI1: เปลี่ยนเลขใบแจ้งหนี้/ใบกำกับ/ผู้ขาย ไปชนใบอื่นของผู้ขายเดียวกัน → ปฏิเสธ (ผจก.บัญชี/GM ข้ามได้พร้อมเหตุผล)
+      let _dsiAud = null, _dsiRevU = null;
+      if(_oldInv){ const _da = _dsiEditApply(s, _oldInv, _newInv, a.data.dupSupInvOverride, 'UPDATE_INV', a.data.at);
+        if(_da.deny){ alert('⛔ บันทึกไม่ได้ — ' + _da.deny); return s; } _newInv = _da.inv; _dsiAud = _da.audits; _dsiRevU = _da.rev; }
       // 🆕 PRICE-FIX verify 2: ใบปรับราคาแล้ว (post_pi) — reducer ปฏิเสธการเปลี่ยนเงิน (ด่านเดียวกับ invUpdateDeny · กันสำเนาเก่าย้อนยอด)
       if(_oldInv && (_oldInv.priceAdjustHistory || []).some(x => x && x.mode === 'post_pi')
         && ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId'].some(f => a.data[f] !== undefined && !_protSame(_oldInv[f], a.data[f]))){
@@ -30909,7 +31293,7 @@ function _reducerCore(s, a){
         alert('⛔ ปรับยอด/ปัดเศษเกิน ±1 ฿ — ถ้าราคาไม่ตรงใบกำกับ ใช้ ↩️ ส่งให้จัดซื้อแก้ราคา'); return s; }
       // 🆕 WHT-MERGE: แก้ยอดหัก ณ ที่จ่าย ของใบที่รวมอยู่ใน 50 ทวิ ของ PV (เช่น 🧾 เพิ่ม WHT ย้อนหลัง) → ปฏิเสธ
       if(_oldInv && _invWhtMergedInto(_oldInv) && a.data.whtAmount !== undefined && !_protSame(_oldInv.whtAmount, a.data.whtAmount)){ alert(_whtMergedDenyMsg(_oldInv)); return s; }
-      const _auds = [];
+      const _auds = _dsiAud ? _dsiAud.slice() : [];
       if(_oldInv){
         // 🆕 UNDO_FIELD_GUARD (UAT บัญชี): + invDate — ลงประวัติทุกครั้ง (ด่านย้อนอ่านวันที่ใบแรกสุดจากประวัตินี้ · invEarliestDate)
         const _finF = ['amount','netPayable','vat','vatTotal','whtAmount','supplierId','partyId','offInvDiscount','retention','invDate'];
@@ -30919,11 +31303,11 @@ function _reducerCore(s, a){
         if(_chg.length > 0){
           const _wasPaid = (_oldInv.paidAmount||0) > 0 || _oldInv.paymentStatus === 'paid' || _oldInv.paymentStatus === 'partial';
           // 🆕 UNDO_FIELD_GUARD UAT รอบ 2: ผู้แก้ = _editedBy → ผู้ล็อกอิน (หน้าแก้ใบไม่ส่ง _editedBy = เดิมลง 'system') · วันที่ใบเก็บแบบโครงสร้าง (ด่านย้อนอ่านช่องนี้ ไม่พึ่งข้อความ)
-          const _rev = { rev: ((_oldInv.revisionHistory||[]).length)+1, ts: Date.now(),
+          const _rev = { rev: ((_oldInv.revisionHistory||[]).length)+1+(_dsiRevU ? 1 : 0), ts: Date.now(),
             by: (s.currentUser && s.currentUser.username) || a.data._editedBy || 'system', ...(a.data._editedBy && s.currentUser && a.data._editedBy !== s.currentUser.username ? { editedBy:a.data._editedBy } : {}), wasPaid: _wasPaid,
             ...(_chg.includes('invDate') ? { invDateFrom: _oldInv.invDate || null, invDateTo: _newInv.invDate || null } : {}),
             changes: _chg.map(f => f === 'offInvDiscount' ? (f + ': ' + _odTxt(_oldInv[f]) + ' → ' + _odTxt(a.data[f])) : (f + ': ' + _oldInv[f] + ' → ' + a.data[f])).join(' · ').slice(0,500) };
-          _newInv = { ..._newInv, revisionHistory: [...(_oldInv.revisionHistory||[]), _rev] };
+          _newInv = { ..._newInv, revisionHistory: [...(_oldInv.revisionHistory||[]), ...(_dsiRevU ? [_dsiRevU] : []), _rev] };   // 🆕 DSI1 verify 1: คงแถวเปลี่ยนเลข
           if(_wasPaid){
             try { console.warn('⚠️ แก้ field การเงินของ PI ที่จ่ายแล้ว:', _oldInv.invNumber||_oldInv.id, _rev.changes); } catch(_w){}
             _auds.push({ id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), ts:Date.now(),
@@ -30996,6 +31380,14 @@ function _reducerCore(s, a){
       const _allowF = (_cur.depositUsed == null && !(_cur.depositApplications||[]).length) ? ['depositUsed'] : null;
       const _next = _invKeepProtected(_cur, { ..._cur, ..._pf }, _allowF).inv;
       _invGenericEditKeep(_cur, _next, 'PATCH_INV');   // 🆕 UNDO_FIELD_GUARD G3/G4 (ไม่อ่านหมวดอื่น — ACTION_READS เดิม)
+      // 🆕 DSI1: fields เปลี่ยนเลขใบแจ้งหนี้/ใบกำกับ/ผู้ขาย ไปชนใบอื่นของผู้ขายเดียวกัน → ปฏิเสธ (ผจก.บัญชี/GM ข้ามได้พร้อมเหตุผล)
+      let _dsiAudP = null;
+      { const _da = _dsiEditApply(s, _cur, _next, a.data.dupSupInvOverride, 'PATCH_INV', a.data.ts);
+        if(_da.deny){ alert('⛔ บันทึกไม่ได้ — ' + _da.deny); return s; }
+        delete _next.dupSupInvOverride;
+        if(_da.inv.dupSupInvOverrideLog) _next.dupSupInvOverrideLog = _da.inv.dupSupInvOverrideLog; else delete _next.dupSupInvOverrideLog;
+        if(_da.rev) _next.revisionHistory = _da.inv.revisionHistory;   // 🆕 DSI1 verify 1: แถวเปลี่ยนเลข
+        _dsiAudP = _da.audits.length ? _da.audits : null; }
       // 🆕 UNDO_PRINCIPLE รอบ 3: fields เปลี่ยนฟิลด์การเงิน → ลง revisionHistory แบบ UPDATE_INV (เดิมไม่ลง = แก้ vat เป็น 0 เงียบ ๆ แล้ว ↩️ ทางตรงหลบด่านภาษีซื้อเดือนก่อน)
       { const _pfF = ['amount','netPayable','vat','vatTotal','vatRate','whtAmount','supplierId','partyId','offInvDiscount','retention'];
         const _pChg = _pfF.filter(f => f in _pf && !_protSame(_cur[f], _next[f]));
@@ -31028,7 +31420,7 @@ function _reducerCore(s, a){
         const _paid = Number(_next.paidAmount) || 0;
         _next.paymentStatus = _paid >= _np - 0.01 ? 'paid' : (_paid > 0 ? 'partial' : 'unpaid');
       }
-      return { ...s, invoices: s.invoices.map(i => i.id === _pid ? _next : i) };
+      return { ...s, invoices: s.invoices.map(i => i.id === _pid ? _next : i), ...(_dsiAudP ? { auditLog: [ ...(s.auditLog || []), ..._dsiAudP ] } : {}) };
     }
 
     // 🆕 CAP: ตัด supplier credit แบบ clamp ในตรรกะหลัก (กันเครดิต creditDue ติดลบ/หาย)
@@ -32621,6 +33013,9 @@ function _reducerCore(s, a){
         return { ...s, invoices: s.invoices.map(i => i.id === invId ? _tiApply(i, tiId, { supTaxInvImage: taxInvImage }) : i) };
       }
       const today = d.today || getToday(), now = Number(d.at) || Date.now();
+      // 🆕 DSI1: เลขใบกำกับใหม่ชนเลขใบแจ้งหนี้/ใบกำกับของใบอื่นผู้ขายเดียวกัน (รวมบิลไม่มี VAT · ข้ามช่อง) → ปฏิเสธ (ผจก.บัญชี/GM ข้ามได้พร้อมเหตุผล)
+      const _dsiT = _dsiEditGate(s, inv0, _tiApply(inv0, tiId, { supTaxInvNumber: taxInvNumber }), d.dupSupInvOverride, 'SET_TAX_INV', now);
+      if(_dsiT.deny){ alert('⛔ ' + _dsiT.deny); return s; }
       const u = _actorOf(s, by), who = (u && u.username) || by || '';
       // งวดที่นำภาษีซื้อมาหัก (คีย์ครั้งแรก/งวดยังไม่ยื่น): วันที่บนใบกำกับอยู่ในงวดที่ปิดแล้ว → หักในงวดปัจจุบัน (ม.82/10 ไม่เกิน 6 เดือน)
       //   แก้ใบที่เคยคีย์แล้ว: เดือนบนใบเท่าเดิม → คงงวดเคลมเดิม (ไม่ย้ายงวดเงียบ ๆ) — _taxInvClaimDate
@@ -32659,13 +33054,17 @@ function _reducerCore(s, a){
         _vh.push({ action:'date_month_change', from: E.ymOf(inv.supTaxInvDate), to: E.ymOf(taxInvDate), by: who, at: now, reason: String(d.reason || '').trim() });
       const _pv = _pp.store ? { base: _pp.store.base, vat: _pp.store.vat } : {};
       const _prev = _curNo ? { number: inv.supTaxInvNumber, date: inv.supTaxInvDate || '', claimDate: inv.supVatClaimDate || '', ...(_pp.store ? { base: inv.supTaxInvBase == null ? null : inv.supTaxInvBase, vat: inv.supTaxInvVat == null ? null : inv.supTaxInvVat } : {}) } : null;
-      const _h = { action:'set', number: taxInvNumber, date: taxInvDate, ..._pv, claimDate: _claim, by: who, ts: now, prev: _prev };
+      // 🆕 DSI1 regression: เปลี่ยนเลขใบจ่ายแล้ว (ผจก.บัญชี/GM + เหตุผล) → เหตุผลติดประวัติใบกำกับ + audit
+      const _rmX = _dsiT.rmMark ? { dsiChange: { reason: _dsiT.rmMark.reason, by: _dsiT.rmMark.by, removed: _dsiT.rmMark.removed, wasPaid: true } } : {};
+      const _h = { action:'set', number: taxInvNumber, date: taxInvDate, ..._pv, claimDate: _claim, by: who, ts: now, prev: _prev, ..._rmX };
       const al = { id:'al_taxinv_'+invId+(tiId ? '_' + tiId : '')+'_'+now.toString(36), ts: now, type:'tax_inv_set', action:'tax_inv_set', by: who, entityId: invId, entityRef: inv.invNumber || invId,
         snap: { ti: tiId, number: taxInvNumber, date: taxInvDate, base: _pv.base == null ? null : _pv.base, vat: _pv.vat == null ? null : _pv.vat, claimDate: _claim },
         note: (_prev ? `แก้ใบกำกับ ${_prev.number} (${_prev.date}) → ` : 'คีย์ใบกำกับ ') + `${taxInvNumber} (${taxInvDate}) · `
-          + (_vatDefer && _vatDefer.expiredOnEntry ? 'บันทึกเป็นหลักฐาน — หมดสิทธิ์เคลม (ม.82/3)' : _vatDefer ? 'ยังเลื่อนเคลมอยู่' : `เคลมงวด ${String(_claim).slice(0,7)}`) };
+          + (_vatDefer && _vatDefer.expiredOnEntry ? 'บันทึกเป็นหลักฐาน — หมดสิทธิ์เคลม (ม.82/3)' : _vatDefer ? 'ยังเลื่อนเคลมอยู่' : `เคลมงวด ${String(_claim).slice(0,7)}`)
+          + (_dsiT.rmMark ? ' · ใบจ่ายแล้ว/มีคำขอจ่าย — เปลี่ยนเลขโดย ' + _dsiT.rmMark.by + ' · เหตุผล: ' + _dsiT.rmMark.reason : ''), ..._rmX };
+      const _dsiMk = x => _dsiT.mark ? { ...x, dupSupInvOverrideLog: [ ...(x.dupSupInvOverrideLog || []), _dsiT.mark ] } : x;   // 🆕 DSI1
       return { ...s, invoices: s.invoices.map(i => i.id === invId
-        ? _tiApply(i, tiId, {
+        ? _dsiMk(_tiApply(i, tiId, {
             supTaxInvNumber: taxInvNumber,
             supTaxInvDate: taxInvDate,
             supVatClaimDate: _claim,
@@ -32676,8 +33075,8 @@ function _reducerCore(s, a){
             ...(_pp.store ? { supTaxInvBase: _pp.store.base, supTaxInvVat: _pp.store.vat } : {}),
             ...((_leftover || _vatDefer !== (inv.vatDefer || null)) ? { vatDefer: _vatDefer } : {}),
             ...(_vh.length ? { vatClaimHistory: [...(inv.vatClaimHistory||[]), ..._vh] } : {}),
-          })
-        : i), auditLog:[...(s.auditLog||[]), al] };
+          }))
+        : i), auditLog:[...(s.auditLog||[]), al, ...(_dsiT.audit ? [_dsiT.audit] : [])] };
     }
     case 'CLEAR_TAX_INV': {
       // a.data: invId (รูปเดิม) หรือ { invId, by, at } — สำหรับ undo / mark "ยังไม่ได้รับ" ใหม่
@@ -32693,17 +33092,24 @@ function _reducerCore(s, a){
       // replay/สองเครื่อง: ลบได้เฉพาะเลขที่ผู้ใช้เห็นตอนกด (expectNumber) — อีกเครื่องเพิ่งคีย์เลขใหม่ → ไม่ลบทับ
       if(d.expectNumber !== undefined && String(d.expectNumber||'').trim() !== String(inv.supTaxInvNumber||'').trim()){
         alert('⛔ ใบกำกับของใบนี้ถูกแก้จากเครื่องอื่น (ตอนนี้ ' + inv.supTaxInvNumber + ') — ตรวจก่อนลบ'); return s; }
+      let _dsiC = { ok: true };
       {   // 🆕 MULTI-TAXINV UAT M1: ลบใบที่ยังเปิดแล้วใบที่ยื่นแล้วได้ยอดเคลมเพิ่ม (ใบนั้นเคยถูกตัด) → ห้าม
         const _after = tiId ? _tiApply(inv0, tiId, { removedAt: 1 }) : { ...inv0, supTaxInvNumber:'', supTaxInvBase:null, supTaxInvVat:null };
         const _fd = _tiFiledShiftDeny(s, inv0, _after);
         if(_fd){ alert('⛔ ' + _fd); return s; }
+        // 🆕 DSI1 regression verify: ลบเลขใบกำกับของใบจ่ายแล้ว/จ่ายบางส่วน/มีคำขอจ่าย = ด่านเดียวกับเปลี่ยนเลข (ผจก.บัญชี/GM + เหตุผล ≥10)
+        //   (เดิมลบแล้วคีย์เลขใหม่ได้เงียบ ๆ → เลขเดิมว่างให้คีย์ใบอื่นจ่ายซ้ำ)
+        _dsiC = _dsiEditGate(s, inv0, _after, d.dupSupInvOverride, 'CLEAR_TAX_INV', Number(d.at) || Date.now());
+        if(_dsiC.deny){ alert('⛔ ' + _dsiC.deny); return s; }
       }
       const now = Number(d.at) || Date.now(), who = (u && u.username) || d.by || '';
       const _bv = (inv.supTaxInvBase != null || inv.supTaxInvVat != null) ? { base: inv.supTaxInvBase == null ? null : inv.supTaxInvBase, vat: inv.supTaxInvVat == null ? null : inv.supTaxInvVat } : {};
-      const _h = { action:'clear', number: inv.supTaxInvNumber, date: inv.supTaxInvDate || '', ..._bv, claimDate: inv.supVatClaimDate || '', by: who, ts: now };
+      const _rmC = _dsiC.rmMark ? { dsiChange: { reason: _dsiC.rmMark.reason, by: _dsiC.rmMark.by, removed: _dsiC.rmMark.removed, wasPaid: true } } : {};
+      const _rmN = _dsiC.rmMark ? ' · ใบจ่ายแล้ว/มีคำขอจ่าย — ลบเลขโดย ' + _dsiC.rmMark.by + ' · เหตุผล: ' + _dsiC.rmMark.reason : '';
+      const _h = { action:'clear', number: inv.supTaxInvNumber, date: inv.supTaxInvDate || '', ..._bv, claimDate: inv.supVatClaimDate || '', by: who, ts: now, ..._rmC };
       if(tiId){
         const _al = { id:'al_taxinv_'+inv.id+'_'+tiId+'_'+now.toString(36)+'c', ts: now, type:'tax_inv_clear', action:'tax_inv_clear', by: who, entityId: inv.id, entityRef: inv.invNumber || inv.id, ti: tiId,
-          note: `ลบใบกำกับ ${inv.supTaxInvNumber} (${inv.supTaxInvDate||'-'}) · VAT ${inv.supTaxInvVat == null ? '-' : Number(inv.supTaxInvVat).toFixed(2)}` };
+          note: `ลบใบกำกับ ${inv.supTaxInvNumber} (${inv.supTaxInvDate||'-'}) · VAT ${inv.supTaxInvVat == null ? '-' : Number(inv.supTaxInvVat).toFixed(2)}` + _rmN, ..._rmC };
         // ใบที่ 2+ ที่เลื่อนเคลมอยู่ ลบไม่ได้ (ลบแล้วเพิ่มใหม่ = หลบการอนุมัติเคลมคืน) · ใบบันทึกหลังหมดสิทธิ์ (expiredOnEntry) ลบได้
         if(global.ERP.vatDeferred(inv) && !(inv.vatDefer && inv.vatDefer.expiredOnEntry)){ alert('⛔ ใบกำกับนี้เลื่อนเคลมไว้ — ลบไม่ได้ (เคลมคืนก่อน หรือใช้ใบลดหนี้จากผู้ขาย)'); return s; }
         const _dfx = inv.vatDefer ? { vatDefer: null, vatClaimHistory: [...(inv.vatClaimHistory||[]), { action:'claim', note:'clear', from:'', to:'', by: who, at: now, reason: String(d.reason || '').trim() }] } : {};
@@ -32711,7 +33117,7 @@ function _reducerCore(s, a){
           auditLog:[...(s.auditLog||[]), _al] };
       }
       const al = { id:'al_taxinv_'+inv.id+'_'+now.toString(36)+'c', ts: now, type:'tax_inv_clear', action:'tax_inv_clear', by: who, entityId: inv.id, entityRef: inv.invNumber || inv.id,
-        note: `ลบใบกำกับ ${inv.supTaxInvNumber} (${inv.supTaxInvDate||'-'}) · เดิมเคลมงวด ${String(inv.supVatClaimDate || inv.supTaxInvDate || '').slice(0,7) || '-'}` };
+        note: `ลบใบกำกับ ${inv.supTaxInvNumber} (${inv.supTaxInvDate||'-'}) · เดิมเคลมงวด ${String(inv.supVatClaimDate || inv.supTaxInvDate || '').slice(0,7) || '-'}` + _rmN, ..._rmC };
       return { ...s, invoices: s.invoices.map(i => i.id === inv.id
         ? { ...i, supTaxInvNumber:'', supTaxInvDate:'', supVatClaimDate:'', supTaxInvImage:null,
             supTaxInvReceivedAt:null, supTaxInvReceivedBy:'', supTaxInvHistory: [...(i.supTaxInvHistory||[]), _h],
@@ -32749,6 +33155,9 @@ function _reducerCore(s, a){
       if(!dn) dn = _taxInvDenyReasonR3(s, bv, 'set', { taxInvNumber:number, taxInvDate:date, today, pending:d.pending, reason:d.reason, acceptExpired:d.acceptExpired, taxInvImage:e0.image }, u);
       if(!dn && _tiPaperSumAfter(inv, 'new', vat) > (Number(inv.vat) || 0) + E.TAXINV_VAT_TOL) dn = _TI_OVER_MSG;
       if(dn){ alert('⛔ ' + dn); return s; }
+      // 🆕 DSI1: เลขใบกำกับใบที่ 2+ ชนเลขของใบอื่นผู้ขายเดียวกัน → ปฏิเสธ (ผจก.บัญชี/GM ข้ามได้พร้อมเหตุผล)
+      const _dsiE = _dsiEditGate(s, inv, { ...inv, supTaxInvMore: [ ...(inv.supTaxInvMore || []), { id: eid, number } ] }, d.dupSupInvOverride, 'ADD_TAX_INV_ENTRY', now);
+      if(_dsiE.deny){ alert('⛔ ' + _dsiE.deny); return s; }
       let claim = _taxInvClaimDate(s, bv, date, today);
       const vh = [];
       let vatDefer = null;
@@ -32764,7 +33173,8 @@ function _reducerCore(s, a){
       const al = { id:'al_taxinv_' + inv.id + '_' + eid, ts: now, type:'tax_inv_add', action:'tax_inv_add', by: who, entityId: inv.id, entityRef: inv.invNumber || inv.id,
         snap: { ti: eid, number, date, base, vat, claimDate: claim },
         note: 'เพิ่มใบกำกับ ' + number + ' (' + date + ') · ฐาน ' + base.toFixed(2) + ' · VAT ' + vat.toFixed(2) + ' · ' + (vatDefer ? 'บันทึกเป็นหลักฐาน — หมดสิทธิ์เคลม (ม.82/3)' : 'เคลมงวด ' + String(claim).slice(0, 7)) };
-      return { ...s, invoices: s.invoices.map(i => i.id === inv.id ? { ...i, supTaxInvMore: [...(i.supTaxInvMore || []), entry] } : i), auditLog: [...(s.auditLog || []), al] };
+      return { ...s, invoices: s.invoices.map(i => i.id === inv.id ? { ...i, supTaxInvMore: [...(i.supTaxInvMore || []), entry], ...(_dsiE.mark ? { dupSupInvOverrideLog: [ ...(i.dupSupInvOverrideLog || []), _dsiE.mark ] } : {}) } : i),
+        auditLog: [...(s.auditLog || []), al, ...(_dsiE.audit ? [_dsiE.audit] : [])] };
     }
 
     // 🆕 VAT-CLAIM V5 (B4.1): เลื่อนเคลมภาษีซื้อ (ผจก.บัญชี/GM · เหตุผลจากรายการ) — ใบหายจากทุกงวดจนกว่าจะ CLAIM_VAT_IN_PERIOD · today/at มากับ payload
@@ -33685,7 +34095,7 @@ function _reducerCore(s, a){
       // 🆕 DEPOSIT-VAT verify: ด่านงวดปิดชั้นสุดท้ายแบบ ADD_INV (เดิมมีแค่ UI invCreateDeny)
       { const _lk = _checkDateLock(s, a.data && a.data.inv && a.data.inv.invDate, 'INV'); if(_lk) return _lk; }
       // 🆕 DEPOSIT-VAT review: ฟิลด์ควบคุม + ใบกำกับที่มากับใบใหม่ (ซ้ำ/6 เดือน/งวดเคลม) — ด่านเดียวกับ ADD_INV
-      const _cp = _invCreatePrep(s, { ...((a.data && a.data.inv) || {}), ...(a.data && a.data.today ? { today: a.data.today } : {}) });
+      const _cp = _invCreatePrep(s, { ...((a.data && a.data.inv) || {}), ...(a.data && a.data.today ? { today: a.data.today } : {}), ...(a.data && a.data.dupSupInvOverride ? { dupSupInvOverride: a.data.dupSupInvOverride } : {}) }, { via: 'ADD_COMBINED_INV' });
       if(_cp.deny){ alert('⛔ ตั้งหนี้ไม่ได้ — ' + _cp.deny); return s; }
       const inv = _cp.inv, { grIds } = a.data;
       { const _vd = _grVoidDeny(s, grIds); if(_vd){ alert(_vd); return s; } }   // 🆕 VOID-GR VG3
@@ -33728,7 +34138,7 @@ function _reducerCore(s, a){
       const _psr = _invPartySnap(s, inv);
       if(_psr.deny){ alert(_psr.deny); return s; }
       const invS = _psr.inv;
-      if(_cp.audit) _twExtra = { ..._twExtra, auditLog: [ ...((_twExtra.auditLog) || s.auditLog || []), _cp.audit ] };
+      if(_cp.audit || _cp.dsiAudit) _twExtra = { ..._twExtra, auditLog: [ ...((_twExtra.auditLog) || s.auditLog || []), ...[_cp.audit, _cp.dsiAudit].filter(Boolean) ] };   // 🆕 DSI1: + ประวัติข้ามด่านเลขซ้ำ
       return {
         ...s,
         invoices: [...s.invoices, invS],
@@ -39416,11 +39826,11 @@ const ACTION_READS = Object.freeze({
   UPDATE_PO_FULL: ['approvalRequests','auditLog','expenseItems','pos'],   // 🔧 B18.10-7: + expenseItems   // B18: approvalReqId → _approvalGate อ่านคำขอ (users/settings/approvalRules = หมวดคุม)
   RECEIVE_PO: ['auditLog','expenseItems','fifoLayers','grs','items','movements','pos'],   // 🆕 FREIGHT_EXPENSE F2: + expenseItems (ธงไม่นับสต๊อก itemExpenseLink)
     // 🆕 RECV-ONBEHALF UAT S2: + auditLog (กันซ้ำ al_grob_<gr.id> ก่อนต่อท้าย)
-  ADD_INV: ['approvalRequests','assetCategories','assets','auditLog','contracts','expenseItems','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','suppliers'],   // 🆕 STOCK_TO_ASSET UAT M1: + items (ชื่อสินค้าในด่านต่ำกว่าเกณฑ์)   // 📦 OVER_RECEIVE O1/O5: + returns (คืนส่วนเกิน RTV)   // 🔧 EXPENSE_PO D12: + expenseItems (ค่าเริ่มต้นบัญชี/💎)   // 🆕 EXPENSE_PO P3.8: + assets/assetCategories/contracts (contractCapAccount · ด่านสัญญา)   // VAT-DEFER verify: + approvalRequests (_taxInvDenyReason → vatApPendingLive)   // DEPOSIT-VAT UAT: + grs (ชุดแยกใบเก่า splitInvoiceIds)   // DEPOSIT-VAT review: ใบกำกับที่มากับใบใหม่ → ด่านซ้ำ (findDupTaxInv)
+  ADD_INV: ['approvalRequests','assetCategories','assets','auditLog','contracts','deposits','expenseItems','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','suppliers'],   // 🆕 STOCK_TO_ASSET UAT M1: + items (ชื่อสินค้าในด่านต่ำกว่าเกณฑ์)   // 📦 OVER_RECEIVE O1/O5: + returns (คืนส่วนเกิน RTV)   // 🔧 EXPENSE_PO D12: + expenseItems (ค่าเริ่มต้นบัญชี/💎)   // 🆕 EXPENSE_PO P3.8: + assets/assetCategories/contracts (contractCapAccount · ด่านสัญญา)   // VAT-DEFER verify: + approvalRequests (_taxInvDenyReason → vatApPendingLive)   // DEPOSIT-VAT UAT: + grs (ชุดแยกใบเก่า splitInvoiceIds)   // DEPOSIT-VAT review: ใบกำกับที่มากับใบใหม่ → ด่านซ้ำ (findDupTaxInv)
   ADD_MIG_LATE_INV: ['auditLog','filedTaxInvKeys','grs','invoices','pos','suppliers'],   // 🆕 MIG_LATE_INV: ด่านเลข Ecount/ผู้ขาย+เลขใบ (findDupSupInv/findDupTaxInv) · users/settings = หมวดคุม
-  ADD_COMBINED_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','suppliers'],   // 🆕 STOCK_TO_ASSET verify 1: + items (ด่านต่ำกว่าเกณฑ์)   // 📦 OVER_RECEIVE O1/O5: + returns (คืนส่วนเกิน RTV)   // VAT-DEFER verify: + approvalRequests
-  UPDATE_INV: ['assets','auditLog','deposits','grs','invoices','journalEntries','payments','returns','supplierMemos'],   // 🆕 UNDO_FIELD_GUARD G5: ตาข่ายด่านย้อน (invUndoGateFlip → invUndoExcluded) อ่านชุดเดียวกับ VOID_INV ทางตรง
-  PATCH_INV: ['invoices'],
+  ADD_COMBINED_INV: ['approvalRequests','auditLog','deposits','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','suppliers'],   // 🆕 STOCK_TO_ASSET verify 1: + items (ด่านต่ำกว่าเกณฑ์)   // 📦 OVER_RECEIVE O1/O5: + returns (คืนส่วนเกิน RTV)   // VAT-DEFER verify: + approvalRequests
+  UPDATE_INV: ['assets','auditLog','deposits','grs','invoices','journalEntries','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 DSI1: + pos/suppliers (ด่านเลขใบซ้ำ — ชุดแยกใบ/เลขผู้เสียภาษี)   // 🆕 UNDO_FIELD_GUARD G5: ตาข่ายด่านย้อน (invUndoGateFlip → invUndoExcluded) อ่านชุดเดียวกับ VOID_INV ทางตรง
+  PATCH_INV: ['auditLog','deposits','grs','invoices','payments','pos','suppliers'],   // 🆕 DSI1 verify 1: + deposits (มัดจำ↔ใบสุดท้ายต้องมีมัดจำจริง)   // 🆕 DSI1: ด่านเลขใบซ้ำ (เฉพาะงานที่แตะเลข/ผู้ขาย — ACTION_READS_WHEN ตัดหมวดเพิ่มออกเมื่อไม่แตะ)
   ADD_PAY: ['approvalRequests','invoices','payTags','payments','returns'],   // 🆕 PRICE-FIX UAT S3: คำขออนุมัติ adjust_inv_price ค้าง = ห้ามขอจ่าย
   // UAT M1 (PAY-TAGS): tagId ไม่อยู่ในทะเบียน → โยงด้วยชื่อ (อ่าน payTags)
   // ADD_PAY · DEPOSIT-VAT review R8: จ่าย DP ทาง ADD_PAY ถูกปฏิเสธเสมอ → ไม่อ่าน/เขียน deposits แล้ว (เปิดมัดจำที่ UPDATE_PAY)
@@ -39532,8 +39942,8 @@ const ACTION_READS = Object.freeze({
   REQUEST_INV_PRICE_FIX: ['approvalRequests','assets','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'], SUBMIT_INV_PRICE_FIX: ['approvalRequests','assets','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 PRICE-FIX ขั้น 3 (R2.9) · case ร่วม → หมวดชุดเดียว (ด่านเอกสารผ่าน planInvPriceAdjust: pos/returns/items · findDupTaxInv: suppliers/filedTaxInvKeys)   // 🆕 UNDO_PRINCIPLE C1/C4: + assets (grCapexPriceFixDeny ตรวจทรัพย์สินลงทะเบียนจาก GR)
   RETURN_INV_PRICE_FIX: ['approvalRequests','assets','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'], CANCEL_INV_PRICE_FIX: ['approvalRequests','assets','auditLog','filedTaxInvKeys','grs','invoices','items','payments','pos','returns','supplierMemos','suppliers'],
   ADJUST_INV_PRICE: ['approvalRequests','assets','auditLog','fifoLayers','filedTaxInvKeys','grs','invoices','items','journalEntries','payments','pos','returns','supplierMemos','suppliers'],   // 🆕 PRICE-FIX ขั้น 2 (approvalRequests = ทางอนุมัติ · filedTaxInvKeys/suppliers = findDupTaxInv ตอนใบยังไม่มีเลข)
-  SET_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],     // 🆕 DEPOSIT-VAT E-5 R1/R2 (งวดล็อกอยู่ใน settings = หมวดคุม)
-  ADD_TAX_INV_ENTRY: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],   // 🆕 MULTI-TAXINV: แถวเดียวกับ SET_TAX_INV
+  SET_TAX_INV: ['approvalRequests','auditLog','deposits','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],     // 🆕 DEPOSIT-VAT E-5 R1/R2 (งวดล็อกอยู่ใน settings = หมวดคุม)
+  ADD_TAX_INV_ENTRY: ['approvalRequests','auditLog','deposits','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],   // 🆕 MULTI-TAXINV: แถวเดียวกับ SET_TAX_INV
   CLEAR_TAX_INV: ['approvalRequests','auditLog','filedTaxInvKeys','grs','invoices','journalEntries','payments','pos','suppliers'],   // 🆕 TAXINV-ANYWHERE R3: + journalEntries (vatExpireJeLive)
   DEFER_VAT_CLAIM: ['approvalRequests','auditLog','invoices'],       // 🆕 VAT-CLAIM V5 (B4.6 · ล็อก/สิทธิ์อยู่ใน settings/users = หมวดคุม) · D2: คำขออนุมัติ (กฎ = หมวดคุม)
   CLAIM_VAT_IN_PERIOD: ['approvalRequests','auditLog','invoices','journalEntries'],   // verify VC2: ตรวจ JE โอน VAT หมดสิทธิ์ยังมีผล
@@ -39667,9 +40077,14 @@ const PATCH_READS = Object.freeze({ REVIEW_WEIGH_LOG:['weighLogs'], MARK_WEIGH_R
 //   แถว: [{ when(data) → true = ตัด, drop:[หมวด ⊆ แถว ACTION_READS] }] · ฟังก์ชันคิดพลาด/ข้อมูลแปลก = ไม่ตัด (นับครบเหมือนเดิม)
 //   ทุกแถวต้องมี fixture ใน w3_reads (Proxy พิสูจน์ว่า reducer ไม่แตะหมวดที่ตัด · และงานที่ไม่เข้าเงื่อนไขยังอ่านอยู่)
 const _invUnlinked = d => !!d && typeof d === 'object' && !d.grId && !(d.grIds && (!Array.isArray(d.grIds) || d.grIds.length)) && !d.poId;
+const _DSI_NO_FIELDS = Object.freeze(['supInvNumber','supTaxInvNumber','supTaxInvMore','supplierId']);
+const _patchNoDocNo = d => !!d && typeof d === 'object' && !d.dupSupInvOverride && (d.fields == null || (typeof d.fields === 'object' && !Array.isArray(d.fields)))
+  && !_DSI_NO_FIELDS.some(k => d.fields && Object.prototype.hasOwnProperty.call(d.fields, k));
 const ACTION_READS_WHEN = Object.freeze({
   // ใบค่าใช้จ่าย/EXP (รวมจ่ายเงินสดย่อยทันที) ไม่ผูก GR/PO → ด่าน GR/PO/รับเกิน/ต่ำกว่าเกณฑ์/แยกใบไม่อ่าน grs/pos/items/returns
-  ADD_INV: Object.freeze([Object.freeze({ when: _invUnlinked, drop: Object.freeze(['grs','pos','items','returns']) })]),
+  ADD_INV: Object.freeze([Object.freeze({ when: _invUnlinked, drop: Object.freeze(['deposits','grs','pos','items','returns']) })]),   // 🆕 DSI1 verify 1: + deposits (คู่มัดจำต้องมี poId)
+  // 🆕 DSI1: PATCH_INV ที่ไม่แตะเลขใบแจ้งหนี้/ใบกำกับ/ผู้ขาย = ด่านเลขซ้ำไม่ทำงาน → อ่านแค่ invoices เหมือนเดิม
+  PATCH_INV: Object.freeze([Object.freeze({ when: _patchNoDocNo, drop: Object.freeze(['auditLog','deposits','grs','payments','pos','suppliers']) })]),
 });
 // reducer ที่บอกได้ว่า action "ไม่มีผล" (คืน state เดิม — ถูกปฏิเสธ/ซ้ำ) → สมุดตัดทิ้ง ไม่ค้างให้เล่นซ้ำแล้วพัง (ค้างจาก verify คลื่น 0)
 //   journalAdd ผูก entry ไว้ที่ action.__jref (ไม่ enumerable) — React เรียก reducer ตอน render ซึ่งมาหลัง journalAdd เสมอ (useReducer ไม่คำนวณล่วงหน้า)
@@ -68447,7 +68862,9 @@ function prepSetWaitText(state, jobs){
 }
 // ยอดที่ต้องสั่งชั่งเพิ่ม (หักงานชั่งชุดที่เปิดอยู่แล้ว = กันสร้างซ้ำ) → { row, deficit, sets } | null
 // 🆕 SET_PREP verify 1: ช่วงวันของ "ต้องชั่งชุดเพิ่ม" (วันนี้–พรุ่งนี้)
-function prepSetWin(state){ try { return { ...(global.ERP.prepSetWindow(getToday()) || {}) }; } catch(_e){ return {}; } }
+// 🆕 WNQ2 UAT S3: ใบเริ่มเองกะดึก (วันผลิต = เมื่อวาน) ที่ยังไม่เกิน 12 ชม. ยังนับในช่วง ไม่ไปอยู่ "ใบวันอื่น"
+// 🆕 WNQ2 verify 1: ใบค้างเกิน 12 ชม. (แม้วันผลิต = วันนี้) ไม่นับ — ใช้ prepSetWinNow ตัวกลาง (🔔 + งานค้าง ใช้ตัวเดียวกัน)
+function prepSetWin(state){ try { return global.ERP.prepSetWinNow(state, getToday()) || {}; } catch(_e){ return {}; } }
 function prepSetDeficitFor(state, order, itemId){
   let row = null;
   // 🆕 SET_PREP verify 1: นับเฉพาะใบวันนี้–พรุ่งนี้ (ชุดใช้ภายใน 1 วัน) · ขยายให้ครอบวันของใบนี้เอง (B2 จากการ์ดใบล่วงหน้า/เลยกำหนด)
@@ -68604,7 +69021,7 @@ function WeighPrepStrip({ state, user, branchId, lineIds, blocked, recipes, onPr
   try { badLoc = global.ERP.prepSetLocMisconfig(state, branchId, { lineIds }) || []; } catch(_e){ badLoc = []; }
   // 🆕 WNQ1 N2: สูตรตั้งคลังผิด = เรื่องของผู้แก้สูตร (พนักงานชั่งแก้ไม่ได้) → เห็นเฉพาะผู้แก้ BOM
   if(!(user && hasPerm(user, 'production', 'bom', 'edit'))) badLoc = [];
-  // 🆕 WNQ1 N4: ใบเริ่มเองค้างจากวันก่อน ไปอยู่แถวพับ "🗂 ค้างจากวันก่อน" — ไม่นับซ้ำใน "ใบวันอื่น"
+  // 🆕 WNQ1 N4: ใบเริ่มเองค้างเกิน 12 ชม. ไปอยู่แถวพับ "🗂 ค้างเกิน 12 ชม." — ไม่นับซ้ำใน "ใบวันอื่น"
   let staleIds = new Set();
   try { staleIds = new Set((global.ERP.staleUnstartedSelfStart(state, null, { branchId }) || []).map(o => o.id)); } catch(_e){}
   later = later.map(x => ({ ...x, orders: (x.orders || []).filter(j => !staleIds.has(j.orderId)) })).filter(x => x.orders.length);
@@ -68783,7 +69200,7 @@ function WeighJobQueue({ state, dispatch, user, rows, env, onStart, onReload, on
                 className:'px-2 py-0.5 bg-blue-100 hover:bg-blue-200 text-blue-800 border border-blue-300 rounded text-xs font-bold' }, `🚚 ${openTR.length ? 'ขอเพิ่ม' : 'ขอของ'}ทั้งใบ (${shortAll.batches} batch)`))));
         }));
     }),
-    // 🆕 WNQ1 N4: ใบเริ่มเองค้างจากวันก่อน = แถวพับเดียวท้ายคิว
+    // 🆕 WNQ1 N4: ใบเริ่มเองค้างเกิน 12 ชม. = แถวพับเดียวท้ายคิว
     h(StaleSelfStartRow, { state, dispatch, user, orders: staleOrders, onGo: onStaleGo }));
 }
 // งานปัจจุบันของแถบในกล่องเต็มจอ: งานที่เราจองไว้ก่อน → ใบที่เพิ่งชั่งเสร็จ (batch ถัดไป) → batch ถัดไปตัวแรกในคิว
@@ -69575,24 +69992,29 @@ function LssCancelBtn({ state, dispatch, user, order, onDone, className }){
     onClick: (e) => { if(e && e.stopPropagation) e.stopPropagation(); lssCancelUnstarted(state, dispatch, user, order, onDone); },
     className: cls('px-2 py-1 rounded border border-red-300 bg-red-50 hover:bg-red-100 text-red-800 text-xs font-bold whitespace-nowrap', className) }, '🗑️ ยกเลิกใบนี้ (ยังไม่เริ่ม)');
 }
-// 🆕 WNQ1 N4: id ใบเริ่มเองค้างจากวันก่อน (ไม่ยกเลิกอัตโนมัติ — คำตอบเจ้าของ ก) ลบใบที่ผู้ใช้กด ➡️ ไปใบนี้ แล้ว (revived)
+// 🆕 WNQ1 N4: id ใบเริ่มเองค้างเกิน 12 ชม. (ไม่ยกเลิกอัตโนมัติ — คำตอบเจ้าของ ก) ลบใบที่ผู้ใช้กด ➡️ ไปใบนี้ แล้ว (revived)
 function wnqStaleIds(state, user, branchId, revived){
   let ids = [];
   try { ids = (global.ERP.staleUnstartedSelfStart(state, user, { branchId }) || []).map(o => o.id); } catch(_e){}
   return new Set(ids.filter(id => !(revived && revived.has(id))));
 }
-// 🆕 WNQ1 N4: แถวพับ "🗂 ค้างจากวันก่อน N ใบ ▸" ต่อท้ายคิว — รายใบ: ชื่อ (ProdOrderTag) · วันที่ · ➡️ ไปใบนี้ · 🗑️ ยกเลิก (ทาง LSS4 P3)
+// 🆕 WNQ1 N4: แถวพับ "🗂 ค้างเกิน 12 ชม. N ใบ ▸" ต่อท้ายคิว — รายใบ: ชื่อ (ProdOrderTag) · วันที่ · ➡️ ไปใบนี้ · 🗑️ ยกเลิก (ทาง LSS4 P3)
 function StaleSelfStartRow({ state, dispatch, user, orders, onGo }){
   const list = orders || [];
   if(!list.length) return null;
-  const dayOf = (o) => o.plannedDate ? fmtDate(String(o.plannedDate).slice(0, 10)) : (Number(o.createdAt) > 0 ? new Date(Number(o.createdAt)).toLocaleDateString('th-TH') : '-');   // verify 1: วันที่ไทย
+  // 🆕 WNQ2 UAT S2: เวลาสร้างอ่านแบบเดียวกับ core (_ssCreatedMs รับทั้งตัวเลข/ISO) + บอก "สร้าง dd/mm HH:MM · ค้าง N ชม." ให้เห็นว่าทำไมนับค้าง
+  const cMs = (o) => { try { return global.ERP._ssCreatedMs(o) || 0; } catch(_e){ return 0; } };
+  const pad = (n) => String(n).padStart(2, '0');
+  const dayOf = (o) => { const c = cMs(o); return o.plannedDate ? fmtDate(String(o.plannedDate).slice(0, 10)) : (c ? new Date(c).toLocaleDateString('th-TH') : '-'); };   // verify 1: วันที่ไทย
+  const ageOf = (o) => { const c = cMs(o); if(!c) return ''; const d = new Date(c);
+    return ` · สร้าง ${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())} · ค้าง ${Math.max(0, Math.floor((Date.now() - c) / 3600e3))} ชม.`; };
   return h('details', { 'data-wnq-stale':'1', 'data-wnq-stale-n': list.length, className:'rounded-lg bg-white border border-gray-200 px-3 py-1.5 text-sm' },
     h('summary', { 'data-wnq-stale-summary':'1', className:'cursor-pointer select-none font-medium text-gray-700' },
-      `🗂 ค้างจากวันก่อน ${list.length} ใบ ▸`,
+      `🗂 ค้างเกิน 12 ชม. ${list.length} ใบ ▸`,
       h('span', { className:'ml-2 text-[11px] font-normal text-gray-500' }, 'ใบเริ่มผลิตเองที่ยังไม่เริ่ม — ระบบไม่ยกเลิกเอง')),
     h('div', { className:'mt-1 space-y-1' },
       list.map(o => h('div', { key: o.id, 'data-wnq-stale-order': o.id, className:'flex flex-wrap items-center gap-2 text-xs' },
-        h('span', { className:'flex-1 min-w-[160px]' }, h(ProdOrderTag, { state, order: o }), h('span', { className:'ml-2 text-gray-500' }, '📅 ' + dayOf(o))),
+        h('span', { className:'flex-1 min-w-[160px]' }, h(ProdOrderTag, { state, order: o }), h('span', { className:'ml-2 text-gray-500', 'data-wnq-stale-age': o.id }, '📅 ' + dayOf(o) + ageOf(o))),
         onGo && h('button', { type:'button', 'data-wnq-stale-go': o.id, onClick: () => onGo(o),
           className:'px-2 py-1 rounded border border-indigo-300 bg-white text-indigo-800 text-xs font-bold' }, '➡️ ไปใบนี้'),
         h(LssCancelBtn, { state, dispatch, user, order: o })))));
@@ -69673,7 +70095,7 @@ function SelfStartModal({ state, dispatch, user, branchId, here, onClose, onPrep
     const block = lineStockBlock(state, o);
     const prep = prepGateShort(state, o, b0);
     // 🆕 LSS4 P1: ใบสูตร+ขนาดนี้ที่ยังไม่เริ่ม (ทุกใบ) → แสดงรายการ + ให้สร้างอีกใบได้ (เครื่องผสมหลายเครื่อง)
-    const dups = findSelfStartDups(state, user, sel.bom.id, profileId, branchId, today);
+    const dups = findSelfStartDups(state, user, sel.bom.id, profileId, branchId, today, null, { now: Date.now() });   // 🆕 WNQ2 verify 1: ใบกะดึก ≤ 12 ชม. นับซ้ำด้วย
     let short = [];
     try { short = previewLineShortage(state, o, lssNeedWithDups(o, dups), b0 ? b0.seq : null); } catch(_e){ short = []; }
     if(short.length && dups.length) short.dupsReserved = dups.length;   // UAT S4: ป้ายบอกว่ารวมของที่ใบเดิมจองไว้
@@ -69817,9 +70239,13 @@ function WeighStationTab({ state, dispatch, user, branchId }){
   const activeSub = subLineOk ? subLine : '__all__';
   const recipesShown = useMemo(() => activeSub === '__all__' ? recipes
     : recipes.filter(r => { const wl = r.weighLineIds || []; return !wl.length || wl.includes(activeSub); }), [recipes, activeSub]);
-  // 🆕 WNQ1 N4: ใบเริ่มเองค้างจากวันก่อน ไม่ขึ้นเป็นการ์ดเต็ม → แถวพับท้ายคิว · ➡️ ไปใบนี้ = เอากลับมาเป็นการ์ด (เฉพาะจอนี้)
+  // 🆕 WNQ1 N4: ใบเริ่มเองค้างเกิน 12 ชม. ไม่ขึ้นเป็นการ์ดเต็ม → แถวพับท้ายคิว · ➡️ ไปใบนี้ = เอากลับมาเป็นการ์ด (เฉพาะจอนี้)
   const [staleRevived, setStaleRevived] = useState(() => new Set());
-  const staleIds = useMemo(() => wnqStaleIds(state, user, branchId, staleRevived), [state.productionOrders, state.boms, user, branchId, staleRevived]);
+  // 🆕 WNQ2 UAT S1: นับใหม่ทุก 10 นาที (ช่องเวลาเดียวกับ 🔔) — จอเปิดค้างไม่มีใครบันทึก ใบเกิน 12 ชม. ก็พับเอง
+  const [, setWnqTick] = useState(0);
+  useEffect(() => { const t = setInterval(() => setWnqTick(Math.floor(Date.now() / 6e5)), 6e4); return () => clearInterval(t); }, []);
+  const wnqBucket = Math.floor(Date.now() / 6e5);
+  const staleIds = useMemo(() => wnqStaleIds(state, user, branchId, staleRevived), [state.productionOrders, state.boms, user, branchId, staleRevived, wnqBucket]);
   const staleOrders = useMemo(() => (state.productionOrders || []).filter(o => o && staleIds.has(o.id)), [state.productionOrders, staleIds]);
   const onStaleGo = (o) => {
     setStaleRevived(p => { const n = new Set(p); n.add(o.id); return n; });
@@ -75873,7 +76299,7 @@ function MyStationTab({ state, dispatch, user, branchId }){
 
   const myWorkItems = [];
   const weighHidden = [];   // 🆕 WEIGH-ORDER E6: งานชั่งที่ย้ายไป ⚖️ ชั่ง (ที่เดิมจะขึ้นที่นี่) → แถบชี้ทาง
-  // 🆕 WNQ1 N4/N6: ใบเริ่มเองค้างจากวันก่อน ไม่ขึ้นเป็นการ์ด/ไม่นับในแถบชี้ทาง/ไม่อยู่ในรายการ "ไม่ขึ้นหน้างาน" → แถวพับเดียว
+  // 🆕 WNQ1 N4/N6: ใบเริ่มเองค้างเกิน 12 ชม. ไม่ขึ้นเป็นการ์ด/ไม่นับในแถบชี้ทาง/ไม่อยู่ในรายการ "ไม่ขึ้นหน้างาน" → แถวพับเดียว
   const msStaleIds = wnqStaleIds(state, user, branchId, msRevived);
   const msStaleOrders = baseOrders.filter(o => msStaleIds.has(o.id));
   for(const order of allOrders){
@@ -76690,7 +77116,7 @@ function MyStationTab({ state, dispatch, user, branchId }){
       )
     ),
 
-    // 🆕 WNQ1 N4: ใบเริ่มเองค้างจากวันก่อน = แถวพับเดียว (➡️ ไปใบนี้ = กลับมาเป็นการ์ด · 🗑️ ยกเลิก ทาง LSS4)
+    // 🆕 WNQ1 N4: ใบเริ่มเองค้างเกิน 12 ชม. = แถวพับเดียว (➡️ ไปใบนี้ = กลับมาเป็นการ์ด · 🗑️ ยกเลิก ทาง LSS4)
     h(StaleSelfStartRow, { state, dispatch, user, orders: msStaleOrders, onGo: (o) => {
       setMsRevived(p => { const n = new Set(p); n.add(o.id); return n; });
       // 🆕 WNQ1 verify 1: เลื่อนไปการ์ดใบนี้ (การ์ด/โฟลว์ · งานชั่ง → แถบชี้ไป ⚖️) — มือถือหลายเครื่องผสมจะได้เห็นว่าไปไหน
@@ -87653,6 +88079,8 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
   // มีแต่ใบส่งของ (ยังไม่มีใบกำกับ) → default "ใส่ทีหลัง"
   const [taxInvLater, setTaxInvLater] = useState(!gr.supTaxInvNumber && !!gr.deliveryNoteNo);
   const _tc = useTaxInvCover();   // 🆕 MULTI-TAXINV UAT S3
+  // 🆕 DSI1 D2: เลขใบแจ้งหนี้/ใบกำกับซ้ำกับใบเดิมของผู้ขายนี้ → บล็อกก่อนกดบันทึก
+  const dsi = global.ERP.useDupSupInvGuard(state, user, { supplierId: gr.supplierId || null, supInvNumber: supInvNumber.trim(), supTaxInvNumber: taxInvLater ? '' : String(taxInvNumber || '').trim() }, { testid:'dsi-block' });
   const [idCardImage, setIdCardImage] = useState(null);
   const [vatRate, setVatRate] = useState(7);
   const [vatOverride, setVatOverride] = useState(null);
@@ -88009,9 +88437,12 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
     //   🆕 verify 3b F3: ใบที่ด่านใบกำกับภาษีซ้ำ (_invCreateBlocked ข้างล่าง) จะบล็อกแน่ → ไม่ถามทั้งด่านใบยกมาและด่านเลขใบแจ้งหนี้ซ้ำ (ให้ ⛔ รายงานที่เดียว)
     //     ค่าเดียวกับ invData: supplierId = gr.supplierId · เลขใบกำกับ = ช่องใบกำกับ (ใส่ทีหลัง = ว่าง) · VAT ใบ (แยกตาม WHT ใช้เลข/ผู้ขายเดียวกันทุกใบ)
     const _taxBlk = _taxDupBlockIds(state, [{ supplierId: gr.supplierId, supTaxInvNumber: taxInvLater ? '' : taxInvNumber, supTaxInvDate: taxInvDate, vat }]);
-    const _exactDups = global.ERP.findDupSupInv(state, gr.supplierId, finalSupInv, null);
+    // 🆕 DSI1 D2: ด่านกลาง = บล็อก (ไม่มี confirm ต่อ) · ใบที่ด่านกลางเจอไม่ถามซ้ำในด่านเตือนเดิม
+    if(dsi.blocked) return alert('⛔ ตั้งหนี้ไม่ได้ — ' + (global.ERP.dupSupInvDeny(state, { supplierId: gr.supplierId, supInvNumber: finalSupInv, supTaxInvNumber: taxInvLater ? '' : String(taxInvNumber || '').trim() }) || 'เลขเอกสารซ้ำกับใบเดิมของผู้ขายนี้') + '\n\nยังไม่ได้บันทึกอะไร');
+    const _dsiIds = new Set(dsi.hits.map(x => x.id));
+    const _exactDups = global.ERP.findDupSupInv(state, gr.supplierId, finalSupInv, null).filter(d => !_dsiIds.has(d.id));
     if(!_migLateRevOk(state, [{ supplierId: gr.supplierId || po?.supplierId, taxInvNos: [taxInvLater ? '' : taxInvNumber, gr.supTaxInvNumber], taxDocNos: [finalSupInv],
-      otherDocNos: [gr.deliveryNoteNo, gr.supInvNoSeen], amount, total: amount + vat, date: gr.grDate }], { skipIds: _exactDups.map(d => d.id).concat(Array.from(_taxBlk)) })) return;
+      otherDocNos: [gr.deliveryNoteNo, gr.supInvNoSeen], amount, total: amount + vat, date: gr.grDate }], { skipIds: _exactDups.map(d => d.id).concat(Array.from(_taxBlk), Array.from(_dsiIds)) })) return;
     // 🆕 DUP: เช็คเลขใบกำกับ supplier ซ้ำ — กันเปิด PI/จ่ายซ้ำ
     {
       const dups = _exactDups.filter(d => !_taxBlk.has(d.id));   // 🆕 verify 3b F3: ใบที่ด่านใบกำกับภาษีซ้ำบล็อกแน่ → ⛔ รายงานที่เดียว
@@ -88076,7 +88507,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
           supInvNumber: finalSupInv ? `${finalSupInv}/${idx+1}` : '',
           supInvDate: finalSupInv ? supInvDate : '',
           needSupInv: !finalSupInv,
-          source: 'po_gr',
+          source: 'po_gr', ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 D3
           grId: gr.id, poId: gr.poId,
           supplierId: gr.supplierId,
           amount: segBase,
@@ -88147,7 +88578,7 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
       supInvNumber: finalSupInv,
       supInvDate: finalSupInv ? supInvDate : '',
       needSupInv: !finalSupInv,
-      source: 'po_gr',
+      source: 'po_gr', ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 D3
       grId: gr.id, poId: gr.poId,
       supplierId: gr.supplierId,
       // 🔧 Badge: INV นี้ออกใหม่หลังบัญชีให้แก้ PO
@@ -88819,8 +89250,9 @@ function CreateINVModal({ gr:grProp, state, dispatch, user, onClose, onDone }){
       capIntoSaveWarn(state, [grLive]),   // 🆕 OFF_INV_DISC_ASSET UAT S3
       h(PartialDeliveryAckBox, { rows: pdRows, ack: pdAck, setAck: setPdAck }),   // 🚚 PARTIAL_DELIVERY_PI P2
       pdWhy && h('div', { className:'text-xs text-red-700', 'data-testid':'pd-ack-why' }, pdWhy),
+      dsi.panel,   // 🆕 DSI1
       h('div', { className:'flex gap-2 pt-3 border-t flex-wrap' },
-        h(Button, { variant:'primary', onClick:save, 'data-testid':'inv-create-save', disabled:!!(pfBadge && pfBadge.hold) || !!pfAmtBlock || !!pfNetBlock || !!pfLegacyBlock || !!pdWhy,
+        h(Button, { variant:'primary', onClick:save, 'data-testid':'inv-create-save', disabled:!!(pfBadge && pfBadge.hold) || !!pfAmtBlock || !!pfNetBlock || !!pfLegacyBlock || !!pdWhy || dsi.blocked,
           title:(pfBadge && pfBadge.hold) || pfAmtBlock || pfNetBlock || pfLegacyBlock || pdWhy || undefined },
           pfKeyed && pfPlan && pfAp && pfAp.needAp ? '📤 ส่งขออนุมัติราคา (ยังไม่ตั้งหนี้)' : pfKeyed ? '💾 ยืนยันราคา + สร้าง INV + Post JE' : '💾 สร้าง INV + Post JE'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
@@ -89673,12 +90105,16 @@ function INVList({ state, dispatch, user }){
 function QuickUpdateSupInvModal({ inv, dispatch, onClose, state }){
   const [supInvNumber, setSupInvNumber] = useState(inv.supInvNumber || '');
   const [supInvDate, setSupInvDate] = useState(inv.supInvDate || inv.invDate || getToday());   // UAT S2: ค่าเริ่ม = วันตั้งหนี้ (ไม่ใช่วันนี้) กันเคลียร์ใบเก่าทีละมากแล้ววันที่ผิด
+  // 🆕 DSI1 D2: เลขใหม่ชนใบอื่นของผู้ขายเดียวกัน → บล็อก (ผจก.บัญชี/GM ติ๊กเลขซ้ำจริง+เหตุผล)
+  const _dsiInv = ((state && state.invoices) || []).find(i => i && i.id === inv.id) || inv;   // 🆕 DSI1 verify 2: ใบจริงทั้งใบจาก state (ชุดแยกใบ/มัดจำ/CN-DN ยกเว้นตรงกับ reducer)
+  const dsi = global.ERP.useDupSupInvGuard(state, state && state.currentUser, _dsiInv, { numbers: global.ERP.dupSupInvNewNumbers(_dsiInv, [supInvNumber]), next: { ..._dsiInv, supInvNumber: supInvNumber.trim() }, testid:'dsi-block' });   // 🆕 DSI1 regression: next = เปลี่ยนเลขใบจ่ายแล้ว → กล่องเหตุผล/ข้อความแดงก่อนกด
 
   const save = () => {
     if(inv.voided) return alert('🚫 ใบนี้ยกเลิกแล้ว — คีย์เลขไม่ได้ (คีย์ที่ใบที่ใช้งานอยู่)');   // UAT M1
     if(!supInvNumber.trim()) return alert('ใส่เลขใบกำกับจาก supplier');
     // 🆕 DUP: เช็คเลขใบกำกับซ้ำต่อ supplier (exclude self)
-    if(state && global.ERP.findDupSupInv){
+    if(dsi.blocked) return alert('⛔ บันทึกไม่ได้ — ' + (global.ERP.dupSupInvDeny(state, _dsiInv, { numbers: [supInvNumber.trim()] }) || (dsi.rm && dsi.rm.need ? 'ใบนี้จ่ายแล้ว — เปลี่ยนเลขต้องให้ ผจก.บัญชี/GM ใส่เหตุผล' : 'เลขซ้ำกับใบเดิมของผู้ขายนี้')));   // 🆕 DSI1
+    if(state && global.ERP.findDupSupInv && !dsi.hits.length){
       const dups = global.ERP.findDupSupInv(state, inv.supplierId, supInvNumber.trim(), inv.id);
       if(dups.length > 0){
         const hardBlock = state.settings?.blockDupSupInv === true;
@@ -89688,7 +90124,7 @@ function QuickUpdateSupInvModal({ inv, dispatch, onClose, state }){
       }
     }
     // DEPOSIT-VAT E-3 #5 / E-5 R4: รวมเฉพาะ 2 ฟิลด์ลงใบล่าสุด (เดิมส่ง {...inv} ทั้งใบ = ทับยอดจ่าย/ใบกำกับที่เครื่องอื่นเพิ่งแก้)
-    dispatch({ type:'PATCH_INV', data:{ id: inv.id, fields:{ supInvNumber:supInvNumber.trim(), supInvDate } } });
+    dispatch({ type:'PATCH_INV', data:{ id: inv.id, fields:{ supInvNumber:supInvNumber.trim(), supInvDate }, ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}) } });
     onClose();
   };
 
@@ -89709,8 +90145,9 @@ function QuickUpdateSupInvModal({ inv, dispatch, onClose, state }){
         h(BEDateInput, { value:supInvDate, onChange:setSupInvDate,
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
       ),
+      dsi.panel,   // 🆕 DSI1
       h('div', { className:'flex gap-2 pt-2' },
-        h(Button, { variant:'primary', onClick:save }, '💾 บันทึก'),
+        h(Button, { variant:'primary', onClick:save, disabled: dsi.blocked, 'data-testid':'quick-supinv-save' }, '💾 บันทึก'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
       )
     )
@@ -89963,6 +90400,11 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
   };
 
   const selected = availableGRs.filter(g => selectedGRs.includes(g.id));
+  // 🆕 DSI1 D2: เลขใบแจ้งหนี้/ใบกำกับของแถวใดซ้ำกับใบเดิมของผู้ขายนี้ → บล็อกก่อนกดบันทึก (ทั้งชุด)
+  const dsi = global.ERP.useDupSupInvGuard(state, user, selected.map(g => { const r = rowData[g.id] || {};
+    // 🆕 UAT S1: id ชั่วคราวต่อแถว + batch:true = แถวในรอบนี้เลขเดียวกันก็ขึ้นข้อความแดง (ไม่ต้องรอ confirm/alert ตอนกด)
+    return { id: 'dsirow_' + g.id, grId: g.id, _dsiGrNumber: g.grNumber || '', invNumber: 'แถว GR ' + (g.grNumber || g.id),
+      supplierId: supplierId || null, supInvNumber: String(r.supInvNumber || '').trim(), supTaxInvNumber: String(r.taxInvNumber || '').trim() }; }), { testid:'dsi-block', batch: true });
   const totalNet = selected.reduce((s,g) => s + (Number(rowData[g.id]?.net)||0), 0);
   // 🚚 PARTIAL_DELIVERY_PI P2: GR ของ PO รอส่งเพิ่ม เลือกได้ แต่ติ๊กยืนยันครั้งเดียวต่อชุด (เปลี่ยนชุด = ต้องติ๊กใหม่)
   const pdRows = pdWaitInfo(state, selected);
@@ -90050,12 +90492,15 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
     //   🆕 verify 3b F3: + ใบที่ด่านใบกำกับภาษีซ้ำ (_invCreateBlocked ทั้งชุด) จะบล็อกแน่ — แถวที่จะสร้างจริง (ยอด > 0) · ค่าเดียวกับ invData รายแถว
     const _taxBlk = _taxDupBlockIds(state, selected.filter(gr => (Number(rowData[gr.id]?.amount) || 0) > 0).map(gr => { const row = rowData[gr.id] || {};
       return { supplierId, supTaxInvNumber: row.taxInvNumber, supTaxInvDate: row.taxInvDate || row.invDate, vat: Number(row.vat) || 0 }; }));
+    // 🆕 DSI1 D2: ด่านกลาง = บล็อก (ไม่มี confirm ต่อ) · ใบที่ด่านกลางเจอไม่ถามซ้ำในด่านเตือนเดิม
+    if(dsi.blocked) return alert('⛔ ตั้งหนี้ไม่ได้ — เลขใบแจ้งหนี้/ใบกำกับซ้ำกับใบเดิมของผู้ขายนี้: ' + dsi.hits.map(x => x.number + ' → ' + (x.invNumber || x.id)).join(', ') + '\n\nยังไม่ได้บันทึกอะไร');
+    const _dsiIds = new Set(dsi.hits.map(x => x.id));
     const _exactByGr = {};
-    for(const gr of selected){ const num = (rowData[gr.id]?.supInvNumber||'').trim(); _exactByGr[gr.id] = num ? global.ERP.findDupSupInv(state, supplierId, num, null).filter(d => !_taxBlk.has(d.id)) : []; }
+    for(const gr of selected){ const num = (rowData[gr.id]?.supInvNumber||'').trim(); _exactByGr[gr.id] = num ? global.ERP.findDupSupInv(state, supplierId, num, null).filter(d => !_taxBlk.has(d.id) && !_dsiIds.has(d.id)) : []; }
     if(!_migLateRevOk(state, selected.map(gr => { const row = rowData[gr.id] || {};
       return { label: gr.grNumber || gr.id, supplierId, taxInvNos: [row.taxInvNumber, gr.supTaxInvNumber], taxDocNos: [row.supInvNumber], otherDocNos: [gr.deliveryNoteNo, gr.supInvNoSeen],
         amount: Number(row.amount) || 0, total: (Number(row.amount) || 0) + (Number(row.vat) || 0), date: gr.grDate }; }),
-      { skipIds: [].concat(...Object.values(_exactByGr)).map(d => d.id).concat(Array.from(_taxBlk)) })) return;
+      { skipIds: [].concat(...Object.values(_exactByGr)).map(d => d.id).concat(Array.from(_taxBlk), Array.from(_dsiIds)) })) return;
     // 🆕 DUP: เช็คเลขใบกำกับซ้ำ — ทั้งกับของเดิม + ซ้ำกันเองในรอบนี้
     {
       const dupMsgs = [], dupInvs = [];
@@ -90067,7 +90512,7 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
         const key = num.toLowerCase();
         const dups = _exactByGr[gr.id] || [];
         if(dups.length > 0){ dupMsgs.push(`• "${num}" ซ้ำกับ ${dups.map(d=>d.invNumber + _migLateDupTag(d)).join(', ')}`); dupInvs.push(...dups); }
-        if(seenInBatch[key]) dupMsgs.push(`• "${num}" ใส่ซ้ำในรอบนี้ 2 แถว`);
+        if(seenInBatch[key] && !dsi.hits.length) dupMsgs.push(`• "${num}" ใส่ซ้ำในรอบนี้ 2 แถว`);   // 🆕 UAT S1: ด่านกลางเจอแล้ว (แดง/ผจก.ข้าม) ไม่ถามซ้ำ
         seenInBatch[key] = true;
       }
       if(dupMsgs.length > 0){
@@ -90111,7 +90556,7 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
           supTaxInvReceivedAt: Date.now(),
           supTaxInvReceivedBy: user.username,
         } : {}),
-        source: 'po_gr',
+        source: 'po_gr', ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 D3
         grId: gr.id, poId: gr.poId,
         supplierId,
         amount, vat, vatRate: Number(row.vatRate)||0,
@@ -90351,9 +90796,10 @@ function BatchCreateINVModal({ state, dispatch, user, onClose }){
       h(PartialDeliveryAckBox, { rows: pdRows, ack: pdAck, setAck: setPdAck, tid:'batch-pd-wait-box' }),   // 🚚 PARTIAL_DELIVERY_PI P2
       pdWhy && h('div', { className:'text-xs text-red-700', 'data-testid':'pd-ack-why' }, pdWhy),
 
+      dsi.panel,   // 🆕 DSI1
       h('div', { className:'flex justify-end gap-2 pt-2 border-t' },
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
-        h(Button, { variant:'primary', onClick:save, disabled: selected.length === 0 || !!pdWhy, title: pdWhy || undefined, 'data-testid':'batch-inv-save' },
+        h(Button, { variant:'primary', onClick:save, disabled: selected.length === 0 || !!pdWhy || dsi.blocked, title: pdWhy || undefined, 'data-testid':'batch-inv-save' },
           `💾 สร้าง ${selected.length} INV + Post JE`),
       )
     )
@@ -90514,6 +90960,8 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
   const clearAll = () => setSelectedGRs([]);
 
   const selected = availableGRs.filter(g => selectedGRs.includes(g.id));
+  // 🆕 DSI1 D2: เลขใบแจ้งหนี้/ใบกำกับซ้ำกับใบเดิมของผู้ขายนี้ → บล็อกก่อนกดบันทึก
+  const dsi = global.ERP.useDupSupInvGuard(state, user, { supplierId: supplierId || null, supInvNumber: supInvLater ? '' : supInvNumber.trim(), supTaxInvNumber: taxInvLater ? '' : String(taxInvNumber || '').trim() }, { testid:'dsi-block' });
   // 🚚 PARTIAL_DELIVERY_PI P2: GR ของ PO รอส่งเพิ่ม → ติ๊กยืนยันก่อนบันทึก (เปลี่ยนชุดที่เลือก = ติ๊กใหม่)
   const pdRows = pdWaitInfo(state, selected);
   const pdSig = selected.filter(g => global.ERP.grInvoiceBlock(state, g).waitExtra).map(g => g.id).join(',');
@@ -90686,14 +91134,17 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
     //   🆕 verify 3 F3: ใบที่ด่านเลขใบกำกับซ้ำเดิมเจออยู่แล้ว ไม่ถามซ้ำ · F1: เลขใบกำกับ (taxInvNos) แยกจากเลขใบแจ้งหนี้ (taxDocNos)
     //   🆕 verify 3b F3: ใบที่ด่านใบกำกับภาษีซ้ำ (_invCreateBlocked ข้างล่าง) จะบล็อกแน่ → ไม่ถามทั้งด่านใบยกมาและด่านเลขใบแจ้งหนี้ซ้ำ (ค่าเดียวกับ inv)
     const _taxBlk = _taxDupBlockIds(state, [{ supplierId, supTaxInvNumber: taxInvLater ? '' : taxInvNumber, supTaxInvDate: taxInvDate, vat: Number(vat) || 0 }]);
-    const _exactDups = (!supInvLater && supInvNumber.trim()) ? global.ERP.findDupSupInv(state, supplierId, supInvNumber.trim(), null).filter(d => !_taxBlk.has(d.id)) : [];
+    // 🆕 DSI1 D2: ด่านกลาง = บล็อก (ไม่มี confirm ต่อ) · ใบที่ด่านกลางเจอไม่ถามซ้ำในด่านเตือนเดิม
+    if(dsi.blocked) return alert('⛔ ตั้งหนี้ไม่ได้ — ' + (global.ERP.dupSupInvDeny(state, { supplierId, supInvNumber: supInvLater ? '' : supInvNumber.trim(), supTaxInvNumber: taxInvLater ? '' : String(taxInvNumber || '').trim() }) || 'เลขเอกสารซ้ำกับใบเดิมของผู้ขายนี้') + '\n\nยังไม่ได้บันทึกอะไร');
+    const _dsiIds = new Set(dsi.hits.map(x => x.id));
+    const _exactDups = (!supInvLater && supInvNumber.trim()) ? global.ERP.findDupSupInv(state, supplierId, supInvNumber.trim(), null).filter(d => !_taxBlk.has(d.id) && !_dsiIds.has(d.id)) : [];
     {
       const _inv = [supInvLater ? '' : supInvNumber], _tax = [taxInvLater ? '' : taxInvNumber];
       const _d0 = selected.map(g => String(g.grDate || '')).filter(Boolean).sort()[0] || invDate;
       if(!_migLateRevOk(state, selected.map(g => ({ label: g.grNumber || g.id, supplierId, taxInvNos: [g.supTaxInvNumber].concat(_tax), taxDocNos: _inv, otherDocNos: [g.deliveryNoteNo, g.supInvNoSeen],
           amount: Number(g.totalValue) || 0, total: Number(g.totalValue) || 0, date: g.grDate }))
         .concat([{ label: 'ใบรวม', supplierId, taxInvNos: _tax, taxDocNos: _inv, otherDocNos: [], amount: totalAmount, total: totalAmount + (Number(vat) || 0), date: _d0 }]),
-        { skipIds: _exactDups.map(d => d.id).concat(Array.from(_taxBlk)) })) return;
+        { skipIds: _exactDups.map(d => d.id).concat(Array.from(_taxBlk), Array.from(_dsiIds)) })) return;
     }
     // 🆕 DUP: เช็คเลขใบกำกับซ้ำต่อ supplier
     if(!supInvLater && supInvNumber.trim()){
@@ -90721,6 +91172,7 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
       poId: selected[0].poId,
       supplierId,
       supInvNumber: supInvLater ? '' : supInvNumber.trim(),
+      ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 D3
       supInvDate: supInvLater ? null : supInvDate,
       needSupInv: supInvLater,
       ...(taxInvNumber.trim() && !taxInvLater ? {
@@ -91204,8 +91656,9 @@ function CombinedINVModal({ state, dispatch, user, onClose }){
       selected.length > 0 && capIntoSaveWarn(state, selected.map(g => (state.grs||[]).find(x => x.id === g.id) || g)),
       h(PartialDeliveryAckBox, { rows: pdRows, ack: pdAck, setAck: setPdAck, tid:'comb-pd-wait-box' }),   // 🚚 PARTIAL_DELIVERY_PI P2
       pdWhy && h('div', { className:'text-xs text-red-700', 'data-testid':'pd-ack-why' }, pdWhy),
+      dsi.panel,   // 🆕 DSI1
       h('div', { className:'flex gap-2 pt-3 border-t' },
-        h(Button, { variant:'primary', onClick:save, disabled:selected.length===0 || !!pdWhy, title: pdWhy || undefined, 'data-testid':'comb-inv-save' },
+        h(Button, { variant:'primary', onClick:save, disabled:selected.length===0 || !!pdWhy || dsi.blocked, title: pdWhy || undefined, 'data-testid':'comb-inv-save' },
           `💾 สร้าง INV (${selected.length} GRs)`),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
       )
@@ -92976,6 +93429,9 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
   const [invDate, setInvDate] = useState(inv.invDate || getToday());
   const [dueDate, setDueDate] = useState(inv.dueDate || getToday());
   const [supInvNumber, setSupInvNumber] = useState(inv.supInvNumber || '');
+  // 🆕 DSI1 D2: เลขใบแจ้งหนี้ใหม่ชนใบอื่นของผู้ขายเดียวกัน → บล็อก (ผจก.บัญชี/GM ติ๊กเลขซ้ำจริง+เหตุผล)
+  const _dsiInv = ((state && state.invoices) || []).find(i => i && i.id === inv.id) || inv;   // 🆕 DSI1 verify 2: ใบจริงทั้งใบจาก state (ชุดแยกใบ/มัดจำ/CN-DN ยกเว้นตรงกับ reducer)
+  const dsi = global.ERP.useDupSupInvGuard(state, user, _dsiInv, { numbers: global.ERP.dupSupInvNewNumbers(_dsiInv, [supInvNumber]), next: { ..._dsiInv, supInvNumber: supInvNumber.trim() }, testid:'dsi-block' });   // 🆕 DSI1 regression: next = เปลี่ยนเลขใบจ่ายแล้ว → กล่องเหตุผล/ข้อความแดงก่อนกด
   const [supInvDate, setSupInvDate] = useState(inv.supInvDate || inv.invDate || getToday());
   const [amount, setAmount] = useState(inv.amount || 0);
   const [vatRate, setVatRate] = useState(inv.vatRate || 0);
@@ -93124,7 +93580,8 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
     }
 
     // 🆕 DUP: เช็คเลขใบกำกับซ้ำต่อ supplier (exclude self) ถ้าแก้เลขใบกำกับ
-    if(supInvNumber.trim() && supInvNumber.trim() !== '-'){
+    if(dsi.blocked) return alert('⛔ บันทึกไม่ได้ — ' + (global.ERP.dupSupInvDeny(state, _dsiInv, { numbers: [supInvNumber.trim()] }) || (dsi.rm && dsi.rm.need ? 'ใบนี้จ่ายแล้ว — เปลี่ยนเลขต้องให้ ผจก.บัญชี/GM ใส่เหตุผล' : 'เลขซ้ำกับใบเดิมของผู้ขายนี้')));   // 🆕 DSI1
+    if(!global.ERP.dupSupInvIsBlankNo(supInvNumber) && !dsi.hits.length){
       const dups = global.ERP.findDupSupInv(state, inv.supplierId, supInvNumber.trim(), inv.id);
       if(dups.length > 0){
         const hardBlock = state.settings?.blockDupSupInv === true;
@@ -93163,6 +93620,7 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
     const updated = {
       ...inv,
       invDate, dueDate,
+      ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 D3
       supInvNumber: supInvNumber.trim() || '-',
       supInvDate,
       amount: Number(amount),
@@ -93401,9 +93859,10 @@ function EditINVModal({ inv, state, dispatch, user, onClose, onDone }){
         h('div', { className:'flex justify-between font-bold pt-1 border-t' },
           h('span',null,'สุทธิ:'), h('span',null,fmtCur(netPayable))),
       ),
+      dsi.panel,   // 🆕 DSI1
       h('div', { className:'flex gap-2 justify-end pt-2 border-t' },
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
-        h(Button, { variant:'primary', onClick:save }, '💾 บันทึก + Post JE ใหม่'),
+        h(Button, { variant:'primary', onClick:save, disabled: dsi.blocked, 'data-testid':'edit-inv-save' }, '💾 บันทึก + Post JE ใหม่'),
       )
     )
   );
@@ -97463,6 +97922,8 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
   //   PO เก่าที่ line ไม่ตรงกับ subtotal/vat (seed/migrate) → fallback ค่า header เดิม ไม่โชว์ตาราง
   const [vatLineOverrides, setVatLineOverrides] = useState({});
   const [vatAdjustReason, setVatAdjustReason] = useState('');
+  // 🆕 DSI1 UAT S2: INV ล่วงหน้าจาก PO ใช้ด่านเลขใบซ้ำเดียวกับตั้งหนี้จาก GR (ข้อความแดง + ผจก.บัญชี/GM ติ๊กข้ามได้)
+  const dsi = global.ERP.useDupSupInvGuard(state, user, { supplierId: po.supplierId || null, poId: po.id, supInvNumber: supInvNumber.trim(), supTaxInvNumber: taxInvLater ? '' : String(taxInvNumber || '').trim() }, { testid:'dsi-block' });
   const pb = calcPOVatBreakdown(po, vatLineOverrides, state.company);
   const pbOrig = Object.keys(vatLineOverrides).length ? calcPOVatBreakdown(po, {}, state.company) : pb;
   const usePerLine = pb.hasLineData
@@ -97509,6 +97970,7 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
     if(_covAsk && taxCover === 'part' && (!(Number(taxCovB) > 0) || taxCovV === '' || !(Number(taxCovV) >= 0))) return alert('⛔ ใส่ฐานภาษีและ VAT ตามที่พิมพ์บนใบกำกับ');
     // ⭐ ไม่บังคับ supInvNumber — ใส่ทีหลังได้ (ตอนรับของ หรือตอน supplier ส่งใบจริง)
     const finalSupInv = supInvNumber.trim();
+    if(dsi.blocked) return alert('⛔ เปิด INV ล่วงหน้าไม่ได้ — ' + (global.ERP.dupSupInvDeny(state, { supplierId: po.supplierId, poId: po.id, supInvNumber: finalSupInv, supTaxInvNumber: taxInvLater ? '' : String(taxInvNumber || '').trim() }) || 'เลขเอกสารซ้ำกับใบเดิมของผู้ขายนี้') + '\n\nยังไม่ได้บันทึกอะไร');   // 🆕 DSI1 UAT S2
     // 🆕 VAT-FIX: po.vatRate ไม่มีจริง (เดิม → 7 เสมอ) → ใช้อัตราที่มีผลจริงจาก line
     const vatRate = effRate;
     // 🆕 VAT-FIX: แก้ VAT ราย line ต้องมีเหตุผล + เตือน supplier จด VAT แต่ VAT = 0 (R10)
@@ -97558,7 +98020,7 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
           invNumber: invNo, invDate,
           createdDate: getToday(),
           dueDate,
-          source: 'po_advance',
+          source: 'po_advance', ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 UAT S2
           poId: po.id, poNumber: po.poNumber,
           grId: null,
           supplierId: po.supplierId,
@@ -97648,7 +98110,7 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
       invNumber, invDate,
       createdDate: getToday(),
       dueDate,
-      source: 'po_advance',
+      source: 'po_advance', ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 UAT S2
       poId: po.id, poNumber: po.poNumber,
       grId: null,
       supplierId: po.supplierId,
@@ -97864,8 +98326,9 @@ function CreateINVFromPOAdvanceModal({ po:poProp, state, dispatch, user, onClose
           className:'w-full px-3 py-2 border-2 rounded text-sm' })
       ),
 
+      dsi.panel,   // 🆕 DSI1 UAT S2
       h('div', { className:'flex gap-2 pt-3 border-t' },
-        h(Button, { variant:'primary', onClick:save }, '💾 เปิด INV ล่วงหน้า'),
+        h(Button, { variant:'primary', onClick:save, disabled: dsi.blocked, 'data-testid':'adv-inv-save' }, '💾 เปิด INV ล่วงหน้า'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'),
       )
     )
@@ -98038,6 +98501,10 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
   if(global.ERP.usePartyIdHeal) global.ERP.usePartyIdHeal(state, 'supplier', supplierId, setSupplierId);   // 🆕 PDL1 UAT S2: quick-add ถูกปัดตกตอน rebase → ใช้รายเดิม
   const [supplierName, setSupplierName] = useState('');   // freeform เมื่อไม่มี supplier ในระบบ (PP30 อ่าน supplierNameFreeform)
   const [showAddSup, setShowAddSup] = useState(false);
+  // 🆕 DSI1 UAT S4: พิมพ์ชื่ออิสระตรงกับผู้ขายในทะเบียน (ไม่สนช่องว่าง/ตัวพิมพ์) → ต้องเลือกจากทะเบียน (ไม่งั้นด่านเลขใบซ้ำไม่ทำงาน)
+  const _nmKey = x => { let t = String(x == null ? '' : x); try { t = t.normalize('NFKC'); } catch(_e){} return t.replace(/\s+/g, '').toLowerCase(); };
+  const freeNameRegMatch = useMemo(() => { const k = _nmKey(supplierName); if(supplierId || !k) return [];
+    return (state.suppliers || []).filter(s => s && s.active !== false && (_nmKey(s.name) === k || (s.code && _nmKey(s.code) === k))); }, [supplierId, supplierName, state.suppliers]);
   const [branch, setBranch] = useState(() => (allowedBranches.some(b => b.id === state.currentBranch) ? state.currentBranch : (allowedBranches[0]?.id || state.currentBranch)));
   const [invDate, setInvDate] = useState(getToday());
   const [dueDate, setDueDate] = useState(getToday());
@@ -98077,6 +98544,9 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
   const openContracts = supplierId ? (state.contracts || []).filter(c => c && c.status === 'approved' && c.supplierId === supplierId) : [];
   const [ctSkip, setCtSkip] = useState('');
   const [ctBillId, setCtBillId] = useState(null);
+  // 🆕 DSI1 D2: ผู้ขายเดียวกัน เลขใบแจ้งหนี้/ใบกำกับซ้ำ → บล็อกก่อนกดบันทึก (ข้อความแดง + เปิดใบเดิม · ผจก.บัญชี/GM ติ๊กเลขซ้ำจริง+เหตุผล)
+  const dsi = global.ERP.useDupSupInvGuard(state, user, { supplierId: supplierId || null, supplierNameFreeform: supplierId ? '' : String(supplierName || '').trim(),   // 🆕 DSI1 verify 1: ชื่ออิสระ
+    supInvNumber: supInvNumber.trim() || ((!taxInvLater && taxInvNumber.trim()) || ''), supTaxInvNumber: (!taxInvLater && taxInvNumber.trim()) || '' }, { testid:'dsi-block' });
 
   // เลือก supplier → ครบกำหนดตามเครดิต (ถ้าตั้งไว้ และ user ยังไม่แก้เอง) · supplier ไม่จด VAT → VAT ทุกบรรทัดเป็น 0
   useEffect(() => {
@@ -98363,7 +98833,11 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       const _refs = _refsRaw.map(x => x.toLowerCase());
       const _freeName = supplierName.trim().toLowerCase();
       const _sameSup = i => supplierId ? i.supplierId === supplierId : (!i.supplierId && !!_freeName && String(i.supplierNameFreeform||'').trim().toLowerCase() === _freeName);
-      const _dups = _refs.length ? (state.invoices||[]).filter(i => !i.voided && _sameSup(i)
+      // 🆕 DSI1 D2: ผู้ขายในระบบ = ด่านกลาง (บล็อก · ไม่มี confirm ต่อ) · ผู้รับเงินชื่ออิสระ (ไม่มีรหัส) = เตือนแบบเดิม
+      if(freeNameRegMatch.length) return alert('⛔ บันทึกไม่ได้ — "' + supplierName.trim() + '" มีในทะเบียนผู้ขายแล้ว ให้เลือกจากรายการ (กด ✓ ใช้ …) แทนพิมพ์ชื่อเอง\n\nยังไม่ได้บันทึกอะไร');   // 🆕 DSI1 UAT S4
+      if(dsi.blocked) return alert('⛔ บันทึกไม่ได้ — ' + (global.ERP.dupSupInvDeny(state, { supplierId, supInvNumber: _supRef, supTaxInvNumber: _taxRef }) || 'เลขเอกสารซ้ำกับใบเดิมของผู้ขายนี้') + '\n\nยังไม่ได้บันทึกอะไร');
+      const _dsiIds = new Set(dsi.hits.map(x => x.id));
+      const _dups = _refs.length ? (state.invoices||[]).filter(i => !i.voided && !_dsiIds.has(i.id) && _sameSup(i)
         && [i.supInvNumber, i.supTaxInvNumber].some(n => n && _refs.includes(String(n).trim().toLowerCase()))) : [];
       if(_dups.length > 0){
         const _list = _dups.map(d => `• ${d.invNumber} (${fmtCur(d.netPayable||d.amount||0)})`).join('\n');
@@ -98460,6 +98934,7 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       note,
       ...(pdTag.length ? global.ERP.docTagFields(pdTag) : {}),   // 🆕 DOC-TAGS D3 · MT4: แท็กของ PI (ช่องเดียวกับ PV เงินสดย่อย)
       ...(openContracts.length && ctSkip.trim() ? { contractSkipReason:{ reason:ctSkip.trim(), contractIds:openContracts.map(c => c.id), by:user.username, at:Date.now() } } : {}),   // 🆕 EXPENSE_PO P10.4
+      ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 D3: คำขอข้าม (reducer ตรวจสิทธิ์จาก currentUser)
       createdBy: user.username,
       createdAt: Date.now(),
     };
@@ -98506,6 +98981,10 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
           !supplierId && h('input', { type:'text', value:supplierName, onChange:e=>setSupplierName(e.target.value),
             placeholder:'ชื่อผู้รับเงิน (freeform) เช่น การไฟฟ้านครหลวง',
             className:'mt-1 w-full px-3 py-2 border-2 rounded text-sm' }),
+          freeNameRegMatch.length > 0 && h('div', { 'data-testid':'direct-freename-reg', className:'mt-1 bg-red-50 border-2 border-red-400 rounded p-2 text-xs text-red-800' },
+            '⛔ "' + supplierName.trim() + '" มีในทะเบียนผู้ขายแล้ว — ต้องเลือกจากรายการ (กันเลขใบแจ้งหนี้ซ้ำ/จ่ายซ้ำ)',
+            freeNameRegMatch.map(sp => h('button', { key: sp.id, type:'button', 'data-testid':'direct-freename-use', className:'ml-2 mt-1 px-2 py-0.5 rounded border border-red-400 bg-white text-red-700 hover:bg-red-100',
+              onClick: () => { setSupplierId(sp.id); setSupplierName(''); } }, '✓ ใช้ ' + (sp.code ? sp.code + ' ' : '') + (global.ERP.partyNameWithBranch ? global.ERP.partyNameWithBranch(sp, state.suppliers) : sp.name)))),
           supplier && h('div', { className:'mt-1 text-[11px] text-gray-500' },
             supplier.vatRegistered === false ? '⚠️ supplier ไม่จด VAT — VAT ทุกบรรทัด = 0' : '✓ จด VAT',
             supCredit(supplier).isSet ? ` · เครดิต ${supCredit(supplier).days} วัน` : ' · ยังไม่ตั้งเครดิต'),
@@ -98740,8 +99219,9 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       h(Field, { label:'หมายเหตุ' },
         h('textarea', { value:note, onChange:e=>setNote(e.target.value), rows:2, className:'w-full px-3 py-2 border-2 rounded text-sm' })),
 
+      dsi.panel,   // 🆕 DSI1
       h('div', { className:'flex gap-2 pt-3 border-t' },
-        h(Button, { variant:'primary', onClick:save, disabled: saving || lines.length === 0 || (isPd && !!pdBlockMsg), 'data-testid':'direct-save' },
+        h(Button, { variant:'primary', onClick:save, disabled: saving || lines.length === 0 || (isPd && !!pdBlockMsg) || dsi.blocked || freeNameRegMatch.length > 0, 'data-testid':'direct-save' },
           isPd ? '💾 บันทึก PI + 💵 จ่ายเงินสดย่อย' : '💾 บันทึก PI + Post JE'),
         h(Button, { variant:'secondary', onClick:onClose }, 'ยกเลิก'))),
 
@@ -100775,6 +101255,7 @@ global.ERP.registerModule('purchase', {
   PayINVModal,
   PaymentList,
   QuickUpdateSupInvModal,
+  EditINVModal,   // 🆕 DSI1 verify 2: ให้เทสต์เปิดได้
   PendingTaxInvModal,   // 🆕 PENDING-TAXINV PT2: mod-accounting เปิดหน้าต่างเดียวกัน
   isPendingSupInv,
   ptaxCanEdit,
@@ -109089,6 +109570,10 @@ function MigLateInvModal({ state, dispatch, user, onClose }){
         h('span', { 'data-testid':'ml-dupAck-text' }, 'ยืนยันไม่ซ้ำกับ ' + info.soft.map(e => e.ref).join(', ') + ' — ตรวจแล้วเป็นคนละรายการ · ระบุเหตุผลในช่องเหตุผล',
           acked && info.soft.length && h('ul', { className:'list-disc ml-4 text-gray-700' }, info.soft.map(e => h('li', { key:e.id }, e.text))))),
       h('div', { className:'text-xs' }, '📎 รูปบิล ', h('input', { type:'file', accept:'image/*', onChange:onImg }), f.supInvImage && h('span', { className:'text-green-700 ml-1' }, '✓ ' + f.supInvImage.name)),
+      // 🆕 DSI1 D2: เลขเอกสารชนใบเดิมของผู้ขายนี้ → ปุ่มเปิดใบเดิม (ใบยกมาไม่มีทางข้าม)
+      (() => { const _p = _mlPayload(f, user, 1); const _hs = _p.supplierId && String(_p.supDocNo || '').trim()
+          ? global.ERP.findDupSupInvBlock(state, { id: _p.id, supplierId: _p.supplierId, supInvNumber: String(_p.supDocNo).trim() }, {}) : [];
+        return _hs.length ? h(global.ERP.DupSupInvPanel, { hits:_hs, canOv:false, noOv:true, ov:{}, setOv:() => {}, reasonOk:false, tid:'dsi-block' }) : null; })(),
       deny && (touched ? h('div', { 'data-testid':'ml-deny', className:'text-xs text-red-700 bg-red-50 border border-red-200 rounded p-1' }, '⛔ ' + deny)
         : h('div', { 'data-testid':'ml-deny', 'data-hint':'1', className:'text-xs text-gray-500' }, 'ℹ️ ' + deny)),
       h('div', { className:'flex justify-end gap-2 pt-2' },
@@ -113104,6 +113589,19 @@ function TaxInvEntryForm({ inv:invProp, state, dispatch, user, onClose, claimYm,
   // 🆕 F1: ไม่ pre-fill จาก supInvNumber (กัน false positive ที่ user save โดยไม่ได้ตั้งใจ)
   //        ใช้ supTaxInvNumber ที่มีอยู่จริงเท่านั้น · ถ้ายังไม่มี → ว่าง
   const [taxInvNumber, setTaxInvNumber] = useState(inv.supTaxInvNumber || '');
+  // 🆕 DSI1 D2: เลขใบกำกับใหม่ชนเลขใบแจ้งหนี้/ใบกำกับของใบอื่นผู้ขายเดียวกัน (รวมบิลไม่มี VAT) → บล็อกก่อนบันทึก
+  // 🆕 DSI1 regression: next = ใบหลังแก้ → เปลี่ยน/ลบเลขใบที่จ่ายแล้ว ผจก.บัญชี/GM เห็นกล่องเหตุผล · คนอื่นเห็นข้อความแดงก่อนกด (ไม่ใช่ alert หลังกด)
+  const _dsiNext = _isNew ? null : ti ? { ...inv0, supTaxInvMore: (inv0.supTaxInvMore || []).map(e => e && e.id === ti ? { ...e, number: taxInvNumber.trim() } : e) } : { ...inv0, supTaxInvNumber: taxInvNumber.trim() };
+  const dsi = global.ERP.useDupSupInvGuard(state, user, inv0, { numbers: global.ERP.dupSupInvNewNumbers(inv0, [taxInvNumber]), next: _dsiNext, testid:'dsi-block' });
+  // 🆕 DSI1 regression verify: 🗑️ ลบ Tax INV ของใบจ่ายแล้ว/มีคำขอจ่าย = ด่านเดียวกับเปลี่ยนเลข (reducer CLEAR_TAX_INV เรียก _dsiEditGate)
+  //   ผจก.บัญชี/GM: กดลบครั้งแรก → กล่องเหตุผล (≥10) → กดอีกครั้งจึงลบ · คนอื่น: ปุ่มลบกดไม่ได้ + ข้อความแดง
+  const [clrOv, setClrOv] = useState({ tick:false, reason:'' });
+  const [clrOpen, setClrOpen] = useState(false);
+  const _rmClr = (() => { try { return (_isNew || !inv0) ? { need:false, removed:[] } : global.ERP.dupSupInvRemovedPaid(state, inv0, ti
+    ? { ...inv0, supTaxInvMore: (inv0.supTaxInvMore || []).map(e => e && e.id === ti ? { ...e, removedAt: 1 } : e) }
+    : { ...inv0, supTaxInvNumber: '' }); } catch(_e){ return { need:false, removed:[] }; } })();
+  const _clrReasonOk = String(clrOv.reason || '').trim().length >= 10;
+  const _clrDsiDeny = _rmClr.need && !dsi.canOv ? 'ใบนี้จ่ายแล้ว/มีคำขอจ่าย — ลบเลข ' + _rmClr.removed.join(', ') + ' เองไม่ได้ (กันคีย์เลขเดิมซ้ำแล้วจ่ายซ้ำ) → ให้ ผจก.บัญชี/GM แก้' : '';   // 🆕 DSI1 verify 2: ส่งใบจริงทั้งใบ (ชุดแยกใบ/มัดจำ↔ใบสุดท้าย/CN-DN ยกเว้นตรงกับ reducer)
   const [taxInvDate, setTaxInvDate] = useState(inv.supTaxInvDate || ((claimYm || blankDate) ? '' : getToday()));   // V5: มาจากป๊อปอัป → ไม่เติมวันนี้ (STF-1)
   const [reason, setReason] = useState('');            // V5: เหตุผล (เปลี่ยนเดือนใบที่เลื่อน/ย้ายงวด · ลบใบที่เลื่อน · บันทึกหมดสิทธิ์)
   const [redOk, setRedOk] = useState(false);           // V5: ยืนยันกล่องแดง "ใบลงวันที่หลังงวดที่เลือก"
@@ -113232,10 +113730,12 @@ function TaxInvEntryForm({ inv:invProp, state, dispatch, user, onClose, claimYm,
     if(acceptExpired === true && !_canAcceptExpired) return alert('⛔ ' + (_acceptDeny || setDenyReason));
     if(_dateAfterYm && !redOk) return;   // V5: ต้องติ๊กยืนยันในกล่องแดงก่อน (ไม่ใช้ alert)
     if(_paperErr) return alert('⛔ ' + _paperErr);
+    if(dsi.blocked) return alert('⛔ บันทึกไม่ได้ — ' + (global.ERP.dupSupInvDeny(state, inv0, { numbers: [taxInvNumber.trim()] }) || (dsi.rm && dsi.rm.need ? 'ใบนี้จ่ายแล้ว — เปลี่ยนเลขต้องให้ ผจก.บัญชี/GM ใส่เหตุผล' : 'เลขซ้ำกับใบเดิมของผู้ขายนี้')));   // 🆕 DSI1
+    const _dsiOv = dsi.override ? { dupSupInvOverride: dsi.override } : {};   // 🆕 DSI1 D3
     if(_isNew){   // 🆕 MULTI-TAXINV: เพิ่มใบกำกับใบที่ 2+
       const _eid = 'ti_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const _add = { type:'ADD_TAX_INV_ENTRY', data:{ invId: inv0.id, entry:{ id:_eid, number: taxInvNumber.trim(), date: taxInvDate, base:_paperPayload.base, vat:_paperPayload.vat, image: taxInvImage || null },
-        reason: reason.trim() || undefined, acceptExpired: acceptExpired === true ? true : undefined, by: user.username, today: _today, at: Date.now() } };
+        reason: reason.trim() || undefined, acceptExpired: acceptExpired === true ? true : undefined, by: user.username, today: _today, at: Date.now(), ..._dsiOv } };
       try { if(global.ERP.reducer && global.ERP.reducer(state, _add) === state) return; } catch(_e){}
       dispatch(_add);
       if(typeof onSaved === 'function') onSaved(inv0.id);
@@ -113252,7 +113752,7 @@ function TaxInvEntryForm({ inv:invProp, state, dispatch, user, onClose, claimYm,
       by: user.username,
       today: _today,
       at: Date.now(),
-      expectNumber: _seen.n, expectDate: _seen.d,
+      expectNumber: _seen.n, expectDate: _seen.d, ..._dsiOv,
     }};
     try { if(global.ERP.reducer && global.ERP.reducer(state, _act) === state){ onClose(); return; } } catch(_e){}   // ค่าเดิม = ไม่มีอะไรเปลี่ยน · ถูกปฏิเสธ = reducer แจ้งแล้ว
     dispatch(_act);
@@ -113417,15 +113917,24 @@ function TaxInvEntryForm({ inv:invProp, state, dispatch, user, onClose, claimYm,
         h('label', { className:'block text-xs font-medium mb-1' }, 'เหตุผล (ผจก.บัญชี · อย่างน้อย 10 ตัวอักษร — ใช้เมื่อเปลี่ยนเดือนของใบ/ลบใบที่เลื่อน)'),
         h('input', { type:'text', value:reason, onChange:e => setReason(e.target.value), 'data-testid':'taxinv-reason',
           className:'w-full px-3 py-2 border rounded text-sm', placeholder:'เช่น ผู้ขายออกใบกำกับใหม่แทนใบเดิม' })),
+      dsi.panel,   // 🆕 DSI1
+      // 🆕 DSI1 regression verify: ลบเลขใบจ่ายแล้ว — คนอื่นเห็นข้อความแดง · ผจก.บัญชี/GM กดลบแล้วเห็นกล่องเหตุผล
+      !_migBack && !_isNew && inv.supTaxInvNumber && _rmClr.need && (!dsi.canOv || clrOpen) && global.ERP.DupSupInvRmPanel
+        ? h(global.ERP.DupSupInvRmPanel, { state, inv: inv0, removed: _rmClr.removed, canOv: dsi.canOv, ov: clrOv, setOv: setClrOv, reasonOk: _clrReasonOk, tid: 'dsi-clr-rm' }) : null,
       h('div', { className:'flex gap-2 pt-3 border-t flex-wrap' },
-        !_migBack && !_migDenyBind && h(Button, { variant:'primary', onClick:save, disabled:uploading || !!setDenyReason || !!_paperErr || (_dateAfterYm && !redOk), title: setDenyReason || _paperErr || '', 'data-testid':'taxinv-save' }, _isNew ? '➕ บันทึกใบกำกับใบนี้' : '💾 บันทึก Tax INV'),
+        !_migBack && !_migDenyBind && h(Button, { variant:'primary', onClick:save, disabled:uploading || !!setDenyReason || !!_paperErr || (_dateAfterYm && !redOk) || dsi.blocked, title: setDenyReason || _paperErr || '', 'data-testid':'taxinv-save' }, _isNew ? '➕ บันทึกใบกำกับใบนี้' : '💾 บันทึก Tax INV'),
         _canAcceptExpired && h(Button, { variant:'danger', onClick:() => save(true), disabled:uploading || (_dateAfterYm && !redOk),
           title:'เก็บเลข/รูปใบกำกับเป็นหลักฐาน — ภาษีซื้อไม่เข้างวดใด (🔴 หมดสิทธิ์ ม.82/3)' }, 'บันทึกเป็นหลักฐาน (หมดสิทธิ์)'),
-        !_migBack && !_isNew && inv.supTaxInvNumber && h(Button, { variant:'danger', disabled: !!clearDenyReason, title: clearDenyReason || '',
+        !_migBack && !_isNew && inv.supTaxInvNumber && h(Button, { variant:'danger', 'data-testid':'taxinv-clear',
+          disabled: !!clearDenyReason || !!_clrDsiDeny || (_rmClr.need && clrOpen && !_clrReasonOk), title: clearDenyReason || _clrDsiDeny || '',
           onClick:()=>{
             if(clearDenyReason) return alert('⛔ ' + clearDenyReason);
+            if(_clrDsiDeny) return alert('⛔ ' + _clrDsiDeny);
+            if(_rmClr.need && !clrOpen) return setClrOpen(true);   // 🆕 DSI1: เปิดกล่องเหตุผลก่อน
+            if(_rmClr.need && !_clrReasonOk) return;
             if(confirm(`ลบ Tax INV "${inv.supTaxInvNumber}" จาก INV นี้?`)){
-              dispatch({ type:'CLEAR_TAX_INV', data:{ invId: inv.id, ...(ti ? { tiId: ti } : {}), by: user.username, at: Date.now(), expectNumber: String(inv.supTaxInvNumber || '').trim(), reason: reason.trim() || undefined } });
+              dispatch({ type:'CLEAR_TAX_INV', data:{ invId: inv.id, ...(ti ? { tiId: ti } : {}), by: user.username, at: Date.now(), expectNumber: String(inv.supTaxInvNumber || '').trim(), reason: reason.trim() || undefined,
+                ...(_rmClr.need ? { dupSupInvOverride: { reason: String(clrOv.reason).trim() } } : {}) } });
               onClose();
             }
           } }, '🗑️ ลบ Tax INV'),
@@ -116200,9 +116709,12 @@ function ContractBillModalInner({ state, dispatch, user, ctId, instIds, onClose,
   const capMissing = lines.some(l => l.t === 'capex') && (!capAcc || !(state.chartOfAccounts || []).some(a => a.code === capAcc));
   const retMissing = ret > 0 && !(state.chartOfAccounts || []).some(a => a.code === E.retentionAccountCode(state));
   const expAccs = (state.chartOfAccounts || []).filter(a => a.type === 'expense');
+  // 🆕 DSI1 verify 2: เลขใบแจ้งหนี้/ใบกำกับชนใบเดิมของผู้รับจ้าง → ข้อความแดงก่อนกด + ปุ่มปิด · ผจก.บัญชี/GM ติ๊ก "เลขซ้ำจริง" + เหตุผล
+  const dsi = E.useDupSupInvGuard(state, user, { supplierId: ct.supplierId || null, supInvNumber: supInv.trim() || taxNo.trim(), supTaxInvNumber: taxNo.trim() }, { testid:'ct-bill-dsi' });
   const save = () => {
     if(saving) return;
     if(!lines.length) return alert('เลือกงวดที่จะตั้งหนี้');
+    if(dsi.blocked) return alert('⛔ ตั้งหนี้ไม่ได้ — ' + (E.dupSupInvDeny(state, { supplierId: ct.supplierId, supInvNumber: supInv.trim() || taxNo.trim(), supTaxInvNumber: taxNo.trim() }, { via:'CONTRACT_BILL' }) || 'เลขเอกสารซ้ำกับใบเดิมของผู้รับจ้างนี้') + '\n\nยังไม่ได้บันทึกอะไร');
     if(needBypass && !bypass.trim()) return alert('งวดที่ยังไม่ตรวจรับ — ใส่เหตุผลที่ตั้งหนี้โดยไม่รอตรวจรับ');
     if(over && !overWhy.trim()) return alert('ยอดเกินตารางงวด — ใส่เหตุผล');
     if(Math.abs(ret - retAuto) > 0.01 && !retWhy.trim()) return alert('เงินประกันไม่ตรงสัญญา — ใส่เหตุผล');
@@ -116229,6 +116741,7 @@ function ContractBillModalInner({ state, dispatch, user, ctId, instIds, onClose,
       ...(needBypass ? { acceptBypass:{ reason:bypass.trim(), by:user.username, at:Date.now() } } : {}),
       ...(over ? { overSchedule:{ reason:overWhy.trim() } } : {}),
       ...(fileIds.length ? { taxInvFileIds:[...fileIds] } : {}),   // 🔧 UAT3 N6
+      ...(dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 verify 2: คำขอข้าม (reducer ตรวจสิทธิ์เอง)
       ...(ct.tagId ? E.docTagFields(E.docTagsOf(state, ct)) : {}), createdBy:user.username, createdAt:Date.now() };   // MT3 ทุกแท็กของสัญญา
     const next = E.reducer(state, { type:'ADD_INV', data:invData });
     if(next === state) return;   // reducer แจ้งเหตุผลแล้ว
@@ -116278,10 +116791,11 @@ function ContractBillModalInner({ state, dispatch, user, ctId, instIds, onClose,
         form:whtPay.form || ct.whtForm || '53', testid:'ct-bill-wht-lp', onChange:(pid, party) => setWhtPay({ pid:pid || '', form:party && E.whtDefaultForm ? E.whtDefaultForm(party) : '' }) }),
       h('div', { className:'text-xs text-slate-600' }, 'หลังใบนี้: ตั้งหนี้แล้ว ' + fmtCur(sm.billedGross + amount + vat) + ' / ยอดสัญญา ' + fmtCur(sm.totalGross)
         + ' · ใบผูกสัญญาจ่ายจากเงินสดย่อยทันทีไม่ได้ (ต้องผ่านคิวอนุมัติจ่าย)'),
+      dsi.panel,   // 🆕 DSI1 verify 2
       (capMissing || retMissing) && h('div', { className:'bg-amber-50 border border-amber-300 rounded p-2 text-xs' }, '⚠️ ยังไม่มีบัญชี ' + [capMissing && capAcc, retMissing && E.retentionAccountCode(state)].filter(Boolean).join(', ') + ' — ',
         h('button', { className:'underline font-bold', onClick:() => addContractAccounts(state, dispatch) }, '➕ เพิ่มบัญชีสำหรับสัญญา')),
       h('div', { className:'flex justify-end gap-2 border-t pt-2' }, h('button', { className:'px-3 py-1.5 bg-slate-100 rounded', onClick:onClose }, 'ยกเลิก'),
-        h('button', { className:'px-3 py-1.5 bg-green-600 text-white rounded font-bold disabled:opacity-40', disabled:saving || capMissing || retMissing || !lines.length, onClick:save, 'data-testid':'ct-bill-save' }, '💾 ตั้งหนี้งวด'))));
+        h('button', { className:'px-3 py-1.5 bg-green-600 text-white rounded font-bold disabled:opacity-40', disabled:saving || capMissing || retMissing || !lines.length || dsi.blocked, onClick:save, 'data-testid':'ct-bill-save' }, '💾 ตั้งหนี้งวด'))));
 }
 // ==================== 🔧 EXPENSE_PO ① ตั้งหนี้งานบริการจาก PO (B8.2 · D12/D13) ====================
 //   บัญชีเห็น/เปลี่ยน "บันทึกเป็น" ต่อบรรทัด (ค่าเริ่มต้นจากทะเบียนรายจ่าย) · เปลี่ยน = reducer จด acctChanged + audit
@@ -116307,10 +116821,11 @@ function _whtPayDefault(state, supplierId){
   return { pid: d, form: p && E.whtDefaultForm ? E.whtDefaultForm(p) : '' };
 }
 function svcBillSave(p){
-  const { state, dispatch, user, po, lines, amount, vat, wht, net, over, overWhy, form, invDate, due, supInv, taxNo, taxDate, lastConf, setSaving, onClose, saving, whtPay } = p;
+  const { state, dispatch, user, po, lines, amount, vat, wht, net, over, overWhy, form, invDate, due, supInv, taxNo, taxDate, lastConf, setSaving, onClose, saving, whtPay, dsi } = p;
   const E = global.ERP, r2 = v => Math.round((Number(v) || 0) * 100) / 100;
   if(saving) return;
   if(!lines.length) return alert('เลือกงานที่จะตั้งหนี้');
+  if(dsi && dsi.blocked) return alert('⛔ ตั้งหนี้ไม่ได้ — ' + (E.dupSupInvDeny(state, { supplierId: po.supplierId, supInvNumber: supInv.trim() || taxNo.trim(), supTaxInvNumber: taxNo.trim() }, { via:'SVC_BILL' }) || 'เลขเอกสารซ้ำกับใบเดิมของผู้ขายนี้') + '\n\nยังไม่ได้บันทึกอะไร');   // 🆕 DSI1 verify 2
   if(over && !overWhy.trim()) return alert('ยอดตั้งหนี้เกินงานที่ยืนยัน — ใส่เหตุผล');
   if(lines.some(x => x.t === 'cap_new' && !x.below && !x.cat)) return alert('เลือกหมวดทรัพย์สินของบรรทัด 💎 ทรัพย์สินใหม่');
   const id = genId('inv'), invNumber = E.genDocNumber('PI', invDate, state.invoices || [], 'invNumber');
@@ -116351,6 +116866,7 @@ function svcBillSave(p){
     whtLines, whtForm:form || '53', whtAmount:wht, whtRate:rate, whtCertificates:wht > 0 ? E.buildWHTCerts(whtLines, form || '53', { state, supplierId:po.supplierId }) : [],
     whtNumber:wht > 0 ? E.genWHNumber(state) : '', expenseLines, netPayable:net, paidAmount:0, paymentStatus:'unpaid',
     poConfirmIds:expenseLines.flatMap(l => l.poConfirmIds), ...(over ? { overPO:true, overPOReason:overWhy.trim() } : {}),
+    ...(dsi && dsi.override ? { dupSupInvOverride: dsi.override } : {}),   // 🆕 DSI1 verify 2: คำขอข้าม (reducer ตรวจสิทธิ์เอง)
     ...(po.tagId ? global.ERP.docTagFields(global.ERP.docTagsOf(state, po)) : {}), createdBy:user.username, createdAt:Date.now() };   // MT3 ทุกแท็กของ PO
   const next = E.reducer(state, { type:'ADD_INV', data:invData });
   if(next === state) return;   // reducer แจ้งเหตุผลแล้ว
@@ -116367,7 +116883,7 @@ function svcBillSave(p){
 global.ERP.svcBillSave = svcBillSave;   // ✅ verify 1: ให้เทสต์ตรวจ whtLines แยกอัตรา
 function SvcBillView(p){
   const { state, po, rows, sel, setSel, amt, setAmt, treat, setTreat, capCat, setCapCat, overWhy, setOverWhy, invDate, setInvDate, supInv, setSupInv, due, setDue,
-    taxNo, setTaxNo, taxDate, setTaxDate, saving, onClose, lines, amount, vat, wht, net, over, form, whtOk, thr, expAccs, capCats, defOf, onSave, dispatch, user, whtPay, setWhtPay } = p;
+    taxNo, setTaxNo, taxDate, setTaxDate, saving, onClose, lines, amount, vat, wht, net, over, form, whtOk, thr, expAccs, capCats, defOf, onSave, dispatch, user, whtPay, setWhtPay, dsi } = p;
   const inp = 'border rounded px-2 py-1 text-sm', Sum = global.ERP.PoContractSummaryBox;
   const sup = ((state.suppliers || []).find(s => s.id === po.supplierId) || {}).name || '';
   return h(Modal, { isOpen:true, title:'🔧 ตั้งหนี้งานบริการ ' + (po.poNumber || '') + ' — ' + sup, onClose, size:'xl', docKey:'svc-bill:' + po.id },
@@ -116406,8 +116922,9 @@ function SvcBillView(p){
       wht > 0 && po.supplierId && setWhtPay && global.ERP.WhtLinePayeeChip && h(global.ERP.WhtLinePayeeChip, { state, dispatch, user, supplierId:po.supplierId,
         payeeId:whtPay.pid, form:whtPay.form || form || '53', testid:'svc-bill-wht-lp',
         onChange:(pid, party) => setWhtPay({ pid:pid || '', form:party && global.ERP.whtDefaultForm ? global.ERP.whtDefaultForm(party) : '' }) }),
+      dsi && dsi.panel,   // 🆕 DSI1 verify 2
       h('div', { className:'flex justify-end gap-2 border-t pt-2' }, h('button', { className:'px-3 py-1.5 bg-slate-100 rounded', onClick:onClose }, 'ยกเลิก'),
-        h('button', { className:'px-3 py-1.5 bg-green-600 text-white rounded font-bold disabled:opacity-40', disabled:saving || !lines.length, onClick:onSave, 'data-testid':'svc-bill-save' }, '💾 ตั้งหนี้งานบริการ'))));
+        h('button', { className:'px-3 py-1.5 bg-green-600 text-white rounded font-bold disabled:opacity-40', disabled:saving || !lines.length || !!(dsi && dsi.blocked), onClick:onSave, 'data-testid':'svc-bill-save' }, '💾 ตั้งหนี้งานบริการ'))));
 }
 function SvcBillModal({ state, dispatch, user, poId, onClose }){
   const E = global.ERP, r2 = v => Math.round((Number(v) || 0) * 100) / 100;
@@ -116425,6 +116942,8 @@ function SvcBillModal({ state, dispatch, user, poId, onClose }){
   const [taxDate, setTaxDate] = useState(getToday());
   const [saving, setSaving] = useState(false);
   const [whtPay, setWhtPay] = useState(() => _whtPayDefault(state, po && po.supplierId));   // 🆕 WP7 + รอบ 3: ค่าเริ่ม = ผู้ถูกหักประจำของผู้ขาย ('' = ผู้ขาย)
+  // 🆕 DSI1 verify 2: เลขใบแจ้งหนี้/ใบกำกับชนใบเดิมของผู้ขาย → ข้อความแดงก่อนกด + ปุ่มปิด · ผจก.บัญชี/GM ติ๊ก "เลขซ้ำจริง" + เหตุผล (hook ก่อน return)
+  const dsi = E.useDupSupInvGuard(state, user, { supplierId: (po && po.supplierId) || null, supInvNumber: supInv.trim() || taxNo.trim(), supTaxInvNumber: taxNo.trim() }, { testid:'svc-bill-dsi' });
   if(!po) return null;
   const inc = po.priceMode === 'inclusive', thr = E.capexThreshold ? E.capexThreshold(state) : 0;
   const expAccs = (state.chartOfAccounts || []).filter(a => a.type === 'expense');
@@ -116447,8 +116966,8 @@ function SvcBillModal({ state, dispatch, user, poId, onClose }){
   const net = r2(amount + vat - wht), over = lines.some(x => x.ex > x.confEx + 0.5);
   const lastConf = (x) => x.r.confs.map(c => c.date).sort().slice(-1)[0] || invDate;
   return h(SvcBillView, { state, po, rows, sel, setSel, amt, setAmt, treat, setTreat, capCat, setCapCat, overWhy, setOverWhy, invDate, setInvDate, supInv, setSupInv, due, setDue,
-    taxNo, setTaxNo, taxDate, setTaxDate, saving, onClose, lines, amount, vat, wht, net, over, form, whtOk, thr, expAccs, capCats, defOf, dispatch, user, whtPay, setWhtPay,
-    onSave:() => svcBillSave({ state, dispatch, user, po, lines, amount, vat, wht, net, over, overWhy, form, invDate, due, supInv, taxNo, taxDate, lastConf, setSaving, onClose, saving, whtPay }) });
+    taxNo, setTaxNo, taxDate, setTaxDate, saving, onClose, lines, amount, vat, wht, net, over, form, whtOk, thr, expAccs, capCats, defOf, dispatch, user, whtPay, setWhtPay, dsi,
+    onSave:() => svcBillSave({ state, dispatch, user, po, lines, amount, vat, wht, net, over, overWhy, form, invDate, due, supInv, taxNo, taxDate, lastConf, setSaving, onClose, saving, whtPay, dsi }) });
 }
 function ContractAmendModal({ state, dispatch, user, ct, onClose }){
   const E = global.ERP, r2 = v => Math.round((Number(v) || 0) * 100) / 100;
@@ -132174,6 +132693,12 @@ function _opqNextStep(op, job, jst, info, plan, state){
   if(plan && plan.reason === 'perm') return { text:'คุณไม่มีสิทธิ์ทำงานนี้ — ให้ผู้มีสิทธิ์ (เช่น ผู้อนุมัติจ่าย/ผู้ดูแลระบบ) ล็อกอินที่เครื่องนี้แล้วกด บันทึกอีกครั้ง', acts:[{ k:'reapply-off', why:'perm' }].concat(open) };
   if(plan && plan.maybeRekeyed){
     const mr = plan.maybeRekeyed, nk = ((global.ERP.NAV || {}).NAV_DOC_KINDS || []).find(k => k.collection === mr.coll);
+    // 🆕 DSI1 D4: เลขใบแจ้งหนี้/ใบกำกับมีใบอื่นของผู้ขายเดียวกันแล้ว → ไม่มีปุ่มบันทึกอีกครั้ง (ด่านเดียวกับหน้าคีย์)
+    //   🆕 verify 2: บอกสถานะจ่ายของใบเดิม (จ่ายแล้ว/มีคำขอจ่ายรออนุมัติ) + ทางบิลคนละใบจริง (งานค้างข้ามไม่ได้ → คีย์ใหม่ในหน้าคีย์แล้วติ๊ก)
+    if(plan.reason === 'dupno'){ const _pl = plan.dupSupInv && global.ERP.dupSupInvPayLabel ? global.ERP.dupSupInvPayLabel(state, plan.dupSupInv) : '';
+      return { text:`มีใบเลขนี้แล้ว — เลข ${mr.dupNo} อยู่ใน ${mr.number}${_pl ? ' (' + _pl + ')' : ''} · ไม่ต้องบันทึกอีก ถ้าใช่ใบเดียวกันให้กด ✓ คีย์ใหม่/ตรวจครบแล้ว ที่หัวชุด`
+        + ' · ถ้าเป็นบิลคนละใบจริงที่ผู้ขายใช้เลขซ้ำ: ให้ ผจก.บัญชี/GM คีย์ใหม่ในหน้าคีย์แล้วติ๊ก "เลขซ้ำจริง (ใบคนละใบ)" พร้อมเหตุผล แล้วกด ✓ ที่หัวชุด',
+      acts: nk ? [{ k:'open', kind:nk.kind, id:mr.id, nav:{ tab:nk.nav.tab, subs:nk.nav.subs, label:nk.label } }] : [] }; }
     return { text:`อาจคีย์ใหม่ไปแล้วเป็น ${mr.number} — เปิดดูก่อน ถ้าใช่ให้กด ✓ คีย์ใหม่/ตรวจครบแล้ว ที่หัวชุด`, acts: nk ? [{ k:'open', kind:nk.kind, id:mr.id, nav:{ tab:nk.nav.tab, subs:nk.nav.subs, label:nk.label } }] : [] };
   }
   if(/^(REVIEW_WEIGH_LOG|MARK_WEIGH_REPRINT)$/.test(head.type)) return { text:'ไปตัดสิน/สั่งพิมพ์ซ้ำที่สถานีชั่งใหม่', acts:goto };
@@ -132715,6 +133240,7 @@ global.ERP.ItemEditModal = ItemEditModal;
 global.ERP.ItemInfoPanel = ItemInfoPanel;   // 🆕 ITEM-FORM: กล่องข้อมูลต้นทุน/ราคาขาย/ซื้อจาก (อ่านอย่างเดียว)
 global.ERP.PendingOpsTab = PendingOpsTab;
 global.ERP.opqOpenCount = opqOpenCount;
+global.ERP._opqNextStep = _opqNextStep;   // 🆕 DSI1 verify 2: ให้เทสต์ตรวจข้อความการ์ดได้
 global.ERP.opqCauseText = opqCauseText;   // 🆕 OPQ-READABLE: เหตุผลไทยของงานค้าง (ใช้ร่วมกับโมดัลชน)   // 🆕 UAT M3: แถบแดงนับรายการที่ยังไม่ขึ้นจริง   // 🆕 MW-0.2: แถบเตือนใน shell เปิดรายการได้โดยไม่ต้องเข้าหน้าตั้งค่า
 global.ERP.StateAppendPolicy = StateAppendPolicy;   // 🌊 คลื่น 4 §B4.4
 global.ERP.StateRpcPolicy = StateRpcPolicy;          // 🌊 UAT คลื่น 3: สวิตช์บันทึกรายหมวด (เทสต์ w3_killswitch_e2e render ตรง ๆ ตามสิทธิ์ผู้ใช้)
@@ -138728,10 +139254,13 @@ C.registerGroup({
         if(!E.prepSetNeeds) return 0;
         const mine = MGR_TIER(ctx.user) ? null : new Set((E.getUserAssignedLines && E.getUserAssignedLines(ctx.user)) || []);
         const rows = [];
+        // 🆕 WNQ2 verify 1: ช่วงวันเดียวกับแถบ ⚖️ / B2 / 🔔 (ใบกะดึก ≤ 12 ชม. ยังนับ · ใบค้างเกิน 12 ชม. ไม่นับ) — คำนวณครั้งเดียวนอกลูปสาขา
+        let _psWin = {};
+        try { _psWin = (E.prepSetWinNow ? E.prepSetWinNow(ctx.state, E.getToday()) : (E.prepSetWindow && E.prepSetWindow(E.getToday()))) || {}; } catch(_e){ _psWin = {}; }
         for(const b of (ctx.state.branches || [])){
           if(!b || !ctx.inScope(b.id)) continue;
           let rs = [];
-          try { rs = E.prepSetNeeds(ctx.state, b.id, (E.prepSetWindow && E.prepSetWindow(E.getToday())) || {}) || []; } catch(_e){ rs = []; }   // 🆕 SET_PREP verify 1: ใบวันนี้–พรุ่งนี้
+          try { rs = E.prepSetNeeds(ctx.state, b.id, _psWin) || []; } catch(_e){ rs = []; }   // 🆕 SET_PREP verify 1: ใบวันนี้–พรุ่งนี้
           for(const r of rs) if(r.deficit > 0 && (!mine || !mine.size || mine.has(r.lineId))) rows.push({ ...r, branchId: b.id });
         }
         return { count: rows.length, docs: C.mkDocs(rows, r => ({ kind:'weighprep', id: r.setBomId, ref: r.setBomName || r.name })),
