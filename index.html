@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="67e82332f473";window.__ERP_BUILT_AT__="2026-11-05T13:29:22";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="159a774fe948";window.__ERP_BUILT_AT__="2026-11-05T14:28:38";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -1357,6 +1357,14 @@ function buildBackflushLines(state, order, batch){
 //   prep set = ผลผลิตของสูตร active + ทุกขั้นเป็นชั่ง + อยู่หน้าชั่ง + สูตรอยู่ไลน์เดียวกับใบที่ใช้ (bom.lineId / weighLineIds)
 //   ถุงแป้งแผนกชั่ง (สูตรอยู่อีกไลน์) ไม่ใช่ prep set (Q1) · สวิตช์ฉุกเฉิน settings.prepSetGateEnabled (ไม่มีค่า = เปิด · ปิด = D ไม่บล็อก)
 function prepSetGateOn(state){ return !(state && state.settings && state.settings.prepSetGateEnabled === false); }
+// 🆕 WNQ1 N1: ถ้อยคำแถบชุดตามด่านจริง — ด่านปิด = ชุดขาดก็ยังเริ่มได้ (ติดลบได้) ห้ามบอกว่า "เริ่มไม่ได้"
+//   → { blocks, head, sub, short } · short = ข้อความสั้นสำหรับ toast/งานค้าง
+function prepStripWording(state){
+  const on = prepSetGateOn(state);
+  return on
+    ? { blocks:true, head:'⚖️ ต้องชั่งชุดเพิ่ม', sub:'batch ที่ชุดไม่พอจะเริ่ม/บันทึกไม่ได้จนกว่าจะชั่งชุดเข้าคลัง', short:'ชุดชั่งเตรียมไม่พอ' }
+    : { blocks:false, head:'⚖️ ชุดควรชั่งเพิ่ม', sub:'ชุดควรชั่งเพิ่ม — ยังเริ่มได้ (ติดลบได้)', short:'ชุดควรชั่งเพิ่ม' };
+}
 const _PS_IDX = new WeakMap();
 function _prepSetIndex(state){
   const boms = (state && state.boms) || [];
@@ -3225,6 +3233,31 @@ function prodOrderName(state, o, noFallbackNo){
   const it = pid ? ((state && state.items) || []).find(x => x && x.id === pid) : null;
   const b = o.bomId ? ((state && state.boms) || []).find(x => x && x.id === o.bomId) : null;
   return String(o.productName || out0.productName || (it && it.name) || (b && (b.name || b.productName)) || o.bomName || (noFallbackNo ? '' : (o.orderNumber || o.id)) || '').trim();
+}
+// 🆕 WNQ1 N4: ใบเริ่มเองที่ค้างจากวันก่อน (planned ยังไม่เริ่ม · วันผลิต/วันสร้าง < วันนี้) ที่ผู้ใช้เห็น
+//   → [order] เรียงเก่าก่อน · ไม่ยกเลิกอัตโนมัติ (คำตอบเจ้าของ ก) · opts.branchId / opts.lineIds กรองเพิ่ม · opts.today ใช้ในเทสต์
+function staleUnstartedSelfStart(state, user, opts){
+  const op = opts || {};
+  const t0 = String(op.today || getToday()).slice(0, 10);
+  const lf = (op.lineIds && op.lineIds.length) ? new Set(op.lineIds) : null;
+  const dayOf = (o) => {
+    const p = String(o.plannedDate || '').slice(0, 10);
+    if(/^\d{4}-\d{2}-\d{2}$/.test(p)) return p;
+    const n = Number(o.createdAt);
+    if(!(n > 0)) return '';
+    const d = new Date(n);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  };
+  return ((state && state.productionOrders) || []).filter(o => {
+    if(!o || o.createdVia !== 'self_start' || o.status !== 'planned' || !_lssUnstarted(o)) return false;
+    if(op.branchId && o.branchId !== op.branchId) return false;
+    const d = dayOf(o);
+    if(!d || d >= t0) return false;
+    if(lf && !weighJobLines(state, o).concat(o.lineId ? [o.lineId] : []).some(id => lf.has(id))) return false;
+    if(!user) return true;
+    const un = user.username || user;
+    return o.createdBy === un || weighJobVisibleTo(state, user, o) || canCancelUnstartedSelfStart(state, user, o);
+  }).sort((a, b) => (dayOf(a) < dayOf(b) ? -1 : dayOf(a) > dayOf(b) ? 1 : (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0)));
 }
 function prodOrderSize(o){ return String((o && o.selfStart && o.selfStart.profileLabel) || '').trim(); }
 // opts.withNo = true → ต่อท้าย "(PROD-…)" สำหรับข้อความล้วน (toast/confirm) — บนจอให้แสดงเลขเป็นตัวเล็กแยกเอง
@@ -11497,7 +11530,84 @@ function getLowStockAlerts(state, branchId = null){
   return alerts;
 }
 
-// 🆕 NC: ศูนย์รวมแจ้งเตือนปฏิบัติการ — รวม alert ทุกชนิดสำหรับกระดิ่งเดียว
+// 🆕 WNQ1 N5 (คำตอบเจ้าของ ข้อ 2 ก): ใครเห็นเรื่องผลิตในระฆัง — ผจก.ผลิต / หัวหน้าไลน์ / QC เท่านั้น
+//   พนักงานชั่ง/พนักงานไลน์ทั่วไป = ไม่เห็น (เห็นแค่ชิปสั้น/แถบพับบนจอ) · orders.view อย่างเดียว (Operator) ไม่นับเป็น ผจก.
+function prodBellAudience(user){
+  if(!user) return { any:false };
+  const su = isSuperUser(user);
+  const rank = POSITION_RANK[user.position] || 0;
+  // role 'branch' ค่าเริ่มต้นได้สิทธิ์ผลิตเกือบทั้งหมด → ดูสิทธิ์รายข้อเฉพาะผู้ใช้ที่ตั้งสิทธิ์เอง (permissions ไม่ว่าง)
+  //   และไม่ใช่พนักงานไลน์ (มีไลน์/สถานีสังกัด · ต่ำกว่าซูเปอร์ไวเซอร์)
+  const explicit = user.permissions != null;
+  const lineStaff = rank < 2 && (getUserAssignedLines(user).length > 0 || (user.assignedStations || []).length > 0);
+  const byPerm = explicit && !lineStaff;
+  const mgr = su || weighSeesAll(user) || (byPerm && ['create','edit','approve','complete'].some(a => hasPerm(user, 'production', 'orders', a)));
+  const lead = !mgr && rank >= 2 && hasAnyPermIn(user, 'production');   // หัวหน้าไลน์ = ซูเปอร์ไวเซอร์ขึ้นไป
+  const qc = !mgr && (user.canQC === true || (byPerm && hasAnyPermIn(user, 'production', 'qc')));
+  return { any: mgr || lead || qc, mgr, lead, qc, bomEdit: su || hasPerm(user, 'production', 'bom', 'edit'),
+    lines: (mgr || qc) ? null : getUserAssignedLines(user) };   // หัวหน้าไลน์ = ไลน์ที่สังกัด (ไม่ตั้ง = ทุกไลน์ในสาขา)
+}
+// → [nc_prod_stale_set?, nc_prod_info?] · pure (อ่าน state + today ที่ส่งมา) · cache ตัวเดียวตามอ้างอิงข้อมูล
+let _PBA_CACHE = null;
+function prodBellAlerts(state, user, today, inScope){
+  const au = prodBellAudience(user);
+  if(!au.any || !state) return [];
+  const key = [state.productionOrders, state.fifoLayers, state.boms, state.settings, state.branches, state.items, state.locations, today, user];
+  if(_PBA_CACHE && _PBA_CACHE.key.length === key.length && _PBA_CACHE.key.every((k, i) => k === key[i])) return _PBA_CACHE.out.map(a => ({ ...a }));
+  const out = _prodBellBuild(state, au, today, inScope);
+  _PBA_CACHE = { key, out };
+  return out.map(a => ({ ...a }));
+}
+function _prodBellBuild(state, au, today, inScope){
+  const win = prepSetWindow(today);
+  const gateOn = prepSetGateOn(state);
+  const lf = au.lines && au.lines.length ? new Set(au.lines) : null;
+  const staleL = [], info = [];
+  let staleN = 0, infoN = 0;
+  for(const b of (state.branches || [])){
+    if(!b || !inScope(b.id)) continue;
+    const ln = (id) => { const l = findLine(state, b.id, id); return (l && (l.name || l.id)) || id || '-'; };
+    const pre = `${b.name || b.id} › `;
+    let needs = [];
+    try { needs = (prepSetNeeds(state, b.id, win) || []).filter(x => !lf || lf.has(x.lineId)); } catch(_e){ needs = []; }
+    // 🕒 ชุดเกิน 1 วัน (เตือนอย่างเดียว · เหมือนแถบชุดหน้าชั่ง)
+    for(const x of needs){
+      const n = prepSetStale(state, b.id, x.lineId, x.itemId, today);
+      if(!(n > 0)) continue;
+      staleN++;
+      staleL.push(`${pre}${ln(x.lineId)} · ${x.setBomName || x.name} ${fmtNum(n)} ${x.unit || 'ชุด'}`);
+    }
+    // ⚖️ ชุดควรชั่งเพิ่ม — รวมต่อไลน์
+    const byLine = new Map();
+    for(const x of needs.filter(x => x.deficit > 0)){ if(!byLine.has(x.lineId)) byLine.set(x.lineId, []); byLine.get(x.lineId).push(x); }
+    for(const [lid, xs] of byLine){
+      infoN++;
+      const names = xs.slice(0, 3).map(x => `${x.setBomName || x.name} ${fmtNum(x.deficit)}`).join(', ') + (xs.length > 3 ? ` +${xs.length - 3}` : '');
+      info.push(`${pre}${ln(lid)}: ${gateOn ? 'ต้องชั่งชุดเพิ่ม' : 'ชุดควรชั่งเพิ่ม'} ${xs.length} ชุด (${names}) · ${gateOn ? 'ด่านชุดเปิด — batch ที่ชุดไม่พอเริ่มไม่ได้' : 'ด่านชุดปิด ติดลบได้'}`);
+    }
+    // 🗂 ใบเริ่มเองค้างจากวันก่อน (ไม่ยกเลิกอัตโนมัติ — คำตอบเจ้าของ ข้อ 1 ก)
+    let old = [];
+    try { old = staleUnstartedSelfStart(state, null, { branchId: b.id, lineIds: au.lines || undefined, today }) || []; } catch(_e){ old = []; }
+    if(old.length){ infoN++; info.push(`${pre}🗂 ใบเริ่มเองค้างจากวันก่อน ${old.length} ใบ ไม่ได้เริ่ม — กด 🗑️ ยกเลิกเองที่ ⚖️ ชั่ง`); }
+    // ⚠️ ใบเริ่มเองวันนี้ที่ยืนยันติดลบ (selfStart.shortAck)
+    const neg = (state.productionOrders || []).filter(o => o && o.branchId === b.id && o.createdVia === 'self_start' && o.selfStart && o.selfStart.shortAck
+      && o.status !== 'cancelled' && String(o.plannedDate || '').slice(0, 10) === today && (!lf || lf.has(o.lineId)));
+    if(neg.length){ infoN++; info.push(`${pre}⚠️ ใบเริ่มเองวันนี้ที่ติดลบ ${neg.length} ใบ — ตามขอของ (TR) เข้าคลังไลน์`); }
+    // ⚠️ สูตรชุดตั้งคลังรับนอกคลังไลน์ — เฉพาะผู้แก้ BOM
+    if(au.bomEdit){
+      let bad = [];
+      try { bad = prepSetLocMisconfig(state, b.id, { lineIds: au.lines || undefined }) || []; } catch(_e){ bad = []; }
+      const nb = new Set(bad.map(x => x.bomId)).size;
+      if(nb){ infoN++; info.push(`${pre}⚠️ สูตรชุดตั้งคลังรับนอกคลังไลน์ ${nb} สูตร — แก้คลังรับในสูตร`); }
+    }
+  }
+  const out = [];
+  if(staleN) out.push({ id:'nc_prod_stale_set', type:'prod_stale_set', icon:'🕒', severity:'warn', module:'production',
+    title:`ชุดชั่งเตรียมเกิน 1 วัน ${staleN} ชุด — ตรวจความสดก่อนใช้`, detail: staleL.slice(0, 6), count: staleN, navTab:'production' });
+  if(infoN) out.push({ id:'nc_prod_info', type:'prod_info', icon:'🏭', severity:'info', module:'production',
+    title:'ผลิต · แจ้งเพื่อทราบ', detail: info.slice(0, 6), count: infoN, navTab:'production' });
+  return out;
+}
 //   role + branch aware: เห็นเฉพาะที่เกี่ยวกับสิทธิ์ + สาขาที่เข้าถึง
 //   return [{ id, type, icon, severity:'warn'|'urgent'|'info', module, title, detail:[...], count, navTab }]
 function collectOperationalAlerts(state, user){
@@ -11684,6 +11794,11 @@ function collectOperationalAlerts(state, user){
     }
   }
 
+  // 8. 🏭 WNQ1 N5: เรื่องผลิต "เพื่อทราบ" ที่ย้ายออกจากหน้าชั่ง — ไม่เกิน 2 กลุ่ม · คำนวณสด ไม่เก็บ state
+  if(can('production')){
+    try { for(const a of prodBellAlerts(state, user, today, inScope)) alerts.push(a); } catch(e){ console.warn('[alerts] prod', e); }
+  }
+
   // 🎯 TODO-DEEPLINK B4.7: ทุก alert มี nav/todo/btn (คง navTab/count ไว้ให้ badge + เทสต์เดิม)
   for(const a of alerts){ try { _decorateAlert(a, user); } catch(e){ console.warn('[alerts] decorate', a.id, e); } }
   // เรียง urgent → warn → info
@@ -11753,6 +11868,21 @@ function _decorateAlert(a, user){
     case 'nc_period':
       todo = `งวดจะล็อกถึง ${fmtDate(_alertLockDate(a))} — เคลียร์งานค้างของบัญชีก่อนวันนั้น`;
       nav = { tab:'checklist', subs:{ checklist_group:'accounting', checklist_sev:'all' } }; btn = 'ดูงานค้างบัญชี'; break;
+    case 'nc_prod_stale_set':   // 🆕 WNQ1 N5: ไปหน้า ⚖️ ชั่ง (แถบชุด 🕒) · QC ที่ไม่มีสิทธิ์ชั่ง → 🔬 QC
+    { // UAT N4: เปิด ⚖️ ชั่งไม่ได้ (เช่น QC) → หน้าปลายทางไม่มีรายการชุด → บอกว่ารายการอยู่ในข้อความนี้
+      const wNav = _alertNav(user, 'production.weigh', a, null);
+      todo = wNav ? `ชุดชั่งเตรียม ${a.count || n} ชุดเกิน 1 วัน — ตรวจความสดก่อนใช้ ถ้าไม่ผ่านให้บันทึกของเสีย`
+        : `ชุดชั่งเตรียม ${a.count || n} ชุดเกิน 1 วัน — รายการชุดอยู่ในข้อความนี้ · ตรวจความสด ถ้าไม่ผ่านแจ้งหัวหน้าไลน์/บันทึกของเสียที่สต๊อก`;
+      nav = wNav || _alertNav(user, 'production.qc', a, null); btn = wNav ? 'ดูชุด' : 'ไป 🔬 QC';
+      // verify 1: ไม่มีรายการเอกสาร → ไม่ส่ง ids (ids ว่าง = กรองประวัติชั่ง/QC เหลือ 0) · ⚖️ เปิดแถบชุดให้เห็นแถว 🕒 เอง
+      if(nav && nav.focus){ delete nav.focus.ids; if(wNav) nav.focus.openPrep = true; }
+      break; }
+    case 'nc_prod_info':
+    { const wNav = _alertNav(user, 'production.weigh', a, null);
+      todo = wNav ? 'เพื่อทราบ — ไม่บล็อกงาน · ดูรายละเอียดที่ ⚖️ ชั่ง' : 'เพื่อทราบ — ไม่บล็อกงาน · รายละเอียดอยู่ในข้อความนี้';
+      nav = wNav || _alertNav(user, 'production.orders', a, null); btn = wNav ? 'ไปหน้าชั่ง' : 'ไปใบสั่งผลิต';
+      if(nav && nav.focus){ delete nav.focus.ids; if(wNav) nav.focus.openPrep = true; }   // verify 1: เหมือนข้างบน
+      break; }
     default: break;
   }
   if(nav && nav.focus) nav.focus.todo = todo;
@@ -16916,7 +17046,7 @@ Object.assign(global.ERP, {
   fixedColGroup, TABLE_FIXED_CLS,
   gramsPerUnitName, gramsOfMaterial, weighDefaultTolG, bomHasWeighStep, weighRecipeFromBom, bomsForWeigh, bomWeighFree,
   buildProfileManualBatches, lineSelfStartOn, selfStartManager, selfStartLines, canSelfStartProduction, selfStartDenyReason, selfStartProfiles, selfStartBomReason, selfStartRecipes, selfStartWeighFreeHidden, selfStartShortAck, buildSelfStartOrder, selfStartOrderDenyReason, prodOrderLabel, prodOrderName, prodOrderTwin,   // 🆕 LSS D1 · LSS4 P2 prodOrderLabel
-  _lssUnstarted, findSelfStartDup, findSelfStartDups, selfStartParallelOk, canCancelProdOrderMgr, canCancelUnstartedSelfStart, selfStartWeighElsewhere, weighJobVisibleTo, bomOrderWeighVisibleTo,   // 🆕 LSS verify 1
+  _lssUnstarted, findSelfStartDup, findSelfStartDups, selfStartParallelOk, canCancelProdOrderMgr, canCancelUnstartedSelfStart, staleUnstartedSelfStart, prodBellAudience, prodBellAlerts, selfStartWeighElsewhere, weighJobVisibleTo, bomOrderWeighVisibleTo,   // 🆕 LSS verify 1
   bomWeighOnly, bomOnWeighPage, bomWeighLines, _weighBomCode,   // 🆕 WEIGH-IMPORT-V2 verify 1: รหัสชั่งจริง (คำนำหน้า LOT) ให้หน้านำเข้าเช็กชน
   weighSeesAll, weighManagesOrder, weighStationOpId, weighOrderShape, isWeighStationWork, weighJobLines, weighJobId, weighJobRecipe, weighJobsFor,   // 🆕 WEIGH-ORDER E1
   bomPortionCheck, _portionCount, PORTION_MAX, weighPortionDrift, weighDriftOpen, weighDriftByItem,   // 🆕 UAT ชุด 2
@@ -16929,7 +17059,7 @@ Object.assign(global.ERP, {
   getLineStockLocation, getFGDestinationLocation, getRawWarehouseLocation,
   // 🆕 PRODUCTION-LIVE คลื่น 0 (สัญญา B2/B10.5/B11)
   isBomAvailable, getLineOwnLocations, isLineSharedMainStore, resolveMergedLoc, locDeleteBlockReason, isLocMergedClosed, lssClosedLocMsg, canLineShareMainStore, lineShareMainStorePlan, getLineConsumeLocs, planFgReversal, getBomOutputLocation, getItemHomeLocations, suggestBomOutputLocation,
-  negUnitCost, isSellOnlyItem, isSupplierRecvLoc, supplierRecvLocs, bomOutputCandidates, producibleItems, orderOutputLines, orderLiveHandoverTOs, buildBackflushLines, prepSetGateOn, prepSetBomFor, prepSetBomKey, prepSetBomInUse, prepSetLocMisconfig, prepSetOnHand, prepSetStale, prepSetReserved, prepSetBatchShort, prepSetConsumeShort, prepSetNeeds, prepSetWindow, prepSetOutOfWindow, prepSetPlanCheck, prepSetConsumed: _psConsumed, orderRecipeScale, orderUnitFactor, resolveOrderOutputLoc, isBomPhantom,
+  negUnitCost, isSellOnlyItem, isSupplierRecvLoc, supplierRecvLocs, bomOutputCandidates, producibleItems, orderOutputLines, orderLiveHandoverTOs, buildBackflushLines, prepSetGateOn, prepStripWording, prepSetBomFor, prepSetBomKey, prepSetBomInUse, prepSetLocMisconfig, prepSetOnHand, prepSetStale, prepSetReserved, prepSetBatchShort, prepSetConsumeShort, prepSetNeeds, prepSetWindow, prepSetOutOfWindow, prepSetPlanCheck, prepSetConsumed: _psConsumed, orderRecipeScale, orderUnitFactor, resolveOrderOutputLoc, isBomPhantom,
   canActOnLocation, getLineBomItemIds, locActDenyReason, isIntraTO, userHandlesIncomingTO, getLocStockFIFO,
   toLinePieces, slicePieces, isInTransitTO, getInTransit, getInTransitSummary, getInTransitValue, getNegStockValue,
   // Permissions
@@ -68099,6 +68229,12 @@ function prepRowStale(state, o, r){
   return rows.filter(x => (x.orders || []).some(j => j.orderId === o.id && (j.batchSeq == null ? null : j.batchSeq) === seq))
     .map(x => ({ itemId: x.itemId, name: x.setBomName || x.name, n: prepStaleQty(state, o.branchId, x.lineId, x.itemId) })).filter(x => x.n > 0);
 }
+// 🆕 WNQ1 UAT S1: ชื่อชุดย่อบนชิป (ตัดคำ "ชุด" นำหน้า + ยาวเกิน 14 ตัวอักษรตัด …) · ชื่อเต็มอยู่ใน title
+function _wnqShortName(name){
+  const t = String(name || '').replace(/^ชุด\s*/, '').trim() || String(name || '').trim() || 'ชุด';
+  const a = Array.from(t);
+  return a.length > 14 ? a.slice(0, 13).join('') + '…' : t;
+}
 function prepStaleText(name, n){
   return `🕒 มีชุดเกิน 1 วัน ${fmtNum(n)} ชุด (${name}) — ตรวจความสดก่อนใช้ · ระบบยังนับเป็นของที่มี`;
 }
@@ -68246,10 +68382,12 @@ function _wjShortText(rows){
   return rows.map(r => `${r.itemName} ขาด ${fmtNum(Math.round(r.missing * 100) / 100)} ${r.baseUnit || ''}`.trim()).join(', ');
 }
 // บรรทัดเหตุผล (+ 🔄 โหลดใหม่ · ทาง "ชั่งที่หน้างานแทน")
-function WeighJobBlockLine({ block, onReload, big, onRoute, onRetry, onCancelClaim }){
+//   🆕 WNQ1 W15: noText = ไม่พิมพ์ข้อความซ้ำ (การ์ดในคิว · เครื่องชั่งไม่ต่อ — หัวบอกแล้ว ปุ่ม ▶ บอก "🔗 ต่อเครื่องชั่งก่อน") · ปุ่มทางออกยังอยู่
+function WeighJobBlockLine({ block, onReload, big, onRoute, onRetry, onCancelClaim, noText }){
   if(!block) return null;
+  if(noText && !block.fallback && !block.reload && !block.retry && !block.cancel) return h('span', { 'data-weigh-job-block': block.code, hidden:true });
   return h('div', { 'data-weigh-job-block': block.code, className: cls(big ? 'text-sm' : 'text-xs', 'text-gray-700 flex flex-wrap items-center gap-x-2 gap-y-1') },
-    h('span', null, block.text),
+    !noText && h('span', null, block.text),
     block.reload && onReload && h('button', { type:'button', onClick: onReload, 'data-weigh-job-reload':'1',
       className:'px-2 py-0.5 rounded border bg-white text-blue-700 text-xs font-medium' }, '🔄 โหลดใหม่'),
     block.retry && onRetry && h('button', { type:'button', onClick: onRetry, 'data-weigh-job-retry':'1',
@@ -68265,12 +68403,20 @@ function WeighJobBlockLine({ block, onReload, big, onRoute, onRetry, onCancelCla
 // ปุ่มเริ่ม/ชั่งต่อ ของแถว (onStart ไม่ส่งมา = ยังไม่ต่อสาย E5b → กดไม่ได้)
 function _wjStartText(row, state, user, afterFinish, blk){
   if(blk && blk.code === 'sent_wait') return '📮 รอส่งผลชั่ง';
+  if(blk && blk.code === 'scale') return '🔗 ต่อเครื่องชั่งก่อน';   // 🆕 WNQ1 W15: เหตุผลอยู่บนปุ่ม (การ์ดไม่พิมพ์ซ้ำ)
   if(row.status === 'claimed' && row.claim && user && row.claim.by === user.username) return '▶ ชั่งต่อ';
   if(row.batchSeq == null) return '▶ เริ่มชั่ง';
   return afterFinish ? `▶ ชั่ง ${_wjWord(row)} ${row.batchNo}/${row.batchCount} ต่อ` : `▶ เริ่มชั่ง ${_wjWord(row)} ${row.batchNo}/${row.batchCount}`;
 }
 // 🆕 SET_PREP A: แถบ "⚖️ ต้องชั่งชุดเพิ่ม" ในแท็บ ⚖️ ชั่ง — ป้าย "ต้องชั่งเพิ่ม N ชุด" ต่อสูตรชุด + สูตรโดว์ที่รอชุด (ชั่งเองไม่ได้) · อ่านอย่างเดียว
 function WeighPrepStrip({ state, user, branchId, lineIds, blocked, recipes, onPrepWeigh }){
+  // 🆕 WNQ1 verify 1: กด "ดูชุด" ในระฆัง → กางแถบเอง + เลื่อนมาให้เห็น (hook ต้องอยู่ก่อน return null)
+  const [forceOpen, setForceOpen] = useState(false);
+  useEffect(() => {
+    const on = () => { setForceOpen(true); setTimeout(() => { try { const el = document.querySelector('[data-prep-strip]'); if(el){ el.open = true; el.scrollIntoView({ block:'center', behavior:'smooth' }); } } catch(_e){} }, 80); };
+    global.addEventListener('erp-weigh-prep-open', on);
+    return () => global.removeEventListener('erp-weigh-prep-open', on);
+  }, []);
   let rows = [];
   // 🆕 SET_PREP verify 1: นับเฉพาะใบวันนี้–พรุ่งนี้ (ชุดใช้ภายใน 1 วัน) · ใบล่วงหน้า/เลยกำหนดค้าง แสดงแยก (ยังไม่ต้องชั่ง)
   const win = prepSetWin(state);
@@ -68285,24 +68431,44 @@ function WeighPrepStrip({ state, user, branchId, lineIds, blocked, recipes, onPr
   const waits = (recipes || []).filter(r => blocked && blocked[r.bomId]);
   let badLoc = [];   // 🆕 SET_PREP verify 1: สูตรชุดตั้งคลังรับนอกคลังไลน์ (ด่าน D ไม่ดูชุดนี้จนกว่าจะแก้สูตร)
   try { badLoc = global.ERP.prepSetLocMisconfig(state, branchId, { lineIds }) || []; } catch(_e){ badLoc = []; }
+  // 🆕 WNQ1 N2: สูตรตั้งคลังผิด = เรื่องของผู้แก้สูตร (พนักงานชั่งแก้ไม่ได้) → เห็นเฉพาะผู้แก้ BOM
+  if(!(user && hasPerm(user, 'production', 'bom', 'edit'))) badLoc = [];
+  // 🆕 WNQ1 N4: ใบเริ่มเองค้างจากวันก่อน ไปอยู่แถวพับ "🗂 ค้างจากวันก่อน" — ไม่นับซ้ำใน "ใบวันอื่น"
+  let staleIds = new Set();
+  try { staleIds = new Set((global.ERP.staleUnstartedSelfStart(state, null, { branchId }) || []).map(o => o.id)); } catch(_e){}
+  later = later.map(x => ({ ...x, orders: (x.orders || []).filter(j => !staleIds.has(j.orderId)) })).filter(x => x.orders.length);
   if(!rows.length && !waits.length && !stale.length && !later.length && !badLoc.length) return null;
-  return h('div', { className:'bg-rose-50 border-2 border-rose-200 rounded-lg p-3 text-sm space-y-1', 'data-prep-strip':'1' },
-    h('div', { className:'font-bold text-rose-900' }, `⚖️ ต้องชั่งชุดเพิ่ม (${rows.length})`,
-      h('span', { className:'ml-2 text-xs font-normal text-rose-800' }, 'batch ที่ชุดไม่พอจะเริ่ม/บันทึกไม่ได้จนกว่าจะชั่งชุดเข้าคลัง')),
+  const wd = global.ERP.prepStripWording(state);
+  // 📅 ใบวันอื่น: ชื่อใบ (prodOrderLabel) ไม่ซ้ำ · โชว์ 5 ใบแรก + "อีก N"
+  const os = (state && state.productionOrders) || [];
+  const laterIds = [...new Set(later.flatMap(x => x.orders.map(j => j.orderId)))];
+  const laterNames = laterIds.map(id => { const o = os.find(p => p && p.id === id); return o ? prodOrderLabel(state, o) : id; });
+  const openDef = wd.blocks && (rows.length > 0 || waits.length > 0);
+  const sumParts = rows.length ? [`${wd.head} ${rows.length}`] : [];   // verify 1: ไม่มีชุดขาด → ไม่ขึ้น "ควรชั่งเพิ่ม 0"
+  if(stale.length) sumParts.push(`🕒 ชุดเก่า ${stale.length}`);
+  if(laterIds.length) sumParts.push(`📅 ใบวันอื่น ${laterIds.length}`);
+  if(waits.length) sumParts.push(`⏸ รอชุด ${waits.length}`);
+  if(badLoc.length) sumParts.push(`⚠️ สูตรตั้งคลังผิด ${badLoc.length}`);
+  return h('details', { open: (openDef || forceOpen) || undefined, 'data-prep-strip':'1', 'data-prep-strip-gate': wd.blocks ? 'on' : 'off',
+      className: cls('rounded-lg text-sm', openDef ? 'bg-rose-50 border-2 border-rose-200 p-3' : 'bg-white border border-gray-200 px-3 py-1.5') },
+    h('summary', { 'data-prep-strip-summary':'1', className: cls('cursor-pointer select-none font-bold', openDef ? 'text-rose-900' : 'text-gray-700') },
+      sumParts.join(' · ') + ' ▸'),
+    h('div', { className:'mt-1 space-y-1' },
+    (rows.length > 0 || waits.length > 0) && h('div', { className: cls('text-xs', wd.blocks ? 'text-rose-800' : 'text-gray-600'), 'data-prep-strip-sub':'1' }, wd.sub),
     rows.map(x => h('div', { key: x.lineId + '|' + x.itemId, className:'flex flex-wrap items-center gap-2', 'data-prep-need': x.itemId, 'data-prep-deficit': x.deficit },
-      h('span', { className:'px-1.5 rounded bg-rose-600 text-white text-xs font-bold', 'data-prep-badge': x.setBomId }, `ต้องชั่งเพิ่ม ${fmtNum(x.deficit)} ชุด`),
+      h('span', { className:'px-1.5 rounded bg-rose-600 text-white text-xs font-bold', 'data-prep-badge': x.setBomId }, `${wd.blocks ? 'ต้องชั่งเพิ่ม' : 'ควรชั่งเพิ่ม'} ${fmtNum(x.deficit)} ชุด`),
       h('span', { className:'flex-1 min-w-[180px] text-rose-900' }, `${x.setBomName || x.name} · ต้องใช้ ${fmtNum(x.needed)} · มี ${fmtNum(x.onHand)}${x.inbound > 0 ? ` · กำลังมา ${fmtNum(x.inbound)}` : ''}`),
       onPrepWeigh && h('button', { type:'button', 'data-prep-strip-b1': x.itemId, onClick: () => onPrepWeigh({ miss: x, jobs: null }),
         className:'px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold' }, '⚖️ ชั่งชุดนี้ที่เครื่องนี้'))),
-    stale.map(({ x, n }) => h('div', { key:'st' + x.lineId + '|' + x.itemId, className:'text-xs text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-0.5', 'data-prep-stale': x.itemId, 'data-prep-stale-qty': n },
-      prepStaleText(x.setBomName || x.name, n))),
+    stale.map(({ x, n }) => h('div', { key:'st' + x.lineId + '|' + x.itemId, className:'text-xs text-amber-900 break-words', 'data-prep-stale': x.itemId, 'data-prep-stale-qty': n,
+      title: prepStaleText(x.setBomName || x.name, n) }, prepStaleText(x.setBomName || x.name, n))),   // verify 1: มือถือไม่มี tooltip → โชว์ข้อความเต็ม
     badLoc.length > 0 && h('div', { className:'text-xs text-amber-900 bg-amber-50 border border-amber-400 rounded px-2 py-0.5', 'data-prep-badloc': badLoc.map(x => x.bomId).join(',') },
       '⚠️ สูตรชุดตั้งคลังรับนอกคลังไลน์ — ระบบยังไม่ตรวจชุดนี้ก่อนเริ่มโดว์: ' + badLoc.map(x => `${x.name} → ${x.locName}`).join(' · ')
         + ' · แก้ที่สูตร (คลังรับผลผลิต) ให้เป็นคลังไลน์ หรือเว้นว่าง'),
     later.length > 0 && h('div', { className:'text-xs text-gray-600', 'data-prep-later': later.map(x => x.itemId + ':' + x.needed).join(',') },
-      '📅 ใบวันอื่น (ล่วงหน้า/เลยกำหนดค้าง) ยังไม่ต้องชั่ง: ' + later.map(x => `${x.setBomName || x.name} ${fmtNum(x.needed)} ชุด (${[...new Set(x.orders.map(j => j.orderNumber))].join(', ')})`).join(' · ')),
+      '📅 ใบวันอื่น ยังไม่ต้องชั่ง: ' + laterNames.slice(0, 5).join(', ') + (laterNames.length > 5 ? ` · อีก ${laterNames.length - 5}` : '')),
     waits.length > 0 && h('div', { className:'text-xs text-rose-800', 'data-prep-wait-recipes': waits.map(r => r.bomId).join(',') },
-      '⏸ รอชุด (ชั่งเองไม่ได้จนชุดพอ): ' + waits.map(r => `${r.name} (${blocked[r.bomId].map(m => m.name).join(', ')})`).join(' · ')));
+      (wd.blocks ? '⏸ รอชุด (ชั่งเองไม่ได้จนชุดพอ): ' : '⏸ ชุดควรชั่งก่อน: ') + waits.map(r => `${r.name} (${blocked[r.bomId].map(m => m.name).join(', ')})`).join(' · '))));
 }
 // 🆕 SET_PREP B1/B2: แถบใต้ batch ที่ชุดชั่งเตรียมไม่พอ — "⚖️ ชั่งชุดนี้ที่เครื่องนี้" · "📤 ส่งให้เครื่องอื่นชั่ง" (ยืนยันในแอป) · "รอชุด: PROD-…"
 function PrepSetRowActions({ state, dispatch, user, order, rowKey, ps, onPrepWeigh, canOrder }){
@@ -68344,11 +68510,13 @@ function PrepSetRowActions({ state, dispatch, user, order, rowKey, ps, onPrepWei
     msg && h('div', { className:'text-blue-900', 'data-prep-msg':'1' }, msg));
 }
 // 📋 คิวงานชั่งตามใบสั่ง (ภาพรวม เหนือ iframe) — จัดกลุ่มตามใบ · batch เรียงตามลำดับ
-function WeighJobQueue({ state, dispatch, user, rows, env, onStart, onReload, onTR, onRoute, onCancelClaim, onPrepWeigh }){
-  if(!rows || !rows.length) return null;
+function WeighJobQueue({ state, dispatch, user, rows, env, onStart, onReload, onTR, onRoute, onCancelClaim, onPrepWeigh, staleOrders, onStaleGo }){
+  rows = rows || [];
+  if(!rows.length && !(staleOrders || []).length) return null;
   const groups = [];
   rows.forEach(r => { let g = groups.find(x => x.orderId === r.orderId); if(!g){ g = { orderId: r.orderId, rows: [] }; groups.push(g); } g.rows.push(r); });
   const canSplit = canSplitOrderUI(user);
+  // 🆕 WNQ1 W15: เครื่องชั่งไม่ต่อ = บอกจุดเดียวที่แถวสถานะบนสุด (หัว ⚖️ สถานีชั่ง) · การ์ดไม่ขึ้นข้อความซ้ำ (ปุ่ม ▶ บอก "🔗 ต่อเครื่องชั่งก่อน")
   return h('div', { className:'bg-white rounded-lg shadow p-3 text-sm space-y-2', 'data-weigh-job-queue':'1' },
     h('div', { className:'font-bold text-gray-800' }, `📋 งานชั่งตามใบสั่ง (${rows.length})`,
       h('span', { className:'ml-2 text-xs font-normal text-gray-500' }, 'ชั่งทีละ batch · กด ▶ ที่ batch ถัดไป')),
@@ -68363,8 +68531,11 @@ function WeighJobQueue({ state, dispatch, user, rows, env, onStart, onReload, on
       return h('div', { key: g.orderId, className:'border rounded-lg p-2 space-y-1', 'data-weigh-job-order': g.orderId },
         h('div', { className:'font-medium text-gray-800' }, head, headNo && h('span', { 'data-prod-no':'1', className:'ml-2 text-[10px] font-mono font-normal text-gray-400' }, headNo), o && isSelfStartOrder(o) && h(SelfStartChip, { order:o, className:'ml-2' }), r0.recordOnly && h('span', { className:'ml-2 text-xs text-amber-700' }, '🧾 บันทึกอย่างเดียว'),
           o && h(LssCancelBtn, { state, dispatch, user, order:o, className:'ml-2' })),   // 🆕 LSS4 P3 ยกเลิกใบเริ่มเองที่ยังไม่เริ่ม
-        done.map(d => h('div', { key:'d' + d.seq, className:'text-xs text-green-800', 'data-weigh-job-done': d.seq },
-          `✅ B${d.no}${d.lot ? ' · LOT ' + d.lot : ''}${d.by ? ' · ' + _wjUserLabel(state, d.by) : ''}${d.at ? ' ' + _wjHm(d.at) : ''}`)),
+        // 🆕 WNQ1 W13: batch ที่เสร็จแล้วพับเป็น "✅ เสร็จ N batch ▸" (แตะดู LOT/คนชั่ง/เวลา)
+        done.length > 0 && h('details', { 'data-wnq-done':'1', className:'text-xs text-green-800' },
+          h('summary', { className:'cursor-pointer select-none' }, `✅ เสร็จ ${done.length} batch ▸`),
+          done.map(d => h('div', { key:'d' + d.seq, className:'pl-3', 'data-weigh-job-done': d.seq },
+            `✅ B${d.no}${d.lot ? ' · LOT ' + d.lot : ''}${d.by ? ' · ' + _wjUserLabel(state, d.by) : ''}${d.at ? ' ' + _wjHm(d.at) : ''}`))),
         g.rows.map(r => {
           const blk = weighJobStartBlock(state, user, r, env);
           const bTag = r.batchSeq != null ? (r.round ? `รอบ ${r.batchNo}` : `B${r.batchNo}`) : 'ทั้งใบ';
@@ -68395,7 +68566,7 @@ function WeighJobQueue({ state, dispatch, user, rows, env, onStart, onReload, on
               r.status !== 'needs_split' && h('span', { className:'text-xs text-gray-600', 'data-weigh-job-qty':'1' }, qty),
               mineClaim && h('span', { className:'text-[11px] px-1.5 rounded bg-amber-100 text-amber-800' }, 'งานของคุณ'),
               showBtn && h('button', { type:'button', 'data-weigh-job-start': r.jobId, disabled: !!blk || !onStart,
-                onClick: () => onStart && !blk && onStart(r),
+                onClick: () => onStart && !blk && onStart(r), title: blk ? blk.text : '',
                 className: cls('ml-auto px-3 py-1 rounded text-xs font-bold', (!blk && onStart) ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'bg-gray-200 text-gray-500 cursor-not-allowed') },
                 _wjStartText(r, state, user, done.length > 0, blk)),
               // 🆕 verify (must): ปลดงานที่คนอื่นจอง/จองค้างเครื่องอื่น (ผจก.ของใบ) · ยึดคืนงานที่ค้างเกิน 30 นาที (คนมีสิทธิ์ชั่ง · ไม่ใช่ชั่งแยกชิ้น)
@@ -68415,26 +68586,34 @@ function WeighJobQueue({ state, dispatch, user, rows, env, onStart, onReload, on
               && h('div', { className:'text-xs text-amber-800', 'data-weigh-job-claim-note':'1' }, blk.text.split('·').slice(1).join('·').trim()),
             r.status !== 'needs_split' && blk && (showBtn || r.status === 'blocked')
               && blk.code !== 'queue' && h(WeighJobBlockLine, { block: blk, onReload, onRoute: onRoute && o ? () => onRoute(o) : null,
-                onRetry: onStart ? () => onStart(r) : null, onCancelClaim }),
+                onRetry: onStart ? () => onStart(r) : null, onCancelClaim, noText: blk.code === 'scale' && showBtn }),
             // 🆕 UAT ชุด 2 S4: ชุดที่ batch นี้ใช้มีของเกิน 1 วันในคลัง → เตือน (ไม่บล็อก ไม่หักออก)
-            o && (r.status === 'ready' || r.status === 'claimed') && prepRowStale(state, o, r).map(x => h('div', { key:'st' + x.itemId,
-              className:'text-xs text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-0.5', 'data-prep-stale-row': x.itemId, 'data-prep-stale-qty': x.n },
-              prepStaleText(x.name, x.n))),
+            //   🆕 WNQ1 W17: ชิปเล็กบรรทัดเดียว · UAT S1: ชื่อชุดย่อ + "ตรวจความสด" อยู่บนชิปเลย (แท็บเล็ต/มือถือ hover ไม่ได้)
+            o && (r.status === 'ready' || r.status === 'claimed') && (() => { const st = prepRowStale(state, o, r); return st.length > 0 && h('div', { className:'flex flex-wrap gap-1' },
+              st.map(x => h('span', { key:'st' + x.itemId, title: prepStaleText(x.name, x.n),
+                className:'inline-block max-w-full truncate text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded-full px-1.5', 'data-prep-stale-row': x.itemId, 'data-prep-stale-qty': x.n },
+                `🕒 ${_wnqShortName(x.name)} เก่า — ตรวจความสด`))); })(),
             prepPs.length > 0 && o && (r.next || (env && env.seesAll)) && h(PrepSetRowActions, { state, dispatch, user, order: o, rowKey: r.jobId, ps: prepPs, onPrepWeigh,
               canOrder: !!(env && env.canCreate) || hasPerm(user, 'production', 'orders', 'create') || isSuperUser(user) }),
             // 🆕 E6: ชั่งแล้วรอรับผลผลิต → ผจก. "✅ ปิดงาน" ที่แถวนี้เลย
             r.status === 'weighed_pending_output' && o && h(WeighPendingCloseButton, { state, dispatch, user, order: o, batch: _wjBatch(o, r), opId: r.opId, small:true }),
-            short.length > 0 && h('div', { className:'text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1 flex flex-wrap items-center gap-2', 'data-weigh-job-short': r.jobId, ...(openTR.length ? { 'data-weigh-job-tr-open': openTR.map(x => x.trNumber).join(',') } : {}) },
+            // 🆕 WNQ1 W19: ชิป "🚚 รอของ TR-…" / "📦 ขาด N รายการ" แตะเปิดรายการ + ปุ่ม TR · ไม่บล็อก (เลิกคำ "รอรับของก่อนเริ่ม")
+            short.length > 0 && h('details', { className:'text-xs text-amber-800', 'data-weigh-job-short': r.jobId, ...(openTR.length ? { 'data-weigh-job-tr-open': openTR.map(x => x.trNumber).join(',') } : {}) },
+              h('summary', { 'data-wnq-short-chip':'1', className:'cursor-pointer select-none inline-block rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 font-medium' },
+                openTR.length ? `🚚 รอของ ${openTR.map(x => x.trNumber).join(', ')} ▸` : `📦 ขาด ${short.length} รายการ ▸`),
+              h('div', { className:'mt-1 bg-amber-50 border border-amber-200 rounded px-2 py-1 flex flex-wrap items-center gap-2' },
               h('span', { className:'flex-1 min-w-[180px]' }, openTR.length
-                ? `${_wjOpenTRText(openTR)}ของในคลังไลน์ยังไม่พอ: ${_wjShortText(short)} — รอรับของก่อนเริ่ม${_wjShortWhere(state, o)}`
+                ? `${_wjOpenTRText(openTR)}ของในคลังไลน์ยังไม่พอ: ${_wjShortText(short)}${_wjShortWhere(state, o)}`
                 : `ของในคลังไลน์ไม่พอ: ${_wjShortText(short)} — ขอของ (TR) ก่อนเริ่ม${_wjShortWhere(state, o)}`),
               onTR && o && h('button', { type:'button', onClick: () => askTR(short, trLabel(false)),
                 className: openTR.length ? 'px-2 py-0.5 bg-white hover:bg-blue-50 text-blue-800 border border-blue-300 rounded text-xs' : 'px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold' }, openTR.length ? '🚚 ขอเพิ่ม (TR)' : '🚚 ขอของ (TR)'),
               onTR && o && shortAll.length > 0 && h('button', { type:'button', 'data-weigh-job-short-all': r.jobId, onClick: () => askTR(shortAll, trLabel(true)),
                 title:'รวมของทุก batch ที่ยังไม่ได้ชั่ง — เปิดใบขอของครั้งเดียว',
-                className:'px-2 py-0.5 bg-blue-100 hover:bg-blue-200 text-blue-800 border border-blue-300 rounded text-xs font-bold' }, `🚚 ${openTR.length ? 'ขอเพิ่ม' : 'ขอของ'}ทั้งใบ (${shortAll.batches} batch)`)));
+                className:'px-2 py-0.5 bg-blue-100 hover:bg-blue-200 text-blue-800 border border-blue-300 rounded text-xs font-bold' }, `🚚 ${openTR.length ? 'ขอเพิ่ม' : 'ขอของ'}ทั้งใบ (${shortAll.batches} batch)`))));
         }));
-    }));
+    }),
+    // 🆕 WNQ1 N4: ใบเริ่มเองค้างจากวันก่อน = แถวพับเดียวท้ายคิว
+    h(StaleSelfStartRow, { state, dispatch, user, orders: staleOrders, onGo: onStaleGo }));
 }
 // งานปัจจุบันของแถบในกล่องเต็มจอ: งานที่เราจองไว้ก่อน → ใบที่เพิ่งชั่งเสร็จ (batch ถัดไป) → batch ถัดไปตัวแรกในคิว
 // 🆕 verify (must): isSent(row) = batch ที่เราจองและชั่งเสร็จแล้ว (มีผลชั่งในระบบ/คิว/กำลังส่ง) → ไม่ใช่ "งานของเรา" ต่อ — เสนอ batch ถัดไปของใบเดิมก่อน
@@ -68465,7 +68644,7 @@ function WeighJobStrip({ state, user, rows, env, onStart, onReload, lastOrderId,
       h('div', { className:'text-base font-bold text-indigo-900', 'data-weigh-job-label':'1' }, '📋 ' + weighJobLabel(cur, state)),
       h('div', { className:'text-xs text-indigo-800' }, claimTxt, cur.recordOnly ? ' · 🧾 บันทึกอย่างเดียว' : ''),
       blk && h(WeighJobBlockLine, { block: blk, onReload, big:true, onRoute: onRoute && o ? () => onRoute(o) : null,
-        onRetry: onStart ? () => onStart(cur) : null, onCancelClaim }),
+        onRetry: onStart ? () => onStart(cur) : null, onCancelClaim, noText: blk.code === 'scale' }),   // 🆕 WNQ1 W15: ปุ่มใหญ่บอก "🔗 ต่อเครื่องชั่งก่อน"
       short.length > 0 && h('div', { className:'text-xs text-amber-800', 'data-weigh-job-short-strip':'1' }, `ของในคลังไลน์ไม่พอ: ${_wjShortText(short)} — ขอของ (TR) ก่อนเริ่ม${_wjShortWhere(state, o)}`)),
     h('button', { type:'button', 'data-weigh-job-strip-start': cur.jobId, disabled: !!blk || !onStart,
       onClick: () => onStart && !blk && onStart(cur),
@@ -68740,9 +68919,10 @@ function WeighOrderProgress({ order, state, dispatch, user }){
 // 🧑‍🍳 หน้างาน: แถบชี้ทางงานชั่งที่ย้ายไป ⚖️ (§B3 · A.6 กติกาเดียว)
 //   พนักงาน: บรรทัดเดียว "⚖️ งานชั่ง N batch ย้ายไป ⚖️ ชั่ง แล้ว →" (นับเฉพาะงานที่ weighJobsFor ให้เห็น) · ไม่เห็นงาน → บอกให้ขอไลน์/สิทธิ์
 //   ผจก. (weighSeesAll): การ์ดรายใบ "⚖️ ไส้เผือก PROD-… — ไลน์ X · เสร็จ 1/4" + "↩ ทำที่หน้างาน" + "✅ ปิดงาน" (batch ที่รอรับผลผลิต)
-function MyStationWeighPointer({ state, dispatch, user, branchId, hidden }){
+function MyStationWeighPointer({ state, dispatch, user, branchId, hidden, excludeIds }){
   const sees = weighSeesAll(user);
-  const jobs = useMemo(() => weighJobsFor(state, user, branchId), [state.productionOrders, state.boms, state.items, state.settings, user, branchId]);
+  const jobs0 = useMemo(() => weighJobsFor(state, user, branchId), [state.productionOrders, state.boms, state.items, state.settings, user, branchId]);
+  const jobs = excludeIds && excludeIds.size ? jobs0.filter(r => !excludeIds.has(r.orderId)) : jobs0;   // 🆕 WNQ1 M8: ไม่นับใบค้างวันก่อน
   const hid = hidden || [];
   if(!sees && !hid.length) return null;
   const canWeighTab = isSuperUser(user) || hasPerm(user, 'production', 'weigh', 'view');
@@ -69127,14 +69307,15 @@ function WeighDoneStrip({ state, branchId }){
   const [all, setAll] = useState(false);
   const bags = (x) => Math.round(x * 100) / 100;
   const rows = all ? d.rows : d.rows.slice(0, 8);
-  return h('div', { className:'bg-white rounded-lg shadow px-3 py-2 text-sm', 'data-weigh-done':'1' },
-    h('div', { className:'flex flex-wrap items-center gap-x-3 gap-y-1' },
+  // 🆕 WNQ1 W23: บรรทัดเดียว — ชิปรายสูตรอยู่หลังแตะ (details)
+  return h('details', { className:'bg-white rounded-lg shadow px-3 py-1.5 text-sm', 'data-weigh-done':'1' },
+    h('summary', { className:'cursor-pointer select-none flex flex-wrap items-center gap-x-3 gap-y-1' },
       h('span', { className:'font-bold text-gray-800' }, '✅ วันนี้ชั่งแล้ว'),
       d.total === 0 ? h('span', { className:'text-gray-500' }, 'ยังไม่มีผลชั่งของสาขานี้วันนี้')
         : [ h('span', { key:'t', className:'px-2 py-0.5 rounded-full bg-green-100 text-green-800 font-bold', 'data-weigh-done-total':String(d.total) }, `${d.total} ครั้ง`),
             h('span', { key:'f', className:'text-gray-700', 'data-weigh-done-free':String(d.free) }, `เลือกสูตรเอง ${d.free}${bags(d.freeBags) !== d.free ? ` (= ${fmtNum(bags(d.freeBags))} batch)` : ''}`),
             h('span', { key:'o', className:'text-gray-700', 'data-weigh-done-order':String(d.order) }, `ตามใบสั่ง ${d.order} batch`) ],
-      h('span', { className:'text-[11px] text-gray-400' }, 'นับจากผลชั่งในระบบทุกเครื่อง')),
+      h('span', { className:'text-[11px] text-gray-400' }, d.rows.length > 0 ? `${d.rows.length} สูตร ▸` : 'นับจากผลชั่งในระบบทุกเครื่อง')),
     d.rows.length > 0 && h('div', { className:'mt-1.5 flex flex-wrap gap-1.5' },
       rows.map(r => h('span', { key:r.key, className:'inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200 bg-gray-50 text-xs', 'data-weigh-done-row':r.key },
         h('span', { className:'font-medium text-gray-800 max-w-[14rem] truncate', title:r.name }, r.name),
@@ -69222,6 +69403,28 @@ function LssCancelBtn({ state, dispatch, user, order, onDone, className }){
   return h('button', { type:'button', 'data-testid':'lss-cancel', 'data-lss-cancel': order.id,
     onClick: (e) => { if(e && e.stopPropagation) e.stopPropagation(); lssCancelUnstarted(state, dispatch, user, order, onDone); },
     className: cls('px-2 py-1 rounded border border-red-300 bg-red-50 hover:bg-red-100 text-red-800 text-xs font-bold whitespace-nowrap', className) }, '🗑️ ยกเลิกใบนี้ (ยังไม่เริ่ม)');
+}
+// 🆕 WNQ1 N4: id ใบเริ่มเองค้างจากวันก่อน (ไม่ยกเลิกอัตโนมัติ — คำตอบเจ้าของ ก) ลบใบที่ผู้ใช้กด ➡️ ไปใบนี้ แล้ว (revived)
+function wnqStaleIds(state, user, branchId, revived){
+  let ids = [];
+  try { ids = (global.ERP.staleUnstartedSelfStart(state, user, { branchId }) || []).map(o => o.id); } catch(_e){}
+  return new Set(ids.filter(id => !(revived && revived.has(id))));
+}
+// 🆕 WNQ1 N4: แถวพับ "🗂 ค้างจากวันก่อน N ใบ ▸" ต่อท้ายคิว — รายใบ: ชื่อ (ProdOrderTag) · วันที่ · ➡️ ไปใบนี้ · 🗑️ ยกเลิก (ทาง LSS4 P3)
+function StaleSelfStartRow({ state, dispatch, user, orders, onGo }){
+  const list = orders || [];
+  if(!list.length) return null;
+  const dayOf = (o) => o.plannedDate ? fmtDate(String(o.plannedDate).slice(0, 10)) : (Number(o.createdAt) > 0 ? new Date(Number(o.createdAt)).toLocaleDateString('th-TH') : '-');   // verify 1: วันที่ไทย
+  return h('details', { 'data-wnq-stale':'1', 'data-wnq-stale-n': list.length, className:'rounded-lg bg-white border border-gray-200 px-3 py-1.5 text-sm' },
+    h('summary', { 'data-wnq-stale-summary':'1', className:'cursor-pointer select-none font-medium text-gray-700' },
+      `🗂 ค้างจากวันก่อน ${list.length} ใบ ▸`,
+      h('span', { className:'ml-2 text-[11px] font-normal text-gray-500' }, 'ใบเริ่มผลิตเองที่ยังไม่เริ่ม — ระบบไม่ยกเลิกเอง')),
+    h('div', { className:'mt-1 space-y-1' },
+      list.map(o => h('div', { key: o.id, 'data-wnq-stale-order': o.id, className:'flex flex-wrap items-center gap-2 text-xs' },
+        h('span', { className:'flex-1 min-w-[160px]' }, h(ProdOrderTag, { state, order: o }), h('span', { className:'ml-2 text-gray-500' }, '📅 ' + dayOf(o))),
+        onGo && h('button', { type:'button', 'data-wnq-stale-go': o.id, onClick: () => onGo(o),
+          className:'px-2 py-1 rounded border border-indigo-300 bg-white text-indigo-800 text-xs font-bold' }, '➡️ ไปใบนี้'),
+        h(LssCancelBtn, { state, dispatch, user, order: o })))));
 }
 // ขั้นแรกของใบเป็นงานหน้าชั่งไหม (ส่งไป ⚖️ รับงาน) — สวิตช์งานชั่งตามใบสั่งปิด = weighStationOpId คืน null → เริ่มที่หน้างาน
 function _lssFirstIsWeighJob(state, order){
@@ -69319,7 +69522,7 @@ function SelfStartModal({ state, dispatch, user, branchId, here, onClose, onPrep
     if(busyRef.current) return;
     if(!chk || !chk.order){ setErr((chk && chk.msg) || 'เลือกสูตรก่อน'); return; }
     if(chk.block){ setErr(String(chk.block).split('\n')[0]); return; }
-    if(chk.prep.length){ setErr('ชุดชั่งเตรียมไม่พอ — กด ⚖️ ไปชั่งชุดก่อน'); return; }
+    if(chk.prep.length){ setErr(global.ERP.prepStripWording(state).short + ' — กด ⚖️ ไปชั่งชุดก่อน'); return; }   // 🆕 WNQ1 N1: chk.prep มีค่าเฉพาะด่านเปิด (prepGateShort)
     if(chk.dup && parallel !== true){ setErr(`มีใบ ${dupName(chk.dup)} (สูตร+ขนาดนี้ ยังไม่เริ่ม) อยู่แล้ว — กด ➡️ ไปใบนี้ หรือ ➕ สร้างอีกใบ`); return; }
     if(chk.short.length && !ackShort){ setErr('วัตถุดิบในคลังไลน์ไม่พอ — ติ๊กยืนยันก่อน (ติดลบได้ แล้วขอของ TR ทีหลัง)'); return; }
     if(parallel === true && chk.dups.length){
@@ -69443,7 +69646,15 @@ function WeighStationTab({ state, dispatch, user, branchId }){
   const activeSub = subLineOk ? subLine : '__all__';
   const recipesShown = useMemo(() => activeSub === '__all__' ? recipes
     : recipes.filter(r => { const wl = r.weighLineIds || []; return !wl.length || wl.includes(activeSub); }), [recipes, activeSub]);
-  const jobsShown = useMemo(() => activeSub === '__all__' ? jobsAll : jobsAll.filter(r => (r.lines || []).includes(activeSub)), [jobsAll, activeSub]);
+  // 🆕 WNQ1 N4: ใบเริ่มเองค้างจากวันก่อน ไม่ขึ้นเป็นการ์ดเต็ม → แถวพับท้ายคิว · ➡️ ไปใบนี้ = เอากลับมาเป็นการ์ด (เฉพาะจอนี้)
+  const [staleRevived, setStaleRevived] = useState(() => new Set());
+  const staleIds = useMemo(() => wnqStaleIds(state, user, branchId, staleRevived), [state.productionOrders, state.boms, user, branchId, staleRevived]);
+  const staleOrders = useMemo(() => (state.productionOrders || []).filter(o => o && staleIds.has(o.id)), [state.productionOrders, staleIds]);
+  const onStaleGo = (o) => {
+    setStaleRevived(p => { const n = new Set(p); n.add(o.id); return n; });
+    setTimeout(() => { try { const el = document.querySelector(`[data-weigh-job-order="${o.id}"]`); if(el && el.scrollIntoView) el.scrollIntoView({ block:'center' }); } catch(_e){} }, 120);
+  };
+  const jobsShown = useMemo(() => (activeSub === '__all__' ? jobsAll : jobsAll.filter(r => (r.lines || []).includes(activeSub))).filter(r => !staleIds.has(r.orderId)), [jobsAll, activeSub, staleIds]);
   // 🆕 WEIGH-ORDER E5b (§B2.13 · Q3): สูตรที่มีงานใบสั่งรอชั่ง/กำลังชั่งที่คนนี้เห็น → พนักงาน: ไม่ส่งเป็นสูตรชั่งอิสระ ·
   //   ผจก.: ยังส่งแต่เปลี่ยนชื่อ "… — มีใบสั่ง N batch · กด ▶ ในคิวงานชั่ง" (ไม่มีข้อความใหม่ — recipe-change-guard ของแอปชั่งดูแลสูตรที่หายกลางชุด)
   // 🆕 SET_PREP D: สูตรโดว์ที่ชุดชั่งเตรียม (ขนาดหลัก) ในคลังไลน์ไม่พอ → ไม่ส่งเป็นสูตรชั่งเอง (ผจก.ก็เหมือนกัน) · ขึ้นในแถบ "ต้องชั่งชุดเพิ่ม" แทน
@@ -69455,11 +69666,12 @@ function WeighStationTab({ state, dispatch, user, branchId }){
   const recipesCfg = useMemo(() => {
     const shown0 = recipesShown.filter(r => !prepBlocked[r.bomId]);
     const open = {};
-    jobsAll.forEach(r => { if(r.status === 'ready' || r.status === 'claimed') open[r.bomId] = (open[r.bomId] || 0) + 1; });
+    // 🆕 WNQ1 UAT M1: ใบเริ่มเองค้างวันก่อน (พับอยู่ในแถว 🗂) ไม่นับ → พนักงานยังเห็นสูตรวันนี้ (ไม่หายเงียบ)
+    jobsAll.filter(r => !staleIds.has(r.orderId)).forEach(r => { if(r.status === 'ready' || r.status === 'claimed') open[r.bomId] = (open[r.bomId] || 0) + 1; });
     if(!Object.keys(open).length) return shown0;
     return seesAll ? shown0.map(r => open[r.bomId] ? { ...r, name: `${r.name} — มีใบสั่ง ${open[r.bomId]} batch · กด ▶ ในคิวงานชั่ง` } : r)
       : shown0.filter(r => !open[r.bomId]);
-  }, [recipesShown, jobsAll, seesAll, prepBlocked]);
+  }, [recipesShown, jobsAll, seesAll, prepBlocked, staleIds]);
   // 🆕 WLS1 D2: ขนาดฉลากตามไลน์อยู่ใน sig ด้วย → เปลี่ยนค่าตั้งแล้วส่ง config ใหม่ · ค่าเดิม = sig เดิม (ไม่ส่งซ้ำ)
   const _wlsMap = state.settings && state.settings.weighLabelSizeByLine;
   const recipesSig = useMemo(() => weighRecipesSig(recipesCfg) + '|' + JSON.stringify(recipesCfg.map(r => weighLabelSizeField(state, weighRecipeStationLine(state, r, activeSub)).labelSize || 0)), [recipesCfg, _wlsMap, state.branches, activeSub]);
@@ -70038,8 +70250,13 @@ function WeighStationTab({ state, dispatch, user, branchId }){
             activeSub === '__all__' ? `${recipes.length} สูตร` : `${recipesShown.length} / ${recipes.length} สูตร`),
           ready && h('span', { className:'text-xs text-green-700' }, `● พร้อม${weighVersion ? ' v' + weighVersion : ''}`),
           busyLot && h('span', { className:'text-xs text-amber-700 animate-pulse' }, `⏳ กำลังส่ง ${busyLot}…`),
-          scaleInfo && h('span', { className: cls('text-xs', scaleInfo.connected ? 'text-green-700' : 'text-gray-500') },
-            scaleInfo.connected ? `🔗 เครื่องชั่ง: ${scaleInfo.device || 'ต่อแล้ว'}` : '⚪ ยังไม่ต่อเครื่องชั่ง'),
+          // 🆕 WNQ1 W15: สถานะเครื่องชั่งจุดเดียว (การ์ดในคิวไม่ซ้ำ) + ปุ่มเลื่อนไปต่อในหน้าชั่ง
+          (scaleInfo || (ready && canCreate)) && h('span', { 'data-wnq-scale-state': scaleOn ? 'on' : 'down', className: cls('text-xs', scaleOn ? 'text-green-700' : 'text-amber-800 font-medium') },
+            // verify 2: มีปุ่ม 🔗 ไปต่อเครื่องชั่ง อยู่ข้าง ๆ แล้ว → ข้อความสั้น (ไม่บอกซ้ำ · หัวไม่ล้นหลายบรรทัดบนมือถือ)
+            scaleOn ? `🔗 เครื่องชั่ง: ${scaleInfo.device || 'ต่อแล้ว'}` : ((ready && canCreate) ? '⚪ เครื่องชั่งยังไม่ต่อ' : '⚪ เครื่องชั่งยังไม่ต่อ — กด 🔗 ต่อเครื่องชั่งในหน้าชั่ง')),
+          !scaleOn && ready && canCreate && h('button', { type:'button', 'data-wnq-scale-connect':'1',
+            onClick: () => { try { const el = wrapRef.current || iframeRef.current; if(el && el.scrollIntoView) el.scrollIntoView({ block:'start' }); } catch(_e){} },
+            className:'px-2 py-0.5 rounded border border-indigo-300 bg-white text-indigo-800 text-xs font-bold' }, '🔗 ไปต่อเครื่องชั่ง'),
           // 🆕 LSS D1: ▶ เริ่มผลิตเอง (สวิตช์ lineSelfStart + ไลน์ที่สังกัด)
           canSelfStart && h('button', { type:'button', 'data-testid':'lss-open-weigh', onClick: () => setShowSelfStart(true),
             className:'min-h-[40px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold' }, '▶ เริ่มผลิตเอง'),
@@ -70088,18 +70305,21 @@ function WeighStationTab({ state, dispatch, user, branchId }){
         }))),
 
     // 🆕 WEIGH-ORDER E6 (§E-2): สวิตช์ปิด/เปิดงานชั่งตามใบสั่งทั้งระบบ (ผจก.) · ปิดอยู่ = บอกทุกคน
-    (seesAll || jobsOff) && h('div', { className: cls('rounded-lg px-3 py-2 text-sm flex flex-wrap items-center gap-2', jobsOff ? 'bg-amber-50 border-2 border-amber-300 text-amber-900' : 'bg-white shadow text-gray-700'), 'data-weigh-jobs-switch': jobsOff ? 'off' : 'on' },
-      h('span', { className:'flex-1 min-w-[200px]' }, jobsOff
+    //   🆕 WNQ1 W10: เปิดอยู่ = ชิปเล็ก "📋 ตามใบสั่ง: เปิด ⏸" (ผจก.) · ปิดอยู่ = แถบเต็มเหมือนเดิม (บอกทุกคน)
+    (seesAll || jobsOff) && h('div', { className: cls('text-sm flex flex-wrap items-center gap-2', jobsOff ? 'rounded-lg px-3 py-2 bg-amber-50 border-2 border-amber-300 text-amber-900' : 'justify-end'), 'data-weigh-jobs-switch': jobsOff ? 'off' : 'on' },
+      h('span', { className: jobsOff ? 'flex-1 min-w-[200px]' : 'text-xs text-gray-600 px-2 py-0.5 rounded-full bg-white border border-gray-200',
+        title: jobsOff ? '' : 'งานชั่งตามใบสั่ง: เปิดอยู่ — ใบสั่งของสูตรที่ติ๊ก "ส่งเข้าหน้าชั่ง" มาชั่งที่นี่' }, jobsOff
         ? '⏸ งานชั่งตามใบสั่งปิดอยู่ทั้งระบบ — ขั้นชั่งของใบสั่งทำที่ 🧑‍🍳 หน้างาน (ชั่งอิสระที่นี่ใช้ได้ตามปกติ)'
-        : '📋 งานชั่งตามใบสั่ง: เปิดอยู่ — ใบสั่งของสูตรที่ติ๊ก "ส่งเข้าหน้าชั่ง" มาชั่งที่นี่'),
+        : '📋 ตามใบสั่ง: เปิด'),
       seesAll && h('button', { type:'button', onClick: toggleJobs, 'data-weigh-jobs-toggle':'1',
-        className: cls('px-3 py-1 rounded text-xs font-bold', jobsOff ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'border border-red-300 bg-white text-red-700') },
-        jobsOff ? '▶ เปิดงานชั่งตามใบสั่ง' : '⏸ ปิดทั้งระบบ (เครื่องชั่ง/แท็บเล็ตมีปัญหา)')),
+        title: jobsOff ? '' : 'ปิดงานชั่งตามใบสั่งทั้งระบบ (เครื่องชั่ง/แท็บเล็ตมีปัญหา)',
+        className: cls('rounded font-bold', jobsOff ? 'px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-700 text-white' : 'px-2 py-0.5 text-[11px] border border-red-300 bg-white text-red-700') },
+        jobsOff ? '▶ เปิดงานชั่งตามใบสั่ง' : '⏸ ปิดทั้งระบบ')),
     // 🆕 WEIGH-ORDER E5a: 📋 คิวงานชั่งตามใบสั่ง (ภาพรวม · ตาม sub-line ที่เลือก)
     h(WeighPrepStrip, { state, dispatch, user, branchId, lineIds: activeSub === '__all__' ? (seesAll ? null : myLineIds) : [activeSub], blocked: prepBlocked, recipes,
       onPrepWeigh: canCreate ? onPrepWeigh : null }),
     h(WeighJobQueue, { state, dispatch, user, rows: jobsShown, env: jobEnv, onStart: onJobStart, onReload: reloadWeigh, onTR: setJobTR, onRoute: onJobRoute, onCancelClaim,
-      onPrepWeigh: canCreate ? onPrepWeigh : null }),
+      onPrepWeigh: canCreate ? onPrepWeigh : null, staleOrders, onStaleGo }),
     scrapInit && global.ERP.NewScrapModal && h(global.ERP.NewScrapModal, { state, dispatch, user, branchId, initialItems: scrapInit.items, initialReason: scrapInit.reason,
       onClose: ()=>setScrapInit(null) }),
     jobTR && h(StockShortageModal, {
@@ -70287,6 +70507,8 @@ function WeighHistory({ state, dispatch, user, branchId, seesAll, lines, onRepri
     .filter(w => seesAll || w.userId === user?.id), [state.weighLogs, branchId, seesAll, user?.id]);
   const F = usePageFocus('production.weigh', baseLogs, w => w.id, { state, user, onFocus:(f) => {
     if(f.ids){ setQ(''); setLineFilter('all'); setOnlyOff(false); setOnlyJobBad(false); }
+    // 🆕 WNQ1 verify 1: มาจากระฆังเรื่องชุด (ไม่มี ids) → สั่งแถบชุดด้านบนกางออก ให้เห็นแถว 🕒 ทันที
+    if(f.openPrep){ try { global.dispatchEvent(new CustomEvent('erp-weigh-prep-open')); } catch(_e){} }
   } });
   const logs = useMemo(() => {
     const ql = q.trim().toLowerCase();
@@ -75421,6 +75643,7 @@ function MyStationTab({ state, dispatch, user, branchId }){
   const [doneTarget, setDoneTarget] = useState(null);
   // 🆕 PRODUCTION-LIVE คลื่น 1: แถบเตือนติดลบที่คลังไลน์ (ไม่บล็อก) + หน้าต่างขอของ (TR) ที่ใส่รายการที่ขาดไว้ให้
   const [negNote, setNegNote] = useState(null);   // { order, rows, at }
+  const [msRevived, setMsRevived] = useState(() => new Set());   // 🆕 WNQ1 N4: ใบค้างวันก่อนที่กด ➡️ ไปใบนี้ (กลับมาเป็นการ์ด)
   const [negTR, setNegTR] = useState(null);       // { order, rows }
   // 🆕 TR_SUMMARY T2: 📋 TR ที่เปิดแล้ว (พับไว้) — คนไลน์ดูได้ว่าเปิดใบไหนไปแล้ว · ขอบเขต = ปลายทางคลังของไลน์ที่สังกัด + ที่ฉันเปิดเอง
   const [showMyTR, setShowMyTR] = useState(false);
@@ -75479,7 +75702,11 @@ function MyStationTab({ state, dispatch, user, branchId }){
 
   const myWorkItems = [];
   const weighHidden = [];   // 🆕 WEIGH-ORDER E6: งานชั่งที่ย้ายไป ⚖️ ชั่ง (ที่เดิมจะขึ้นที่นี่) → แถบชี้ทาง
+  // 🆕 WNQ1 N4/N6: ใบเริ่มเองค้างจากวันก่อน ไม่ขึ้นเป็นการ์ด/ไม่นับในแถบชี้ทาง/ไม่อยู่ในรายการ "ไม่ขึ้นหน้างาน" → แถวพับเดียว
+  const msStaleIds = wnqStaleIds(state, user, branchId, msRevived);
+  const msStaleOrders = baseOrders.filter(o => msStaleIds.has(o.id));
   for(const order of allOrders){
+    if(msStaleIds.has(order.id)) continue;
     const ops = order.operations || [];
     // 🪣 ถ้ามี batches[] + opStates → enumerate per batch
     //   v16: standalone order ก็มี batches ได้ (ไม่จำกัดเฉพาะ Master)
@@ -76006,13 +76233,16 @@ function MyStationTab({ state, dispatch, user, branchId }){
             className:'mt-2 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-bold' }, '⚙️ ไปตั้งค่าคลังไลน์ (📍 Sub-Locations)')
         : h('div', { className:'text-xs mt-1 font-medium' }, '👉 แจ้งผู้ดูแลระบบ: ตั้งค่า → 📍 Sub-Locations → "🏭 สร้างคลังไลน์ให้ไลน์ที่ยังไม่มี"')),
     // 🆕 PRODUCTION-LIVE คลื่น 1: ตัดแล้วติดลบที่คลังไลน์ — แถบเตือน (ไม่บล็อก) + ขอของ (TR) ที่ใส่รายการที่ขาดไว้ให้
-    negNote && h('div', { 'data-testid':'mystation-neg-note', className:'bg-amber-50 border-2 border-amber-400 rounded-lg p-3 text-sm text-amber-900 flex flex-wrap items-center gap-2' },
-      h('div', { className:'flex-1 min-w-[200px]' },
-        h('b', null, '⚠️ ตัดวัตถุดิบแล้ว — ติดลบที่คลังไลน์ · '), prodOrderLabel(state, negNote.order, { withNo:true }), ': ',
-        negNote.rows.map(r => `${r.itemName} −${fmtNum(Math.round(r.missing * 100) / 100)} ${r.baseUnit || ''}`).join(', '),
-        h('div', { className:'text-xs text-amber-800 mt-0.5' }, 'ขอของ (TR) → คลังต้นทางกดส่ง → ไลน์กด 📥 รับของ = ยอดติดลบหักล้างเอง · หรือนับปรับทีหลัง')),
+    //   🆕 WNQ1 M4: บรรทัดเดียว "⚠️ ติดลบ N รายการ · ชื่อใบ" + 🚚 ขอของ (TR) · รายการเต็มอยู่ใน tooltip
+    negNote && h('div', { 'data-testid':'mystation-neg-note', className:'bg-amber-50 border border-amber-300 rounded-lg px-3 py-1.5 text-sm text-amber-900 flex flex-wrap sm:flex-nowrap items-center gap-2',
+        title: negNote.rows.map(r => `${r.itemName} −${fmtNum(Math.round(r.missing * 100) / 100)} ${r.baseUnit || ''}`).join(', ')
+          + ' · ขอของ (TR) → คลังต้นทางกดส่ง → ไลน์กด 📥 รับของ = ยอดติดลบหักล้างเอง · หรือนับปรับทีหลัง' },
+      // UAT S2: มือถือ (แตะ hover ไม่ได้) → ตัดบรรทัดได้ · จอกว้าง sm: ขึ้นไปบรรทัดเดียว
+      h('span', { className:'flex-1 min-w-0 break-words sm:truncate', 'data-wnq-neg-text':'1' }, h('b', null, `⚠️ ติดลบ ${negNote.rows.length} รายการ`), ' · ', prodOrderLabel(state, negNote.order, { withNo:true }), ': ',
+        negNote.rows.map(r => `${r.itemName} −${fmtNum(Math.round(r.missing * 100) / 100)} ${r.baseUnit || ''}`.trim()).join(', '),
+        h('span', { className:'text-xs text-amber-800' }, ' · ของมาแล้วกด 📥 รับของ')),
       h('button', { type:'button', onClick:()=>setNegTR({ order:negNote.order, rows:negNote.rows }),
-        className:'px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold' }, '🚚 ขอของ (TR)'),
+        className:'px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold whitespace-nowrap' }, '🚚 ขอของ (TR)'),
       h('button', { type:'button', onClick:()=>setNegNote(null), title:'ปิดแถบนี้', className:'px-2 py-1 text-amber-800 text-xs' }, '✕')),
     // 🆕 TR_SUMMARY T2: ทางเข้า 📋 TR ที่เปิดแล้ว จากหน้างาน
     global.ERP.LineTRList && h('div', { 'data-testid':'mystation-tr-list' },
@@ -76048,7 +76278,7 @@ function MyStationTab({ state, dispatch, user, branchId }){
           canSplit && h('span', { className:'ml-auto' }, h(SplitBatchButton, { order:o, state, dispatch, user, compact:true })))));
     })(),
     // 🆕 WEIGH-ORDER E6 (§B3): งานชั่งที่ย้ายไป ⚖️ ชั่ง — พนักงาน = บรรทัดชี้ทาง · ผจก. = การ์ดรายใบ (↩ ทำที่หน้างาน · ✅ ปิดงาน)
-    h(MyStationWeighPointer, { state, dispatch, user, branchId, hidden: weighHidden }),
+    h(MyStationWeighPointer, { state, dispatch, user, branchId, hidden: weighHidden, excludeIds: msStaleIds }),
     // 🆕 ไม่มีงานขึ้น → บอกสาเหตุจริง ไม่ปล่อยให้เดาว่าติ๊กสิทธิ์ผิด
     _noWorkReason && h('div', { className:'bg-amber-50 border-2 border-amber-400 rounded-lg p-3' },
       h('div', { className:'font-bold text-amber-900 mb-1' }, '⚠️ ยังไม่มีงานขึ้นที่สถานีของคุณ'),
@@ -76289,6 +76519,16 @@ function MyStationTab({ state, dispatch, user, branchId }){
       )
     ),
 
+    // 🆕 WNQ1 N4: ใบเริ่มเองค้างจากวันก่อน = แถวพับเดียว (➡️ ไปใบนี้ = กลับมาเป็นการ์ด · 🗑️ ยกเลิก ทาง LSS4)
+    h(StaleSelfStartRow, { state, dispatch, user, orders: msStaleOrders, onGo: (o) => {
+      setMsRevived(p => { const n = new Set(p); n.add(o.id); return n; });
+      // 🆕 WNQ1 verify 1: เลื่อนไปการ์ดใบนี้ (การ์ด/โฟลว์ · งานชั่ง → แถบชี้ไป ⚖️) — มือถือหลายเครื่องผสมจะได้เห็นว่าไปไหน
+      setTimeout(() => { try {
+        const el = document.querySelector(`[data-ms-order="${o.id}"]`) || document.querySelector(`[data-row-id^="${o.id}|"]`)
+          || document.querySelector('main [data-testid="mystation-weigh-pointer"]');
+        if(el && el.scrollIntoView) el.scrollIntoView({ block:'center' });
+      } catch(_e){} }, 120);
+    } }),
     // 🆕 Diagnostic banner (always visible) — ตรวจ orders ทั้งหมดที่ซ่อนจากหน้างาน + อธิบายเหตุผล
     (() => {
       const stTypes = state.stationTypes || [];
@@ -76305,7 +76545,7 @@ function MyStationTab({ state, dispatch, user, branchId }){
       for(const order of allBranchOrders){
         // ถ้า order นี้ visible ใน myWorkItems → ไม่ต้องแจ้ง
         const isVisible = myWorkItems.some(w => w.order.id === order.id);
-        if(isVisible) continue;
+        if(isVisible || msStaleIds.has(order.id)) continue;   // 🆕 WNQ1 M10: ใบค้างวันก่อนอยู่แถวพับแล้ว
         // หาเหตุผลที่ไม่ขึ้น
         const reasons = [];
         const ops = order.operations || [];
@@ -77832,7 +78072,7 @@ function OrderFlowCard({ group, state, user, onOpenOp, userStations, interactive
     return { opId: op.id, status };
   }) : null;
   const _bDone = _bs.length ? _bs.filter(x => (x.opStates||[]).every(q => ['completed','handed_off','skipped'].includes(q.status))).length : 0;
-  return h('div', { className:'bg-white rounded-lg shadow border-l-4 border-gray-400 p-3 space-y-2' },
+  return h('div', { 'data-ms-order': order.id, className:'bg-white rounded-lg shadow border-l-4 border-gray-400 p-3 space-y-2' },   // WNQ1 verify 1: ➡️ ไปใบนี้ เลื่อนหา
     renderOrderHeader(order, false),
     _bs.length > 0 && h('div', { className:'text-[11px] text-sky-800' }, `🪣 ${_bs.length} batch · เสร็จ ${_bDone}/${_bs.length} — กดขั้นเพื่อทำ batch ถัดไป`),
     renderFlowchart(order, _agg)
@@ -138111,7 +138351,8 @@ C.registerGroup({
     // 🆕 SET_PREP A(1): ชุดชั่งเตรียมที่ต้องชั่งเพิ่ม (ใบผลิตที่เปิดต้องใช้ > คงเหลือ + งานชั่งชุดที่เปิดอยู่) — batch ที่ชุดไม่พอเริ่ม/บันทึกไม่ได้ (D)
     //   ref: src/00-core.js prepSetNeeds · src/mod-production.js WeighStationTab focus 'production.weighprep' (ids = setBomId → เปิดสูตรชุดในหน้าชั่ง)
     { key:'prod_prep_set_needed', label:'⚖️ ต้องชั่งชุดเพิ่ม (ชุดชั่งเตรียมไม่พอสำหรับใบผลิตที่เปิด)', severity:'warn', goLive:true,
-      todo: tdo(d => `ชุด ${d.ref} ไม่พอ — กด «⚖️ ไปชั่งชุด» แล้วชั่งให้ครบ (batch ที่ชุดไม่พอเริ่มไม่ได้)`, n => `ชุดชั่งเตรียม ${n} ชุดไม่พอ — กด «⚖️ ไปชั่งชุด» แล้วชั่งให้ครบ (batch ที่ชุดไม่พอเริ่มไม่ได้)`),
+      // 🆕 WNQ1 N1: ด่านชุดปิด = เริ่มได้ (ติดลบได้) → ห้ามบอก "เริ่มไม่ได้" (prepStripWording)
+      todo: tdo((d, ctx) => `ชุด ${d.ref} ไม่พอ — กด «⚖️ ไปชั่งชุด» แล้วชั่งให้ครบ ${((global.ERP.prepStripWording && !global.ERP.prepStripWording(ctx && ctx.state).blocks) ? '(ยังเริ่มได้ ติดลบได้)' : '(batch ที่ชุดไม่พอเริ่มไม่ได้)')}`, (n, ctx) => `ชุดชั่งเตรียม ${n} ชุดไม่พอ — กด «⚖️ ไปชั่งชุด» แล้วชั่งให้ครบ ${((global.ERP.prepStripWording && !global.ERP.prepStripWording(ctx && ctx.state).blocks) ? '(ยังเริ่มได้ ติดลบได้)' : '(batch ที่ชุดไม่พอเริ่มไม่ได้)')}`),
       btn: '⚖️ ไปชั่งชุด',
       show: (ctx) => weighVisible(ctx),
       nav: docNav(WEIGH_NAV, { scope:'production.weighprep', alwaysFocus:true }),
@@ -138128,7 +138369,7 @@ C.registerGroup({
           for(const r of rs) if(r.deficit > 0 && (!mine || !mine.size || mine.has(r.lineId))) rows.push({ ...r, branchId: b.id });
         }
         return { count: rows.length, docs: C.mkDocs(rows, r => ({ kind:'weighprep', id: r.setBomId, ref: r.setBomName || r.name })),
-          detail: rows.map(r => `${r.setBomName || r.name} · ต้องชั่งเพิ่ม ${fmtNum(r.deficit)} ชุด (ต้องใช้ ${fmtNum(r.needed)} · มี ${fmtNum(r.onHand)}${r.inbound > 0 ? ` · กำลังมา ${fmtNum(r.inbound)}` : ''}) · ${ctx.branchName(r.branchId)}`) };
+          detail: rows.map(r => `${r.setBomName || r.name} · ${(E.prepStripWording && !E.prepStripWording(ctx.state).blocks) ? 'ควรชั่งเพิ่ม' : 'ต้องชั่งเพิ่ม'} ${fmtNum(r.deficit)} ชุด (ต้องใช้ ${fmtNum(r.needed)} · มี ${fmtNum(r.onHand)}${r.inbound > 0 ? ` · กำลังมา ${fmtNum(r.inbound)}` : ''}) · ${ctx.branchName(r.branchId)}`) };
       } },
 
     // 🆕 SET_PREP UAT ชุด 1 (M1 · D3): back-flush ถูกพักเพราะชุดชั่งเตรียมไม่พอตอนบันทึก (สองเครื่องปิด batch พร้อมกัน / ผลค้างส่งช้า)
