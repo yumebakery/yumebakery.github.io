@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="1fc83997d2fe";window.__ERP_BUILT_AT__="2026-11-05T18:08:16";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="dd3070448027";window.__ERP_BUILT_AT__="2026-11-05T21:46:47";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -18676,6 +18676,432 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));
 
 </script>
+<!--src/00-docs.js--><script>
+// ============================================================================
+// 00-docs.js — PERSIST_V2 "ตู้เอกสาร ใบละช่อง" · แตกก้อน state ↔ เอกสารรายใบ  →  global.ERP.Docs
+// ============================================================================
+// สัญญา: memory/design/PERSIST_V2_INTERFACE.md §1 (COLL_MAP) / §3 (Client) · แผนเต็ม PERSIST_V2_PLAN.md §2.2/§2.6
+// pure ล้วน: ไม่มี I/O ไม่แตะ localStorage/supabase/DOM · ใช้ได้ทั้ง harness และ node · โหลดก่อน 00-supabase.js (_build.py ORDER)
+//   ค่าคงที่จาก 01-state.js (SEQ_BUMPS / SEQ_BUMP_KEYS / CAP_LIMITS / capLogsForSave) อ่าน "ตอนเรียก" ผ่าน global.ERP
+//   (ไฟล์นี้โหลดก่อน 01-state) · ไม่มี = ค่าปลอดภัย (ไม่ bump · เพดานเดิม 15000/10000)
+//
+//   explode(state)                 → { docs:[{c,id,ord,data}], counters:[{name,value}], meta:{version, heads, kinds} }
+//   implode(docs, counters, meta)  → state (ไม่มี session keys)
+//   diffOps(base, next, known, o)  → { ops:[{c,id,op:'put'|'del',data?,base_rev}], counters:[bump|cas], colls:[...], reorder:[...], warnings:[...], meta }
+//   collOf(key, value?)            → 'docs' | 'windowed' | 'blob' | 'singleton' | 'counter' | 'meta' | 'session'
+//
+// กฎตัวตนเอกสาร (ต้องตรงกับ SQL mirror_tick/parity — ดู INTERFACE §3 ส่วนเลน CLIENT):
+//   - docs/windowed: id = String(element.id) · id ต้องเป็น string ไม่ว่าง หรือ number จำกัด (เหมือน erp_private.tid)
+//   - weighLogs: id = String(deviceId ?? '') + '|' + String(id)  (เหมือน tid ของคลื่น 4 — สองเครื่องใช้ id ชนกันได้)
+//   - auditLog: id ซ้ำในก้อน (reducer ตั้ง id จากเวลา ms) → ตัวที่ 2,3.. ได้ id + '~2', '~3' ตามลำดับในก้อน
+//               (จำตัวตนต่อ element ไว้ใน WeakMap → หน้าต่างเลื่อนแล้วตัวตนไม่เปลี่ยน) · หมวดอื่น id ซ้ำ = ล้ม + รายงาน
+//   - blob singleton / singleton object: id = '_' · blob เก็บ data = { v:<ค่าเดิม> } · singleton เก็บ data = object เดิม
+//   - marker ตัดหัว (audit_truncated / weigh_truncated) ไม่เป็น doc → meta.heads[key] · implode ใส่คืน + ตัดเพดานตาม capLogsForSave
+// ข้อมูลรูปไม่ถูก (ไม่มี id / id ซ้ำ / ชนิดเปลี่ยน) = throw Error code 'pv2_shape' + issues (ห้ามทับเงียบ · ผู้เรียกเก็บงานไว้ในสมุด)
+// ============================================================================
+(function(global){
+  'use strict';
+
+  var SID = '_';   // id ของเอกสารเดี่ยว (blob singleton / singleton object)
+
+  // ---- แผนที่หมวด (สแกนข้อมูลจริง 5 พ.ย. · INTERFACE §1) · คีย์ที่ไม่อยู่ในนี้ = ตัดสินจากชนิดค่า (array → docs) ----
+  var COLL_MAP = Object.freeze({
+    version:'meta',
+    currentUser:'session', currentBranch:'session',
+    __devSeq:'session', __fromCloudPull:'session', __importStamp:'session', __importBlocked:'session',
+    seq:'counter', invSeq:'counter', siSeq:'counter', whtSeq:'counter',
+    company:'singleton', settings:'singleton', branchGroupPresets:'singleton',
+    itemTags:'blob', fgDispatchKeys:'blob', storageLocations:'blob', lotGenealogy:'blob',
+    auditLog:'windowed', weighLogs:'windowed'
+  });
+  // หมวดที่มีหน้าต่าง: เพดานเริ่มต้น (01-state AUDIT_LOG_CAP / WEIGH_LOG_CAP) + ชนิด marker
+  var WIN = Object.freeze({
+    auditLog:  Object.freeze({ cap:15000, mark:'audit_truncated' }),
+    weighLogs: Object.freeze({ cap:10000, mark:'weigh_truncated' })
+  });
+
+  function _own(o, k){ return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+  function _plain(v){
+    if(!v || typeof v !== 'object' || Array.isArray(v)) return false;
+    var p = Object.getPrototypeOf(v); return p === Object.prototype || p === null;
+  }
+  function _skipVal(v){ return v === undefined || typeof v === 'function' || typeof v === 'symbol'; }
+  function _E(){ return global.ERP || {}; }
+  function _capOf(c){ var L = _E().CAP_LIMITS; return (L && Number(L[c]) > 0) ? Number(L[c]) : (WIN[c] ? WIN[c].cap : 0); }
+  function _isMark(c, el){ return !!(WIN[c] && el && typeof el === 'object' && el.type === WIN[c].mark); }
+
+  function collOf(key, value){
+    if(_own(COLL_MAP, key)) return COLL_MAP[key];
+    if(arguments.length < 2 || value === undefined || Array.isArray(value)) return 'docs';
+    if(_plain(value)) return 'singleton';
+    return 'blob';   // primitive / null / ชนิดแปลก → เก็บทั้งค่าเป็น doc เดียว
+  }
+  function keyOf(c, id){ return c + '/' + id; }
+
+  function _shapeErr(issues){
+    var e = new Error('PV2 รูปข้อมูลแตกเป็นเอกสารไม่ได้: ' + issues.slice(0, 5).map(function(x){ return x.key + (x.i != null ? '[' + x.i + ']' : '') + ' ' + x.why; }).join(' · ')
+      + (issues.length > 5 ? ' (+' + (issues.length - 5) + ')' : ''));
+    e.code = 'pv2_shape'; e.issues = issues; return e;
+  }
+
+  // ---- ตัวตนเอกสาร ----
+  function _rawId(c, el){
+    if(!_plain(el)) return null;
+    var id = el.id;
+    if(!((typeof id === 'string' && id !== '') || (typeof id === 'number' && isFinite(id)))) return null;
+    return c === 'weighLogs' ? String(el.deviceId == null ? '' : el.deviceId) + '|' + String(id) : String(id);
+  }
+  // auditLog: ตัวตนที่เคยให้ต่อ element (immutable ref) — กันหน้าต่างเลื่อนแล้ว '~2' กลายเป็นตัวแรก
+  var _alMemo = (typeof WeakMap === 'function') ? new WeakMap() : null;
+  // cache ดัชนีต่อ array ref (reducer ไม่แก้ array เดิมในที่) · ตรวจ length + หัว/ท้ายกันกรณีถูก push ในที่
+  var _ixMemo = (typeof WeakMap === 'function') ? new WeakMap() : null;
+
+  // คืน { ids:[docId | null(marker)], map:{docId → index}, n:จำนวนเนื้อ(ไม่นับ marker), marks:[index], issues:[] }
+  function _index(c, arr){
+    if(_ixMemo){
+      var m = _ixMemo.get(arr);
+      if(m && m.len === arr.length && m.f === arr[0] && m.l === arr[arr.length - 1]) return m.ix;
+    }
+    var win = !!WIN[c], al = c === 'auditLog', ids = new Array(arr.length), map = Object.create(null), marks = [], issues = [], n = 0, i;
+    for(i = 0; i < arr.length; i++){
+      var el = arr[i];
+      if(win && _isMark(c, el)){ ids[i] = null; marks.push(i); continue; }
+      var id = _rawId(c, el);
+      if(id == null){ ids[i] = null; issues.push({ key:c, i:i, why: _plain(el) ? 'ไม่มี id (ต้องเป็น string ไม่ว่าง/number)' : 'ไม่ใช่ object' }); continue; }
+      if(al){
+        var mm = _alMemo && _alMemo.get(el);
+        if(mm && mm.indexOf(id) === 0 && !(mm in map) && (mm === id || mm.charAt(id.length) === '~')) id = mm;
+        else if(id in map){ var k = 2; while((id + '~' + k) in map) k++; id = id + '~' + k; }
+        if(_alMemo && mm !== id) _alMemo.set(el, id);
+      } else if(id in map){
+        issues.push({ key:c, i:i, why:'id ซ้ำ "' + id + '" (ตัวแรกที่ ' + map[id] + ')' }); ids[i] = null; continue;
+      }
+      ids[i] = id; map[id] = i; n++;
+    }
+    var ix = { ids:ids, map:map, n:n, marks:marks, issues:issues };
+    if(_ixMemo && arr.length) _ixMemo.set(arr, { len:arr.length, f:arr[0], l:arr[arr.length - 1], ix:ix });
+    return ix;
+  }
+  function idsOf(c, arr){ return Array.isArray(arr) ? _index(c, arr).ids.slice() : []; }
+
+  // ---- เทียบค่าแบบ jsonb (ลำดับคีย์ไม่สำคัญ · undefined = ไม่มีคีย์) · ไม่ stringify · ลึกเกิน = ถือว่าต่าง (ส่งเกิน ไม่ส่งขาด) ----
+  function _deq(a, b, d){
+    if(a === b) return true;
+    if(d > 64) return false;
+    if(a === null || b === null || typeof a !== 'object' || typeof b !== 'object'){
+      if(typeof a === 'number' && typeof b === 'number') return a === b || (a !== a && b !== b);
+      return false;
+    }
+    var i, x, y;
+    if(Array.isArray(a) || Array.isArray(b)){
+      if(!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+      for(i = 0; i < a.length; i++){
+        x = a[i]; y = b[i]; if(x === y) continue;
+        if(_skipVal(x)) x = null; if(_skipVal(y)) y = null;
+        if(!_deq(x, y, d + 1)) return false;
+      }
+      return true;
+    }
+    if(typeof a.toJSON === 'function' || typeof b.toJSON === 'function'){
+      try { return JSON.stringify(a) === JSON.stringify(b); } catch(_e){ return false; }
+    }
+    var n = 0, m = 0;
+    for(i in a) if(_own(a, i) && !_skipVal(a[i])){
+      n++; x = a[i]; y = b[i];
+      if(!_own(b, i) || _skipVal(y)) return false;
+      if(x !== y && !_deq(x, y, d + 1)) return false;
+    }
+    for(i in b) if(_own(b, i) && !_skipVal(b[i])) m++;
+    return n === m;
+  }
+  function eqVal(a, b){ return _deq(a, b, 0); }
+
+  // ════════════════════════════ explode ════════════════════════════
+  function explode(state){
+    var docs = [], counters = [], meta = { version:undefined, heads:{}, kinds:{} }, issues = [], k;
+    state = state || {};
+    for(k in state){
+      if(!_own(state, k)) continue;
+      var v = state[k], kind = collOf(k, v);
+      if(kind === 'session' || _skipVal(v)) continue;
+      meta.kinds[k] = kind;
+      if(kind === 'meta'){ meta[k] = v; continue; }
+      if(kind === 'counter'){
+        if(!_plain(v)){ issues.push({ key:k, why:'ตัวนับต้องเป็น object' }); continue; }
+        for(var sk in v) if(_own(v, sk) && !_skipVal(v[sk])) counters.push({ name:k + '.' + sk, value:v[sk] });
+        continue;
+      }
+      if(kind === 'singleton'){
+        if(!_plain(v)){ issues.push({ key:k, why:'singleton ต้องเป็น object' }); continue; }
+        docs.push({ c:k, id:SID, ord:0, data:v }); continue;
+      }
+      if(kind === 'blob'){ docs.push({ c:k, id:SID, ord:0, data:{ v:v } }); continue; }
+      // docs / windowed
+      if(!Array.isArray(v)){ issues.push({ key:k, why:'หมวด ' + kind + ' ต้องเป็น array' }); continue; }
+      var ix = _index(k, v), ord = 0, i;
+      if(ix.issues.length){ issues.push.apply(issues, ix.issues); continue; }
+      for(i = 0; i < ix.marks.length; i++){
+        if(ix.marks[i] === 0) meta.heads[k] = v[0];
+        else issues.push({ key:k, i:ix.marks[i], why:'marker ตัดหัวไม่อยู่ตำแหน่งแรก' });
+      }
+      for(i = 0; i < v.length; i++) if(ix.ids[i] != null) docs.push({ c:k, id:ix.ids[i], ord:ord++, data:v[i] });
+    }
+    if(issues.length) throw _shapeErr(issues);
+    return { docs:docs, counters:counters, meta:meta };
+  }
+
+  // ---- ตัดเพดานหมวดหน้าต่าง (กฎเดียวกับ capLogsForSave ของ 01-state · ไม่มี = สำรองในนี้ รูป marker เดียวกัน) ----
+  function _capWin(c, arr){
+    var E = _E();
+    if(typeof E.capLogsForSave === 'function'){
+      try { var o = {}; o[c] = arr; var r = E.capLogsForSave(o); if(r && Array.isArray(r[c])) return r[c]; } catch(_e){}
+    }
+    var cap = _capOf(c), hasM = _isMark(c, arr[0]), body = arr.length - (hasM ? 1 : 0);
+    if(!cap || body <= cap) return arr;
+    var kept = arr.slice(-cap), dropped = (hasM ? (Number(arr[0].dropped) || 0) : 0) + (body - cap);
+    var ts = (kept[0] && kept[0].ts) || 0, mk;
+    if(c === 'auditLog') mk = { id:'al_trunc_' + ts.toString(36), ts:ts, type:'audit_truncated', by:'system', dropped:dropped,
+      note:'✂️ ตัด auditLog เก่าสุดรวม ' + dropped + ' รายการตอน persist (กัน blob เต็ม) — เก็บล่าสุด ' + cap + ' รายการ' };
+    else mk = { id:'wl_trunc_' + ts.toString(36), deviceId:'system', ts:ts, type:'weigh_truncated', lot:'', dropped:dropped,
+      recipeName:'✂️ ตัดประวัติชั่งเก่าสุดรวม ' + dropped + ' ชุด (กัน blob เต็ม) — export CSV เป็นระยะ', items:[], total:0 };
+    return [mk].concat(kept);
+  }
+
+  // ════════════════════════════ implode ════════════════════════════
+  // docs: [{c,id,ord,data,deleted?}] (id ซ้ำ = ตัวหลังชนะ · deleted=true ข้าม) · counters: [{name,value}] · meta: {version, heads, kinds}
+  function implode(docs, counters, meta){
+    meta = meta || {};
+    var st = {}, kinds = meta.kinds || {}, heads = meta.heads || {}, groups = Object.create(null), order = [], i, c, g;
+    if(meta.version !== undefined) st.version = meta.version;
+    docs = docs || [];
+    for(i = 0; i < docs.length; i++){
+      var d = docs[i]; if(!d || d.c == null || d.id == null) continue;
+      c = String(d.c);
+      if(!(c in groups)){ groups[c] = Object.create(null); order.push(c); }
+      groups[c][String(d.id)] = { d:d, i:i };
+    }
+    for(var oi = 0; oi < order.length; oi++){
+      c = order[oi]; g = groups[c];
+      var rows = [], id;
+      for(id in g) if(!g[id].d.deleted) rows.push({ id:id, d:g[id].d, i:g[id].i });
+      var kind = _own(kinds, c) ? kinds[c] : (_own(COLL_MAP, c) ? COLL_MAP[c] : null);
+      if(!kind){   // ไม่รู้ชนิด: มีแต่ '_' → blob (data มีแค่ v) / singleton · นอกนั้น docs
+        var onlySid = rows.length === 1 && rows[0].id === SID;
+        if(onlySid){ var dd = rows[0].d.data; kind = (_plain(dd) && Object.keys(dd).length === 1 && _own(dd, 'v')) ? 'blob' : 'singleton'; }
+        else kind = 'docs';
+      }
+      if(kind === 'session' || kind === 'meta' || kind === 'counter') continue;
+      if(kind === 'singleton'){ for(i = 0; i < rows.length; i++) if(rows[i].id === SID) st[c] = rows[i].d.data; continue; }
+      if(kind === 'blob'){ for(i = 0; i < rows.length; i++) if(rows[i].id === SID) st[c] = rows[i].d.data ? rows[i].d.data.v : undefined; continue; }
+      rows.sort(function(a, b){
+        var x = Number(a.d.ord), y = Number(b.d.ord);
+        if(!isFinite(x)) x = Infinity; if(!isFinite(y)) y = Infinity;
+        return x < y ? -1 : (x > y ? 1 : a.i - b.i);
+      });
+      var arr = new Array(rows.length);
+      for(i = 0; i < rows.length; i++){
+        arr[i] = rows[i].d.data;
+        if(c === 'auditLog' && _alMemo && rows[i].d.data && typeof rows[i].d.data === 'object') _alMemo.set(rows[i].d.data, rows[i].id);
+      }
+      st[c] = arr;
+    }
+    // หมวดที่รู้ว่ามีแต่ไม่มีเอกสาร (array ว่าง / ตัวนับว่าง)
+    for(c in kinds) if(_own(kinds, c) && st[c] === undefined){
+      if(kinds[c] === 'docs' || kinds[c] === 'windowed') st[c] = [];
+      else if(kinds[c] === 'counter') st[c] = {};
+    }
+    // ตัวนับ
+    counters = counters || [];
+    for(i = 0; i < counters.length; i++){
+      var ct = counters[i]; if(!ct || typeof ct.name !== 'string') continue;
+      var dot = ct.name.indexOf('.'); if(dot <= 0) continue;
+      var top = ct.name.slice(0, dot), sub = ct.name.slice(dot + 1);
+      if(!_plain(st[top])) st[top] = {};
+      if(ct.value !== undefined && ct.value !== null) st[top][sub] = ct.value;
+    }
+    // หน้าต่าง: marker หัวเดิม + ตัดเพดาน
+    for(c in WIN){
+      if(!_own(WIN, c) || !Array.isArray(st[c])) continue;
+      var a2 = st[c];
+      if(heads[c] && typeof heads[c] === 'object') a2 = [heads[c]].concat(a2);
+      st[c] = _capWin(c, a2);
+    }
+    return st;
+  }
+
+  // ════════════════════════════ patch (implode ทีละส่วน · verify finding 9) ════════════════════════════
+  // prev = array ของหมวด c ที่ได้จาก implode/patch ครั้งก่อน (ลำดับตาม ord) · ups = [{id, ord, data, isNew, ord0}] · dels = [id]
+  //   ได้ผลเท่ากับ implode ทั้งหมวด เมื่อ: ใบเดิมแก้ในที่ (ord เท่าเดิม) · ใบใหม่ ord > ทุกใบเดิม (maxOrd0) · ลบ = ตัดออก
+  //   เงื่อนไขไม่ครบ (ord ย้าย/ใบใหม่แทรกกลาง/ใบเดิมนอกหน้าต่าง) = คืน null → ผู้เรียก implode ทั้งหมวด
+  function patch(c, prev, ups, dels, maxOrd0){
+    if(!Array.isArray(prev)) return null;
+    var ix = _index(c, prev); if(ix.issues.length) return null;
+    var out = null, app = [], drop = null, i, u, mx = Number(maxOrd0);
+    ups = ups || []; dels = dels || [];
+    for(i = 0; i < ups.length; i++){
+      u = ups[i]; var at = ix.map[u.id];
+      if(at === undefined){
+        if(!u.isNew) return null;   // ใบเดิมที่ไม่อยู่ใน array (นอกหน้าต่าง) → ทั้งหมวด
+        var o = Number(u.ord); if(!isFinite(o) || (isFinite(mx) && !(o > mx))) return null;
+        app.push({ u:u, o:o, k:i }); continue;
+      }
+      if(u.isNew || Number(u.ord) !== Number(u.ord0)) return null;
+      if(!out) out = prev.slice();
+      out[at] = u.data;
+    }
+    for(i = 0; i < dels.length; i++){ var di = ix.map[dels[i]]; if(di !== undefined){ drop = drop || Object.create(null); drop[di] = 1; } }
+    if(!out && !app.length && !drop) return prev;
+    var base = out || prev;
+    if(drop){ var kept = []; for(i = 0; i < base.length; i++) if(!drop[i]) kept.push(base[i]); base = kept; }
+    else if(!out && app.length) base = prev.slice();
+    if(app.length){
+      app.sort(function(a, b){ return a.o < b.o ? -1 : (a.o > b.o ? 1 : a.k - b.k); });
+      for(i = 0; i < app.length; i++){
+        base.push(app[i].u.data);
+        if(c === 'auditLog' && _alMemo && app[i].u.data && typeof app[i].u.data === 'object') _alMemo.set(app[i].u.data, app[i].u.id);
+      }
+    }
+    if(c === 'auditLog' && _alMemo && out) for(i = 0; i < ups.length; i++){ u = ups[i]; if(!u.isNew && u.data && typeof u.data === 'object') _alMemo.set(u.data, u.id); }
+    if(WIN[c]) base = _capWin(c, base);
+    return base;
+  }
+
+  // ════════════════════════════ diffOps ════════════════════════════
+  // base = ฐานที่ตรง server (_syncedState) · next = ก้อนจะส่ง · known = { 'c/id': rev } · o = { actions:[journal entries] }
+  // ถูก: เทียบ ref ก่อน → ทีละ element แบบตื้น (ลึกเฉพาะช่องที่ ref ต่าง) · ไม่ stringify ทั้งหมวด
+  function _kr(known, c, id){ var v = known[keyOf(c, id)]; return (v === undefined || v === null || !isFinite(Number(v))) ? null : Number(v); }
+  function _bumpKeys(){
+    var E = _E(), out = Object.create(null);
+    if(E.SEQ_BUMP_KEYS && E.SEQ_BUMP_KEYS.forEach) E.SEQ_BUMP_KEYS.forEach(function(k){ out[k] = 1; });
+    return out;
+  }
+  function _bumpWant(name, actions){
+    if(!actions || !actions.length) return null;
+    var SB = _E().SEQ_BUMPS || {}, sum = 0;
+    for(var i = 0; i < actions.length; i++){
+      var t = actions[i] && actions[i].type; if(!t) return null;
+      var b = _own(SB, t) ? SB[t] : null; if(b && b[name]) sum += Number(b[name]) || 0;
+    }
+    return sum;
+  }
+  function _eqEl(a, b){
+    if(a === b) return true;
+    if(_plain(a) && _plain(b)){
+      var n = 0, m = 0, k;
+      for(k in a) if(_own(a, k) && !_skipVal(a[k])){
+        n++; if(!_own(b, k) || _skipVal(b[k])) return false;
+        if(a[k] !== b[k] && !_deq(a[k], b[k], 1)) return false;
+      }
+      for(k in b) if(_own(b, k) && !_skipVal(b[k])) m++;
+      return n === m;
+    }
+    return _deq(a, b, 0);
+  }
+
+  function _alFresh(c, id, i, el, N, known){
+    var raw = _rawId(c, el) || id, n = 2, cand;
+    while(((cand = raw + '~' + n) in N.map) || _kr(known, c, cand) !== null) n++;
+    if(N.map[id] === i) delete N.map[id];
+    N.map[cand] = i; N.ids[i] = cand;
+    if(_alMemo && el && typeof el === 'object') _alMemo.set(el, cand);
+    return cand;
+  }
+
+  function diffOps(base, next, known, o){
+    base = base || {}; next = next || {}; known = known || {}; o = o || {};
+    var res = { ops:[], counters:[], colls:[], reorder:[], warnings:[], meta:null };
+    var touched = Object.create(null), keys = Object.create(null), issues = [], k, bk = null;
+    for(k in next) if(_own(next, k)) keys[k] = 1;
+    for(k in base) if(_own(base, k)) keys[k] = 1;
+    function touch(c){ if(!(c in touched)){ touched[c] = 1; res.colls.push(c); } }
+    function put(c, id, data){ res.ops.push({ c:c, id:id, op:'put', data:data, base_rev:_kr(known, c, id) }); touch(c); }
+    function del(c, id){ res.ops.push({ c:c, id:id, op:'del', base_rev:_kr(known, c, id) }); touch(c); }
+
+    for(k in keys){
+      var bv = base[k], nv = next[k];
+      if(bv === nv) continue;
+      var bGone = _skipVal(bv), nGone = _skipVal(nv);
+      var kind = collOf(k, nGone ? bv : nv);
+      if(kind === 'session') continue;
+      if(!bGone && !nGone && !_own(COLL_MAP, k) && collOf(k, bv) !== kind){
+        issues.push({ key:k, why:'ชนิดหมวดเปลี่ยน ' + collOf(k, bv) + ' → ' + kind }); continue;
+      }
+      if(nGone){
+        if(bGone) continue;
+        if(kind === 'singleton' || kind === 'blob'){ del(k, SID); continue; }
+        // หมวดหายทั้งหมวด = น่าจะเป็นบั๊ก → ไม่ลบ (กันงานหาย) แจ้งผู้เรียก
+        res.warnings.push({ key:k, why:'หมวดหายจากก้อน — ไม่ส่งลบ' }); continue;
+      }
+      if(kind === 'meta'){
+        if(!_deq(bv, nv, 0)){ res.meta = res.meta || {}; res.meta[k] = nv; res.warnings.push({ key:k, why:'ค่า meta เปลี่ยน (G1: version ห้ามขยับ)' }); }
+        continue;
+      }
+      if(kind === 'counter'){
+        if(!_plain(nv) || (!bGone && !_plain(bv))){ issues.push({ key:k, why:'ตัวนับต้องเป็น object' }); continue; }
+        var bo = bGone ? {} : bv, sk, nm;
+        if(!bk) bk = _bumpKeys();
+        var subs = Object.create(null);
+        for(sk in nv) if(_own(nv, sk)) subs[sk] = 1;
+        for(sk in bo) if(_own(bo, sk)) subs[sk] = 1;
+        for(sk in subs){
+          var b0 = _skipVal(bo[sk]) ? undefined : bo[sk], n0 = _skipVal(nv[sk]) ? undefined : nv[sk];
+          if(b0 === n0 || (b0 !== undefined && n0 !== undefined && _deq(b0, n0, 0))) continue;
+          nm = k + '.' + sk; touch(k);
+          var delta = (typeof n0 === 'number' && typeof b0 === 'number') ? n0 - b0 : NaN;
+          var want = (nm in bk) ? _bumpWant(nm, o.actions) : null;
+          if(want !== null && delta > 0 && Math.floor(delta) === delta && want === delta) res.counters.push({ name:nm, op:'bump', delta:delta });
+          else res.counters.push({ name:nm, op:'cas', expect: b0 === undefined ? null : b0, value: n0 === undefined ? null : n0 });
+        }
+        continue;
+      }
+      if(kind === 'singleton'){
+        if(!_plain(nv)){ issues.push({ key:k, why:'singleton ต้องเป็น object' }); continue; }
+        if(bGone || !_eqEl(bv, nv)) put(k, SID, nv);
+        continue;
+      }
+      if(kind === 'blob'){ if(bGone || !_deq(bv, nv, 0)) put(k, SID, { v:nv }); continue; }
+      // docs / windowed
+      if(!Array.isArray(nv) || (!bGone && !Array.isArray(bv))){ issues.push({ key:k, why:'หมวด ' + kind + ' ต้องเป็น array' }); continue; }
+      var win = kind === 'windowed', bA = bGone ? [] : bv;
+      var B = _index(k, bA), N = _index(k, nv);
+      if(N.issues.length){ issues.push.apply(issues, N.issues); continue; }
+      if(B.issues.length){ issues.push.apply(issues, B.issues.map(function(x){ return { key:x.key, i:x.i, why:'(ฐาน) ' + x.why }; })); continue; }
+      // หน้าต่าง: เทียบเฉพาะ "เนื้อ" ช่วงท้าย cap ตัว (หัวที่เกินเพดาน = จะถูกตัดตอน persist อยู่แล้ว)
+      var skip = win ? Math.max(0, N.n - (_capOf(k) || N.n)) : 0;
+      var matched = 0, lastBi = -1, sawNew = false, reord = false, i;
+      for(i = 0; i < nv.length; i++){
+        var id = N.ids[i]; if(id == null) continue;
+        if(skip > 0){ skip--; if(id in B.map) matched++; continue; }
+        var bi = B.map[id];
+        if(bi === undefined){
+          // auditLog: id ใหม่ชนเอกสารที่ server มีอยู่แล้ว (หลุดหน้าต่างฐานไปแล้ว) → ให้ '~n' ตัวถัดไปที่ว่าง (ไม่ทับของเดิม)
+          if(k === 'auditLog' && _kr(known, k, id) !== null) id = _alFresh(k, id, i, nv[i], N, known);
+          put(k, id, nv[i]); sawNew = true; continue;
+        }
+        matched++;
+        if(bi < lastBi || sawNew) reord = true;
+        lastBi = bi;
+        if(bA[bi] !== nv[i] && !_eqEl(bA[bi], nv[i])) put(k, id, nv[i]);
+      }
+      if(reord) res.reorder.push(k);
+      if(!win && matched < B.n){
+        for(i = 0; i < bA.length; i++){ var bid = B.ids[i]; if(bid != null && !(bid in N.map)) del(k, bid); }
+      }
+    }
+    if(issues.length) throw _shapeErr(issues);
+    return res;
+  }
+
+  var ERP = global.ERP = global.ERP || {};
+  ERP.Docs = {
+    COLL_MAP:COLL_MAP, WIN:WIN, SID:SID,
+    collOf:collOf, keyOf:keyOf, idsOf:idsOf, eqVal:eqVal,
+    explode:explode, implode:implode, diffOps:diffOps, patch:patch, capOf:_capOf
+  };
+  if(typeof module !== 'undefined' && module.exports) module.exports = ERP.Docs;
+})(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));
+
+</script>
 <!--src/00-supabase.js--><script>
 // ============================================================================
 // 00-supabase.js — thin Supabase sync client  →  global.ERP.SBSync (⚠️ ERP.SB = StatusBadge UI component — ห้ามใช้ชื่อนั้น)
@@ -19229,6 +19655,9 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   //   (เดิม 2 × _capMax = ค่าเพดานงานล่าสุดที่ตั้ง ไม่ว่าล้มหรือไม่ → ก้อน 10 MB เพดาน 13–20 นาที และขยับตาม pushNow/ดึงเต็มก้อนที่แทรก)
   var STK_SLACK_MS = 60000;
   var _stkCap = 0, _stkLast = 0, _stkNetDown = false;
+  // 🗄️ PERSIST_V2 verify finding 7: เซิร์ฟเวอร์กำลังสลับวิธีบันทึก (storage_mode freeze = งานบำรุงรักษาที่วางแผนไว้) → หยุดนาฬิกาเพดานงานค้างแบบเน็ตขาด
+  //   แต่หยุดรวมไม่เกิน FREEZE_PAUSE_MAX (สลับค้างผิดปกติ → นับเพดานตามปกติ งานไม่ค้างในหน่วยความจำตลอดไป)
+  var _stkFrozen = false, _stkFrozenMs = 0, FREEZE_PAUSE_MAX = 30 * 60 * 1000;
   var _failT0 = 0, _failAt = 0, _failCap = 0;   // งาน (RPC/ดึง/เขียนทั้งก้อน) ที่ล้มล่าสุด: เวลาเริ่ม · เวลาล้ม · เพดานที่ใช้
   var _opT0 = 0, _opCap = 0;                    // งานที่กำลังรออยู่ (ไว้บอกเวลาบนแถบ ⏳)
   //   🆕 SSH1 final review #4: จดเฉพาะงานของรอบส่ง (flow 'push' = apply/เขียนทั้งก้อน/ดึงใน rebase) — ดึงเบื้องหลัง (ดึงเข้าจอ/ตรวจนำเข้า) ที่หมดเวลา
@@ -19247,6 +19676,15 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   function _stkMark(why, reachable){
     var now = Date.now();
     if(_stkOffline()){ _stkSince = 0; _stkNetDown = true; return; }
+    if(/^frozen/.test(String(why || ''))){
+      var dt = (_stkFrozen && _stkLast) ? Math.max(0, now - _stkLast) : 0;
+      if(_stkFrozenMs + dt < FREEZE_PAUSE_MAX){
+        _stkFrozenMs += dt;
+        if(_stkSince && _stkLast) _stkSince = Math.min(now, _stkSince + (now - _stkLast));   // หยุดนาฬิกา: ช่วงสลับโหมดไม่นับ
+        _stkLast = now; _stkNetDown = true; _stkFrozen = true; _stkWhy = String(why).slice(0, 80); return;
+      }
+    }
+    _stkFrozen = false;
     if(!reachable && _stkNetLevel(why)){
       if(_stkSince && _stkLast) _stkSince = Math.min(now, _stkSince + (now - _stkLast));   // หยุดนาฬิกา: ช่วงเน็ตขาดไม่นับ
       _stkLast = now; _stkNetDown = true; return;
@@ -19258,13 +19696,13 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     }
     _stkLast = now; _stkWhy = String(why || '').slice(0, 80); _stkN++;
   }
-  function _stkReset(){ _stkSince = 0; _stkWhy = ''; _stkN = 0; _stkCap = 0; _stkLast = 0; _stkNetDown = false; }
+  function _stkReset(){ _stkSince = 0; _stkWhy = ''; _stkN = 0; _stkCap = 0; _stkLast = 0; _stkNetDown = false; _stkFrozen = false; _stkFrozenMs = 0; }
   function _stkThr(){ return _S2.fixed ? _S2.cap : Math.max(_S2.cap, (_stkCap || 0) + STK_SLACK_MS); }   // เทสต์ setS2 = ค่าตรง
   function _stkOver(){ return !_stkOffline() && !_stkNetDown && !!_stkSince && (Date.now() - _stkSince >= _stkThr()); }
   // 🆕 SSH1 verify 2 (#3): แถบ ⏳ — ประมาณเวลาที่เหลือก่อนเก็บเข้า 🧾 งานค้าง (paused = เน็ตขาด/ออฟไลน์ → ส่งเองเมื่อเน็ตกลับ)
   function stuckEta(){
     var now = Date.now(), thr = _stkThr();
-    if(_stkOffline() || _stkNetDown) return { paused:true, ms:null, since:_stkSince, thr:thr };
+    if(_stkOffline() || _stkNetDown) return { paused:true, frozen:_stkFrozen, ms:null, since:_stkSince, thr:thr };
     var opLeft = _opT0 ? Math.max(0, _opT0 + _opCap - now) : 0;
     if(!_stkSince && !_S2.fixed && _opT0) thr = Math.max(_S2.cap, Math.max(_stkCap, _opCap) + STK_SLACK_MS);   // ยังไม่ล้ม: ถ้างานที่รออยู่ล้ม = เริ่มนับจากตอนเริ่มงานนั้น
     var base = _stkSince || _opT0 || now;
@@ -19787,7 +20225,25 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   //   🌊 คลื่น 3: select('*') → รู้ว่ามีคอลัมน์ rev ไหม (SQL ติดตั้งแล้ว) · ฐานใหม่ตรง server ทั้งก้อน = ล้างความรู้รายหมวด
   async function loadCloudState(){
     var sb = _sb(); if(!sb) throw new Error('Supabase ยังไม่พร้อม (config/lib)');
-    var res = await sb.from('erp_state_snapshots').select('*').eq('id', CLOUD_ID).maybeSingle();
+    // 🗄️ PERSIST_V2: อ่าน storage_mode · docs = โหลดจาก erp_docs_since (ไม่รู้/อ่านไม่ได้ = ทางเดิม · ผิดก็ได้ moved ตอนบันทึก)
+    //   verify finding 11: ถามโหมด "พร้อมกับ" select ก้อน (เดิมรอถามก่อน = เปิดแอปช้าขึ้น 1 รอบ · ค้างได้ถึง 15 วิ) · รู้ว่า docs = ยกเลิก select ก้อน
+    //   select เสร็จแล้วรอคำตอบโหมดอีกไม่เกิน 3 วิ · ตอบช้ากว่านั้น = เปิดด้วยทางเดิม แล้วสลับตอนคำตอบมาถึง (เหมือนรอบเช็ก)
+    var _bootDone = false, _mDone = false, _m0 = null, _ac0 = null;
+    try { _ac0 = (typeof AbortController === 'function') ? new AbortController() : null; } catch(_a0){}
+    var _mpP = Promise.resolve().then(function(){ return _modeProbe(true); }).catch(function(){ return null; }).then(function(m){
+      _mDone = true; _m0 = m;
+      if(m === 'docs' && _Docs() && !_bootDone){ try { if(_ac0) _ac0.abort(); } catch(_ab){} }
+      else if(m && _bootDone && m !== (_smode || 'blob')) _setMode(m, 'boot-late');
+      return m;
+    });
+    var _sq = sb.from('erp_state_snapshots').select('*').eq('id', CLOUD_ID);
+    if(_ac0 && typeof _sq.abortSignal === 'function'){ try { _sq = _sq.abortSignal(_ac0.signal); } catch(_s0){} }
+    var res = await Promise.resolve(_sq.maybeSingle()).catch(function(e){ return { data:null, error:{ message:String(e && e.message || e) } }; });
+    if(!_mDone) await Promise.race([_mpP, _sleep(3000)]);
+    if(_mDone && _m0) _setMode(_m0, 'boot');
+    if(_docsMode() && _Docs()){ var _dl = await _loadDocs(); if(_dl){ _bootDone = true; return _dl; } }
+    _bootDone = true;
+    if(_ac0 && _ac0.signal && _ac0.signal.aborted) res = await sb.from('erp_state_snapshots').select('*').eq('id', CLOUD_ID).maybeSingle();   // ยกเลิกไปเพราะคิดว่า docs แต่ไม่ใช่
     if(res.error) throw new Error(res.error.message);
     _loaded = true;
     if(!res.data || !res.data.state){ _hasRow = false; _tok = null; return null; }
@@ -19827,7 +20283,8 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(!res.data || !res.data.state) return null;
     if(_own(res.data, 'rev')) _hasRevCol = true;
     if(_own(res.data, 'rewrite_revs')) _w4Col = true;   // 🌊 คลื่น 4: SQL ติดตั้งแล้ว (หลักฐาน G6)
-    return { state:res.data.state, savedAt:res.data.saved_at, rev:(res.data.rev != null ? Number(res.data.rev) : null), byUser:res.data.by_user || null, full:true };
+    return { state:res.data.state, savedAt:res.data.saved_at, rev:(res.data.rev != null ? Number(res.data.rev) : null), byUser:res.data.by_user || null, full:true,
+             devseq: !!(res.data.state.__devSeq && res.data.state.__devSeq[_sessKey()]) };   // 🗄️ ก้อน blob ตัวจริง (มี __devSeq ของแท็บนี้)
   }
   var _peekFails = 0, PEEK_STALE_BASE_MS = 10 * 60 * 1000;
   // 🆕 SSH1 verify 2 (#1): เพดานดึงเฉพาะส่วนปรับตามจริง — ไม่ตอบทันเวลา (client_timeout) = เพิ่มเท่าตัว 60 → 120 → 240 วิ แล้วลองดึงเฉพาะส่วนอีกครั้ง
@@ -19882,7 +20339,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     _peekFails = 0; _keysTo = 0; _keysOkMs = Date.now() - kt0;
     var r = res.data || {};
     if(!r.ok) return r.reason === 'no_row' ? null : _peekFull(flow);
-    if(r.full) return { state:r.state, savedAt:r.saved_at, rev:Number(r.rev), byUser:r.by_user || null, full:true };
+    if(r.full) return { state:r.state, savedAt:r.saved_at, rev:Number(r.rev), byUser:r.by_user || null, full:true, devseq: !!(r.state && r.state.__devSeq && r.state.__devSeq[_sessKey()]) };
     if(_w4Pref(pb.state)) _w4Seen(r);   // สวิตช์ถอยเปิดอยู่ (ปิดคลื่น 4 ในเครื่อง/ทั้งบริษัท) → ห้ามให้คำตอบ w:4 ทำสถานะเป็น "ต่อท้ายฝั่งเซิร์ฟเวอร์ ✓"
     var st = Object.assign({}, pb.state), k;
     for(k in (r.keys || {})) if(_own(r.keys, k)) st[k] = r.keys[k];
@@ -19904,7 +20361,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       return _peekFull(flow);
     }
     // 🆕 SSP1 S1: หมวดที่ขยับระหว่างรอบ (ไว้ใส่ประวัติ rebase_fallback — อ่านอย่างเดียว ไม่แตะตัวแปร committed)
-    return { state:st, savedAt:r.saved_at, rev:Number(r.rev), byUser:r.by_user || null, delta:true, keys: Object.keys(r.keys || {}).concat(Object.keys(r.tails || {})).slice(0, 40) };
+    return { state:st, savedAt:r.saved_at, rev:Number(r.rev), byUser:r.by_user || null, delta:true, devseq: !!r.my_devseq, keys: Object.keys(r.keys || {}).concat(Object.keys(r.tails || {})).slice(0, 40) };
   }
   function _shape(v){ return Array.isArray(v) ? v.length : (_plain(v) ? Object.keys(v).filter(function(k){ return v[k] !== undefined; }).length : -1); }
   function _shapeDiff(st, shape){
@@ -19915,16 +20372,34 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     return bad;
   }
   async function peekCloudState(){
-    var r = (_rpcOn(null) && _syncedState && !_needFullSync) ? await _peekDelta({ state:_syncedState, rev:_rev, known:_known, tails:_tail }) : await _peekFull();
+    var r;
+    if(_docsMode()){
+      r = await _peekDocs({ state:_syncedState, ds:_needFullSync ? null : _ds });
+      if(r && r.moved){ _setMode(r.moved, 'pull-since'); r = (r.moved === 'blob') ? await _peekFull() : null; }   // ระหว่างดึง ระบบย้อนกลับ blob → ดึงก้อน blob
+      _lastPeek = r ? { state:r.state, rev:r.rev, dstore:r.dstore || null } : null;
+      return r;
+    }
+    r = (_rpcOn(null) && _syncedState && !_needFullSync) ? await _peekDelta({ state:_syncedState, rev:_rev, known:_known, tails:_tail }) : await _peekFull();
     _lastPeek = r ? { state:r.state, rev:r.rev } : null;
     return r;
   }
-  function peekCloudStateFull(){ return _peekFull(); }   // ใช้กับงาน "ตรวจของจริง" (import verify) — ห้ามใช้ delta
+  function peekCloudStateFull(){ return _docsMode() ? _peekDocs({ state:null, ds:null }) : _peekFull(); }   // 🗄️ docs = ดึงเอกสารทั้งหมด   // ใช้กับงาน "ตรวจของจริง" (import verify) — ห้ามใช้ delta
   function adoptPulled(savedAt, state, rev){
     _rebaseGen++;   // ก้อนในเครื่องถูกแทน → pushNow ที่ถือก้อนเก่าอยู่ต้องไม่ส่ง
     _loaded = true; _hasRow = true; _tok = savedAt;
     // ผู้เรียกรุ่นก่อนคลื่น 3 ไม่ส่ง rev → ใช้ rev ของ peek ล่าสุดถ้าเป็นก้อนเดียวกัน (ไม่รู้ = 0 → apply ครั้งแรก stale → rebase → ดึงเต็มก้อน ปลอดภัยโดยโครงสร้าง)
     if(rev == null && state && _lastPeek && _lastPeek.state === state) rev = _lastPeek.rev;
+    // 🗄️ PERSIST_V2: ก้อนจาก _peekDocs → รับฐานเอกสารคู่กัน · ไม่ใช่ก้อนเดียวกับ peek ล่าสุด (ไม่รู้ฐานเอกสาร) = ต้องดึงทั้งหมดก่อนเขียน
+    if(_docsMode()){
+      var _pd = (state && _lastPeek && _lastPeek.state === state) ? _lastPeek.dstore : null;
+      if(_pd){ _ds = _pd; _rev = 0; _known = {}; _seenRev = _pd.head; _tok = _dTok(_pd.head); _behind = false; _needFullSync = false; }
+      else { _ds = null; _needFullSync = true; _behind = false; }
+      var _tabEpD = _syncedState ? _epochOf(_syncedState) : null;
+      try { _setSynced(state || _syncedState); } catch(_s2){}
+      _tail = {};
+      try { if(state) epochCheck(state, 'pull', null, _tabEpD); } catch(_ep2){}
+      return;
+    }
     _rev = (rev != null && isFinite(rev)) ? Number(rev) : 0; _known = {}; _seenRev = _rev; _behind = false; _needFullSync = false;
     var _tabEp0 = _syncedState ? _epochOf(_syncedState) : null;   // verify: epoch ที่แท็บนี้ถือก่อนรับก้อนใหม่
     try { _setSynced(state || _syncedState); } catch(_s){}
@@ -19938,6 +20413,20 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   //   ยังไม่มีคอลัมน์ rev → ลองขอ rev ไม่ถี่กว่า 5 นาที (อาศัยรอบ 20 วิ เดิม — G2) → ติดตั้ง SQL ระหว่างแท็บเปิด = เปลี่ยนเป็นรายหมวดเอง
   async function checkCloudChanged(){
     var sb = _sb();
+    // 🗄️ PERSIST_V2: รอบเช็กเดียวกันอ่าน storage_mode (แถวเล็ก) · เปลี่ยน = สลับตัวส่ง + บอกว่ามีของใหม่ (ดึงเข้าจอด้วยตัวส่งใหม่ตอนว่าง)
+    //   verify finding 11: โหมด blob (ปกติ) ถามไม่ถี่กว่า 2 นาที (G2 ไม่เพิ่ม poll — ผู้เขียนรู้จาก moved อยู่แล้ว) · freeze/docs = ทุกรอบ (≤ 1 ครั้ง/วิ)
+    var _mGap = (_smode === 'freeze' || _smode === 'docs') ? 1000 : MODE_PROBE_BLOB_MS;
+    try { if(global.__ERP_MODE_PROBE_MS != null) _mGap = Number(global.__ERP_MODE_PROBE_MS) || 0; } catch(_mg){}
+    if(sb && isCloudOnly() && _loaded && Date.now() - _modeAt >= _mGap){
+      try {
+        var _m1 = await _modeProbe(false);
+        if(_m1 && _m1 !== (_smode || 'blob')){
+          _setMode(_m1, 'tick');
+          if(_m1 !== 'freeze' && _needFullSync) return { changed:true, mode:_m1, byUser:null };
+        }
+      } catch(_mp){}
+    }
+    if(_docsMode()) return _checkDocsChanged(sb);
     if(!sb || !_hasRow || !_tok || _conflict) return { changed:false };
     var seen0 = _seenRev, pushing0 = _pushing;   // จับค่าก่อน select — ผลบันทึกของเราอาจกลับมาก่อน (rev ใหม่กว่าภาพที่ select อ่าน)
     try {
@@ -19958,6 +20447,22 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       var changed = other || _behind;
       if(rv != null && seen0 > 0 && rv < seen0){ _needFullSync = true; changed = true; }   // ฐานข้อมูลถูกย้อน
       return { changed:changed, savedAt:t, byUser:other ? (res.data.by_user || null) : null, rev:rv };
+    } catch(e){ return { changed:false }; }
+  }
+
+  // 🗄️ PERSIST_V2: โหมด docs — เทียบ erp_head.rev กับฐานในเครื่อง (แถวเดียว · ไม่ดึงเอกสาร)
+  async function _checkDocsChanged(sb){
+    if(!sb || _conflict) return { changed:false };
+    if(!_ds || _needFullSync) return { changed:true, full:true, byUser:null };
+    var h0 = _ds.head, pushing0 = _pushing;
+    try {
+      var res = await sb.from('erp_head').select('rev').eq('tenant', 'company').maybeSingle();
+      if(res.error || !res.data) return { changed:_behind };
+      var rv = Number(res.data.rev);
+      if(!isFinite(rv)) return { changed:_behind };
+      if(pushing0 || _pushing || !_ds || _ds.head !== h0) return { changed:_behind, rev:rv, stale:true };
+      if(rv < h0){ _needFullSync = true; return { changed:true, rev:rv, rewind:true }; }   // รุ่นถอยหลัง (กู้ฐานข้อมูล) → ดึงทั้งหมด
+      return { changed: rv > h0 || _behind, rev:rv, byUser:null };
     } catch(e){ return { changed:false }; }
   }
 
@@ -20176,6 +20681,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         if(gen !== _chanGen) return;
         var p = (msg && msg.payload) || {};
         if(p.savedAt && _sameTok(p.savedAt, _tok)) return;    // ก้อนที่เราถืออยู่แล้ว (🌊 คลื่น 3: saved_at จาก RPC กับ select เขียนต่างรูปแบบได้)
+        if(p.mode === 'docs' && _docsMode() && _ds && p.rev != null && Number(p.rev) <= Number(_ds.head || 0)) return;   // 🗄️ รุ่นที่เรามีแล้ว
         _remoteCbs.forEach(function(cb){ try { cb(p); } catch(_e){} });
       });
       _chan = ch; _chanState = 'joining';
@@ -20205,7 +20711,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       var ch = _rt();
       if(!ch || typeof ch.send !== 'function') return;
       // UAT audit: เดิมช่องสาธารณะ (คลื่น 4 เป็นช่องส่วนตัวแล้ว แต่คงไว้) → ไม่ส่งชื่อผู้ใช้ (แถบใช้ by_user จากตารางซึ่งต้องล็อกอินถึงอ่านได้)
-      var r = ch.send({ type:'broadcast', event:'saved', payload:{ savedAt:_tok, rev:_seenRev || null, build: global.__ERP_BUILD_ID__ || null } });   // 🌊 คลื่น 3: + rev (~100 ไบต์ · G3)
+      var r = ch.send({ type:'broadcast', event:'saved', payload:{ savedAt:_tok, rev:_seenRev || null, build: global.__ERP_BUILD_ID__ || null, mode: _docsMode() ? 'docs' : 'blob' } });   // 🌊 คลื่น 3: + rev (~100 ไบต์ · G3) · 🗄️ โหมด docs: rev = รุ่นเอกสาร (head)
       if(r && typeof r.catch === 'function') r.catch(function(){});
     } catch(_b){}
   }
@@ -20513,7 +21019,18 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     }
     return _rpcReject(r, next, base);
   }
+  // 🗄️ PERSIST_V2 review 1 (ข้อ 1a): ตัวกันก้อน (docs_blob_guard) raise ERP_STATE_MOVED (P0001) = เซิร์ฟเวอร์สลับเป็นตู้เอกสารแล้ว ไม่มีอะไรถูกเขียน
+  //   (apply ที่ผ่านด่านแรกแล้วรอล็อกข้ามจังหวะ flip_to_docs · หรือทางเดิมเขียนทั้งก้อน) → ห้ามนับเป็น error/ถอยไปทางเดิม (โดนกันซ้ำ 2 นาที)
+  //   → ถือเป็นคำตอบ moved: โหมดจากข้อความ (storage_mode=…) · ไม่มี = docs (ค่าเดียวที่ตัวกันเห็นได้ · freeze ไม่เคย commit)
+  function _stMovedErr(e){ return !!e && /ERP_STATE_MOVED/.test(String(e.message || '') + ' ' + String(e.hint || '') + ' ' + String(e.details || '')); }
+  function _stMovedOn(e, src){
+    var mm = /storage_mode=([a-z]+)/.exec(String(e && e.message || ''));
+    _modeAt = 0;
+    try { syncTrace('mode', false, { code:'state_moved_err', src:src, msg:String(e && e.message || '').slice(0, 120) }); } catch(_t){}
+    return _onMoved(mm && mm[1] !== 'blob' ? mm[1] : 'docs', src);
+  }
   function _rpcResErr(res){
+    if(_stMovedErr(res.error)) return _stMovedOn(res.error, 'state_apply_err');
     var kind = _rpcErrKind(res.error, res.status), em = String(res.error.code || '') + ' ' + String(res.error.message || '');
     if(kind === 'gone'){ _rpcOff('gone:' + em, 10 * 60 * 1000); return { ok:false, rpcGone:true }; }
     if(kind === 'busy') return { ok:false, busy:true, error:em };
@@ -20525,6 +21042,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   function _rpcReject(r, next, base){
     if(r.stale){ _conflict = true; return { ok:false, conflict:true, stale:r.stale }; }
     switch(r.reason){
+      case 'moved':    return _onMoved(r.mode, 'state_apply');   // 🗄️ PERSIST_V2: เซิร์ฟเวอร์สลับวิธีบันทึกแล้ว (ไม่มีอะไรถูกเขียน) → สลับตัวส่ง + rebase
       case 'rewind':   _rev = 0; _known = {}; _seenRev = 0; _needFullSync = true; _conflict = true; return { ok:false, conflict:true, rewind:true };
       case 'disabled': _rpcOff(r.reason, 2 * 60 * 1000); return { ok:false, rpcGone:true };
       case 'no_trigger': _trigGone = true; _rpcOff(r.reason, 2 * 60 * 1000); return { ok:false, rpcGone:true };
@@ -20544,6 +21062,549 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         _rpcOff('reject:' + r.reason, 2 * 60 * 1000); return { ok:false, rpcGone:true };
     }
   }
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🗄️ PERSIST_V2 เลน CLIENT ขั้น 3 — ตัวส่งโหมด docs ("ตู้เอกสาร ใบละช่อง" · INTERFACE §2/§3 · PLAN §2.6/§2.7)
+  //   ทั้งสองโหมดอยู่ใน build เดียว: storage_mode บนเซิร์ฟเวอร์ (erp_state_meta key 'storage_mode') เป็นตัวเลือก
+  //     'blob'   = ทางเดิมทุกอย่าง (erp_state_apply / erp_state_keys) — ไม่มีโค้ดในส่วนนี้ทำงานเลย
+  //     'freeze' = เซิร์ฟเวอร์กำลังสลับ → ไม่ส่ง (รอแบบคิวยาว) · งานอยู่ในสมุด
+  //     'docs'   = push = erp_docs_commit (ops จาก ERP.Docs.diffOps เทียบ _syncedState · base_rev จาก _ds.known)
+  //                ดึง/เปิดแอป = erp_docs_since (แบ่งหน้า) + implode · ชน (stale/dupnumber) = _rebaseOnConflict/_foldEntries เดิม
+  //   รู้โหมดจาก 3 ทาง: อ่านตอนเปิดแอป/รอบเช็ก 20 วิ (checkCloudChanged) · คำตอบ {reason:'moved', mode} · since.mode
+  //   สลับกลางทาง (blob → moved → docs): ไม่มีอะไรถูกเขียน (moved = เซิร์ฟเวอร์ไม่ commit) → งานค้างในสมุด → ล้างฐาน → rebase ด้วยตัวส่งใหม่
+  //     (ดึงทั้งหมดจาก since(0) แล้วเล่นสมุดซ้ำ) · งานที่กดระหว่างนั้นเข้าสมุดตามปกติ (_applyRebased เล่นต่อท้าย)
+  //   คำตอบหาย (in-doubt) โหมด docs: ส่งคำขอเดิมซ้ำทั้งก้อน (sess, dev_seq เดิม = idempotent) ก่อน rebase → ลงแล้ว = รับผลเดิม · ไม่ลง = rebase ปกติ
+  //   คำตอบหายตอนโหมด blob แล้วเซิร์ฟเวอร์สลับเป็น docs ก่อนรู้ผล → ไม่รู้ว่าลงหรือยัง (ก้อน docs ไม่มี __devSeq) → งานค้าง (ตรวจรายใบ) ไม่เล่นซ้ำ
+  // ═══════════════════════════════════════════════════════════════════════
+  var _smode = null;        // storage_mode ที่รู้ล่าสุด · null = ยังไม่รู้ (= ทางเดิม)
+  var _ds = null;           // ฐานเอกสารที่ตรงกับ _syncedState (โหมด docs) — ดู _dsNew
+  var _dPend = null;        // คำขอ erp_docs_commit ที่ไม่รู้ผล (คำตอบหาย) — ส่งซ้ำแบบเดิมก่อน rebase
+  var _dSeqN = 0;           // dev_seq ต่อ session: ขยับทุกคำขอเนื้อใหม่ (journal seq ซ้ำได้: pushNow ก่อน dispatch) · ส่งซ้ำ in-doubt = เลขเดิม
+  var _blobDoubt = false;   // คำตอบของ erp_state_apply หาย (ยังไม่รู้ผล) — ถ้าสลับเป็น docs ก่อนรู้ = งานค้าง
+  var _modeAt = 0, _modeLast = null, _modeErr = 0, _modeSwitches = [], _modeBase = null;
+  var DOCS_PAGE = 3000, DOCS_CHAIN_MAX = 24, MODE_PROBE_BLOB_MS = 2 * 60 * 1000;
+  var DOCS_UNIQUE = Object.freeze({ pos:['poNumber'], grs:['grNumber'], transferRequests:['trNumber'], transferOrders:['toNumber'] });   // = erp_private.unique_fields (คลื่น 4) · sim UNIQUE_FIELDS
+  function _Docs(){ var D = global.ERP && global.ERP.Docs; return (D && typeof D.diffOps === 'function' && typeof D.implode === 'function') ? D : null; }
+  function _docsMode(){ return _modeBase === 'docs'; }   // ตัวส่งที่ถือฐาน (freeze ระหว่างทาง = ยังเป็นตัวเดิม)
+  // ── แผนที่แบบสายโซ่ (prototype chain): สำเนาเก่าใช้ร่วม · เขียนทับเฉพาะที่เปลี่ยน · null = ลบ · ลึกเกิน = รวบเป็นชั้นเดียว ──
+  //   (ข้อมูลจริง ~100k ใบ — คัดลอกทั้ง map ทุก commit/ดึง = 20-40 ms · โซ่ = O(ที่เปลี่ยน))
+  function _cmFlat(m){ var o = Object.create(null); for(var k in m){ var v = m[k]; if(v != null) o[k] = v; } return o; }
+  function _cmKid(m, depth){ return depth >= DOCS_CHAIN_MAX ? { m:Object.create(_cmFlat(m)), d:1 } : { m:Object.create(m), d:depth + 1 }; }
+  // ds = { head, colls:{c:{id:row}}, cd:{c:depth}, known:{'c/id':rev}, kd, ctr:{name:{value,rev}}, maxOrd:{c:n}, kinds:{c:kind} }
+  //   row = { c, id, ord, data, rev } · known = rev ล่าสุดของทุกใบ **รวมใบที่ถูกลบ (tombstone)** — verify finding 4:
+  //     สร้าง id เดิมซ้ำหลังลบ ต้องส่ง base_rev = rev ของ tombstone (SQL D8) · p_reads ของใบที่ถูกลบ = rev ของ tombstone (เดิม null = stale ทุกรอบ → งานค้าง)
+  //     ใบมีอยู่จริงไหม ดูที่ colls (null = ลบ) ไม่ใช่ known
+  // cr = {หมวด: rev ที่รู้ว่าหมวดนี้ครบ} (review 1 ข้อ 3) — หมวดที่อยู่ใน p_coll_reads ของ commit ที่ลงแล้ว = ครบ ณ rv ของ commit นั้น
+  //   (เซิร์ฟเวอร์ตรวจใต้ล็อกแล้วว่าไม่มีใครเขียนแทรก) → ส่ง max(head, cr) แทน head เก่า · ไม่งั้นงานของเราเองทำให้ stale ทุกครั้งที่มีเครื่องอื่นแทรก
+  function _dsNew(){ return { head:0, colls:Object.create(null), cd:Object.create(null), known:Object.create(null), kd:0, ctr:Object.create(null), maxOrd:Object.create(null), kinds:Object.create(null), cr:Object.create(null) }; }
+  function _dsFork(ds){
+    var k = _cmKid(ds.known, ds.kd);
+    return { head:ds.head, colls:Object.assign(Object.create(null), ds.colls), cd:Object.assign(Object.create(null), ds.cd),
+             known:k.m, kd:k.d, ctr:Object.assign(Object.create(null), ds.ctr), maxOrd:Object.assign(Object.create(null), ds.maxOrd),
+             kinds:Object.assign(Object.create(null), ds.kinds), cr:Object.assign(Object.create(null), ds.cr || {}), _own:Object.create(null) };
+  }
+  function _dsColl(ds, c){   // map ของหมวด c ที่เขียนได้ในรอบนี้ (copy-on-write)
+    if(ds._own && ds._own[c]) return ds.colls[c];
+    var cur = ds.colls[c], kid = cur ? _cmKid(cur, ds.cd[c] || 0) : { m:Object.create(null), d:0 };
+    ds.colls[c] = kid.m; ds.cd[c] = kid.d; if(ds._own) ds._own[c] = 1;
+    return kid.m;
+  }
+  function _dsPut(ds, c, id, ord, data, rev){
+    var m = _dsColl(ds, c), o = Number(ord);
+    if(!isFinite(o)){ var prev = m[id]; o = (prev && isFinite(Number(prev.ord))) ? Number(prev.ord) : (ds.maxOrd[c] != null ? ds.maxOrd[c] + 1 : 0); }
+    m[id] = { c:c, id:id, ord:o, data:data, rev:rev };
+    ds.known[c + '/' + id] = rev;
+    if(ds.maxOrd[c] == null || o > ds.maxOrd[c]) ds.maxOrd[c] = o;
+  }
+  function _dsDel(ds, c, id, rev){ var m = _dsColl(ds, c), r = Number(rev); m[id] = null; ds.known[c + '/' + id] = (rev != null && isFinite(r)) ? r : null; }
+  function _dsCtr(ds, name, value, rev){ if(value === null || value === undefined) delete ds.ctr[name]; else ds.ctr[name] = { value:value, rev:rev }; }
+  function _dsSeal(ds){ delete ds._own; return ds; }
+  // kind ของหมวด: COLL_MAP → ที่จำไว้ → INIT_STATE → เดาจากเอกสาร (มีแต่ '_' = singleton/blob)
+  function _dsKind(ds, c){
+    var D = _Docs(), E = global.ERP || {};
+    if(D && _own(D.COLL_MAP, c)) return D.COLL_MAP[c];
+    if(ds.kinds[c]) return ds.kinds[c];
+    var I = E.INIT_STATE; if(I && _own(I, c) && D) return D.collOf(c, I[c]);
+    return null;
+  }
+  // array ที่เรียงตาม ord ของฐานเอกสารแน่นอน (ได้จาก implode/patch หรือ commit ที่ต่อท้ายล้วน) — ใช้ patch ต่อได้ (verify finding 9)
+  var _canon = (typeof WeakSet === 'function') ? new WeakSet() : null;
+  function _canonAdd(a){ if(_canon && Array.isArray(a)) try { _canon.add(a); } catch(_c){} return a; }
+  function _isCanon(a){ return !!(_canon && Array.isArray(a) && _canon.has(a)); }
+  var _dsStats = { full:0, patch:0 };
+  // implode เฉพาะหมวดที่ระบุ (ไม่ระบุ = ทั้งหมด) ทับบน prev · หมวดอื่นใช้ค่าเดิม (ref เดิม → diff ครั้งหน้าข้ามได้ทันที)
+  //   inc = { chg:{c:{id:1}}, ds0 } (ดึงเฉพาะส่วน): หมวด docs/windowed ที่ prev[c] เรียงตามฐาน (canon) → patch เฉพาะใบที่เปลี่ยน
+  //   (ไม่ต้องเรียงใหม่ทั้งหมวด 50k แถวทุกรอบดึง 20 วิ) · patch ไม่ได้ = implode ทั้งหมวดแบบเดิม
+  function _dsState(ds, prev, only, inc){
+    var D = _Docs(), st = prev ? Object.assign({}, prev) : {}, cs = only ? only : Object.keys(ds.colls), i, c;
+    for(i = 0; i < cs.length; i++){
+      c = cs[i]; var m = ds.colls[c], rows = [], id;
+      var kind = _dsKind(ds, c), kinds = {}; if(kind) kinds[c] = kind;
+      if(inc && inc.chg && inc.chg[c] && inc.ds0 && prev && _isCanon(prev[c]) && (kind === 'docs' || kind === 'windowed') && typeof D.patch === 'function'){
+        var ups = [], dels = [], m0 = inc.ds0.colls[c];
+        for(id in inc.chg[c]){
+          var r1 = m && m[id], r0 = m0 && m0[id];
+          if(!r1){ dels.push(id); continue; }
+          ups.push({ id:id, ord:r1.ord, data:r1.data, isNew:!r0, ord0:r0 ? r0.ord : null });
+        }
+        var pa = null; try { pa = D.patch(c, prev[c], ups, dels, inc.ds0.maxOrd[c]); } catch(_pe){ pa = null; }
+        if(pa){ st[c] = _canonAdd(pa); _dsStats.patch++; continue; }
+      }
+      if(m) for(id in m){ var r = m[id]; if(r) rows.push(r); }
+      _dsStats.full++;
+      if(!rows.length){
+        if(kind === 'docs' || kind === 'windowed' || (!kind && Array.isArray(st[c]))) st[c] = _canonAdd([]);
+        else delete st[c];
+        continue;
+      }
+      var one = D.implode(rows, [], { kinds:kinds });
+      if(_own(one, c)) st[c] = _canonAdd(one[c]); else delete st[c];
+    }
+    // ตัวนับ: สร้างหัวใหม่ทุกตัวจาก ds.ctr (เล็ก) · หัวที่เคยมีแต่ไม่มีตัวนับเหลือ = {}
+    var tops = Object.create(null), n;
+    for(n in ds.ctr){ var dot = n.indexOf('.'); if(dot <= 0) continue; var tp = n.slice(0, dot); (tops[tp] = tops[tp] || {})[n.slice(dot + 1)] = ds.ctr[n].value; }
+    if(!only || only.__ctr){
+      for(c in W3_SUB) if(_own(st, c) || tops[c]) st[c] = tops[c] || {};
+      for(c in tops) if(!W3_SUB[c]) st[c] = tops[c];
+    }
+    var appV = Number((global.ERP && global.ERP.INIT_STATE && global.ERP.INIT_STATE.version) || 0);
+    if(st.version === undefined && appV) st.version = appV;   // G1: version ไม่อยู่ใน feed (ไม่ขยับ = รุ่นแอป)
+    // หมวดที่ไม่มีเอกสารเลย (array ว่าง/ตัวนับว่าง) ไม่อยู่ใน feed → เติมตามชนิดใน INIT_STATE (ก้อน blob มี [] เสมอ · ด่าน/rebase ใช้ ref.invoices ตรง ๆ)
+    if(!prev){
+      var I = (global.ERP && global.ERP.INIT_STATE) || {};
+      for(c in I) if(_own(I, c) && !_own(st, c)){
+        var kd0 = D.collOf(c, I[c]);
+        if(kd0 === 'docs' || kd0 === 'windowed') st[c] = _canonAdd([]);
+        else if(kd0 === 'counter') st[c] = {};
+      }
+    }
+    return st;
+  }
+  function _dTok(head){ return 'docs:' + head; }
+  // อ่าน storage_mode (erp_state_meta key/value ของ docs_v1.sql · รูป sim {storage_mode}) · null = ไม่รู้ (เน็ต/ไม่มีตาราง = ถือว่า blob ภายนอก)
+  async function _modeProbe(force){
+    var sb = _sb(); if(!sb || !isCloudOnly()) return null;
+    if(!force && Date.now() - _modeAt < 1000) return _modeLast;
+    _modeAt = Date.now();
+    try {
+      var tm = null, res = await Promise.race([Promise.resolve(sb.from('erp_state_meta').select('key, value').eq('key', 'storage_mode').maybeSingle()),
+        new Promise(function(r){ tm = setTimeout(function(){ r({ data:null, error:{ code:'', message:'client_timeout' } }); }, 15000); })]);
+      if(tm) clearTimeout(tm);
+      if(res && res.error){ _modeErr++; return null; }
+      var d = res && res.data, m = null;
+      if(d && typeof d.storage_mode === 'string') m = d.storage_mode;
+      else if(d && d.key === 'storage_mode') m = (typeof d.value === 'string') ? d.value : (d.value && typeof d.value === 'object' && typeof d.value.v === 'string' ? d.value.v : null);
+      else if(!d) m = 'blob';   // docs_v1.sql ยังไม่ติดตั้ง = blob
+      if(m !== 'blob' && m !== 'freeze' && m !== 'docs') m = null;
+      _modeLast = m; _modeErr = 0;
+      return m;
+    } catch(_e){ _modeErr++; return null; }
+  }
+  // สลับตัวส่ง — ล้างความรู้ของตัวส่งเดิม (ฐานต้องดึงใหม่ทั้งก้อนด้วยตัวส่งใหม่ก่อนเขียน) · ไม่แตะสมุด/งานค้าง
+  function _setMode(m, why){
+    if(m !== 'blob' && m !== 'freeze' && m !== 'docs') return false;
+    var was = _smode;
+    if(m === was) return false;
+    _smode = m; _modeLast = m;
+    try { _modeSwitches.push({ at:Date.now(), from:was, to:m, why:String(why || '').slice(0, 60) }); if(_modeSwitches.length > 20) _modeSwitches.shift(); } catch(_s){}
+    try { syncTrace('mode', true, { code:m, msg:(was || '?') + '→' + m + ' ' + String(why || '') }); } catch(_t){}
+    if(m === 'freeze') return true;   // รอโหมดถัดไป (ฐานเดิมยังใช้อ่านได้)
+    var bwas = _modeBase || 'blob';   // ตัวส่งที่ถือฐานอยู่ (freeze แล้วกลับโหมดเดิม = ฐานเดิมยังใช้ได้)
+    _modeBase = m;
+    if(m === bwas) return true;
+    if(m === 'docs'){ _ds = null; _needFullSync = true; _behind = false; }
+    else { _ds = null; _rev = 0; _known = {}; _seenRev = 0; _tail = {}; _needFullSync = true; _behind = false; _w4 = null; }   // _dPend คงไว้: ต้องรู้ผลก่อนเล่นสมุดซ้ำบน blob (ส่งซ้ำได้ผลเดิมแม้ย้ายโหมดแล้ว)
+    if(was && was !== 'freeze'){
+      try { logAudit({ ts:new Date().toISOString(), action:'storage_mode_switch', label:'ระบบเปลี่ยนวิธีบันทึก ' + was + ' → ' + m + ' (งานในสมุดส่งต่อด้วยวิธีใหม่)',
+        ref:String(why || '').slice(0, 120), device:deviceId(), detail:{ from:was, to:m, journal:_liveEntries().length, blobDoubt:_blobDoubt } }); } catch(_l){}
+    }
+    return true;
+  }
+  // คำตอบ moved จากเซิร์ฟเวอร์ (ทั้ง erp_state_apply และ erp_docs_commit) — ไม่มีอะไรถูกเขียน
+  function _onMoved(mode, src){
+    var m = String(mode || '');
+    if(m === 'freeze'){ _setMode('freeze', src); return { ok:false, busy:true, frozen:true, moved:'freeze', error:'storage_mode freeze (' + src + ')' }; }
+    if(m === 'docs' || m === 'blob'){ _setMode(m, src); _conflict = true; return { ok:false, conflict:true, moved:m }; }
+    _modeAt = 0; return { ok:false, busy:true, error:'moved:' + m };
+  }
+  // ── ดึง feed ──
+  //   คืน { ds, changed:[หมวด], ctr:bool, head, mode, rewind } · throw = ล้ม (ผู้เรียกลองใหม่) · ไม่แตะตัวแปร committed
+  async function _dsPull(sb, ds0, flow){
+    var full = !ds0, ds = full ? _dsNew() : _dsFork(ds0), since = full ? 0 : Number(ds0.head || 0), changed = Object.create(null), chg = Object.create(null), ctr = false, mode = null, after = null;
+    if(full) ds._own = Object.create(null);
+    for(var page = 0; page < 100000; page++){
+      var lim = DOCS_PAGE; try { if(global.__ERP_DOCS_PAGE) lim = Number(global.__ERP_DOCS_PAGE) || DOCS_PAGE; } catch(_lp){}   // เทสต์ย่อหน้า
+      // parity sim↔SQL (INTERFACE §7.1): หน้าที่ตัดกลางรุ่น/โหลดทั้งหมด → ส่ง next_key กลับเป็น p_after (ไม่มี = ไม่ส่งช่องนี้)
+      var sp = { p_since: since, p_limit: lim }; if(after) sp.p_after = after;
+      var res = await _rpcTimed(sb, 'erp_docs_since', sp, _keysCap(), 'peek_docs', null, flow);
+      if(res.error){ var ex = new Error(String(res.error.code || '') + ' ' + String(res.error.message || '')); ex.kind = _rpcErrKind(res.error, res.status); throw ex; }
+      var r = res.data || {};
+      if(!r.ok){ var e2 = new Error('docs_since:' + String(r.reason || '') + ':' + String(r.code || r.detail || '')); e2.kind = r.code === 'auth' ? 'auth' : 'error'; throw e2; }
+      if(r.mode) mode = String(r.mode);
+      if(r.rewind && !full) return { rewind:true, mode:mode };
+      var docs = r.docs || [], cts = r.counters || [], i;
+      for(i = 0; i < docs.length; i++){
+        var d = docs[i]; if(!d || d.c == null || d.id == null) continue;
+        var c = String(d.c), id = String(d.id); changed[c] = 1; (chg[c] = chg[c] || Object.create(null))[id] = 1;
+        if(!_ordWarned && !d.deleted && d.ord != null && !_ordOk(d.ord)){ _ordWarned = true; try { syncTrace('docs_warn', false, { code:'ord', msg:'ord เกิน 2^53 ' + c + '/' + id + ' = ' + String(d.ord).slice(0, 24) }); } catch(_ow){} }
+        if(d.deleted) _dsDel(ds, c, id, d.rev); else _dsPut(ds, c, id, d.ord, d.data, Number(d.rev));
+      }
+      for(i = 0; i < cts.length; i++){ var ct = cts[i]; if(ct && typeof ct.name === 'string'){ _dsCtr(ds, ct.name, ct.value, Number(ct.rev)); ctr = true; } }
+      var nx = Number(r.next != null ? r.next : r.head);
+      if(!isFinite(nx)) nx = since;
+      if(!r.more){ ds.head = Math.max(Number(ds.head || 0), nx); break; }
+      var nk = (r.next_key && typeof r.next_key === 'object') ? r.next_key : null;
+      // มี next_key = เคอร์เซอร์ขยับในรุ่นเดิมได้ (next อาจเท่า p_since เดิม) · ไม่มี = ต้องขยับรุ่น
+      if(nk ? !(nx >= since && (!after || JSON.stringify(nk) !== JSON.stringify(after))) : !(nx > since)){ var e3 = new Error('docs_since: หน้าถัดไปไม่ขยับ'); e3.kind = 'error'; throw e3; }
+      since = nx; after = nk; ds.head = nx;
+    }
+    if(full) _dsPrune(ds);
+    _dsSeal(ds);
+    return { ds:ds, changed:Object.keys(changed), chg:chg, ctr:ctr, head:ds.head, mode:mode, full:full };
+  }
+  // หมวดหน้าต่าง (auditLog/weighLogs): โหลดทั้งหมด (since 0) แล้วเก็บในฐานเฉพาะช่วงท้ายเพดาน (known ทุกใบคงไว้ กัน id ชน '~n')
+  //   verify finding 9/10: โหมด docs ไม่เคยลบประวัติ → map ในเครื่องโตทุกวัน · ก้อนที่เห็นก็ตัดเพดานอยู่แล้ว (implode → capLogsForSave)
+  function _dsPrune(ds){
+    var D = _Docs(); if(!D || !D.WIN) return;
+    for(var c in D.WIN){
+      var m = ds.colls[c]; if(!m) continue;
+      var cap = typeof D.capOf === 'function' ? D.capOf(c) : 0; if(!(cap > 0)) continue;
+      var rows = [], id; for(id in m){ var r = m[id]; if(r) rows.push(r); }
+      if(rows.length <= cap + 1000) continue;
+      rows.sort(function(a, b){ var x = Number(a.ord), y = Number(b.ord); if(!isFinite(x)) x = Infinity; if(!isFinite(y)) y = Infinity; return x < y ? -1 : (x > y ? 1 : 0); });
+      var keep = Object.create(null), kept = rows.slice(-cap);
+      for(var i = 0; i < kept.length; i++) keep[kept[i].id] = kept[i];
+      ds.colls[c] = keep; ds.cd[c] = 0; if(ds._own) ds._own[c] = 1;
+    }
+  }
+  // peek โหมด docs: pb = { state, ds } (ds null = ดึงทั้งหมด) → รูปเดียวกับ _peekDelta/_peekFull + dstore
+  async function _peekDocs(pb, flow){
+    var sb = _sb(); if(!sb) throw new Error('Supabase ยังไม่พร้อม (config/lib)');
+    if(!_Docs()) throw new Error('ERP.Docs ไม่พร้อม (00-docs.js)');
+    var useBase = !!(pb && pb.ds && pb.state);
+    var p = await _dsPull(sb, useBase ? pb.ds : null, flow);
+    if(p.rewind){ try { logAudit({ ts:new Date().toISOString(), action:'state_drift', label:'รุ่นเอกสารบนเซิร์ฟเวอร์ถอยหลัง → ดึงทั้งหมด', ref:'docs_rewind', device:deviceId() }); } catch(_l){}
+      p = await _dsPull(sb, null, flow); useBase = false; }
+    if(p.mode && p.mode !== 'docs') return { moved:p.mode, state:null };
+    var st;
+    if(useBase){
+      var only = p.changed.slice(); if(p.ctr) only.__ctr = true;
+      st = (only.length || only.__ctr) ? _dsState(p.ds, pb.state, only, { chg:p.chg, ds0:pb.ds }) : pb.state;
+    } else st = _dsState(p.ds, null, null);
+    return { state:st, savedAt:_dTok(p.head), rev:p.head, byUser:null, delta:useBase, full:!useBase, keys:p.changed.slice(0, 40), dstore:p.ds, docs:true };
+  }
+  // ── อ่าน p_reads / p_coll_reads ของงานในก้อนนี้ ──
+  //   ERP.actionDocReads(type, data, state) → {docs, colls} (เลน STATE) · null/ไม่มี = ACTION_READS ทั้งหมวด (− APPEND_ONLY/PATCH ที่ก้อนนี้เขียน − WHEN) แบบคลื่น 4
+  //   + MERGE_GUARD_KEYS ทุกครั้ง · 'ALL' = ทุกหมวดในก้อน
+  function _dReads(list, base, next, d, ds, all){
+    var E = _E4(), R = E.ACTION_READS || {}, AO = E.APPEND_ONLY_READS || {}, PR = E.PATCH_READS || {}, adr = (typeof E.actionDocReads === 'function') ? E.actionDocReads : null;
+    // ไม่มีตัวกลางของเลน STATE แต่มีตาราง ACTION_DOC_READS → เรียกเองแบบเดียวกัน (รูปผิด = null = ทั้งหมวด)
+    if(!adr && E.ACTION_DOC_READS && typeof E.ACTION_DOC_READS === 'object') adr = function(t, data, st){
+      var f = _own(E.ACTION_DOC_READS, t) ? E.ACTION_DOC_READS[t] : null;
+      if(typeof f !== 'function' || !data || typeof data !== 'object' || !st) return null;
+      var r = f(data, st); if(!r || !Array.isArray(r.docs) || !Array.isArray(r.colls)) return null;
+      if(r.docs.some(function(x){ return !x || typeof x.c !== 'string' || x.id == null; }) || r.colls.some(function(c){ return typeof c !== 'string'; })) return null;
+      return r;
+    };
+    var colls = Object.create(null), docs = Object.create(null), touched = Object.create(null), opk = Object.create(null), i, k;
+    d.colls.forEach(function(c){ touched[c] = 1; });
+    d.ops.forEach(function(o){ opk[o.c + '/' + o.id] = 1; });
+    var isAll = !!all || _journalTruncated || !list.length;
+    for(i = 0; !isAll && i < list.length; i++){
+      var a = list[i], t = a && a.type; if(!t){ isAll = true; break; }
+      if(_AUDIT_ONLY[t]) continue;
+      var dr = null;
+      if(adr){ try { dr = adr(t, a.data, base); } catch(_e){ dr = null; } }
+      if(dr){
+        var dr2 = null; try { dr2 = adr(t, a.data, next); } catch(_e2){ dr2 = null; }
+        [dr, dr2].forEach(function(x){ if(!x) return; (x.docs || []).forEach(function(y){ if(y && y.c != null && y.id != null) docs[String(y.c) + '/' + String(y.id)] = { c:String(y.c), id:String(y.id) }; }); (x.colls || []).forEach(function(c){ colls[c] = 1; }); });
+        continue;
+      }
+      var r = _own(R, t) ? R[t] : null; if(!r || typeof r.forEach !== 'function'){ isAll = true; break; }
+      var ao = _own(AO, t) ? AO[t] : [], pr = _own(PR, t) ? PR[t] : [], drop = _readsDrop(t, a.data);
+      r.forEach(function(c){ if(_own(drop, c)) return; if((ao.indexOf(c) >= 0 || pr.indexOf(c) >= 0) && touched[c]) return; colls[c] = 1; });
+    }
+    if(isAll){
+      var D = _Docs();
+      [base, next].forEach(function(s){ for(k in (s || {})) if(_own(s, k) && !W3_SKIP[k]){ var kd = D ? D.collOf(k, s[k]) : 'docs'; if(kd !== 'session' && kd !== 'meta') colls[k] = 1; } });
+    }
+    ((E.MERGE_GUARD_KEYS) || []).forEach(function(c){ colls[c] = 1; });
+    var pc = {}, pr2 = [], h = Number(ds.head || 0);
+    for(k in colls) pc[k] = Math.max(h, Number((ds.cr && ds.cr[k]) || 0));   // review 1 ข้อ 3
+    for(k in docs){ if(opk[k]) continue; var kv = ds.known[k]; pr2.push({ c:docs[k].c, id:docs[k].id, rev:(kv == null ? null : Number(kv)) }); }
+    return { colls:pc, docs:pr2, all:isAll };
+  }
+  // ord ของใบใหม่ที่ "แทรกหัว/กลาง" (reducer ใส่ใบใหม่ไว้หน้าสุด) — ต่อท้าย = ไม่ส่ง (เซิร์ฟเวอร์ต่อท้ายเอง)
+  function _dOrds(D, ds, next, d){
+    var out = Object.create(null);
+    (d.reorder || []).forEach(function(c){
+      var arr = next[c]; if(!Array.isArray(arr)) return;
+      var m = ds.colls[c], ids = D.idsOf(c, arr), newSet = Object.create(null), run = [], prevOrd = null;
+      d.ops.forEach(function(o){ if(o.c === c && o.op === 'put' && o.base_rev == null) newSet[o.id] = 1; });
+      function flush(nextOrd){
+        if(!run.length) return;
+        var k = run.length, j;
+        // verify finding 3: ord ข้างเคียงเกิน 2^53 (ปัดเศษแล้ว) = ไม่ส่ง (SQL ปฏิเสธเลข 19 หลัก → bad_request) · ยอมลำดับเซิร์ฟเวอร์
+        if(prevOrd == null && nextOrd != null){ if(_ordOk(nextOrd - k)) for(j = 0; j < k; j++) out[c + '/' + run[j]] = nextOrd - k + j; }
+        else if(prevOrd != null && nextOrd != null && _ordOk(prevOrd) && _ordOk(nextOrd) && nextOrd - prevOrd - 1 >= k){ for(j = 0; j < k; j++) out[c + '/' + run[j]] = prevOrd + 1 + j; }
+        run = [];
+      }
+      for(var i = 0; i < ids.length; i++){
+        var id = ids[i]; if(id == null) continue;
+        if(newSet[id]){ run.push(id); continue; }
+        var row = m && m[id], o = row ? Number(row.ord) : NaN;
+        if(!isFinite(o)){ run = []; prevOrd = null; continue; }
+        flush(o); prevOrd = o;
+      }
+      run = [];   // ใบใหม่ท้ายสุด = ต่อท้าย (ไม่ส่ง ord)
+    });
+    return out;
+  }
+  function _dUnique(ds, ops){
+    var out = [];
+    ops.forEach(function(o){
+      var F = _own(DOCS_UNIQUE, o.c) ? DOCS_UNIQUE[o.c] : null; if(!F || o.op !== 'put' || !o.data || typeof o.data !== 'object') return;
+      var m = ds.colls[o.c], old = m && m[o.id], od = old && old.data;
+      F.forEach(function(f){
+        var v = o.data[f]; if(v == null || v === '' || (typeof v !== 'string' && typeof v !== 'number')) return;
+        if(od && od[f] === v) return;   // เลขเดิมของใบเดิม (ลงทะเบียนแล้ว)
+        out.push({ c:o.c, field:f, scope:'', value:v, doc_id:o.id });
+      });
+    });
+    return out;
+  }
+  // ผลสำเร็จ: ฐานเอกสารใหม่ + _syncedState (หมวดที่ส่ง = ค่าของ next · ref เดิม) · ช่องว่างรุ่น (prev_head > ฐาน) = เครื่องอื่นเขียนแทรก → _behind
+  function _dOrdMap(x){
+    if(!x || typeof x !== 'object') return null;
+    var out = Object.create(null), n = 0;
+    if(Array.isArray(x)) x.forEach(function(y){ if(y && y.c != null && y.id != null && _ordOk(y.ord)){ out[String(y.c) + '/' + String(y.id)] = Number(y.ord); n++; } });
+    else for(var k in x) if(_own(x, k) && _ordOk(x[k])){ out[k] = Number(x[k]); n++; }
+    return n ? out : null;
+  }
+  // ord ต้องเป็นจำนวนเต็มที่ JS เก็บได้ตรง (≤ 2^53 · INTERFACE §3.2) — เกิน = ปัดเศษแล้วลำดับชน → ไม่ใช้/ไม่ส่ง
+  function _ordOk(v){ var n = (typeof v === 'string' && /^-?[0-9]{1,16}$/.test(v)) ? Number(v) : v; return typeof n === 'number' && Number.isSafeInteger(n); }
+  var _ordWarned = false;
+  function _dCommitted(p, r){
+    var ds = _dsFork(p.ds), rv = Number(r.rev), prev = r.prev_head != null ? Number(r.prev_head) : rv - 1, i;
+    ds._own = Object.create(null);
+    if(!r.noop){
+      // verify finding 3: ord ที่เซิร์ฟเวอร์ให้จริง (res.ords {'c/id': n} หรือ [{c,id,ord}]) → ฐานในเครื่องเรียงเหมือนเซิร์ฟเวอร์ · ไม่มี = ord ที่ส่ง/เดิม/ท้ายสุด+1
+      var so = _dOrdMap(r.ords);
+      p.params.p_ops.forEach(function(o){ if(o.op === 'del') _dsDel(ds, o.c, o.id, rv); else { var k = o.c + '/' + o.id; _dsPut(ds, o.c, o.id, (so && _own(so, k)) ? so[k] : o.ord, o.data, rv); } });
+      var rc = r.counters, rmap = Object.create(null);
+      if(Array.isArray(rc)) rc.forEach(function(x){ if(x && typeof x.name === 'string') rmap[x.name] = x.value; });
+      else if(rc && typeof rc === 'object') for(var n in rc) if(_own(rc, n)) rmap[n] = (rc[n] && typeof rc[n] === 'object' && 'value' in rc[n]) ? rc[n].value : rc[n];
+      (p.params.p_counters || []).forEach(function(c){
+        var v = _own(rmap, c.name) ? rmap[c.name] : (c.op === 'bump' ? (Number(ds.ctr[c.name] ? ds.ctr[c.name].value : 0) || 0) + Number(c.delta) : c.value);
+        _dsCtr(ds, c.name, v, rv);
+      });
+    }
+    // review 1 ข้อ 3: หมวดที่ส่งใน p_coll_reads แล้ว commit ลง = ครบ ณ rv (ไม่ขึ้นกับ gap ของ head รวม)
+    if(!r.noop){ var _pcr = p.params.p_coll_reads || {}; for(var _cc in _pcr) if(_own(_pcr, _cc)) ds.cr[_cc] = rv; }
+    var gap = !r.noop && prev > Number(p.ds.head || 0);
+    if(!r.noop && !gap) ds.head = rv;
+    _dsSeal(ds);
+    var synced = Object.assign({}, p.base), next = p.next;
+    if(p.partial){
+      // verify finding 5: ก้อนย่อยที่ยังไม่ใช่ก้อนสุดท้าย — ฐาน = ฐานเดิม + เฉพาะใบในก้อนนี้ (implode จากฐานเอกสาร) · ตัวนับ (ก้อนแรก) = ค่าของเรา
+      var pc = Object.create(null);
+      p.params.p_ops.forEach(function(o){ pc[o.c] = 1; });
+      var only = Object.keys(pc);
+      if(only.length) synced = _dsState(ds, synced, only);
+      (p.params.p_counters || []).forEach(function(x){ var tp = String(x.name).split('.')[0]; if(next[tp] === undefined) delete synced[tp]; else synced[tp] = next[tp]; });
+    } else {
+      for(i = 0; i < p.d.colls.length; i++){ var c = p.d.colls[i]; if(next[c] === undefined) delete synced[c]; else synced[c] = next[c]; }
+      if(!r.noop && !p.chunked) _dCanonMark(p, ds);
+    }
+    // ตัวนับ: _syncedState คงค่าของเรา (= จอ) แม้เซิร์ฟเวอร์บวกร่วมกับเครื่องอื่นแล้วได้ค่าสูงกว่า — ห้ามใช้ค่าเซิร์ฟเวอร์ในฐาน
+    //   (ฐาน > จอ = diff ครั้งหน้าเป็น CAS ถอยหลัง) · ค่าจริงเข้าฐานตอนดึงครั้งถัดไป (ds.ctr = ค่าเซิร์ฟเวอร์ถ้ารู้)
+    if(p.opt && p.opt.base){ _behind = false; _needFullSync = false; }
+    _ds = ds; _rev = 0; _known = {}; _tail = {};
+    _setSynced(synced); _hasRow = true; _loaded = true; _busyStreak = 0;
+    _seenRev = ds.head; _tok = _dTok(ds.head);
+    if(gap){ _behind = true; _remoteCbs.forEach(function(cb){ try { cb({ behind:true }); } catch(_e){} }); }
+    return { ok:true, noop:!!r.noop, rev:rv, applied:r.applied || 0, docs:true };
+  }
+  // verify finding 9: หมวดที่ commit นี้แค่แก้ในที่/ต่อท้าย (ord ใบใหม่เรียงขึ้นต่อจากเดิม) + ฐานเดิมเรียงตามฐานเอกสาร → array ใหม่ก็เรียงตามฐาน (patch ต่อได้)
+  function _dCanonMark(p, ds){
+    var cs = p.d.colls || [], reo = p.d.reorder || [], i;
+    for(i = 0; i < cs.length; i++){
+      var c = cs[i], arr = p.next[c];
+      if(!Array.isArray(arr) || !_isCanon(p.base[c]) || reo.indexOf(c) >= 0) continue;
+      var m0 = p.ds.colls[c], m1 = ds.colls[c], last = p.ds.maxOrd[c], good = true;
+      p.params.p_ops.forEach(function(o){
+        if(!good || o.c !== c || o.op !== 'put' || (m0 && m0[o.id])) return;   // ใบเดิม = แก้ในที่
+        var row = m1 && m1[o.id], ov = row ? Number(row.ord) : NaN;
+        if(!isFinite(ov) || (last != null && !(ov > last))) { good = false; return; }
+        last = ov;
+      });
+      if(good) _canonAdd(arr);
+    }
+  }
+  function _docsMovedErr(e){ return !!e && /ERP_DOCS_MOVED/.test(String(e.message || '') + ' ' + String(e.hint || '') + ' ' + String(e.details || '')); }
+  function _dResult(p, res){
+    if(res.error){
+      var kind = _rpcErrKind(res.error, res.status), em = String(res.error.code || '') + ' ' + String(res.error.message || '');
+      // verify finding 6: โหมดเปลี่ยนระหว่างรอล็อก erp_head (flip_to_blob/freeze) → SQL raise ERP_DOCS_MOVED (P0001) = ทั้ง transaction ถูกยกเลิก ไม่มีอะไรลง
+      //   ไม่ใช่ fatal → รอแบบคิวยาว (ไม่นับเพดานงานค้าง) · รอบหน้าถามโหมดใหม่ (_modeAt = 0) แล้วสลับตัวส่งตามคำตอบ moved
+      if(_docsMovedErr(res.error)){ _dPend = null; _modeAt = 0; try { syncTrace('mode', false, { code:'moved_err', msg:em }); } catch(_t){} return { ok:false, busy:true, frozen:true, moved:'freeze', error:'storage_mode moved (' + em.slice(0, 60) + ')' }; }
+      if(kind === 'gone'){ _dPend = null; _modeAt = 0; _setMode('blob', 'docs-gone'); _conflict = true; return { ok:false, conflict:true, moved:'blob' }; }   // ไม่มีฟังก์ชัน = เซิร์ฟเวอร์ยังไม่ติดตั้ง → ทางเดิม
+      if(kind === 'busy'){ _dPend = null; return { ok:false, busy:true, error:em }; }         // 55P03/57014 ก่อน commit (ทั้ง transaction ถูกยกเลิก)
+      if(kind === 'busy_unknown') return { ok:false, busy:true, inDoubt:true, error:em };    // ไม่รู้ผล → _dPend ค้างไว้ส่งซ้ำ
+      if(kind === 'error'){ _dPend = null; return { ok:false, fatal:true, docsFatal:true, error:'docs_commit:' + em }; }
+      var ex = new Error(em); if(kind === 'auth'){ ex.w3known = true; _dPend = null; }
+      throw ex;                                                                              // net = ไม่รู้ผล (_dPend ค้าง) · auth = ไม่ลงแน่
+    }
+    var r = res.data || {};
+    if(r.ok){ _dPend = null; return _dCommitted(p, r); }
+    _dPend = null;   // ทุกคำตอบที่ไม่ ok = ไม่มีอะไรถูกเขียน
+    switch(r.reason){
+      case 'stale':
+        _conflict = true;
+        return { ok:false, conflict:true, stale:(r.stale || []).slice(0, 12).map(function(x){ return x ? (x.c ? x.c + '/' + x.id : (x.coll ? 'coll:' + x.coll : (x.counter ? 'ctr:' + x.counter : '?'))) : '?'; }) };
+      case 'dupnumber':
+        try { logAudit({ ts:new Date().toISOString(), action:'doc_dupnumber', label:'เลขเอกสารซ้ำกับเครื่องอื่น → รวมงานใหม่: ' + (r.dup || []).map(function(x){ return x && x.value; }).filter(Boolean).join(', ').slice(0, 160), ref:String(r.dup && r.dup[0] && r.dup[0].value || ''), detail:r.dup, device:deviceId() }); } catch(_l){}
+        _conflict = true; return { ok:false, conflict:true, dup:r.dup };
+      case 'moved': return _onMoved(r.mode, 'docs_commit');
+      case 'denied':
+        if(r.code === 'auth'){ var ea = new Error('denied:auth'); ea.w3known = true; throw ea; }
+        try { logAudit({ ts:new Date().toISOString(), action:'state_docs_denied', label:'ระบบปฏิเสธการบันทึก (' + String(r.code || '') + ') → งานค้าง', ref:String(r.code || '') + ':' + String(r.c || '') + '/' + String(r.id || ''), detail:r, device:deviceId() }); } catch(_l2){}
+        return { ok:false, fatal:true, docsFatal:true, error:'denied:' + String(r.code || '') };
+      default:
+        try { logAudit({ ts:new Date().toISOString(), action:'state_docs_reject', label:'ระบบปฏิเสธคำขอบันทึก (บั๊กฝั่งแอป)', ref:String(r.reason) + ':' + String(r.detail || ''), device:deviceId() }); } catch(_l3){}
+        return { ok:false, fatal:true, docsFatal:true, error:'docs:' + String(r.reason || 'reject') };
+    }
+  }
+  // push โหมด docs · next = ก้อนที่ตัดเพดาน+strip แล้ว · opt.base/opt.dstore = ฐานจาก peek ของรอบ rebase
+  async function _applyViaDocs(sb, next, byUser, seqCovered, opt){
+    opt = opt || {};
+    var D = _Docs(); if(!D) return { ok:false, fatal:true, docsFatal:true, error:'docs:no-lib' };
+    var ds = opt.base ? opt.dstore : _ds, base = opt.base || _syncedState;
+    if(!ds || !base || (!opt.base && _needFullSync)){ _conflict = true; return { ok:false, conflict:true, needBase:true }; }   // ยังไม่มีฐานเอกสาร → rebase (ดึงทั้งหมด)
+    var entries = _journal.filter(function(e){ return !e.noop && (!(seqCovered > 0) || e.seq <= seqCovered); });
+    var list = entries.concat(opt.actions || []);
+    var d;
+    try { d = D.diffOps(base, next, ds.known, { actions:list }); }
+    catch(e){
+      try { logAudit({ ts:new Date().toISOString(), action:'state_docs_shape', label:'ข้อมูลแตกเป็นเอกสารไม่ได้ → ไม่ส่ง (งานอยู่ในสมุด)', ref:String(e && e.message || e).slice(0, 160), detail:(e && e.issues || []).slice(0, 10), device:deviceId() }); } catch(_l){}
+      return { ok:false, fatal:true, docsFatal:true, error:'pv2_shape:' + String(e && e.message || e).slice(0, 120) };
+    }
+    if(d.warnings && d.warnings.length){ try { syncTrace('docs_warn', false, { code:'warn', msg:d.warnings.slice(0, 3).map(function(w){ return w.key + ':' + w.why; }).join(' · ') }); } catch(_w){} }
+    if(!d.ops.length && !d.counters.length) return { ok:true, noop:true, local:true };
+    var ords = _dOrds(D, ds, next, d);
+    var ops = d.ops.map(function(o){ var k = o.c + '/' + o.id; return _own(ords, k) ? Object.assign({}, o, { ord:ords[k] }) : o; });
+    var rd = _dReads(list, base, next, d, ds, opt.readsAll || opt.strict);
+    var types = []; list.forEach(function(e){ if(e && e.type && types.indexOf(e.type) < 0 && types.length < 64) types.push(String(e.type)); });
+    var seq = seqCovered > 0 ? seqCovered : 0;
+    var chunks = _dChunks(ops);
+    if(chunks.length <= 1){
+      var params = { p_ops:ops, p_reads:rd.docs, p_coll_reads:rd.colls, p_counters:d.counters, p_unique:_dUnique(ds, ops),
+        p_sess:_dSess(), p_dev_seq:++_dSeqN, p_build:global.__ERP_BUILD_ID__ || null, p_device:deviceId(), p_actions:types };
+      var p = { params:params, ds:ds, base:base, next:next, d:d, seq:seq, opt:{ base:!!opt.base } };
+      _dPend = p;
+      var res = await _rpcTimed(sb, 'erp_docs_commit', params, _rpcCapMs(RPC_APPLY_MAX_MS), 'apply_docs');
+      return _dResult(p, res);
+    }
+    // verify finding 5: เกินเพดานต่อคำขอ (SQL 2,000 ใบ/call · statement_timeout 10 วิ) → แบ่งส่งทีละก้อน (เดิม = denied:cap → งานค้าง ส่งไม่ขึ้นตลอดไป)
+    //   ก้อนแรกถือ p_reads/p_coll_reads/ตัวนับ (ตรวจว่างานยังถูกต้อง ณ ตอนนั้น) · ก้อนถัดไปส่งเฉพาะใบ (base_rev รายใบกันทับงานเครื่องอื่น)
+    //   dev_seq แยกทุกก้อน · ตัดสมุดหลังก้อนสุดท้าย · ไม่รู้ผลก้อนไหน = ส่งซ้ำก้อนนั้นแล้วส่งก้อนที่เหลือต่อ (_dResolvePend)
+    var plan = { chunks:[], i:0, next:next, d:d, seq:seq, opt:{ base:!!opt.base }, types:types, n:ops.length };
+    chunks.forEach(function(cops, ci){
+      plan.chunks.push({ p_ops:cops, p_reads:ci ? [] : rd.docs, p_coll_reads:ci ? {} : rd.colls, p_counters:ci ? [] : d.counters, p_unique:_dUnique(ds, cops),
+        p_sess:_dSess(), p_dev_seq:0, p_build:global.__ERP_BUILD_ID__ || null, p_device:deviceId(), p_actions:types });
+    });
+    try { syncTrace('docs_chunk', true, { code:'plan', msg:ops.length + ' ใบ → ' + chunks.length + ' ก้อน' }); } catch(_t){}
+    return _dRunChunks(sb, plan, ds, base);
+  }
+  // sess ของโหมด docs = sess ของแท็บ + '#d' (verify finding 1): dev_seq เป็นตัวนับคำขอ ไม่ใช่ journal seq — ถ้า SQL รวม max(dev_seq) ลง __devSeq ตอน
+  //   flip_to_blob แล้วใช้ key เดียวกับ blob, rebase blob จะตัดสมุดตาม dev_seq (งานหาย/ส่งซ้ำ) · แยก key = __devSeq[แท็บนี้] ของ blob ไม่ถูกแตะ
+  function _dSess(){ return _sessKey() + '#d'; }
+  var DOCS_CHUNK_OPS = 1000, DOCS_CHUNK_BYTES = 3 * 1024 * 1024;
+  function _dChunks(ops){
+    var lim = DOCS_CHUNK_OPS; try { if(global.__ERP_DOCS_CHUNK) lim = Math.max(1, Number(global.__ERP_DOCS_CHUNK) || DOCS_CHUNK_OPS); } catch(_l){}   // เทสต์ย่อก้อน
+    if(ops.length <= lim && ops.length <= 200) return [ops];
+    var out = [], cur = [], bytes = 0;
+    for(var i = 0; i < ops.length; i++){
+      var b = 64; try { b += ops[i].op === 'put' ? JSON.stringify(ops[i].data).length : 0; } catch(_j){ b += 1024; }
+      if(cur.length && (cur.length >= lim || bytes + b > DOCS_CHUNK_BYTES)){ out.push(cur); cur = []; bytes = 0; }
+      cur.push(ops[i]); bytes += b;
+    }
+    if(cur.length) out.push(cur);
+    return out;
+  }
+  // ส่งก้อนย่อยตามลำดับ (ฐานของก้อนถัดไป = ผลของก้อนก่อน: _ds/_syncedState ที่ _dCommitted ตั้ง)
+  async function _dRunChunks(sb, plan, ds, base){
+    var busyTry = 0;
+    while(plan.i < plan.chunks.length){
+      var last = plan.i === plan.chunks.length - 1, params = plan.chunks[plan.i];
+      if(!params.p_dev_seq) params.p_dev_seq = ++_dSeqN;
+      var p = { params:params, ds:ds || _ds, base:base || _syncedState, next:plan.next, d:plan.d, seq:last ? plan.seq : 0, opt:plan.opt,
+                partial:!last, chunked:true, plan:plan };
+      ds = null; base = null;   // ก้อนถัดไปใช้ฐานที่ commit แล้ว
+      _dPend = p;
+      var res = await _rpcTimed(sb, 'erp_docs_commit', params, _rpcCapMs(RPC_APPLY_MAX_MS), 'apply_docs');
+      var r = _dResult(p, res);   // throw = ไม่รู้ผล (_dPend ค้างไว้ = ก้อนนี้)
+      if(!r.ok){
+        // ก้อนหลังก้อนแรก: ล็อกไม่ทัน (ไม่มีอะไรลง) = ลองก้อนเดิมซ้ำทันทีสูงสุด 4 ครั้ง (ไม่ย้อนไปตรวจงานใหม่ทั้งก้อน)
+        if(plan.i > 0 && r.busy && !r.inDoubt && !r.frozen && busyTry < 4){ busyTry++; await _sleep(400 * busyTry); continue; }   // dev_seq เดิม (ไม่มีอะไรลง)
+        if(plan.i > 0){
+          try { logAudit({ ts:new Date().toISOString(), action:'state_docs_chunk_partial', label:'บันทึกงานใหญ่แบ่งก้อน: ลงแล้ว ' + plan.i + '/' + plan.chunks.length + ' ก้อน ก้อนถัดไปไม่ผ่าน → รวมงานใหม่',
+            ref:String(r.error || (r.stale && r.stale.join(',')) || (r.conflict ? 'conflict' : '')).slice(0, 120), device:deviceId(), detail:{ done:plan.i, total:plan.chunks.length, ops:plan.n, types:plan.types } }); } catch(_l){}
+        }
+        return r;
+      }
+      busyTry = 0; plan.i++;
+    }
+    try { syncTrace('docs_chunk', true, { code:'done', msg:plan.n + ' ใบ · ' + plan.chunks.length + ' ก้อน' }); } catch(_t2){}
+    return { ok:true, rev:Number(_ds && _ds.head) || 0, applied:plan.n, docs:true, chunks:plan.chunks.length };
+  }
+  // ก่อน rebase: คำขอที่ไม่รู้ผล → ส่งซ้ำแบบเดิมทุกตัวอักษร (idempotent) · 'committed' | 'not' | 'none' · throw = ยังไม่รู้ (ลองใหม่)
+  async function _dResolvePend(sb){
+    var p = _dPend; if(!p) return 'none';
+    var res = await _rpcTimed(sb, 'erp_docs_commit', p.params, _rpcCapMs(RPC_APPLY_MAX_MS), 'apply_docs');
+    if(res.error) throw new Error('resend:' + String(res.error.code || '') + ' ' + String(res.error.message || ''));   // รอบนี้ไม่ลง แต่รอบก่อนอาจลงแล้ว = ยังไม่รู้ → ลองใหม่
+    var r = res.data || {};
+    if(r.ok){
+      _dPend = null;
+      _dCommitted(p, r);   // ลงแล้ว (รอบก่อน หรือรอบนี้) — ฐานของคำขอ = ฐานที่คำนวณไว้ตอนส่ง (ระหว่างนั้นไม่มีอะไรแทนฐาน: ชน latch + สมุดไม่ว่างกันดึง)
+      // verify finding 5: ก้อนย่อยที่ไม่ใช่ก้อนสุดท้าย → ส่งก้อนที่เหลือต่อ (ไม่เล่นงานซ้ำบนฐานที่ลงไปแล้วบางส่วน) · ไม่ผ่าน = รวมงานตามปกติ
+      if(p.plan && p.partial && _docsMode()){
+        p.plan.i++;
+        var rc = await _dRunChunks(sb, p.plan, null, null);   // throw = ไม่รู้ผลก้อนถัดไป (_dPend ค้าง) → ลองใหม่
+        if(!rc.ok){ try { syncTrace('resend', false, { code:'chunk', msg:'ก้อน ' + p.plan.i + '/' + p.plan.chunks.length }); } catch(_t3){} return 'not'; }
+        _journalAfterPush(p.plan.seq);
+        try { syncTrace('resend', true, { code:'committed', msg:'chunks ' + p.plan.chunks.length }); } catch(_t4){}
+        return 'committed';
+      }
+      if(!_docsMode()){ _ds = null; _needFullSync = true; }   // ย้อนเป็น blob แล้ว: จอ/ref = ผลของคำขอนี้ · ฐาน blob ต้องดึงทั้งแถวใหม่
+      if(p.seq) _journalAfterPush(p.seq);
+      try { syncTrace('resend', true, { code:'committed', msg:'dev_seq ' + p.params.p_dev_seq }); } catch(_t){}
+      return 'committed';
+    }
+    _dPend = null;
+    if(r.reason === 'moved'){ _onMoved(r.mode, 'resend'); }
+    try { syncTrace('resend', false, { code:String(r.reason || ''), msg:'dev_seq ' + p.params.p_dev_seq }); } catch(_t2){}
+    return 'not';
+  }
+  // เปิดแอป/โหลดทั้งก้อนโหมด docs (= loadCloudState)
+  async function _loadDocs(){
+    var sb = _sb();
+    var p = await _dsPull(sb, null, 'boot');
+    if(p.mode && p.mode !== 'docs'){ _setMode(p.mode, 'boot-since'); return null; }
+    var st = _dsState(p.ds, null, null);
+    _loaded = true; _hasRow = true;
+    _ds = p.ds; _dPend = null; _rev = 0; _known = {}; _tail = {}; _seenRev = p.head; _tok = _dTok(p.head);
+    _behind = false; _needFullSync = false; _rpcMode = null;
+    var _tabEp0 = _syncedState ? _epochOf(_syncedState) : null;
+    _setSynced(st);
+    try { epochCheck(st, 'boot', null, _tabEp0); } catch(_ep){}
+    return { state:st, savedAt:_tok, rev:p.head, docs:true };
+  }
+  function docsStatus(){
+    var n = 0; if(_ds) for(var c in _ds.colls){ var m = _ds.colls[c]; for(var id in m){ if(m[id]) n++; } }   // นับใบที่มีอยู่ (known รวม tombstone แล้ว)
+    return { mode:_smode, head:_ds ? _ds.head : null, docs:n, pend:!!_dPend, devSeq:_dSeqN, blobDoubt:_blobDoubt, needFullSync:_needFullSync, behind:_behind,
+             switches:_modeSwitches.slice(), lastProbe:_modeLast, probeErr:_modeErr };
+  }
+
   // opt: { base, rev, exact (ฐานจาก peek ของรอบ rebase), strict (กู้คืน/ทับทั้งก้อน), actions, readsAll }
   // ═══════════════════════════════════════════════════════════════════════
   // 🧹 MIGRATION_ECOUNT_2569 M2: รุ่นข้อมูล (settings.dataEpoch) — หลังเจ้าของล้างข้อมูล ห้ามงานที่ค้างก่อนล้างกลับขึ้นมา
@@ -20645,6 +21706,29 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     //    เดิม push ทั้งก้อน → เครื่องอื่นโหลดมาแล้วกลายเป็น user คนล่าสุดที่ล็อกอิน (ข้ามหน้า login เลย)
     //    🌊 คลื่น 3 (fix e): strip ก่อน diff เสมอ
     var stripped = _stripSession(capped);
+    // 🗄️ PERSIST_V2: เซิร์ฟเวอร์กำลังสลับ (freeze) → ไม่ส่ง · เช็กโหมดใหม่ (ไม่ถี่กว่า 1 วิ) · ยังสลับอยู่ = รอแบบคิวยาว (งานอยู่ในสมุด)
+    if(_smode === 'freeze'){
+      var _mf = await _modeProbe(false);
+      if(_mf && _mf !== 'freeze') _setMode(_mf, 'push-probe');
+      if(_smode === 'freeze') return { ok:false, busy:true, frozen:true, error:'storage_mode freeze' };
+    }
+    // 🗄️ PERSIST_V2: โหมด docs → erp_docs_commit เท่านั้น (ห้ามถอยไปเขียนทั้งก้อน — เซิร์ฟเวอร์ปิดไว้แล้ว G4)
+    if(_docsMode()){
+      var rd;
+      try { rd = await _applyViaDocs(sb, stripped, byUser, seqCovered, opt); }
+      catch(e){
+        _lastCloudErr = String(e && e.message || e); _lastPingOk = false;
+        if(!(e && e.w3known)){ _conflict = true; _inDoubt = true; }   // คำตอบหาย → รอบหน้า rebase (ส่งคำขอเดิมซ้ำก่อน)
+        return { ok:false, error:_lastCloudErr };
+      }
+      if(rd.ok){
+        _lastCloudSaveAt = Date.now(); _lastCloudErr = null; _lastPingOk = true; _inDoubt = false; _stkReset();
+        if(!rd.noop) _announceSaved(byUser);
+        return rd;
+      }
+      if(rd.inDoubt){ _conflict = true; _inDoubt = true; }
+      return rd;   // conflict / busy / fatal / moved(blob → conflict → rebase ด้วยตัวส่ง blob)
+    }
     if(_hasRow && _rpcOn(state)){
       var rr;
       // 🌊 คลื่น 4 (I7): ตรวจการต่อท้ายบนค่าดิบ (ไม่ตัดเพดาน) · ตั้งค่าทั้งหมวดยังส่งค่าที่ตัดแล้ว
@@ -20654,16 +21738,16 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         _lastCloudErr = String(e && e.message || e); _lastPingOk = false;
         // 🌊 คลื่น 3 (review #0): เน็ตหลุด/คำตอบหาย = ไม่รู้ว่า server commit ไปแล้วหรือยัง → ฐาน (_syncedState) ไม่น่าเชื่อ
         //   latch ชน → รอบหน้าเข้า rebase (peek + my_devseq ตัดที่ขึ้นแล้ว + replay) ไม่ใช่ noop ในเครื่อง (แก้กลับค่าเดิม = หาย)
-        if(!(e && e.w3known)){ _conflict = true; _inDoubt = true; }
+        if(!(e && e.w3known)){ _conflict = true; _inDoubt = true; _blobDoubt = true; }
         return { ok:false, error:_lastCloudErr };
       }
       if(rr.ok){
-        _lastCloudSaveAt = Date.now(); _lastCloudErr = null; _lastPingOk = true; _inDoubt = false;
+        _lastCloudSaveAt = Date.now(); _lastCloudErr = null; _lastPingOk = true; _inDoubt = false; _blobDoubt = false;
         _stkReset();   // 🆕 SSH1 verify 1: ส่งสำเร็จทางใดก็ได้ (pushNow เครื่องชั่ง/เบิกด่วน) = ล้างเวลาเริ่มเพดาน F2(c) · ไม่งั้นค่าเก่าค้าง → ล้มครั้งเดียวเข้างานค้างทันที
         if(!rr.noop){ _announceSaved(byUser); _dailyAfterSave(sb, null); }   // สำเนารายวันเซิร์ฟเวอร์ทำแล้ว · แอปแค่ลบของเก่า (ไม่รอ)
         return rr;
       }
-      if(rr.inDoubt){ _conflict = true; _inDoubt = true; }                       // re-review 🔴: ไม่รู้ว่า commit แล้วไหม → รอบหน้า rebase (peek + my_devseq) แบบเดียวกับ #0
+      if(rr.inDoubt){ _conflict = true; _inDoubt = true; _blobDoubt = true; }    // re-review 🔴: ไม่รู้ว่า commit แล้วไหม → รอบหน้า rebase (peek + my_devseq) แบบเดียวกับ #0
       if(!rr.rpcGone) return rr;                              // conflict / busy / fatal → ผู้เรียกจัดการ
     }
     // ── ทางเดิม (เขียนทั้งก้อน + token saved_at) ──
@@ -20696,11 +21780,13 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
             .eq('id', CLOUD_ID).eq('saved_at', _tok).select(sel), _legacyCap);
         }
         // 🆕 SSH1 verify 1: หมดเวลา = ไม่รู้ว่าเขียนแล้วไหม → latch ชน (รอบหน้า rebase ตรวจ my_devseq) · คืน error → ทางลองใหม่ + เพดาน F2(c)
-        if(res && res.clientTimeout){ _conflict = true; _inDoubt = true; _lastCloudErr = String(res.error.message); _lastPingOk = false; return { ok:false, error:_lastCloudErr }; }
+        if(res && res.clientTimeout){ _conflict = true; _inDoubt = true; _blobDoubt = true; _lastCloudErr = String(res.error.message); _lastPingOk = false; return { ok:false, error:_lastCloudErr }; }
         // ยังไม่มีคอลัมน์คลื่น 3 (PostgREST ปฏิเสธก่อนรัน = ยังไม่มีอะไรถูกเขียน) → ลองใหม่แบบเดิม 1 ครั้ง
         if(res && res.error && withRev && _noColErr(res.error)){ _hasRevCol = false; continue; }
         break;
       }
+      // review 1 (ข้อ 1a): ตัวกันก้อนปฏิเสธ (โหมดย้ายแล้ว) → สลับตัวส่ง + rebase · ไม่ throw (ไม่ลองเขียนทั้งก้อนซ้ำ)
+      if(res && res.error && _stMovedErr(res.error)) return _stMovedOn(res.error, 'legacy_err');
       if(!wasRow){
         if(res.error){
           if(/duplicate|unique/i.test(res.error.message)){ _conflict = true; return { ok:false, conflict:true }; }
@@ -20719,7 +21805,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         _rev = nrv; _known = {}; _seenRev = nrv;
         _tail = _tailsOf(_pushState, nrv);                 // 🌊 คลื่น 4: ทั้งก้อนตรง server ณ nrv
       }
-      _behind = false; _needFullSync = false;
+      _behind = false; _needFullSync = false; _blobDoubt = false;
       _setSynced(_pushState);   // 🆕 MW-2
       _lastCloudSaveAt = Date.now(); _lastCloudErr = null; _lastPingOk = true;
       _announceSaved(byUser);   // 🆕 MW-1: บอกเครื่องอื่นว่ามีของใหม่ (สัญญาณเปล่า)
@@ -21054,29 +22140,45 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(!E.ACTION_MERGE || !E.reducer) return { ok:false, reason:'not-ready' };
     if(_journalTruncated) return { ok:false, reason:'truncated' };
     if(_rebaseBlocked) return { ok:false, reason:'blocked' };   // verify 🔴: รอบก่อนเทงานที่ตีกลับเข้างานค้างไม่ได้ — ห้ามเล่นซ้ำบนฐานใหม่ (ด่าน replace จะผ่านผิด ๆ)
+    // 🗄️ PERSIST_V2: คำขอ docs ที่ไม่รู้ผล → ส่งซ้ำแบบเดิมก่อน (ลงแล้ว = ตัดออกจากสมุด · ไม่ลง = รวมงานตามปกติ)
+    if(_dPend){
+      var _rs;
+      try { _rs = await _dResolvePend(_sb()); } catch(e0){ return { ok:false, retry:true, reason:'load:' + (e0 && e0.message || e0) }; }
+      if(_rs === 'committed' && !_liveEntries().length){ _conflict = false; _inDoubt = false; _fallbackWhy = null; return { ok:true, state:_syncedState, seqTop:0, renum:[], attempts:0, nothing:true, ref:_syncedState, resent:true }; }
+    }
     var ref = _syncedState;   // ก้อนที่ผู้ใช้เห็นตอนแก้ (token เดิม)
     if(!ref) return { ok:false, reason:'no-base' };
     var appV = Number(E.INIT_STATE && E.INIT_STATE.version || 0);
     var loc0 = null; try { loc0 = E.__getState && E.__getState(); } catch(_l0){}
     // 🌊 คลื่น 3: ฐานสำหรับดึงเฉพาะหมวดที่เปลี่ยน — รอบแรกจากความรู้ในเครื่อง · รอบถัดไปจากก้อนที่ peek รอบก่อน (ดาวน์โหลดเฉพาะส่วนที่ขยับระหว่างรอบ)
-    var pb = { state:_syncedState, rev:_rev, known:_known, tails:_tail };
+    var pb = { state:_syncedState, rev:_rev, known:_known, tails:_tail, ds:_needFullSync ? null : _ds };
     _rbTrace = { t0: Date.now(), rounds: [] };   // 🆕 SSP1 S1: บันทึกแต่ละรอบ (โหมด/หมวดที่ขยับ) ไว้ใส่ประวัติเมื่อรวมงานไม่ได้
+    var _rbMoves = 0;
     for(var attempt = 1; attempt <= REBASE_MAX; attempt++){
       var entries = _liveEntries();
       var seqTop = _journal.length ? _journal[_journal.length - 1].seq : 0;
       var cloud;
       // UAT: อ่านแบบไม่แตะ token/ฐาน (_syncedState คงเป็น ref จนกว่า push สำเร็จ) · เน็ตสะดุด = ลองใหม่ ไม่ใช่โหลดทิ้ง
-      try { cloud = (_rpcOn(loc0) && pb.state && !_needFullSync) ? await _peekDelta(pb, 'push') : await _peekFull('push'); }
+      // 🗄️ PERSIST_V2: โหมด docs = erp_docs_since จากฐานเอกสาร + implode · คำตอบหายตอน blob แล้วสลับเป็น docs = ไม่รู้ว่าลงไหม → งานค้าง (ตรวจรายใบ)
+      if(_docsMode() && _blobDoubt) return { ok:false, reason:'flip-indoubt', inflight:true, msg:'ระบบเปลี่ยนวิธีบันทึกระหว่างรอผลการส่งครั้งก่อน — ไม่รู้ว่าขึ้นแล้วหรือยัง' };
+      try { cloud = _docsMode() ? await _peekDocs(pb, 'push') : (_rpcOn(loc0) && pb.state && !_needFullSync) ? await _peekDelta(pb, 'push') : await _peekFull('push'); }
       catch(e){ return { ok:false, retry:true, reason:'load:' + (e && e.message || e) }; }
+      if(cloud && cloud.moved){   // ระหว่างรวมงาน เซิร์ฟเวอร์สลับวิธีบันทึก → ตัวส่งใหม่ ดึงใหม่ทั้งก้อน (ไม่นับรอบ)
+        _setMode(cloud.moved, 'rebase-since');
+        if(cloud.moved === 'freeze') return { ok:false, retry:true, reason:'frozen' };
+        pb = { state:null, rev:0, known:{}, tails:{}, ds:null }; attempt--; if(++_rbMoves > 3) return { ok:false, retry:true, reason:'load:mode-flapping' };
+        continue;
+      }
       if(!cloud || !cloud.state) return { ok:false, reason:'no-cloud' };
-      try { _rbTrace.rounds.push({ a: attempt, mode: cloud.delta ? 'delta' : 'full', keys: cloud.keys || null, rev: cloud.rev || 0 }); } catch(_rt){}
-      pb = { state:cloud.state, rev:cloud.rev || 0, known:{}, tails:_tailsOf(cloud.state, cloud.rev || 0) };
+      try { _rbTrace.rounds.push({ a: attempt, mode: cloud.docs ? (cloud.delta ? 'docs' : 'docs-full') : cloud.delta ? 'delta' : 'full', keys: cloud.keys || null, rev: cloud.rev || 0 }); } catch(_rt){}
+      pb = { state:cloud.state, rev:cloud.rev || 0, known:{}, tails:cloud.docs ? {} : _tailsOf(cloud.state, cloud.rev || 0), ds:cloud.dstore || null };
       if(Number(cloud.state.version || 0) > appV) return { ok:false, reason:'version' };
       // 🧹 M2: ระบบถูกล้างข้อมูลหลังจากที่ผู้ใช้เห็นก้อนนี้ → งานในสมุดอ้างข้อมูลที่ถูกล้าง ห้ามเล่นซ้ำ (ข้อมูลเก่าจะกลับมา)
       if(_epochOf(cloud.state) !== _epochOf(ref)) return { ok:false, reason:'epoch', epoch:_epochOf(cloud.state) };
       // push ก่อนหน้าของแท็บนี้ที่ "ลงแล้ว" (คำตอบอาจหาย) → ตัดออกจากสมุด ไม่เล่นซ้ำ
-      var _ds = cloud.state.__devSeq && cloud.state.__devSeq[_sessKey()];
-      if(_ds && _ds.seq){ _journalAfterPush(_ds.seq); entries = _liveEntries(); seqTop = _journal.length ? _journal[_journal.length - 1].seq : 0; }
+      var _dsq = cloud.state.__devSeq && cloud.state.__devSeq[_sessKey()];
+      if(_dsq && _dsq.seq){ _journalAfterPush(_dsq.seq); entries = _liveEntries(); seqTop = _journal.length ? _journal[_journal.length - 1].seq : 0; }
+      if(cloud.devseq) _blobDoubt = false;   // 🗄️ เซิร์ฟเวอร์ blob ตัวจริงบอกแล้วว่าแท็บนี้ลงถึง seq ไหน = หายสงสัย
       // ผู้ใช้ถูกปิด/เปลี่ยนบทบาทบนเครื่องอื่นระหว่างนั้น → ห้ามส่งงานแทนเขา (เดิมโหลดใหม่ = เด้งออก)
       //   verify: เทียบทั้ง active/role/สิทธิ์รายคน/สาขา (เดิมแค่ active+role — ถอนสิทธิ์ทีละข้อแล้วยังเล่นซ้ำได้)
       //   ออกจากระบบแล้ว (currentUser = null ระหว่างรอส่ง) → ใช้ผู้ใช้ตามชื่อที่จดในสมุด จาก ref
@@ -21094,6 +22196,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       if(!entries.length){
         _tok = cloud.savedAt; _hasRow = true; _loaded = true; _conflict = false; _inDoubt = false; _fallbackWhy = null; _setSynced(cloud.state);
         _rev = cloud.rev || 0; _known = {}; _seenRev = _rev; _behind = false; _needFullSync = false;   // 🌊 คลื่น 3: ฐานตรง server ทั้งก้อน ณ cloud.rev
+        if(cloud.docs){ _ds = cloud.dstore; _rev = 0; _tail = {}; }   // 🗄️ ฐานเอกสารคู่กัน
         return { ok:true, state: cloud.state, seqTop: seqTop, renum: [], attempts: attempt, nothing: true, ref: ref };
       }
       // review #2/#6: ไม่มีใครเขียนแทรก (cloud = ฐานที่งานในสมุดถูกกดบน) → เล่นซ้ำบนฐานเดียวกัน = ผลเดิมทุกอย่าง
@@ -21108,12 +22211,14 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       _tok = cloud.savedAt; _hasRow = true; _loaded = true; _conflict = false; _inDoubt = false; _fallbackWhy = null;
       // 🌊 คลื่น 3: diff กับก้อนที่ peek มา (ไม่ใช่ ref — ไม่งั้นหมวดของเครื่องอื่นถูกส่งซ้ำเป็นของเรา แล้ว stale ตลอดไป)
       //   exact = ฐานตรง server ณ cloud.rev และ _tok = cloud.savedAt → ถ้า RPC หายกลางทาง ทางเดิมเขียนทั้งก้อนต่อได้ทันที
-      var pr = await pushCloudState(fr.state, byUser, seqTop, { base: cloud.state, rev: cloud.rev || 0, exact: true });
+      var pr = await pushCloudState(fr.state, byUser, seqTop, { base: cloud.state, rev: cloud.rev || 0, exact: true, dstore: cloud.dstore || null });
+      // เซิร์ฟเวอร์ตอบ moved (สลับวิธีบันทึกระหว่างรวมงาน · ไม่มีอะไรถูกเขียน) → ดึงด้วยตัวส่งใหม่ทันที ไม่นับรอบ
+      if(pr && pr.moved && pr.moved !== 'freeze'){ pb = { state:null, rev:0, known:{}, tails:{}, ds:null }; if(++_rbMoves <= 3){ attempt--; continue; } }
       if(pr && pr.ok){
         _journalAfterPush(seqTop);
         return { ok:true, state:fr.state, seqTop:seqTop, renum:fr.renum, attempts:attempt, ref: ref, loc0: loc0, numMap: fr.numMap, base0: base, dropped: fr.dropped || [] };
       }
-      if(pr && pr.busy) return { ok:false, retry:true, reason:'busy' };             // ฐานข้อมูลคิวยาว → ลองใหม่แบบ backoff
+      if(pr && pr.busy) return { ok:false, retry:true, reason:pr.frozen ? 'frozen' : 'busy' };   // ฐานข้อมูลคิวยาว → ลองใหม่แบบ backoff · 🗄️ freeze = หยุดนาฬิกา (finding 7)
       if(pr && pr.fatal) return { ok:false, reason:'fatal:' + pr.error };            // รุ่นข้อมูลไม่ตรง (G1) → ทางเดิม: งานค้าง
       if(!pr || !pr.conflict) return { ok:false, retry:true, reason:'push:' + ((pr && pr.error) || '') };
       await _sleep(250 * attempt + Math.floor(Math.random() * 400));   // เครื่องอื่นบันทึกแทรกอีก — ถอยแล้วลองใหม่
@@ -21466,7 +22571,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     var types = Object.create(null);
     try { _liveEntries().forEach(function(e){ var t = String(e.type || '?'); types[t] = (types[t] || 0) + 1; }); } catch(_t){}
     var tr = _rbTrace || { t0: null, rounds: [] };
-    var mode = 'legacy'; try { mode = _rpcOn(null) ? (_w4 === true ? 'w4' : 'w3') : 'legacy'; } catch(_m){}
+    var mode = 'legacy'; try { mode = _docsMode() ? 'docs' : _rpcOn(null) ? (_w4 === true ? 'w4' : 'w3') : 'legacy'; } catch(_m){}
     return { reason: String(rb.reason || ''), msg: rb.msg ? String(rb.msg).slice(0, 300) : null,
       failedType: rb.entry && rb.entry.type || null, failedSeq: rb.entry && rb.entry.seq != null ? rb.entry.seq : null,
       attempts: rb.attempts || (tr.rounds || []).length || 0,
@@ -21557,13 +22662,13 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
           if(rb.retry){
             // 🆕 SSH1 final review #1: 'push:' = รอบนี้ดึงจาก server สำเร็จแล้ว (server ตอบ) → apply ล้มแบบ Failed to fetch ไม่ใช่เน็ตขาด = นับเพดาน
             //   #2: ออฟไลน์/เน็ตขาดทั้งเส้น = ห้ามใช้เพดาน S2 เทเข้างานค้าง + โหลดหน้าใหม่ระหว่างเน็ตขาด (เหมือน _stkOver)
-            var _rr0 = String(rb.reason || ''), _reach = /^push:/.test(_rr0), _netWait = _stkOffline() || (!_reach && _stkNetLevel(_rr0));
+            var _rr0 = String(rb.reason || ''), _reach = /^push:/.test(_rr0), _netWait = _stkOffline() || _rr0 === 'frozen' || (!_reach && _stkNetLevel(_rr0));
             var _s2Over = !_netWait && !!_s2Since && (Date.now() - _s2Since >= _S2.cap) && _s2Eligible();
             _stkMark(rb.reason || 'retry', _reach);   // 🆕 SSH1 F2(c)
             if(!_s2Over && _stkOver()) rb = _stkRb(rb);
             else if(!_s2Over){
               if(_s2Since && !_s2Eligible()) _s2Reset();
-              if(_retryTimer) clearTimeout(_retryTimer); _retryTimer = setTimeout(_flushCloudPush, rb.reason === 'busy' ? _busyWait() : 10000); return;
+              if(_retryTimer) clearTimeout(_retryTimer); _retryTimer = setTimeout(_flushCloudPush, (rb.reason === 'busy' || rb.reason === 'frozen') ? _busyWait() : 10000); return;
             }
           }
           var _s2Was = { tries: _s2Tries, ms: _s2Since ? Date.now() - _s2Since : 0 }; _s2Reset();
@@ -21581,19 +22686,20 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
             _onConflictFallback(u, 'numlock', _nlInfo, rb);
             return;
           }
-          _onConflictFallback(u, (rr === 'version' || rr.indexOf('fatal:') === 0) ? 'version' : why0, null, rb);
+          _onConflictFallback(u, (rr === 'version' || (rr.indexOf('fatal:') === 0 && !/^fatal:(docs|denied|pv2_shape)/.test(rr))) ? 'version' : (rr === 'flip-indoubt' ? 'switch' : why0), null, rb);
         }, function(err){ _pushing = false; _conflict = true; _lastRebase = { at: Date.now(), ok:false, reason:'throw:' + (err && err.message || err) }; _onConflictFallback(u, why0, null, { reason: _lastRebase.reason }); });
         return;
       } else if(r.busy){
         // 🌊 คลื่น 3: ฐานข้อมูลคิวยาว (lock timeout) → ลองใหม่แบบ backoff 1→10 วิ + สุ่ม (ของยังค้างใน _pendingState)
-        _stkMark('busy:' + String(r.error || '').slice(0, 40));   // 🆕 SSH1 F2(c): เกินเพดาน → งานค้าง
+        _stkMark((r.frozen ? 'frozen:' : 'busy:') + String(r.error || '').slice(0, 40));   // 🆕 SSH1 F2(c): เกินเพดาน → งานค้าง · 🗄️ freeze = หยุดนาฬิกา (finding 7)
         if(_stkOver()){ _stuckSpill(u, r); return; }
         if(_retryTimer) clearTimeout(_retryTimer);
         _retryTimer = setTimeout(_flushCloudPush, _busyWait());
       } else if(r.fatal){
         // 🌊 คลื่น 3: รุ่นข้อมูลไม่ตรง (G1) — ห้ามถอยไปเขียนทั้งก้อน · เข้าทางเดิมคลื่น 0 (งานค้าง)
-        try { logAudit({ ts:new Date().toISOString(), action:'state_rpc_fatal', label:'บันทึกไม่ได้: รุ่นข้อมูลไม่ตรง', ref:String(r.error), by_user:u || null, device:deviceId() }); } catch(_l){}
-        _conflict = true; _onConflictFallback(u, 'version', null, { reason:'fatal:' + r.error });
+        //   🗄️ PERSIST_V2: เซิร์ฟเวอร์ปฏิเสธเนื้อหา (denied/bad_request/รูปข้อมูล) = ไม่ใช่รุ่นข้อมูล → งานค้างพร้อมเหตุ (ไม่ส่งบางส่วน)
+        try { logAudit({ ts:new Date().toISOString(), action:'state_rpc_fatal', label:r.docsFatal ? 'บันทึกไม่ได้: ระบบปฏิเสธ (' + String(r.error).slice(0, 60) + ')' : 'บันทึกไม่ได้: รุ่นข้อมูลไม่ตรง', ref:String(r.error), by_user:u || null, device:deviceId() }); } catch(_l){}
+        _conflict = true; _onConflictFallback(u, r.docsFatal ? '' : 'version', null, { reason:'fatal:' + r.error });
       } else {
         // network/อื่นๆ → เก็บของไว้ retry ทุก 10 วิ (ข้อมูลค้างใน memory — เตือนก่อนปิดด้วย beforeunload)
         _stkMark('net:' + String(r.error || '').slice(0, 40));   // 🆕 SSH1 F2(c)
@@ -21803,6 +22909,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
              retryAt: _retryAt || null, retrySince: _s2Since || null,   // 🆕 SSP1 S2: ช่วงลองส่งต่อเพราะชนถี่
              lastSaveAt: _lastCloudSaveAt || null, error: _lastCloudErr, token: _tok,
              rev: _seenRev, rpc: _rpcOn(null), behind: _behind,   // 🌊 คลื่น 3
+             storageMode: _smode || null, docs: _docsMode(),   // 🗄️ PERSIST_V2
              inDoubt: _inDoubt, fallback: _fallbackWhy,
              busy: _busyStreak > 0, busyStreak: _busyStreak };   // UAT คลื่น 3: ฐานข้อมูลคิวยาว (กำลังรอลองใหม่) → ป้ายเหลือง   // UAT คลื่น 3: เน็ตสะดุด ≠ ชน · ป้ายชนเฉพาะหลังเข้าทางงานค้างจริง
   }
@@ -22393,6 +23500,11 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     // 🌊 คลื่น 3: บันทึกรายหมวด
     peekCloudStateFull: peekCloudStateFull,   // ตรวจของจริง (import verify) — ห้ามใช้ delta
     rpcStatus: rpcStatus,
+    docsStatus: docsStatus, storageMode: function(){ return _smode; }, probeStorageMode: function(){ return _modeProbe(true); },   // 🗄️ PERSIST_V2
+    _pv2: { reads:_dReads, ords:_dOrds, unique:_dUnique, dsState:_dsState, ds:function(){ return _ds; }, pend:function(){ return _dPend; }, setMode:_setMode,
+            known:function(c, id){ return _ds ? _ds.known[c + '/' + id] : undefined; },
+            setDevSeq:function(n){ _dSeqN = Number(n) || 0; return _dSeqN; }, sess:_dSess, stats:function(){ return Object.assign({}, _dsStats); },
+            isCanon:function(a){ return _isCanon(a); }, synced:function(){ return _syncedState; } },   // สำหรับเทสต์
     canReloadNow: canReloadNow, reloadNow: _doReload, preReloadFlush: preReloadFlush,   // 🆕 SSP1 S5
     auditCensusTick: _auditCensusTick,   // 🆕 verify 2: ตรวจรายวันซ้ำ (ทุกชั่วโมง/กลับมาที่แท็บ)
      setDraft: setDraft, hasDraft: hasDraft,   // _doReload เคารพ __ERP_NO_RELOAD ของเทสต์
@@ -28676,8 +29788,18 @@ function _reducerCore(s, a){
     }
     case 'UPDATE_ITEM': {
       // 🆕 FREIGHT_EXPENSE F1: expenseItemId คงตามสินค้าใน state (ฟอร์มสินค้า/แท็บเก่าแก้ทับไม่ได้)
-      const _k = (i, d) => { const n = { ...d }; if(i.expenseItemId != null) n.expenseItemId = i.expenseItemId; else delete n.expenseItemId; return n; };
-      return { ...s, items:s.items.map(i => i.id===a.data.id ? ((i.expenseItemId != null || 'expenseItemId' in a.data) ? _k(i, a.data) : a.data) : i) };
+      // 🆕 PERSIST_V2 H1: stockByBranch คงตามสินค้าใน state ปัจจุบันเสมอ (ไม่เอาจาก a.data)
+      //   ผู้ส่งทุกตัวส่ง { ...สินค้าตอน render, ช่องที่แก้ } (หน้าจัดซื้อ min/max · สูตรชุดฝ่ายขาย · ฟอร์มสินค้า)
+      //   → ถ้าระหว่างนั้นมีรับของ/ตัดสต๊อกลง (เครื่องนี้หรือเครื่องอื่นที่ดึงมา/rebase) ยอดสต๊อกจะถอยกลับเงียบ
+      //   สต๊อกแก้ได้ทาง movement action เท่านั้น (ADJUST_*/RECEIVE_PO/โอน/ขาย/ผลิต) · ไม่มีผู้ส่ง UPDATE_ITEM ที่ตั้งใจแก้สต๊อก
+      //   ต้นทุนไม่ได้อยู่บนสินค้า (อยู่ใน fifoLayers) · costPrice = ค่าที่ผู้ใช้/นำเข้าตั้ง → แก้ผ่าน UPDATE_ITEM ได้ตามเดิม
+      const _k = (i, d) => {
+        const n = { ...d };
+        if(i.expenseItemId != null) n.expenseItemId = i.expenseItemId; else delete n.expenseItemId;
+        if('stockByBranch' in i) n.stockByBranch = i.stockByBranch; else delete n.stockByBranch;
+        return n;
+      };
+      return { ...s, items:s.items.map(i => i.id===a.data.id ? _k(i, a.data) : i) };
     }
     // 🆕 FREIGHT_EXPENSE F1: ตั้ง/ยกเลิกธง "ไม่นับสต๊อก → ลงค่าใช้จ่าย" { itemId, expenseItemId|null, id, at, by, byName }
     //   สิทธิ์บัญชี (superuser / accounting.invQueue.create / accounting.expenseItems.edit) ตรวจจากผู้ใช้สด · ส่งซ้ำ = no-op (auditLog al_iel_<id>)
@@ -40445,7 +41567,7 @@ const ACTION_MERGE = Object.freeze({
   UPDATE_GR: { kind:'replace', coll:'grs', id: d => d && d.id },
   UPDATE_GR_ASSET_INFO: { kind:'delta' },
   UPDATE_INV: { kind:'replace', coll:'invoices', id: d => d && d.id, cmpOmit:['tagId','tagName','tagIds','tagNames','prints'] },   // 🆕 DOC-TAGS D3: reducer คงแท็กจากใบจริง → แก้แท็กจากเครื่องอื่นไม่ทำให้แก้ PI ชน
-  UPDATE_ITEM: { kind:'replace', coll:'items', id: d => d && d.id },
+  UPDATE_ITEM: { kind:'replace', coll:'items', id: d => d && d.id, cmpOmit:['stockByBranch','expenseItemId'] },   // 🆕 PERSIST_V2 H1: reducer คงสต๊อก/ธงค่าใช้จ่ายจากสินค้าจริง → รับของ/ตัดสต๊อกจากเครื่องอื่นไม่ทำให้แก้สินค้าตกงานค้าง
   UPDATE_ITEM_GROUP: { kind:'replace', coll:'itemGroups', id: d => d && d.id },
   UPDATE_ITEM_TYPE: { kind:'replace', coll:'itemTypes', id: d => d && d.id },
   UPDATE_JE: { kind:'replace', coll:'journalEntries', id: d => d && d.id },
@@ -40814,6 +41936,188 @@ const ACTION_READS_WHEN = Object.freeze({
   // 🆕 DSI1: PATCH_INV ที่ไม่แตะเลขใบแจ้งหนี้/ใบกำกับ/ผู้ขาย = ด่านเลขซ้ำไม่ทำงาน → อ่านแค่ invoices เหมือนเดิม
   PATCH_INV: Object.freeze([Object.freeze({ when: _patchNoDocNo, drop: Object.freeze(['auditLog','deposits','grs','payments','pos','suppliers']) })]),
 });
+// ==================== PERSIST_V2 · ACTION_DOC_READS (เลน STATE ขั้น 2 · PERSIST_V2_INTERFACE §3 · PLAN §2.4/§2.6) ====================
+// โหมด docs: action ที่อยู่ในตารางนี้ส่ง "เอกสารที่ reducer อาศัย" เป็นรายใบ (p_reads เทียบ rev รายใบ) แทนทั้งหมวด
+//   ACTION_DOC_READS[type](data, state) → { docs:[{c,id}], colls:[หมวด] }
+//     data  = a.data ของงาน (ก่อน reducer) · state = state ที่ reducer จะรันทับ (ก่อนงาน) — ฟังก์ชัน pure ห้ามแก้ค่า
+//     docs  = ใบที่ reducer อ่าน (หา by id) · id ที่ยังไม่มีใน state = พึ่ง "ใบนี้ยังไม่มี" → client ส่ง rev:null (เซิร์ฟเวอร์: มีแล้ว = stale)
+//     colls = หมวดที่ยังต้องตรวจทั้งหมวด (สแกนหา/นับ/ด่านเลขซ้ำ/ล็อต FIFO) → p_coll_reads
+//   กติกา (ต้องตรงกับเลน CLIENT):
+//     • หมวดคุม MERGE_GUARD_KEYS + ตัวนับ seq/invSeq/siSeq/whtSeq + session ไม่อยู่ในนี้ (client ใส่เองทุก push เหมือนวันนี้)
+//     • ใบที่งานนี้ "เขียน" มี base_rev ใน p_ops อยู่แล้ว → ไม่ต้องอยู่ใน docs · แต่หมวดที่เขียน "ไม่ถูกตรวจทั้งหมวดอัตโนมัติ"
+//       (ต่างจาก erp_state_apply วันนี้) → หมวดที่เขียนแล้วสแกนด้วย (เช่น ด่านเลขซ้ำใน invoices) ต้องอยู่ใน colls เอง
+//     • ไม่อยู่ในตาราง / ฟังก์ชันพัง / ข้อมูลแปลก → actionDocReads คืน null → client ใช้ ACTION_READS ทั้งหมวด (+ หมวดที่เขียน) แบบวันนี้
+//     • ค่าเริ่ม = ปลอดภัยไว้ก่อน: colls = แถว ACTION_READS − APPEND_ONLY_READS (ต่อท้าย/กันซ้ำด้วย id = put base_rev null แทน)
+//       − หมวดที่ ACTION_READS_WHEN ตัด − หมวดที่ "พิสูจน์แล้ว" ว่าอ่านแค่ by id (ย้ายไป docs) · ไม่แน่ใจ = คงทั้งหมวด
+//   ตรวจโดย tests/checklist/pv2_state_docreads.py (Proxy ระดับใบ · fixture ชุด w3_reads) · แก้ reducer case ไหน ต้องทบทวนแถวของมัน + รันเทสต์นั้น
+//   ต้องผ่านการทบทวนอิสระ 2 รอบก่อนเปิดใช้โหมด docs (PLAN §2.4)
+//
+// ตารางเหตุผลรายแถว (หมวด → docs = ย้ายเป็นรายใบ · coll = คงทั้งหมวด · ตัด = ต่อท้ายอย่างเดียว/APPEND_ONLY)
+// | action | docs (รายใบ) | colls (ทั้งหมวด) | เหตุผล |
+// | ADD_INV | - | ทั้งแถว (เว้น auditLog · ใบไม่ผูก GR/PO ตัด grs/pos/items/returns ตาม WHEN) | ด่านเลขซ้ำ findDupTaxInv/findDupSupInv สแกน invoices ทุกใบ + _supTax ของทุกใบที่เทียบ (suppliers) + _splitExempt สแกน grs/pos ทั้งหมวด · สัญญา/มัดจำ/คืนของ/คำขอค้าง = filter ตามฟิลด์ · ย้ายได้เมื่อ unique key ฝั่งเซิร์ฟเวอร์ (F2) ตรงกับ normTaxInvNo แล้ว |
+// | PATCH_INV | invoices[d.id] | invoices (+ แถว ACTION_READS เมื่อแตะเลขใบ) | อ่านใบเดียว (find by id) + settings (หมวดคุม: งวด VAT/ล็อก) · รวม RTB1/TIS1: ด่าน _tisLockDeny หลัง reducer สแกน invoices ทุกใบ → คงทั้งหมวดเสมอ |
+// | UPDATE_INV | invoices[d.id] | assets,deposits,grs,invoices,journalEntries,payments,pos,returns,supplierMemos,suppliers | ใบเป้าหมายใบเดียว · ด่านย้อน invUndoExcluded/invUndoGateFlip สแกน grs(by grIds+po_advance)/deposits/returns/JE/assets/memo/payments ตามฟิลด์ → คงทั้งหมวด · รวม RTB1/TIS1: _tisLockDeny สแกน invoices ทุกใบ → invoices ทั้งหมวดเสมอ |
+// | ADD_PAY | invoices[ใบที่จ่าย: invId/invoiceIds/invoiceId/allocations] | approvalRequests,payTags,payments,returns (+invoices ถ้าบิลอยู่ใน 50 ทวิ รวม) | ด่านจ่ายเกิน/คืนของค้าง/แก้ราคาค้าง/2 คน หาใบ by id · คำขอค้างแก้ราคา(approvalRequests)·RTV ค้าง(returns)·คำขอจ่ายชน+เลข PV รายวัน(payments)·แท็กตามชื่อ(payTags) = สแกน · whtGroupMembers สแกน invoices ทั้งหมวด |
+// | UPDATE_PAY | invoices[ใบของคำขอเดิมใน state ∪ ใบใน data] | approvalRequests,deposits,payments,returns,suppliers (+invoices ถ้า 50 ทวิ รวม หรือ PV ติ๊กรวม 50 ทวิ whtMergeWanted — _whtMergeApply เขียน invoices → _tisLockDeny สแกน) | เหมือน ADD_PAY · มัดจำหา by depositPiId (สแกน deposits) · เลข PV รายวันสแกน payments · suppliers คงไว้ (ไม่แน่ใจทางผู้รับเงิน) |
+// | ADD_PETTY_TXN | pettyTxns[d.id] | - | ต่อท้าย + กันซ้ำ by id · งวดล็อก = settings |
+// | ADD_JE | journalEntries[d.id] · invoices[sourceId/invId ของ JE ใบตั้งหนี้/ใช้มัดจำ] | journalEntries เฉพาะ source transfer_loss | JE ของหายสแกนหา sourceId ซ้ำทั้งหมวด · อื่น ๆ อ่านแค่ใบตั้งหนี้ by id · เลข JE จาก seq.je (ตัวนับ) · auditLog ต่อท้าย |
+// | ADJUST_INV_PRICE | - | ทั้งแถว | findDupTaxInv (invoices/suppliers/grs/pos) + FIFO ล็อต + คำขอค้าง (สแกน) + JE/คืนของ/memo/ทรัพย์สิน ตามฟิลด์ — ซับซ้อนเกินจะพิสูจน์รอบนี้ |
+// | SET_TAX_INV | journalEntries[JE โอน VAT หมดสิทธิ์ของใบ (vatExpiredAt.jeId)] | approvalRequests,filedTaxInvKeys,grs,invoices,payments,pos,suppliers | JE อ่านเฉพาะ _taxInvR3Msg/vatExpireJeLive by id จากใบ · ที่เหลือ = ด่านเลขซ้ำ/คำขอค้าง/คำขอจ่ายค้าง (สแกน) |
+// | ADD_APPROVAL_REQUEST | approvalRequests[d.id] | - | ต่อท้าย + กันซ้ำ by id · กฎอนุมัติ/ผู้ใช้ = หมวดคุม |
+// | UPDATE_APPROVAL_REQUEST | approvalRequests[d.id] · payments[payload.payId ของคำขอเดิม] · invoices[ใบของ payment นั้น] | - | คำขอใบเดียว · gmSelfBlockReason (ผ่าน selfApproveReqUser/approvalStuckStep) หา payment by id แล้วใบของมัน by id · auditLog ต่อท้าย |
+// | RECEIVE_PO | pos[updatedPO.id] · items[itemId ทุกตัวใน data + บรรทัด PO สด] · expenseItems[ธงค่าใช้จ่ายของ items นั้น + expenseItemId ใน data/PO] | fifoLayers | PO สดใบเดียว · itemExpenseLink by id · _netIncomingLayers หักล้าง NEG สแกนล็อตทั้งหมวด · grs/movements/auditLog ต่อท้าย (APPEND_ONLY) |
+// | ADD_GR | grs[d.id] · pos[d.poId] | - | ปลายทางสาขาจาก PO by id · ต่อท้าย grs + seq.gr (bump) |
+// | UPDATE_PO | pos[d.id] · expenseItems[บรรทัดใน data + PO สด] | invoices เฉพาะส่งกลับเป็นร่าง (status draft) | PO ใบเดียว · ด่านบริการ expenseItemOf by id · "ตั้งหนี้แล้วห้ามกลับร่าง" สแกน invoices ตาม poId |
+// | ADD_QUICK_ISSUE | - | boms,expenseItems,fifoLayers,items,materialIssues | ตัด FIFO สแกนล็อต · negUnitCost→findBomForOutput สแกน boms · เลข ISS รายวันสแกน materialIssues · items/expenseItems คงไว้ (ไม่คุ้มเสี่ยง — ชนกับ fifoLayers อยู่แล้ว) |
+// | ADD_WEIGH_LOG | weighLogs[log.id] | boms,expenseItems,fgDispatchKeys,fifoLayers,items,productionOrders (ไม่มีสูตร bomId/'bom:' = ไม่มีหมวด) | กันซ้ำ deviceId|id = ค้นใบเดียว (คีย์ประกอบ — ดูข้อค้นพบ id ซ้ำต่างเครื่องใน INTERFACE) · ชั่งอิสระตัด FIFO/สูตร/ชุดเตรียม สแกนทั้งหมวด |
+// | REVIEW_WEIGH_LOG | weighLogs[d.id] | boms,expenseItems,fifoLayers,items,productionOrders | ตัดสินผลชั่งใบเดียว (map แทนใบเดียวตาม deviceId|id) · คัดทิ้งชั่งอิสระสแกนล็อต weighLogKey + ตัดของเสีย |
+// | ADD_PROD_ORDER | productionOrders[d.id] · boms[d.bomId] | ใบ self_start: boms,items,productionOrders | ใบปกติอ่านแค่สูตร by id (ฉลากอย่างเดียว) · เริ่มผลิตเองสแกนใบซ้ำ (findSelfStartDup) + ด่านสูตร/ไลน์ → ทั้งหมวด |
+// | PATCH_PROD_ORDER | productionOrders[d.id] | weighLogs เฉพาะ patch.status cancelled | ใบเดียว · ด่านยกเลิกเองสแกนผลชั่งค้างตาม job.orderId |
+// | PROD_WORKFLOW_STEP | - | fifoLayers,items,materialIssues,productionOrders | ตัด/รับ FIFO + ใบเบิก + ใบผลิต — คงทั้งหมวด (movements ต่อท้าย) |
+// | ADD_TR | transferRequests[d.id] · items[บรรทัด] · expenseItems[ธงของ items นั้น] | - | _xlLinesDeny → itemExpenseLink by id · คลัง/สิทธิ์ = branches/users (หมวดคุม) · ต่อท้าย + seq.tr (bump) |
+// | UPDATE_TR | transferRequests[d.id] | - | map แทนใบเดียว (คง lines จากใบสด) |
+// | SHIP_PUSH_LINE | - | ทั้งแถว | ตัด FIFO + เลข TO รายวัน (สแกน transferOrders) + negUnitCost (boms) · movements ไม่อยู่ใน APPEND_ONLY → คงไว้ |
+// | ADD_SALES_INV | - | salesInvoices,vatFilings | ด่านเลขใบกำกับขายซ้ำสแกนทั้งหมวด · งวด ภ.พ.30 (vatFilings) · auditLog ต่อท้าย |
+const _drD = (c, ids) => {
+  const out = [], seen = new Set();
+  for(const v of ids || []){
+    if(v == null || v === '' || (typeof v !== 'string' && typeof v !== 'number')) continue;
+    const id = String(v); if(seen.has(id)) continue;
+    seen.add(id); out.push({ c, id });
+  }
+  return out;
+};
+// ค่าทุกตัวของฟิลด์ key ในก้อนข้อมูล (ลึก ≤ 8 ชั้น · array ของค่า = เก็บทุกตัว) — ใช้หา id ที่ payload อ้างถึง (เกินดีกว่าขาด)
+const _drVals = (o, key, out, dep) => {
+  out = out || []; dep = dep || 0;
+  if(!o || typeof o !== 'object' || dep > 8) return out;
+  if(Array.isArray(o)){ for(const x of o) _drVals(x, key, out, dep + 1); return out; }
+  for(const k of Object.keys(o)){
+    const v = o[k];
+    if(k === key && (typeof v === 'string' || typeof v === 'number')) out.push(v);
+    else if(k === key && Array.isArray(v)) v.forEach(x => { if(typeof x === 'string' || typeof x === 'number') out.push(x); else _drVals(x, key, out, dep + 1); });
+    else if(v && typeof v === 'object') _drVals(v, key, out, dep + 1);
+  }
+  return out;
+};
+const _drFind = (s, c, id) => (id == null || id === '') ? null : (((s && s[c]) || []).find(x => x && x.id === id) || null);
+// หมวดค่าเริ่ม: แถว ACTION_READS − APPEND_ONLY_READS − หมวดที่ WHEN ตัด (ตามข้อมูลงาน) − หมวดที่ย้ายเป็นรายใบ (conv)
+function _drColls(type, data, conv){
+  const row = ACTION_READS[type] || [], ao = APPEND_ONLY_READS[type] || [], drop = [];
+  (ACTION_READS_WHEN[type] || []).forEach(w => { try { if(w.when(data)) drop.push(...w.drop); } catch(_e){} });
+  return row.filter(c => !ao.includes(c) && !drop.includes(c) && !(conv || []).includes(c));
+}
+// ใบที่ payment อ้าง: ทุกค่าของ invId / invoiceId / invoiceIds ทุกชั้น (ครอบ 4 ทางของ whtGroupPayDeny + allocations[].invId + whtMerge.certs[].members[].invId — เกินดีกว่าขาด)
+const _drPayInvIds = p => !p || typeof p !== 'object' ? [] : _drVals(p, 'invId').concat(_drVals(p, 'invoiceId'), _drVals(p, 'invoiceIds'));
+// บิลอยู่ใน 50 ทวิ รวม → whtGroupMembers สแกน invoices ทั้งหมวด (ตรวจทั้ง cert ที่ void ด้วย — เกินดีกว่าขาด)
+const _drInWhtGroup = (s, ids) => ids.some(id => { const i = _drFind(s, 'invoices', id); return !!(i && (i.whtCertificates || []).some(c => c && c.groupId)); });
+// item ที่อ้าง + ธงค่าใช้จ่ายของ item นั้น (itemExpenseLink: item.expenseItemId → expenseItems)
+const _drItemDocs = (s, itemIds, extraExp) => {
+  const its = _drD('items', itemIds);
+  const exp = its.map(x => (_drFind(s, 'items', x.id) || {}).expenseItemId).concat(extraExp || []);
+  return its.concat(_drD('expenseItems', exp));
+};
+// 🆕 รวม RTB1/TIS1: UPDATE_PAY ติ๊กรวม 50 ทวิ (whtMergeWanted · ค่าจาก PV เดิมหรือ data) → อนุมัติแล้ว _whtMergeApply เขียน invoices
+//   → ด่าน _tisLockDeny หลัง reducer สแกน invoices ทุกใบ = คงทั้งหมวด (ตรวจทั้ง PV เดิมและ data — เกินดีกว่าขาด)
+const _drWhtMergeWanted = (d, prev) => !!((d && d.whtMergeWanted === true) || (prev && prev.whtMergeWanted === true));
+const _drPayRow = (type, d, s, prev) => {
+  const ids = _drPayInvIds(d).concat(_drPayInvIds(prev));
+  const conv = (_drInWhtGroup(s, ids) || _drWhtMergeWanted(d, prev)) ? [] : ['invoices'];
+  return { docs: conv.length ? _drD('invoices', ids) : [], colls: _drColls(type, d, conv) };
+};
+const ACTION_DOC_READS = Object.freeze({
+  ADD_INV: (d) => ({ docs: [], colls: _drColls('ADD_INV', d, []) }),
+  // 🆕 รวมเลน (DSI1): แตะเลขใบแจ้งหนี้/ใบกำกับ/ผู้ขาย → ด่านเลขซ้ำสแกน invoices ทั้งหมวด = คงทั้งหมวด
+  // 🆕 รวม RTB1/TIS1: ด่านกลางหลัง reducer _tisLockDeny (ใบในใบกำกับรวมห้ามแก้ช่องล็อก) วนสแกน invoices ทุกใบ (s/n) ทุกครั้งที่งานเขียน invoices
+  //   = ทุกครั้งที่ UPDATE_INV/PATCH_INV ลงผล → คงทั้งหมวดเสมอ (ปลอดภัยไว้ก่อน · ความถูกต้องสำคัญกว่าการชนพร้อมกัน)
+  //   _patchNoDocNo/_drDsiSame ยังใช้ที่ ACTION_READS_WHEN / ทบทวนภายหลังถ้าพิสูจน์ได้ว่าด่าน TIS1 อ่านแค่ใบที่เขียน
+  PATCH_INV: (d) => ({ docs: _drD('invoices', [d.id]), colls: _drColls('PATCH_INV', d, []) }),
+  UPDATE_INV: (d) => ({ docs: _drD('invoices', [d.id]), colls: _drColls('UPDATE_INV', d, []) }),
+  ADD_PAY: (d, s) => _drPayRow('ADD_PAY', d, s, null),
+  UPDATE_PAY: (d, s) => _drPayRow('UPDATE_PAY', d, s, _drFind(s, 'payments', d.id)),
+  ADD_PETTY_TXN: (d) => ({ docs: _drD('pettyTxns', [d.id]), colls: _drColls('ADD_PETTY_TXN', d, ['pettyTxns']) }),
+  ADD_JE: (d) => {
+    const tl = d.source === 'transfer_loss' && !!d.sourceId;
+    const iid = d.source === 'inv' ? d.sourceId : d.source === 'deposit_use' ? d.invId : null;
+    return { docs: _drD('journalEntries', [d.id]).concat(_drD('invoices', [iid])), colls: _drColls('ADD_JE', d, tl ? ['invoices'] : ['invoices', 'journalEntries']) };
+  },
+  ADJUST_INV_PRICE: (d) => ({ docs: [], colls: _drColls('ADJUST_INV_PRICE', d, []) }),
+  SET_TAX_INV: (d, s) => {
+    const inv = _drFind(s, 'invoices', d.invId);
+    const views = inv && global.ERP && typeof global.ERP.invTaxInvViews === 'function' ? (global.ERP.invTaxInvViews(inv) || []) : [];
+    const je = [inv].concat(views).map(v => v && v.vatExpiredAt && v.vatExpiredAt.jeId);
+    return { docs: _drD('journalEntries', je), colls: _drColls('SET_TAX_INV', d, ['journalEntries']) };
+  },
+  ADD_APPROVAL_REQUEST: (d) => ({ docs: _drD('approvalRequests', [d.id]), colls: _drColls('ADD_APPROVAL_REQUEST', d, ['approvalRequests']) }),
+  UPDATE_APPROVAL_REQUEST: (d, s) => {
+    const r0 = _drFind(s, 'approvalRequests', d.id) || {};
+    const pids = [r0.payload && r0.payload.payId, d.payload && d.payload.payId];
+    const pays = pids.map(id => _drFind(s, 'payments', id));
+    return { docs: _drD('approvalRequests', [d.id]).concat(_drD('payments', pids), _drD('invoices', [].concat(...pays.map(_drPayInvIds)))),
+      colls: _drColls('UPDATE_APPROVAL_REQUEST', d, ['approvalRequests', 'payments', 'invoices']) };
+  },
+  RECEIVE_PO: (d, s) => {
+    const po = d.updatedPO || {}, live = _drFind(s, 'pos', po.id) || {};
+    const itemIds = _drVals(d, 'itemId').concat(_drVals(live.lines, 'itemId'));
+    return { docs: _drD('pos', [po.id]).concat(_drItemDocs(s, itemIds, _drVals(d, 'expenseItemId').concat(_drVals(live.lines, 'expenseItemId')))),
+      colls: _drColls('RECEIVE_PO', d, ['pos', 'items', 'expenseItems']) };
+  },
+  ADD_GR: (d) => ({ docs: _drD('grs', [d.id]).concat(_drD('pos', [d.poId])), colls: _drColls('ADD_GR', d, ['grs', 'pos']) }),
+  UPDATE_PO: (d, s) => {
+    const live = _drFind(s, 'pos', d.id) || {};
+    const conv = d.status === 'draft' ? ['pos', 'expenseItems'] : ['pos', 'expenseItems', 'invoices'];
+    return { docs: _drD('pos', [d.id]).concat(_drD('expenseItems', _drVals(d.lines, 'expenseItemId').concat(_drVals(live.lines, 'expenseItemId')))),
+      colls: _drColls('UPDATE_PO', d, conv) };
+  },
+  ADD_QUICK_ISSUE: (d) => ({ docs: [], colls: _drColls('ADD_QUICK_ISSUE', d, []) }),
+  // review 1 ข้อ 4: ไม่มีสูตรในระบบ (ไม่มี bomId และ recipeId ไม่ขึ้นต้น 'bom:') = reducer บันทึกผลชั่งอย่างเดียว (อ่านแค่ weighLogs + currentBranch)
+  //   → ไม่ตรวจ boms/expenseItems/fgDispatchKeys/fifoLayers/items/productionOrders ทั้งหมวด (รับของ/ตัดสต๊อกเครื่องอื่นไม่ทำให้เครื่องชั่ง stale)
+  //   เฉพาะโหมด docs (ACTION_READS_WHEN ไม่แตะ = p_check โหมด blob เหมือนเดิม)
+  ADD_WEIGH_LOG: (d) => { const x = (d.log && typeof d.log === 'object') ? d.log : d;
+    const noBom = !x.bomId && !String(x.recipeId || '').startsWith('bom:');
+    return { docs: _drD('weighLogs', [x.id]), colls: noBom ? [] : _drColls('ADD_WEIGH_LOG', d, ['weighLogs']) }; },
+  REVIEW_WEIGH_LOG: (d) => ({ docs: _drD('weighLogs', [d.id]), colls: _drColls('REVIEW_WEIGH_LOG', d, ['weighLogs']) }),
+  ADD_PROD_ORDER: (d) => d.createdVia === 'self_start'
+    ? { docs: _drD('productionOrders', [d.id]), colls: _drColls('ADD_PROD_ORDER', d, []) }
+    : { docs: _drD('productionOrders', [d.id]).concat(_drD('boms', [d.bomId])), colls: _drColls('ADD_PROD_ORDER', d, ['productionOrders', 'boms', 'items']) },
+  PATCH_PROD_ORDER: (d) => ({ docs: _drD('productionOrders', [d.id]),
+    colls: _drColls('PATCH_PROD_ORDER', d, d.patch && d.patch.status === 'cancelled' ? ['productionOrders'] : ['productionOrders', 'weighLogs']) }),
+  PROD_WORKFLOW_STEP: (d) => ({ docs: [], colls: _drColls('PROD_WORKFLOW_STEP', d, []) }),
+  ADD_TR: (d, s) => ({ docs: _drD('transferRequests', [d.id]).concat(_drItemDocs(s, _drVals(d.lines, 'itemId'))),
+    colls: _drColls('ADD_TR', d, ['transferRequests', 'items', 'expenseItems']) }),
+  UPDATE_TR: (d) => ({ docs: _drD('transferRequests', [d.id]), colls: _drColls('UPDATE_TR', d, ['transferRequests']) }),
+  SHIP_PUSH_LINE: (d) => ({ docs: [], colls: _drColls('SHIP_PUSH_LINE', d, []) }),
+  ADD_SALES_INV: (d) => ({ docs: [], colls: _drColls('ADD_SALES_INV', d, []) }),
+});
+// ทางเรียกของ 00-supabase (โหมด docs): คืน { docs, colls } ที่จัดรูปแล้ว (ไม่ซ้ำ · colls เรียง) หรือ null = ถอยไปทั้งหมวด
+// 🆕 รวมเลน (DSI1): UPDATE_INV ไม่เปลี่ยนผู้ขาย/ชุดเลขใบ เทียบใบใน state (ทั้ง payload ตรง ๆ และ payload ทับใบเดิม) + ไม่มีคำขอข้าม
+//   = _dsiEditGate ไม่มีเลขใหม่ให้สแกน และไม่มีเลขถูกลบ → อ่าน invoices แค่ใบนี้ · ไม่แน่ใจ/พัง = false (คงทั้งหมวด)
+const _drDsiSame = (s, d) => {
+  try {
+    if(!d || typeof d !== 'object' || d.dupSupInvOverride) return false;
+    const old = _drFind(s, 'invoices', d.id), E = global.ERP;
+    if(!old || !E || typeof E.dupSupInvNumbers !== 'function') return false;
+    const key = x => String(x.supplierId || '') + '|' + E.dupSupInvNumbers(x).map(n => n.norm).sort().join(',');
+    const k0 = key(old);
+    return key(d) === k0 && key({ ...old, ...d }) === k0;
+  } catch(_e){ return false; }
+};
+function actionDocReads(type, data, state){
+  try {
+    const f = Object.prototype.hasOwnProperty.call(ACTION_DOC_READS, type) ? ACTION_DOC_READS[type] : null;
+    if(typeof f !== 'function' || !data || typeof data !== 'object' || !state || typeof state !== 'object') return null;
+    const r = f(data, state);
+    if(!r || !Array.isArray(r.docs) || !Array.isArray(r.colls)) return null;
+    const seen = new Set(), docs = [];
+    for(const x of r.docs){
+      if(!x || typeof x.c !== 'string' || x.id == null) return null;
+      const k = x.c + '\u0000' + String(x.id); if(seen.has(k)) continue;
+      seen.add(k); docs.push({ c:x.c, id:String(x.id) });
+    }
+    if(r.colls.some(c => typeof c !== 'string')) return null;
+    return { docs, colls: Array.from(new Set(r.colls)).sort() };
+  } catch(_e){ return null; }
+}
 // reducer ที่บอกได้ว่า action "ไม่มีผล" (คืน state เดิม — ถูกปฏิเสธ/ซ้ำ) → สมุดตัดทิ้ง ไม่ค้างให้เล่นซ้ำแล้วพัง (ค้างจาก verify คลื่น 0)
 //   journalAdd ผูก entry ไว้ที่ action.__jref (ไม่ enumerable) — React เรียก reducer ตอน render ซึ่งมาหลัง journalAdd เสมอ (useReducer ไม่คำนวณล่วงหน้า)
 function reducerTracked(s, a){
@@ -40828,6 +42132,7 @@ Object.assign(global.ERP, {
   INIT_STATE, reducer, svcPoDeny: _svcPoDeny, deductFIFO, deductFromStore, siEditStock: _siEditStock, ADD_REPLAY_SAFE, ADD_DUP_TYPES: Object.freeze(Object.keys(_ADD_DUP)), isDupAdd: _isDupAdd, grVoidDeny: _grVoidDeny, payTagName: _payTagName, docTagSame: _docTagSame, ACTION_MERGE, DOC_NUMBERS, reducerTracked,
   ACTION_READS, MERGE_GUARD_KEYS, capLogsForSave: _capLogsForSave,   // 🆕 คลื่น 3 (WAVE3_CONTRACT §B4.1)
   ACTION_READS_WHEN,   // 🆕 SSH1 F3
+  ACTION_DOC_READS, actionDocReads,   // 🆕 PERSIST_V2 เลน STATE ขั้น 2 (โหมด docs: p_reads รายใบ · null = ถอยไป ACTION_READS)
   APPEND_KEYS, SEQ_BUMP_KEYS, SEQ_BUMPS, APPEND_ONLY_READS, PATCH_READS, CAP_LIMITS: Object.freeze({ auditLog:AUDIT_LOG_CAP, weighLogs:WEIGH_LOG_CAP }),   // 🌊 คลื่น 4 (WAVE4_CONTRACT §B4.1)
   PUSH_LINE_REASONS,   // 🆕 TR_PUSH_FAV (A2)
   lineShareNetValueDiff,   // 🆕 LSS3 UAT ชุด 1 S1: ผลต่างมูลค่าจากการหักล้างบวก/ลบ (จอสรุป = reducer)
