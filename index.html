@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="159a774fe948";window.__ERP_BUILT_AT__="2026-11-05T14:28:38";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="41a09607b629";window.__ERP_BUILT_AT__="2026-11-05T15:17:25";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -16300,11 +16300,34 @@ function poContractSummary(state, po){
 }
 // งานเพิ่ม/แก้ PO หลังยืนยันบางงวด (B18.4 · D14) → เหตุผลที่แก้เต็มไม่ได้ | null
 //   รับของสินค้าแล้ว = 'รับของแล้ว' (ข้อความเดิม) · บรรทัดบริการที่ยืนยันแล้วต้องคงเงิน/จำนวน · บรรทัดใหม่ต้องเป็นบริการ
+// 🆕 PEM1 UAT: PO จ่ายล่วงหน้าที่ตั้งหนี้แล้ว (CreateINVFromPOAdvanceModal ตั้ง invoiceId+advanceInvCreated · ยกเลิกใบ = VOID ล้างคืน) → true
+//   อ่านจาก PO อย่างเดียว (reducer ไม่ต้องอ่าน invoices) · ใบแยกหลายใบ = splitInvoiceIds ที่ยังเหลือ
+function poAdvanceInvLive(po){
+  return !!(po && ((po.advanceInvCreated && po.invoiceId) || (po.advanceInvCreated !== undefined && (po.splitInvoiceIds || []).length > 0)));
+}
+// ลายเซ็นเงินของ PO (ผู้ขาย · โหมดราคา · บรรทัด qty/ราคา/ส่วนลด/VAT/แถม · ส่วนลดท้ายบิล) — ใช้ตรวจว่าแก้เต็มแตะยอดเงินไหม
+function _poMoneySig(p){
+  const r = x => Math.round((Number(x) || 0) * 100) / 100, bd = (p && p.billDiscount) || null;
+  // 🔧 PEM1 verify 1: ส่วนลดท้ายบิล + กลุ่ม (ทุกรายการ/มี VAT/ไม่มี VAT) + ยอดที่กรอก (ก่อน/รวม VAT · เฉพาะบาท) — ทั้งสองตัวเปลี่ยนยอดส่วนลด/ยอด PO
+  //   ไม่ใส่ total/subtotal/bd.amount (ค่าคำนวณ · PO เก่าคิดใหม่อาจต่างเศษสตางค์ → แก้หมายเหตุไม่ได้) — reducer คืนค่าเงินจาก PO เดิมแทนเมื่อตั้งหนี้ล่วงหน้าแล้ว (verify 2)
+  //   ยอดที่กรอกเทียบแบบมีผลจริง (ไม่มี key = ตามโหมดราคา · % / เฉพาะไม่มี VAT = ไม่มีผล) → ฟอร์มที่ล้าง key ซ้ำซ้อนไม่ถูกนับว่าแก้
+  const _inc = !!p && p.priceMode === 'inclusive', _bsc = bd ? billDiscScope(bd.scope) : 'all';
+  const bdSig = bd ? [bd.mode === 'pct' ? 'pct' : 'thb', r(bd.value), _bsc,
+    bd.mode === 'pct' || _bsc === 'novat' ? '' : (bd.entered === 'incl' || bd.entered === 'excl' ? bd.entered : (_inc ? 'incl' : 'excl'))] : null;
+  return JSON.stringify([(p && p.supplierId) || '', !!p && p.priceMode === 'inclusive', bdSig,
+    ((p && p.lines) || []).map(l => [(l && l.itemId) || '', (l && l.lineId) || '', (l && l.expenseItemId) || '', r(l && l.qty), r(l && (l.unitPrice ?? l.price)),
+      r(l && l.discount), Number(l && l.vatRate) || 0, !!(l && l.isFreebie)])]);
+}
+const PO_ADV_INV_EDIT_MSG = 'ตั้งหนี้จ่ายล่วงหน้าแล้ว — แก้ราคา/จำนวน/โหมดราคา/ผู้ขาย/ส่วนลดไม่ได้ (ยอดใบตั้งหนี้จะไม่ตรงกับ PO) · ให้บัญชียกเลิกใบตั้งหนี้ล่วงหน้าก่อน แล้วค่อยแก้ PO';
 function poFullEditDenyReason(oldPo, newPo){
+  // 🆕 PEM1 UAT (🔴): ใบตั้งหนี้ล่วงหน้ายังมีผล → แก้ได้เฉพาะช่องที่ไม่แตะเงิน (วันส่ง/หมายเหตุ/คลังที่รับ)
+  if(poAdvanceInvLive(oldPo) && newPo && _poMoneySig(oldPo) !== _poMoneySig(newPo)) return PO_ADV_INV_EDIT_MSG;
   // 🆕 EXPENSE_PO verify 2b: บรรทัดบริการที่ ✂️ ปิดยอดแล้ว = ล็อกเหมือนบรรทัดที่ยืนยันแล้ว (ส่ง qty เดิมกลับมา = "เปิดยอดคืน" แล้ว PO ค้าง)
   const rx = ((oldPo && oldPo.lines) || []).filter(l => (Number(l && l.receivedQty) || 0) > 0 || (isServiceLine(l) && l && l.closedShort));
   if(!rx.length) return null;
   if(rx.some(l => !isServiceLine(l)) || !newPo) return 'รับของแล้ว';
+  // 🆕 PEM1: เปลี่ยนโหมดราคา = ยอดบรรทัดที่ยืนยัน/ปิดยอดแล้วเปลี่ยนตาม (ราคาเดิมตีความใหม่) → ไม่ได้
+  if((newPo.priceMode === 'inclusive') !== (oldPo.priceMode === 'inclusive')) return 'เปลี่ยนโหมดราคา (รวม/ไม่รวม VAT) ไม่ได้ — มีงานบริการที่ยืนยันแล้ว/ปิดยอดแล้ว';
   const nLines = newPo.lines || [], oldKeys = new Set(((oldPo.lines) || []).map(_svcKey).filter(Boolean));
   const same = (a, b) => Math.abs((Number(a) || 0) - (Number(b) || 0)) <= 0.005;
   for(const o of rx){
@@ -17013,7 +17036,7 @@ Object.assign(global.ERP, {
   EXP_BRANCH_ALIASES, expBranchIsHq, expBranchFromText, expenseBranchSuggest, EXP_TYPE_KEYWORDS, expenseSpecialKind, EXP_SPECIAL_LABEL, expenseExtCodeSuggest, expenseLineType,   // 🆕 BRANCH_EXPENSE_REPORT R1-R2
   expenseLinePostedBranch, expenseLineRows, expenseMemoBranch, invCostBranches, invsCostBranches, EXP_COL_HQ, EXP_COL_UNSET, expenseRowCol, branchExpenseReport, branchExpenseJeTotals, expBranchReclassUndoLines, expBranchReclassUndoJe, profitLossByBranch, expenseBranchPlan, canSetExpenseBranch, canMapExpenseExtCode,
   POS_BRANCH_SRC, POS_BRANCH_MAP_DEFAULT, POS_BRANCH_NAMES, posBranchMapResolved, canSetPosBranchMap, posReadKeyOf, posKeyMasked, posKeyTail, posKeySig, posKeyClean, posKeyDenyReason, fetchPosDailySales, branchProfitReport,   // 🆕 POS_BRANCH_SALES
-  isServiceLine, isStockLine, poHasStockLine, poHasServiceLine, poStockPending, poLineRemain, poLineQtyShown, poLineObPending, obcInclusiveBlock, obcOtherLineOpen, OBC_INCLUSIVE_MSG, svcConfirmedQty, svcRemainQty, svcInvoicedMap, svcUninvoiced, poStatusFromLines, whtFormForSupplier, whtMinBase, whtAutoOk, expenseItemOf, itemExpenseLink, itemExpenseLinkUsage, grLineExpCharge, chargeStockClearPlan, canClearChargeStock, CLEAR_CHARGE_WHO, s2aUndoAsk, S2A_UNDO_WHERE, isTransportLine, expenseItemTreatment, acctFieldsVisible, svcConfirmersFor, svcConfirmDenyReason, svcPoParties, getLastExpensePrice, findSimilarServicePOs, poSvcQuoteBase, poInvoicesOf, poContractSummary, poFullEditDenyReason,   // 🔧 EXPENSE_PO ① PO ค่าบริการ
+  isServiceLine, isStockLine, poHasStockLine, poHasServiceLine, poStockPending, poLineRemain, poLineQtyShown, poLineObPending, obcInclusiveBlock, obcOtherLineOpen, OBC_INCLUSIVE_MSG, svcConfirmedQty, svcRemainQty, svcInvoicedMap, svcUninvoiced, poStatusFromLines, whtFormForSupplier, whtMinBase, whtAutoOk, expenseItemOf, itemExpenseLink, itemExpenseLinkUsage, grLineExpCharge, chargeStockClearPlan, canClearChargeStock, CLEAR_CHARGE_WHO, s2aUndoAsk, S2A_UNDO_WHERE, isTransportLine, expenseItemTreatment, acctFieldsVisible, svcConfirmersFor, svcConfirmDenyReason, svcPoParties, getLastExpensePrice, findSimilarServicePOs, poSvcQuoteBase, poInvoicesOf, poContractSummary, poFullEditDenyReason, poAdvanceInvLive, PO_ADV_INV_EDIT_MSG,   // 🔧 EXPENSE_PO ① PO ค่าบริการ
   contractInstTotal, contractInvoices, contractInstBilledMap, contractInstAccepted, contractInvAcceptorChanged, contractInstState, contractSummary, contractBranchSummary, contractDenyReason, projectAssetFor, contractCapAccount, retentionAmountFor, isContractAcceptor, contractInstsReadyToBill, supplierOpenContracts, contractAcceptorDeny, CONTRACT_SUM_KEYS, contractCipCode, retentionAccountCode, pettyDenyInv, assetLifeMonths, assetDepStart,   // 📑 สัญญางานจ้าง P2
   amtR2, invNetPayable, invOffInvDisc, invGrossInclVat, invDeductions, invAmtView, dedText, AMT_DED_KEYS, AMT_DED_LABEL, paySourceKey, paySourceLabel, payAmtView, paidRowAmtView, paidSrcSplit, memoAmtView, grGrossInclVat, sumAmt,   // 🆕 AMOUNT-INCL-VAT B2
   canAddPayTag, canSetDocTag, docTagOf, docTagIdsOf, docTagsOf, docTagFields, unionDocTags, DOC_TAG_MAX, commonDocTag, poTagDefault, InvTagField, DocTagChip, TagSelect, DocTagEdit, TagMultiSelect, promptNewPayTag, docHasTag, docTagNames, TagManagerButton,   // 🆕 MULTI-TAG MT4/MT5
@@ -24751,6 +24774,21 @@ function _poKeepObc(old, nu){
   if(!old || !nu || !(old.lines || []).some(l => l && l.overBilled)) return nu;
   return { ...nu, lines: (nu.lines || []).map((l, i) => { const o = (old.lines || [])[i]; return (o && o.overBilled) ? o : l; }) };
 }
+// 🔧 PEM1 verify 3: ลิงก์บัญชีของ PO — ตั้ง/ล้างโดยทางตั้งหนี้ (UPDATE_PO ตอนตั้งหนี้ล่วงหน้า · VOID_INV · REFUND_PO) เท่านั้น
+//   UPDATE_PO_FULL คงค่าปัจจุบันเสมอ (payload ใช้ตั้ง/ล้างไม่ได้) · ไม่มี key เดิม = ลบ key จาก payload
+const _PO_ACCT_KEEP = ['invoiceId','advanceInvCreated','splitInvoiceIds','prevInvoiceId','prevSplitInvoiceIds','invFromGR','refunds','refundedTotal'];
+// 🔧 PEM1 verify 2: PO ตั้งหนี้ล่วงหน้าแล้ว — คืนยอดหัวใบ + ช่องเงินรายบรรทัดจาก PO เดิม (mutate nu)
+//   ใช้หลัง poFullEditDenyReason ผ่านแล้วเท่านั้น (ผู้ขาย/โหมด/บรรทัด/ส่วนลดท้ายบิลเท่าเดิม → บรรทัดเรียงตรงกันตาม index)
+const _PO_MONEY_HEAD = ['total','subtotal','vat','vatAmount','discount','billDiscount','priceMode','supplierId'];
+const _PO_MONEY_LINE = ['qty','unitPrice','price','unitPriceExVat','discount','discEntered','discEnteredValue','vatRate','lineExVat','lineVat','lineTotal','billDiscAlloc','isFreebie'];
+function _poKeepMoney(old, nu){
+  const kp = (src, dst, ks) => ks.forEach(k => { if(src[k] !== undefined) dst[k] = src[k]; else delete dst[k]; });
+  kp(old, nu, _PO_MONEY_HEAD);
+  const ol = old.lines || [];
+  if(Array.isArray(nu.lines) && nu.lines.length === ol.length)
+    nu.lines = nu.lines.map((l, i) => { const o = ol[i]; if(!l || !o) return l; const x = { ...l }; kp(o, x, _PO_MONEY_LINE); return x; });
+  return nu;
+}
 function _poKeepSvc(s, old, nu){
   const E = global.ERP;
   if(!old || !nu || !E.poHasServiceLine || !(E.poHasServiceLine(old) || E.poHasServiceLine(nu))) return nu;
@@ -28941,6 +28979,8 @@ function _reducerCore(s, a){
       // ห้ามถ้ามี GR แล้ว · 🔧 B18.4 (D14): ผ่อนเฉพาะบรรทัดบริการที่ยืนยันแล้ว (เงิน/จำนวนต้องเท่าเดิม · เพิ่มได้เฉพาะบรรทัดบริการ)
       const _fd = global.ERP.poFullEditDenyReason(old, newPo);
       if(_fd){ alert(_fd === 'รับของแล้ว' ? 'PO นี้รับของไปแล้ว — ใช้ "แก้หลังรับของ" แทน' : '⛔ ' + _fd); return s; }
+      const _advLock = global.ERP.poAdvanceInvLive(old);   // 🔧 PEM1 verify 2: ยอดเงินคงตาม PO เดิม (ดู _poKeepMoney)
+      const _nTotal = _advLock ? (Number(old.total) || 0) : (Number(newPo && newPo.total) || 0);
       { const _sd = _svcPoDeny(s, { ...old, ...(newPo || {}) }); if(_sd){ alert('⛔ ' + _sd); return s; } }   // 🔧 B18.10-7/10
       const _now = Number(a.data.at) || Date.now();   // 🔧 B18.4: เวลาจาก payload (action เก่าไม่มี at = เดิม)
       // 🆕 B18 (อนุมัติรอบเดียว): มาจากคำขอ edit_po_full ที่อนุมัติครบ (approvalReqId) → ตรวจคำขอจริง (_approvalGate · ใช้ได้ครั้งเดียว)
@@ -28959,6 +28999,9 @@ function _reducerCore(s, a){
       // snapshot ก่อนแก้
       const snapshot = { total: old.total, subtotal: old.subtotal, vatAmount: old.vatAmount,
         discount: old.discount, lines: old.lines, dueDate: old.dueDate, paymentMode: old.paymentMode,
+        // 🆕 PEM1 UAT: โหมดราคา/ส่วนลดท้ายบิลก่อนแก้ — ประวัติอ่านราคาเดิมถูกความหมาย (รวม/ไม่รวม VAT) · PO เก่าไม่มีค่า = ไม่ใส่ key
+        //   priceMode ใส่เสมอ (ไม่มี key = revision รุ่นก่อน PEM1 ซึ่งแก้เต็มเปลี่ยนโหมดไม่ได้ = โหมดเท่าปัจจุบัน)
+        priceMode: old.priceMode === 'inclusive' ? 'inclusive' : 'exclusive', ...(old.billDiscount ? { billDiscount: old.billDiscount } : {}),
         // 🆕 EXPENSE_PO verify 2b: ผู้อนุมัติ/ผู้ส่งก่อนแก้ — approvedBy ถูกเขียนทับตอนอนุมัติคำขอแก้เต็ม → svcPoParties ยังกันคนอนุมัติเดิมยืนยันงานได้
         ...(old.approvedBy ? { approvedBy: old.approvedBy } : {}), ...(old.submittedBy ? { submittedBy: old.submittedBy } : {}) };
       const revNo = (old.revisionHistory||[]).length + 1;
@@ -28972,7 +29015,7 @@ function _reducerCore(s, a){
         // PO line เก็บ unitPrice (ไม่มี field price) — เดิมเทียบ .price ที่ไม่มี → ไม่เคยเห็นว่าราคาเปลี่ยน
         const _pn = Number(newL && (newL.unitPrice ?? newL.price)) || 0, _po = Number(oldL.unitPrice ?? oldL.price) || 0;
         return newL && Math.abs(_pn - _po) > 0.001;
-      });
+      }) || (newPo.priceMode === 'inclusive') !== (old.priceMode === 'inclusive');   // 🆕 PEM1: เปลี่ยนโหมดราคา (รวม/ไม่รวม VAT) = ราคาเปลี่ยน
       const wasApproved = ['approved','partial','received'].includes(old.status);
       // B18: ผ่านคำขอ edit_po_full แล้ว = อนุมัติรอบเดียวพอ (ไม่ต้องกลับไปรออนุมัติ PO อีกรอบ)
       const reApproveNeeded = priceChanged && wasApproved && !_apFull;
@@ -28999,7 +29042,7 @@ function _reducerCore(s, a){
         revisionHistory: [...(old.revisionHistory||[]),
           { revNo, at: _now, by, tier: 'full', reason: reason||'', snapshot,
             priceChanged, reApproveNeeded, ...(_apFull ? { approvalReqId:_apFull.id, approvedBy:s.currentUser.username, ...(_apFull.requestedBy ? { requestedBy:_apFull.requestedBy } : {}) } : {}),   // verify 2b: + ผู้ขอ (svcPoParties)
-            ...(global.ERP.poHasServiceLine(old) || global.ERP.poHasServiceLine(newPo) ? { kind:'change_order', amountDelta:Math.round(((Number(newPo.total) || 0) - (Number(old.total) || 0)) * 100) / 100 } : {}) }],
+            ...(global.ERP.poHasServiceLine(old) || global.ERP.poHasServiceLine(newPo) ? { kind:'change_order', amountDelta:Math.round((_nTotal - (Number(old.total) || 0)) * 100) / 100 } : {}) }],
         lastEditAt: _now, lastEditBy: by, lastEditTier: 'full' };
       // 🆕 PO-PAYMODE verify 1: เงื่อนไขจ่ายของ PO ที่อนุมัติแล้ว เปลี่ยนได้ทาง change_po_paymode เท่านั้น → คงค่าปัจจุบันเสมอ
       //   (คำขอ edit_po_full ค้างเก็บสำเนา PO เก่า — อนุมัติทีหลังห้ามทับเงื่อนไขที่เพิ่งเปลี่ยน) · PO ร่าง/รออนุมัติ (ไม่ผ่านคำขอ) แก้ในฟอร์มได้
@@ -29011,13 +29054,19 @@ function _reducerCore(s, a){
       else delete merged.paymentMode;
       if(old.paymentModeChanges !== undefined) merged.paymentModeChanges = old.paymentModeChanges;
       else delete merged.paymentModeChanges;
+      // 🔧 PEM1 verify 3: ลิงก์บัญชี (ใบตั้งหนี้ล่วงหน้า/ใบแยก/ใบที่ยกเลิก/รับคืนเงิน) ตั้ง/ล้างผ่านทางบัญชีเท่านั้น → คงค่าปัจจุบันเสมอ
+      //   (คำขอ edit_po_full ที่สร้างก่อนตั้งหนี้เก็บสำเนา PO ไม่มี invoiceId — อนุมัติทีหลังห้ามล้างลิงก์ = PO กลับเข้าคิวตั้งหนี้ซ้ำ + หลุดล็อก PEM1)
+      _PO_ACCT_KEEP.forEach(k => { if(old[k] !== undefined) merged[k] = old[k]; else delete merged[k]; });
+      // 🔧 PEM1 verify 2: ตั้งหนี้ล่วงหน้าแล้ว → ด่านบนผ่านแปลว่าช่องที่กำหนดเงินเท่าเดิม → ยอด/ค่าที่คำนวณต้องเท่าเดิมด้วย
+      //   (console/replay ส่งบรรทัดเดิมแต่ total/subtotal ปลอม = PO ไม่ตรงใบตั้งหนี้) → คืนยอดใบ + ยอดรายบรรทัดจาก PO เดิม
+      if(_advLock) _poKeepMoney(old, merged);
       if(_gsNew) merged.gmSelfApproved = _gsNew;
       else if(old.gmSelfApproved && !_apOk && !reApproveNeeded && !['draft','pending'].includes(merged.status) && merged.approvedBy === old.approvedBy) merged.gmSelfApproved = old.gmSelfApproved;
       if(old.selfApprovedPerm && !_apOk && !reApproveNeeded && !['draft','pending'].includes(merged.status) && merged.approvedBy === old.approvedBy) merged.selfApprovedPerm = old.selfApprovedPerm;   // SELF-APPROVE S3
       const auditLog = [...(s.auditLog||[]), { id: a.data.at ? 'al_pofull_' + _sanId(id) + '_' + _now.toString(36) : 'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,4),
         ts:_now, type:'po_edit_full', by, entityId:id, entityRef:old.poNumber,
         note: reason||'' + (reApproveNeeded ? ' [🔄 รออนุมัติใหม่ เพราะราคาเปลี่ยน]' : ''),
-        amount: (newPo.total||0) - (old.total||0) }];
+        amount: _nTotal - (old.total||0) }];
       // 🆕 DOC-TAGS D5: แท็กเปลี่ยนด้วย SET_DOC_TAG เท่านั้น → คงแท็กปัจจุบัน (คำขออนุมัติที่ค้างนานไม่ทับแท็กใหม่)
       const _mergedT = _poKeepSvc(s, old, _docTagKeep(s, old, merged, null));   // 🔧 B18.10-1 คงการยืนยันงานบริการ
       return { ...s, pos: s.pos.map(p => p.id === id ? _mergedT : p), auditLog };
@@ -83162,6 +83211,34 @@ function LineDiscInput({ line, priceMode, onPatch, disabled, testid, inputClass 
   );
 }
 
+// 🆕 PEM1: สลับโหมดราคา (ไม่รวม/รวม VAT) — ใช้ร่วม NewPOModal.changePriceMode + EditPOFullModal
+//   ราคาที่พิมพ์ = ตัวเลขเดิม ตีความตามโหมดใหม่ · ส่วนลดรายบรรทัด/ท้ายบิล (บาท) คงความหมายเดิม (ก่อน/รวม VAT ตามที่พิมพ์ไว้)
+//   (ย้ายมาจาก NewPOModal.changePriceMode — BILL-DISC verify #1 · ไม่เปลี่ยนพฤติกรรม)
+function poPriceModeFlipLines(ls, oldMode, newMode){
+  const E = global.ERP;
+  const oldB = oldMode === 'inclusive' ? 'incl' : 'excl', newB = newMode === 'inclusive' ? 'incl' : 'excl';
+  return (ls || []).map(l => {
+    if(!l || l.isFreebie || !(Number(l.discount) > 0 || (l._discRaw != null && Number(l._discRaw) > 0))) return l;
+    const hasVat = (Number(l.vatRate) || 0) > 0;
+    if(!hasVat) return l;
+    const ent = l.discEntered || oldB;
+    const typed = l._discRaw != null ? Number(l._discRaw) || 0 : lineDiscShown(l, ent, oldMode);
+    return { ...l, discount: E.lineDiscToBasis(typed, l.vatRate, ent, newMode), discEntered: ent !== newB ? ent : undefined,
+      discEnteredValue: (ent !== newB && typed > 0) ? E.bdR2(typed) : undefined,
+      _discRaw: l._discRaw != null ? l._discRaw : String(typed) };
+  });
+}
+//   ส่วนลดท้ายบิล (บาท) ที่ไม่ได้เลือก "ยอดที่กรอก" = ตาม price basis เดิม → ล็อก entered เป็น basis เดิม · % / กลุ่มไม่มี VAT = ไม่แตะ
+function poPriceModeFlipBillDisc(b, oldMode, newMode){
+  const E = global.ERP;
+  const oldB = oldMode === 'inclusive' ? 'incl' : 'excl', newB = newMode === 'inclusive' ? 'incl' : 'excl';
+  if(!b || b.mode === 'pct' || E.billDiscScope(b.scope) === 'novat') return b;
+  const ent = b.entered || oldB;
+  const n = { ...b, entered: ent };
+  if(ent === newB) delete n.entered;
+  return n;
+}
+
 // 🔧 UAT2 S6: บวกเดือน 'YYYY-MM-DD' แบบหนีบวันท้ายเดือน (31 ม.ค. +1 = 28/29 ก.พ.)
 global.ERP.addMonthsClamp = function(d, m){ if(!d) return d; const [y0, m0, d0] = String(d).split('-').map(Number); const t = (m0 - 1) + m, y = y0 + Math.floor(t / 12), mo = ((t % 12) + 12) % 12;
   const last = new Date(y, mo + 1, 0).getDate(); return y + '-' + String(mo + 1).padStart(2, '0') + '-' + String(Math.min(d0, last)).padStart(2, '0'); };
@@ -83257,25 +83334,9 @@ function NewPOModal({ state, dispatch, user, onClose, presetSupplierId }){
   //   ส่วนลดท้ายบิล (บาท) ที่ไม่ได้เลือก "ยอดที่กรอก" = ตาม price basis เดิม → ล็อก entered เป็น basis เดิม (ค่าเริ่มต้น ก่อน VAT ตามสเปก)
   const changePriceMode = (m) => {
     if(m === priceMode) return;
-    const E = global.ERP;
-    const oldB = priceMode === 'inclusive' ? 'incl' : 'excl', newB = m === 'inclusive' ? 'incl' : 'excl';
-    setLines(ls => ls.map(l => {
-      if(!l || l.isFreebie || !(Number(l.discount) > 0 || (l._discRaw != null && Number(l._discRaw) > 0))) return l;
-      const hasVat = (Number(l.vatRate) || 0) > 0;
-      if(!hasVat) return l;
-      const ent = l.discEntered || oldB;
-      const typed = l._discRaw != null ? Number(l._discRaw) || 0 : lineDiscShown(l, ent, priceMode);
-      return { ...l, discount: E.lineDiscToBasis(typed, l.vatRate, ent, m), discEntered: ent !== newB ? ent : undefined,
-        discEnteredValue: (ent !== newB && typed > 0) ? E.bdR2(typed) : undefined,
-        _discRaw: l._discRaw != null ? l._discRaw : String(typed) };
-    }));
-    setBillDisc(b => {
-      if(!b || b.mode === 'pct' || E.billDiscScope(b.scope) === 'novat') return b;
-      const ent = b.entered || oldB;
-      const n = { ...b, entered: ent };
-      if(ent === newB) delete n.entered;
-      return n;
-    });
+    // 🆕 PEM1: ตรรกะแปลงย้ายไป poPriceModeFlipLines/BillDisc (ใช้ร่วม EditPOFullModal) — พฤติกรรมเดิมทุกช่อง
+    setLines(ls => poPriceModeFlipLines(ls, priceMode, m));
+    setBillDisc(b => poPriceModeFlipBillDisc(b, priceMode, m));
     setPriceMode(m);
   };
   const [note, setNote] = useState('');
@@ -85473,33 +85534,44 @@ function PODetailModal({ po:poProp, state, dispatch, user, onClose, viewOnly }){
         if(!po.priceChangedAt || !lastRev || lastRev.tier !== 'full' || !lastRev.snapshot) return null;
         if(!(lastRev.priceChanged || (po.priceChangeRevNo && lastRev.revNo === po.priceChangeRevNo))) return null;
         const oldLines = lastRev.snapshot?.lines || [];
+        // 🆕 PEM1 UAT (🟡): เทียบราคา "ก่อน VAT" ต่อหน่วย (ตัวเลขที่พิมพ์ตีความตามโหมดของแต่ละฉบับ) — เปลี่ยนโหมดอย่างเดียวก็เห็นส่วนต่าง
+        //   snapshot ไม่มี priceMode = revision รุ่นก่อน PEM1 (เปลี่ยนโหมดไม่ได้) → โหมดเดิม = โหมดปัจจุบัน
+        const newMode = po.priceMode === 'inclusive' ? 'inclusive' : 'exclusive';
+        const oldMode = lastRev.snapshot.priceMode ? (lastRev.snapshot.priceMode === 'inclusive' ? 'inclusive' : 'exclusive') : newMode;
+        const modeChanged = oldMode !== newMode;
+        const MODE_TH = { exclusive:'ไม่รวม VAT', inclusive:'รวม VAT แล้ว' };
+        const exU = (l, mode) => { const p = Number(l.unitPrice ?? l.price) || 0, v = l.isFreebie ? 0 : (Number(l.vatRate ?? 7) || 0);
+          return mode === 'inclusive' && v > 0 ? p * 100 / (100 + v) : p; };
         const diffs = (po.lines||[]).map((curL, ci) => {
           const oldL = oldLines[ci] && oldLines[ci].itemId === curL.itemId ? oldLines[ci]
             : oldLines.find(x => x.itemId === curL.itemId);
           if(!oldL) return null;
-          const oldPrice = Number(oldL.unitPrice ?? oldL.price)||0;
-          const newPrice = Number(curL.unitPrice ?? curL.price)||0;
-          if(Math.abs(newPrice - oldPrice) < 0.001) return null;
+          const oldPrice = exU(oldL, oldMode);
+          const newPrice = exU(curL, newMode);
+          if(Math.abs(newPrice - oldPrice) < 0.005) return null;
           const delta = newPrice - oldPrice;
           const deltaPct = oldPrice > 0 ? (delta / oldPrice * 100) : 0;
           const nm = (state.items||[]).find(i => i.id === curL.itemId)?.name || curL.itemName || curL.name || curL.itemId;
           return { name: nm + (curL.unit ? ` (${curL.unit})` : ''), oldPrice, newPrice, delta, deltaPct };
         }).filter(Boolean);
-        if(diffs.length === 0) return null;
-        return h('div', { className:'bg-amber-50 border-2 border-amber-400 rounded-lg p-3' },
+        if(diffs.length === 0 && !modeChanged) return null;
+        return h('div', { className:'bg-amber-50 border-2 border-amber-400 rounded-lg p-3', 'data-testid':'po-price-diff' },
           h('div', { className:'font-bold text-amber-900 text-sm mb-2' },
             `🔍 รายการเปลี่ยนแปลงราคา — ต้องอนุมัติใหม่ (${diffs.length} รายการ)`),
           h('div', { className:'text-xs text-amber-800 mb-2' },
             'แก้โดย ', h('b',null, po.priceChangedBy||lastRev.by), ' · ',
             fmtDate(new Date(po.priceChangedAt).toISOString().slice(0,10))),
-          h('div', { className:'bg-white border rounded overflow-hidden' },
+          modeChanged && h('div', { className:'bg-blue-50 border border-blue-300 rounded px-2 py-1 text-xs text-blue-900 mb-2', 'data-testid':'po-price-diff-mode' },
+            '💰 โหมดราคา: ', h('b', null, MODE_TH[oldMode]), ' → ', h('b', null, MODE_TH[newMode]),
+            ' · ยอดรวม ', fmtCur(Number(lastRev.snapshot.total) || 0), ' → ', h('b', null, fmtCur(Number(po.total) || 0))),
+          diffs.length > 0 && h('div', { className:'bg-white border rounded overflow-hidden' },
             h('table', { className:'w-full text-xs' },
               h('thead', { className:'bg-gray-50 border-b' },
                 h('tr', null,
                   h('th', { className:'px-2 py-1 text-left' }, 'สินค้า'),
-                  h('th', { className:'px-2 py-1 text-right' }, 'ราคาเดิม'),
+                  h('th', { className:'px-2 py-1 text-right' }, 'ราคาเดิม (ก่อน VAT)'),
                   h('th', { className:'px-2 py-1 text-center' }, '→'),
-                  h('th', { className:'px-2 py-1 text-right' }, 'ราคาใหม่'),
+                  h('th', { className:'px-2 py-1 text-right' }, 'ราคาใหม่ (ก่อน VAT)'),
                   h('th', { className:'px-2 py-1 text-right' }, 'Δ'),
                   h('th', { className:'px-2 py-1 text-right' }, 'Δ%'))),
               h('tbody', { className:'divide-y' },
@@ -85768,7 +85840,10 @@ function _poClosedCalcLine(l){
 function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
   const po = (state.pos||[]).find(p => p.id === poProp.id) || poProp;   // 🆕 FRESH-PO
   const { Combobox } = global.ERP;
-  const priceMode = po.priceMode || 'exclusive';
+  // 🆕 PEM1: โหมดราคาเปลี่ยนได้ในหน้าแก้เต็ม (เดิมล็อกตามตอนสร้าง PO) — เริ่มจาก po.priceMode
+  const poMode0 = po.priceMode === 'inclusive' ? 'inclusive' : 'exclusive';
+  const [priceMode, setPriceMode] = useState(poMode0);
+  const pmChanged = priceMode !== poMode0;
   const itemOf = (l) => (state.items||[]).find(x => x.id === l.itemId);
   const nameOf = (l) => global.ERP.isServiceLine(l) ? ('🔧 ' + (l.description || '')) : (itemOf(l)?.name || l.itemName || l.name || l.itemId || '');   // 🔧 B13 ชื่อบรรทัดบริการ
   // copy lines — normalize ให้มี field จริงครบ (PO ที่เคยผ่าน Full Edit รุ่นก่อนอาจมี price ค้าง → map กลับเป็น unitPrice)
@@ -85799,6 +85874,21 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
   const [destinationBranch, setDestinationBranch] = useState(po.destinationBranch || state.currentBranch);
   const editableBranches = (state.branches||[]);
   const editableSuppliers = (state.suppliers||[]).filter(s => s.active !== false);
+
+  // 🆕 PEM1: บรรทัดบริการที่ยืนยันงาน/✂️ ปิดยอดแล้ว เงินล็อก (poFullEditDenyReason) → เปลี่ยนโหมดราคาไม่ได้ (ยอดบรรทัดที่ล็อกจะเปลี่ยนตาม)
+  const svcPmLocked = lines.some(l => global.ERP.isServiceLine(l) && (global.ERP.svcConfirmedQty(l) > 0 || !!l.closedShort));
+  // 🆕 PEM1 UAT (🔴): ตั้งหนี้จ่ายล่วงหน้าแล้ว → แก้เงินไม่ได้ (poFullEditDenyReason) — ปุ่มโหมดล็อก + แถบแดงบอกทางออก
+  const advLocked = global.ERP.poAdvanceInvLive(po);
+  const pmLocked = svcPmLocked || advLocked;
+  const pmLockMsg = advLocked ? 'ตั้งหนี้จ่ายล่วงหน้าแล้ว — ให้บัญชียกเลิกใบตั้งหนี้ล่วงหน้าก่อน' : 'มีงานบริการที่ยืนยัน/ปิดยอดแล้ว';
+  // สลับโหมด = ตัวเลขราคาที่พิมพ์ตีความตามโหมดใหม่ · ส่วนลดรายบรรทัด/ท้ายบิลคงความหมายเดิม (กติกาเดียวกับหน้าเปิด PO)
+  const changePriceMode = (m) => {
+    if(m === priceMode || pmLocked) return;
+    setLines(ls => poPriceModeFlipLines(ls, priceMode, m));
+    setBillDisc(b => poPriceModeFlipBillDisc(b, priceMode, m));
+    setPriceMode(m);
+  };
+  const PM_LABEL = { exclusive:'ไม่รวม VAT', inclusive:'รวม VAT แล้ว' };
 
   const NUM_KEYS = ['qty','unitPrice','discount','vatRate'];
   const updateLine = (idx, k, v) => {
@@ -85937,7 +86027,7 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
         || Math.abs((Number(ol.discount)||0) - nl.discount) > 0.001
         || (Number(ol.vatRate)||0) !== nl.vatRate
         || !!ol.isFreebie !== nl.isFreebie;
-    }) || bdChanged;   // 🆕 BILL-DISC §B6: เปลี่ยนส่วนลดท้ายบิล = เปลี่ยนราคา
+    }) || bdChanged || pmChanged;   // 🆕 BILL-DISC §B6: เปลี่ยนส่วนลดท้ายบิล = เปลี่ยนราคา · 🆕 PEM1: เปลี่ยนโหมดราคา = เปลี่ยนราคา
     const wasApproved = ['approved','partial','received'].includes(po.status);
     const reApproveNeeded = moneyChanged && wasApproved;
     if(pmEditable && paymentMode === 'advance' && paymentMode !== po.paymentMode && global.ERP.poHasServiceLine({ lines: finalLines })){   // 🔧 EXPENSE_PO D9/D17 (สูตรเดียวกับ reducer)
@@ -85948,6 +86038,7 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
       supplierId, destinationBranch,
       ...(pmEditable ? { paymentMode } : {}),   // 🆕 PO-PAYMODE verify 1: เฉพาะ PO ร่าง/รออนุมัติ (reducer คงค่าเดิมเสมอสำหรับ PO อนุมัติแล้ว)
       ...(bd.header ? { billDiscount: bd.header } : {}),
+      ...(pmChanged ? { priceMode } : {}),   // 🆕 PEM1: โหมดใหม่ (ไม่เปลี่ยน = คงค่าเดิมของ PO ตาม {...po})
       // priceChangeRevNo = revNo ที่ reducer จะใส่ให้ revision นี้ → PODetailModal ใช้แสดงตาราง old→new (CG-5)
       ...(moneyChanged ? { priceChangedAt: Date.now(), priceChangedBy: user.username, priceChangeRevNo: (po.revisionHistory||[]).length + 1 } : {}),
       // reducer ใช้ `newPo.approvedBy ?? old.approvedBy` → null ถูกแทนด้วยค่าเดิม จึงล้างด้วย '' / 0
@@ -85955,9 +86046,16 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
             approvalLog: [...(po.approvalLog||[]), { action:'reopen_price_change', by:user.username, at:Date.now(), reason }] } : {}),
     };
     if(!bd.header) delete newPo.billDiscount;   // 🆕 BILL-DISC: ลบส่วนลด → ไม่มี key (reducer ใช้ {...newPo})
+    // 🆕 PEM1 UAT (🔴): ตั้งหนี้ล่วงหน้าแล้ว + แตะเงิน → บอกตั้งแต่หน้านี้ (ไม่ส่งคำขออนุมัติที่จะใช้ไม่ได้) · reducer ตรวจซ้ำ
+    if(advLocked){ const _fd = global.ERP.poFullEditDenyReason(po, newPo); if(_fd){ alert('⛔ ' + _fd); return; } }
+    // 🆕 PEM1 UAT (🟡): เปลี่ยนโหมดราคา = ยอดเปลี่ยนแม้ไม่ได้พิมพ์ราคาใหม่ → ยืนยันยอดเดิม → ยอดใหม่ก่อนบันทึก
+    if(pmChanged && !confirm('💰 เปลี่ยนโหมดราคา "' + PM_LABEL[poMode0] + '" → "' + PM_LABEL[priceMode] + '"\n'
+      + 'ยอดรวมเดิม ' + fmtCur(Number(po.total) || 0) + ' → ยอดใหม่ ' + fmtCur(total)
+      + ' (ก่อน VAT ' + fmtCur(Number(po.subtotal) || 0) + ' → ' + fmtCur(subtotal) + ')\n\nตรวจราคาที่กรอกแล้ว — บันทึกเลยไหม?')) return;
     const _bdTxt = (x) => x ? (fmtCur(x.amount) + (x.mode === 'pct' ? ` (${fmtNum(x.value)}%)` : '')) : '0';
     const fullReason = reason + (reApproveNeeded ? ' [🔄 ราคา/รายการเปลี่ยน → รออนุมัติใหม่]' : '')
-      + (bdChanged ? ` [ส่วนลดท้ายบิล ${_bdTxt(po.billDiscount)} → ${_bdTxt(bd.header)}]` : '');
+      + (bdChanged ? ` [ส่วนลดท้ายบิล ${_bdTxt(po.billDiscount)} → ${_bdTxt(bd.header)}]` : '')
+      + (pmChanged ? ` [โหมดราคา ${PM_LABEL[poMode0]} → ${PM_LABEL[priceMode]}]` : '');   // 🆕 PEM1: ผู้อนุมัติเห็นว่าเปลี่ยนโหมด
     // ส่ง approval เฉพาะ PO ที่อนุมัติแล้ว · 🆕 APPROVAL 1b-2: PO ร่าง/รออนุมัติยังไม่มีใครอนุมัติ → แก้ได้เลย (ตัวอนุมัติ PO ตรวจยอดใหม่เอง)
     const needApprove = po.status !== 'draft' && po.status !== 'pending';
     const sent = needApprove && global.ERP.requestApprovalIfNeeded({
@@ -85981,12 +86079,27 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
 
   return h(Modal, { isOpen:true, title:`🔧 แก้ไข PO เต็ม — ${po.poNumber}`, onClose, size:'xl', docKey:'po:edit:'+po.id },
     h('div', { className:'space-y-3' },
+      advLocked && h('div', { className:'bg-red-50 border-2 border-red-300 rounded p-3 text-sm text-red-800', 'data-testid':'poedit-adv-locked' },
+        '⛔ ', h('b', null, 'PO นี้ตั้งหนี้จ่ายล่วงหน้าแล้ว'),
+        ' — แก้ราคา/จำนวน/โหมดราคา/ผู้ขาย/ส่วนลดไม่ได้ (ยอดใบตั้งหนี้จะไม่ตรงกับ PO) · แก้ได้เฉพาะวันส่ง/คลังที่รับ/หมายเหตุ',
+        h('div', { className:'text-xs mt-1' }, 'ต้องแก้ยอด → ให้บัญชียกเลิกใบตั้งหนี้ล่วงหน้าก่อน แล้วค่อยแก้ PO')),
       h('div', { className:'bg-amber-50 border border-amber-200 rounded p-3 text-sm text-amber-800' },
         '⚠️ ', h('b', null, 'Full Edit'),
         ' — แก้ได้ทุกอย่าง: supplier · คลังที่รับ · วันส่ง · ราคา/จำนวน/lines (PO ยังไม่ได้รับของ)',
-        h('div', { className:'mt-1 text-xs' },
-          '💰 โหมดราคา: ', h('b', null, priceMode === 'inclusive' ? 'ราคาที่กรอกรวม VAT แล้ว (ระบบถอด VAT ให้)' : 'ราคาก่อน VAT (ระบบบวก VAT ตาม % แต่ละบรรทัด)'),
-          ' — ตามที่ตั้งตอนสร้าง PO'),
+        // 🆕 PEM1: เลือกโหมดราคาได้ (เหมือนหน้าเปิด PO) — จัดซื้อมาใส่ราคาทีหลังกรอกราคารวม VAT ได้
+        h('div', { className:'mt-2 flex flex-wrap items-center gap-2 text-xs', 'data-testid':'poedit-pricemode' },
+          h('span', null, '💰 โหมดราคา:'),
+          h('div', { className:'inline-grid grid-cols-2 gap-1 border-2 border-amber-300 rounded p-0.5 bg-white' },
+            ['exclusive','inclusive'].map(m => h('button', { key:m, type:'button', 'data-testid':'poedit-pricemode-' + m, disabled: pmLocked && m !== priceMode,
+              onClick:()=>changePriceMode(m), title: pmLocked ? pmLockMsg + ' — เปลี่ยนโหมดราคาไม่ได้' : undefined,
+              className: cls('px-3 py-1 rounded text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed',
+                priceMode === m ? 'bg-blue-600 text-white' : 'bg-white text-gray-800 hover:bg-gray-100') }, PM_LABEL[m])))),
+        h('div', { className:'mt-1 text-xs', 'data-testid':'poedit-pricemode-note' },
+          h('b', null, priceMode === 'inclusive' ? 'ราคาที่กรอก = รวม VAT แล้ว (ระบบถอด VAT ให้)' : 'ราคาที่กรอก = ก่อน VAT (ระบบบวก VAT ตาม % แต่ละบรรทัด)'),
+          pmLocked ? ' — เปลี่ยนไม่ได้: ' + pmLockMsg
+            : pmChanged ? h('span', { className:'text-blue-800' }, ' — เปลี่ยนจาก "' + PM_LABEL[poMode0] + '" ตอนสร้าง PO · ตัวเลขราคาเดิมถูกตีความตามโหมดใหม่ — ตรวจยอดอีกครั้ง'
+                + (['approved','partial','received'].includes(po.status) ? ' (เปลี่ยนโหมด = เปลี่ยนราคา → ต้องผ่านอนุมัติ)' : ''))
+            : ' — เปลี่ยนได้ที่ปุ่มด้านบน (ตอนสร้าง PO ตั้งไว้ "' + PM_LABEL[poMode0] + '")'),
         po.status !== 'draft' && h('div', { className:'mt-1 text-xs' },
           '🔐 ต้องผ่าน approval — เก็บ snapshot เก่าใน history',
           ['approved','partial','received'].includes(po.status) && ' · อนุมัติคำขอแก้ครั้งเดียว = อนุมัติ PO ฉบับใหม่ (ไม่ต้องอนุมัติ PO ซ้ำ) · GM/เจ้าของ มีผลทันที')),
@@ -86075,7 +86188,8 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
                     capexHintEl(state, { priceMode }, linesA[idx] || l, 'edit-' + idx)),   // 💎 FA-S1
                   h('td', { className:'px-2 py-1' },
                     h('input', { type:'number', step:'any', min:0, value:l.qty, onChange:e=>updateLine(idx,'qty',e.target.value),
-                      className:'w-20 px-2 py-1 text-right border rounded' }),
+                      disabled: advLocked, 'data-testid':'poedit-line-qty-' + idx,   // 🔧 PEM1 verify 1: ตั้งหนี้ล่วงหน้าแล้ว = ล็อกช่องเงิน (เห็นก่อนกดบันทึก)
+                      className:'w-20 px-2 py-1 text-right border rounded disabled:bg-gray-100' }),
                     (l.receivedQty||0) > 0 && h('div', { className:'text-[10px] text-blue-600' }, `รับแล้ว ${l.receivedQty}`)),
                   h('td', { className:'px-2 py-1' },
                     h('select', { value:l.unit||'', onChange:e=>updateLine(idx,'unit',e.target.value),
@@ -86084,8 +86198,8 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
                       unitOpts.map(u => h('option', { key:u, value:u },
                         u + (it && findItemUnit(it, u) && !findItemUnit(it, u).isBase ? ` (×${resolveToBase(it.units, u)})` : ''))))),
                   h('td', { className:'px-2 py-1' },
-                    h('input', { type:'number', step:'0.01', min:0, value:l.unitPrice,
-                      onChange:e=>updateLine(idx,'unitPrice',e.target.value), disabled: l.isFreebie,
+                    h('input', { type:'number', step:'0.01', min:0, value:l.unitPrice, 'data-testid':'poedit-line-price-' + idx,   // 🆕 PEM1: testid
+                      onChange:e=>updateLine(idx,'unitPrice',e.target.value), disabled: l.isFreebie || advLocked,
                       className: cls('w-24 px-2 py-1 text-right border rounded',
                         l.isFreebie && 'bg-pink-100 text-pink-700 cursor-not-allowed') }),
                     priceMode === 'inclusive' && !l.isFreebie && c.unitExVat !== l.unitPrice && h('div', { className:'text-[10px] text-gray-500 text-right' }, `ex: ${fmtCur(c.unitExVat)}`),
@@ -86093,12 +86207,12 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
                       `⚠️ ราคาล่าสุด ${fmtCur(lp.price)} บาท/${lp.unit}`)),
                   h('td', { className:'px-2 py-1' },
                     // 🆕 BILL-DISC §V2: ป้าย VAT + กรอกรวม/ก่อน VAT (เก็บ price basis)
-                    h(LineDiscInput, { line:l, priceMode, disabled: l.isFreebie, testid:'poedit-line-disc-'+idx,
+                    h(LineDiscInput, { line:l, priceMode, disabled: l.isFreebie || advLocked, testid:'poedit-line-disc-'+idx,
                       onPatch: patch => setLines(ls => ls.map((x, j) => j === idx ? { ...x, ...patch } : x)),
                       inputClass: cls('w-20 px-2 py-1 text-right border rounded',
                         l.isFreebie && 'bg-pink-100 cursor-not-allowed') })),
                   h('td', { className:'px-2 py-1 text-center' },
-                    h('select', { value:l.vatRate, onChange:e=>updateLine(idx,'vatRate',e.target.value), disabled: l.isFreebie,
+                    h('select', { value:l.vatRate, onChange:e=>updateLine(idx,'vatRate',e.target.value), disabled: l.isFreebie || advLocked,
                       'data-testid':'edit-po-vat',
                       className:cls('w-full px-1 py-1 border rounded text-xs', poNoVatLines(state, supplierId, [l]).length && 'bg-yellow-100 border-yellow-500'),   // 🆕 PV5-6 verify 2
                       title:poNoVatLines(state, supplierId, [l]).length ? 'ผู้ขายจด VAT แต่บรรทัดนี้ไม่มี VAT — ตรวจว่ายกเว้น VAT จริง' : undefined },
@@ -86114,12 +86228,12 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
                       className: cls('w-32 px-1 py-1 border rounded text-xs', hasSched && 'bg-purple-50') }),
                     hasSched && h('div', { className:'text-[10px] text-purple-700' }, `🗓 ${l.scheduleLines.length} งวด`)),
                   h('td', { className:'px-2 py-1 text-center' },
-                    h('input', { type:'checkbox', checked: !!l.isFreebie,
+                    h('input', { type:'checkbox', checked: !!l.isFreebie, disabled: advLocked,
                       onChange:()=>toggleFreebie(idx), title:'ของแถม (ราคา 0, ไม่คิด VAT)' })),
                   h('td', { className:'px-2 py-1 text-right font-mono' },
                     l.isFreebie
                       ? h('span', { className:'text-pink-700 font-bold' }, '🎁 ฟรี')
-                      : h('div', null, fmtCur(c.incVat),
+                      : h('div', { 'data-testid':'poedit-line-total-' + idx }, fmtCur(c.incVat),   // 🆕 PEM1: testid
                           c.vat > 0 && h('div', { className:'text-[10px] text-gray-500 font-sans' }, `ex ${fmtCur(c.exVat)} + vat ${fmtCur(c.vat)}`),
                           // 🆕 BILL-DISC: ส่วนแบ่งส่วนลดท้ายบิล (ยอดหลัก = ก่อนส่วนลดท้ายบิล)
                           (linesA[idx]?.billDiscAlloc > 0) && h('div', { 'data-testid':'poedit-line-billdisc-'+idx,
@@ -86134,7 +86248,7 @@ function EditPOFullModal({ po:poProp, state, dispatch, user, onClose }){
       // Summary
       h('div', { className:'bg-gray-50 rounded p-3 text-sm space-y-1' },
         // 🆕 BILL-DISC §B6: ช่องส่วนลดท้ายบิล — เปลี่ยน = เปลี่ยนราคา (PO ที่อนุมัติแล้วกลับเป็นรออนุมัติ)
-        h(BillDiscountBox, { billDisc, setBillDisc, bd, priceMode, totals, lines }),
+        h(BillDiscountBox, { billDisc, setBillDisc, bd, priceMode, totals, lines, disabled: advLocked }),   // 🔧 PEM1 verify 1: ตั้งหนี้ล่วงหน้าแล้ว = ล็อกส่วนลดท้ายบิล (ค่า/กลุ่ม/ยอดที่กรอก)
         billDiscChanged(po.billDiscount, bd.header) && ['approved','partial','received'].includes(po.status) &&
           h('div', { className:'text-xs text-amber-700', 'data-testid':'poedit-billdisc-reapprove' },
             '🔄 เปลี่ยนส่วนลดท้ายบิล = เปลี่ยนราคา → ต้องผ่านอนุมัติ (อนุมัติคำขอแก้ครั้งเดียว)'),
