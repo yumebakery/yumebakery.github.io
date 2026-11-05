@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="2f668ba35f3e";window.__ERP_BUILT_AT__="2026-11-04T16:18:18";</script>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Sweet Factory ERP v2</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>window.__SB_CONFIG__={url:'https://cdijkaaaswaoyboktbwk.supabase.co',anonKey:'sb_publishable_A9wUjujOnBmW-EbPPM-kyw_rDwzLf0_',cloudOnly:true};</script><script defer crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>window.__ERP_BUILD_ID__="1a420c980539";window.__ERP_BUILT_AT__="2026-11-05T11:49:53";</script>
 </head><body class="bg-slate-50"><div id="root">กำลังโหลด...</div>
 
 <!--src/00-core.js--><script>
@@ -9015,7 +9015,11 @@ function _splitExempt(state, doc, c){
   const sg = doc.splitGroup;
   // 🆕 DEPOSIT-VAT UAT: ข้อมูลเก่า (ก่อน D1) splitGroup = เลขใบแจ้งหนี้/เลข PI (ต่างกันทุกใบได้) · INV ล่วงหน้าจาก PO ไม่มี grId
   //   → ถือเป็นชุดเดียวกันเมื่อผู้ขายตรงกัน + ทั้งสองใบอยู่ใน splitInvoiceIds ชุดเดียวกันของ GR หรือ PO (ชุดใหม่ spl_ ไม่ใช้ทางนี้)
-  if(c.supplierId === doc.supplierId && doc.id && c.id && !String(sg||'').startsWith('spl_') && !String(c.splitGroup||'').startsWith('spl_')){
+  // 🆕 SSH1 F3: ใบใหม่ (ยังไม่อยู่ใน state) ที่ไม่ผูก GR/PO อยู่ในชุดแยกใบของ GR/PO ไม่ได้ (ชุดแยกสร้างจาก GR/PO เท่านั้น) → ไม่ต้องสแกน grs/pos
+  //   (ACTION_READS_WHEN ของ ADD_INV ตัด grs/pos ออก · ใบเดิมในระบบ = ทางเดิมทุกอย่าง)
+  const _newUnlinked = !doc.grId && !((doc.grIds || []).length) && !doc.poId
+    && !((state && state.invoices) || []).some(i => i && i.id === doc.id);
+  if(!_newUnlinked && c.supplierId === doc.supplierId && doc.id && c.id && !String(sg||'').startsWith('spl_') && !String(c.splitGroup||'').startsWith('spl_')){
     const both = x => !!x && Array.isArray(x.splitInvoiceIds) && x.splitInvoiceIds.includes(doc.id) && x.splitInvoiceIds.includes(c.id);
     if(((state && state.grs) || []).some(both) || ((state && state.pos) || []).some(both)) return true;
   }
@@ -18292,6 +18296,61 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   var _S2 = { min: 3000, max: 60000, cap: 300000 };
   var _retryAt = 0, _s2Since = 0, _s2Tries = 0;
   function _s2Reset(){ _retryAt = 0; _s2Since = 0; _s2Tries = 0; }
+  // 🆕 SSH1 F2(c): เพดานรวมของทางลองใหม่ทุกแบบ (rebase load:/push:/busy · apply busy · เน็ต) = _S2.cap (~5 นาที)
+  //   นับจากความล้มครั้งแรกติดกัน · สำเร็จ = ล้าง · เกิน = เข้า 🧾 งานค้าง เหตุ 'stuck:<เหตุ>' + โมดัลชน (ไม่วนเงียบ)
+  //   แยกจากตัวนับ S2 (กฎ max-attempts เดิมไม่เปลี่ยน)
+  var _stkSince = 0, _stkWhy = '', _stkN = 0;
+  //   🆕 SSH1 UAT M2: เครื่องไม่มีเน็ต (navigator.onLine === false) = ไม่นับเพดาน (แท็บเล็ตเครื่องชั่ง/สาขาเน็ตหลุดนาน → ลองใหม่ทุก 10 วิ ตามเดิม
+  //   ไม่เข้างานค้าง/ไม่โหลดหน้าใหม่ขณะออฟไลน์) · เน็ตกลับมา (event 'online') = เริ่มนับใหม่ + ส่งทันที
+  function _stkOffline(){ try { return typeof navigator !== 'undefined' && navigator.onLine === false; } catch(_n){ return false; } }
+  //   🆕 SSH1 verify 2 (#2): เน็ตขาดช่วงต้นทาง (WiFi ยังต่อ · router/ISP ล่ม → navigator.onLine ยัง true) = fetch ล้มทั้งคำขอ
+  //   ("Failed to fetch"/NetworkError/Load failed · ไม่มี HTTP status/SQLSTATE · ไม่ใช่หมดเวลาฝั่ง client) → เหมือนออฟไลน์:
+  //   หยุดนาฬิกาเพดาน (ไม่เริ่ม/ไม่เดิน) + ห้ามเข้างานค้าง/โหลดหน้าใหม่ · นับเฉพาะที่ server ตอบ (busy/5xx) หรือคำขอค้าง (client_timeout)
+  //   🆕 SSH1 verify 2 (#3): เพดานรวม = max(_S2.cap, เพดานของงานที่ล้มในรอบติดค้างนี้ + 60 วิ) · นับจาก "เริ่ม" งานแรกที่ล้ม (ไม่ใช่ตอนมันล้ม)
+  //   (เดิม 2 × _capMax = ค่าเพดานงานล่าสุดที่ตั้ง ไม่ว่าล้มหรือไม่ → ก้อน 10 MB เพดาน 13–20 นาที และขยับตาม pushNow/ดึงเต็มก้อนที่แทรก)
+  var STK_SLACK_MS = 60000;
+  var _stkCap = 0, _stkLast = 0, _stkNetDown = false;
+  var _failT0 = 0, _failAt = 0, _failCap = 0;   // งาน (RPC/ดึง/เขียนทั้งก้อน) ที่ล้มล่าสุด: เวลาเริ่ม · เวลาล้ม · เพดานที่ใช้
+  var _opT0 = 0, _opCap = 0;                    // งานที่กำลังรออยู่ (ไว้บอกเวลาบนแถบ ⏳)
+  //   🆕 SSH1 final review #4: จดเฉพาะงานของรอบส่ง (flow 'push' = apply/เขียนทั้งก้อน/ดึงใน rebase) — ดึงเบื้องหลัง (ดึงเข้าจอ/ตรวจนำเข้า) ที่หมดเวลา
+  //   ต้องไม่ย้อนเวลาเริ่มเพดานของรอบส่ง (เดิม _peekFull เบื้องหลังเพดาน 120–480 วิ ล้ม แล้วรอบส่งล้มใน 5 วิ = เริ่มนับจากตอนเริ่มดึง → เข้างานค้างใน ~60 วิ)
+  function _opFail(ms, t0, flow){
+    if(flow !== 'push') return;
+    _failT0 = t0 || Date.now(); _failAt = Date.now(); _failCap = Number(ms) || 0; if(_stkSince && _failCap > _stkCap) _stkCap = _failCap;
+  }
+  function _stkNetLevel(why){
+    var s = String(why || '');
+    return !/client_timeout|abort/i.test(s) && /Failed to fetch|NetworkError|Load failed|Network request failed|ERR_INTERNET|ERR_NETWORK|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_ADDRESS_UNREACHABLE/i.test(s);
+  }
+  //   🆕 SSH1 final review #1: reachable = รอบเดียวกันมีคำขอที่ server ตอบแล้ว (rebase ดึงเฉพาะส่วน/เต็มก้อนสำเร็จ แล้ว apply ล้ม 'push:…Failed to fetch')
+  //   = ไม่ใช่เน็ตขาด (การเชื่อมต่อถูกตัดกลางอัปโหลด / gateway 413/5xx ไม่มี CORS) → นับเพดานตามปกติ (เดิมหยุดนาฬิกา → ลองทุก 10 วิ ตลอดไป งานอยู่แค่ในหน่วยความจำ)
+  //   ออฟไลน์ / เน็ตขาดทั้งเส้น (ดึงก็ล้ม 'load:…Failed to fetch') = ทางเดิม: ไม่นับ ไม่เข้างานค้าง ไม่โหลดหน้า
+  function _stkMark(why, reachable){
+    var now = Date.now();
+    if(_stkOffline()){ _stkSince = 0; _stkNetDown = true; return; }
+    if(!reachable && _stkNetLevel(why)){
+      if(_stkSince && _stkLast) _stkSince = Math.min(now, _stkSince + (now - _stkLast));   // หยุดนาฬิกา: ช่วงเน็ตขาดไม่นับ
+      _stkLast = now; _stkNetDown = true; return;
+    }
+    _stkNetDown = false;
+    if(!_stkSince){
+      var recent = _failAt && now - _failAt < 5000 && _failT0 && _failT0 <= now;
+      _stkSince = recent ? _failT0 : now; _stkCap = recent ? _failCap : 0;
+    }
+    _stkLast = now; _stkWhy = String(why || '').slice(0, 80); _stkN++;
+  }
+  function _stkReset(){ _stkSince = 0; _stkWhy = ''; _stkN = 0; _stkCap = 0; _stkLast = 0; _stkNetDown = false; }
+  function _stkThr(){ return _S2.fixed ? _S2.cap : Math.max(_S2.cap, (_stkCap || 0) + STK_SLACK_MS); }   // เทสต์ setS2 = ค่าตรง
+  function _stkOver(){ return !_stkOffline() && !_stkNetDown && !!_stkSince && (Date.now() - _stkSince >= _stkThr()); }
+  // 🆕 SSH1 verify 2 (#3): แถบ ⏳ — ประมาณเวลาที่เหลือก่อนเก็บเข้า 🧾 งานค้าง (paused = เน็ตขาด/ออฟไลน์ → ส่งเองเมื่อเน็ตกลับ)
+  function stuckEta(){
+    var now = Date.now(), thr = _stkThr();
+    if(_stkOffline() || _stkNetDown) return { paused:true, ms:null, since:_stkSince, thr:thr };
+    var opLeft = _opT0 ? Math.max(0, _opT0 + _opCap - now) : 0;
+    if(!_stkSince && !_S2.fixed && _opT0) thr = Math.max(_S2.cap, Math.max(_stkCap, _opCap) + STK_SLACK_MS);   // ยังไม่ล้ม: ถ้างานที่รออยู่ล้ม = เริ่มนับจากตอนเริ่มงานนั้น
+    var base = _stkSince || _opT0 || now;
+    return { paused:false, ms:Math.max(0, base + thr - now, opLeft), since:_stkSince, thr:thr };
+  }
   // ทุก entry ที่ยังมีผล = add/delta (replace/deny/อื่น ๆ = ทางเดิมทุกอย่าง)
   function _s2Eligible(){
     var M = (global.ERP && global.ERP.ACTION_MERGE) || {};
@@ -18414,6 +18473,17 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     for(var b in bv) if(_own(bv, b) && bv[b] !== undefined && (!_own(nv, b) || nv[b] === undefined)) return false;
     return true;
   }
+  // 🆕 SSH1 F3: หมวดที่งานนี้ "ไม่อ่านจริง" ตามข้อมูลงาน (ERP.ACTION_READS_WHEN) · คิดพลาด = ไม่ตัด (นับครบตามแถว)
+  function _readsDrop(t, data){
+    var W = (global.ERP && global.ERP.ACTION_READS_WHEN) || {}, rows = _own(W, t) ? W[t] : null, out = {};
+    if(!rows || typeof rows.forEach !== 'function') return out;
+    rows.forEach(function(w){
+      var hit = false;
+      try { hit = !!(w && typeof w.when === 'function' && w.when(data)); } catch(_e){ hit = false; }
+      if(hit && w.drop && typeof w.drop.forEach === 'function') w.drop.forEach(function(k){ out[k] = 1; });
+    });
+    return out;
+  }
   function _readsFor(entries, extra){
     var R = (global.ERP && global.ERP.ACTION_READS) || {}, out = {}, list = (entries || []).concat(extra || []), i, r;
     if(_journalTruncated || !list.length) return 'ALL';            // diff ที่อธิบายไม่ได้ = ตรวจทุกหมวด
@@ -18421,7 +18491,8 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       var t = list[i] && list[i].type; if(!t) return 'ALL';
       if(_AUDIT_ONLY[t]) continue;                                  // ต่อท้ายอย่างเดียว ไม่อ่านอะไร
       r = _own(R, t) ? R[t] : null; if(!r || typeof r.forEach !== 'function') return 'ALL';
-      r.forEach(function(k){ out[k] = 1; });
+      var dr = _readsDrop(t, list[i].data);
+      r.forEach(function(k){ if(!_own(dr, k)) out[k] = 1; });
     }
     return Object.keys(out);
   }
@@ -18467,6 +18538,122 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     _busyStreak++;
     return Math.min(10000, 1000 * Math.pow(2, _busyStreak - 1)) + Math.floor(Math.random() * 1500);
   }
+  // 🆕 SSH1 F2(d): ร่องรอยการส่ง (ring buffer ~30 เหตุการณ์) — เก็บในเครื่อง + แนบไปกับงานค้าง (หาเหตุครั้งหน้าโดยไม่ต้องดู log Supabase)
+  //   ไม่เก็บ token/ข้อมูลงาน · ข้อความตัดสั้นและลบรูปแบบ JWT/คีย์ออก
+  var SYNC_TRACE_KEY = 'erp_v5__syncTrace', SYNC_TRACE_MAX = 30, _sTrace = null;
+  function _trClean(s){ return String(s == null ? '' : s).replace(/eyJ[\w-]+\.[\w-]+\.[\w-]*/g, '[jwt]').replace(/(apikey|token|key|bearer)[=: ]+\S+/gi, '$1=[x]').slice(0, 160); }
+  function _trList(){
+    if(_sTrace) return _sTrace;
+    try { var a = JSON.parse(global.localStorage.getItem(SYNC_TRACE_KEY) || '[]'); _sTrace = Array.isArray(a) ? a.slice(-SYNC_TRACE_MAX) : []; } catch(_e){ _sTrace = []; }
+    return _sTrace;
+  }
+  function syncTrace(kind, ok, info){
+    info = info || {};
+    var ev = { ts: Date.now(), k: String(kind || ''), ok: !!ok };
+    if(info.code) ev.code = _trClean(info.code).slice(0, 24);
+    if(info.msg) ev.msg = _trClean(info.msg);
+    if(info.ms != null) ev.ms = Math.round(Number(info.ms) || 0);
+    if(info.bytes != null) ev.b = Number(info.bytes) || 0;
+    var l = _trList(); l.push(ev); while(l.length > SYNC_TRACE_MAX) l.shift();
+    try { global.localStorage.setItem(SYNC_TRACE_KEY, JSON.stringify(l)); } catch(_e){}
+    return ev;
+  }
+  function getSyncTrace(){ return _trList().slice(); }
+  // 🆕 SSH1 F2(a): เวลาสูงสุดฝั่ง client ของ RPC (erp_state_apply 120 วิ · erp_state_keys 60 วิ)
+  //   เกินเวลา = คืน error ไม่มี SQLSTATE (ชนิด 'net') → ผู้เรียกถือว่าคำตอบหาย (in-doubt latch → rebase ตรวจ my_devseq · ไม่ส่งซ้ำซ้อน)
+  var RPC_APPLY_MAX_MS = 120000, RPC_KEYS_MAX_MS = 60000;
+  function _rpcCapMs(def){ try { if(global.__ERP_RPC_MAX_MS != null) return Number(global.__ERP_RPC_MAX_MS) || def; } catch(_t){} return def; }   // เทสต์ย่อเวลา
+  // 🆕 SSH1 verify 2 (#3): เพดานต่อคำขอตาม "ความเร็วที่วัดได้จริง" ของเครื่องนี้ (syncTrace เก็บ b/ms ของทุกการส่งที่สำเร็จ)
+  //   = clamp(3 × ขนาด ÷ ความเร็ว, 120 วิ, 300 วิ) · ยังไม่เคยวัด (ไม่มีการส่งก้อน ≥ 256 KB สำเร็จ) = กฎเดิม 25 KB/วิ แต่ไม่เกิน 300 วิ
+  //   (เดิม 25 KB/วิ ไม่มีเพดาน → ก้อน 10 MB = 391 วิ ต่อรอบ · ทั้งก้อน 19 MB = 742 วิ) · ขนาดกับความเร็ววัดแบบเดียวกัน (ความยาว string) → อัตราส่วนไม่เพี้ยนแม้ข้อความไทย
+  //   เทสต์ตั้ง __ERP_RPC_MAX_MS = ใช้ค่านั้นตรง ๆ
+  var RPC_CAP_HI_MS = 300000, RPC_RATE_MIN_B = 262144;
+  function _capOv(){ try { return global.__ERP_RPC_MAX_MS != null; } catch(_o){ return false; } }
+  //   🆕 SSH1 final review #3: ความเร็วที่วัดไว้เก่ากว่า 6 ชม. ไม่ใช้ (ร่องรอยอยู่ใน localStorage ข้ามวัน — เน็ตเมื่อวานเร็วกว่าวันนี้)
+  //   + หมดเวลาตอนส่ง (client_timeout) = รอบหน้าเพดานเท่าตัว (เหมือน _keysTo) ไม่เกิน 300 วิ · ส่งสำเร็จ = กลับค่าเดิม
+  //   (เดิมเพดานจากความเร็วเก่าไม่ขยับ → วันเน็ตช้า งาน 10 MB หมดเวลา 120 วิ ทุกรอบจนเข้างานค้าง)
+  var RPC_RATE_MAX_AGE_MS = 6 * 3600 * 1000, _applyTo = 0, APPLY_TO_STEPS = 2;
+  function _upRate(){   // ไบต์/มิลลิวินาที ของการส่งก้อนใหญ่ที่สำเร็จล่าสุด (ช้าสุดใน 5 ครั้ง = ระวังไว้ก่อน)
+    var l = _trList(), rs = [], now = Date.now();
+    for(var i = l.length - 1; i >= 0 && rs.length < 5; i--){
+      var e = l[i]; if(e && e.ok && /^apply/.test(String(e.k || '')) && Number(e.b) >= RPC_RATE_MIN_B && Number(e.ms) > 0
+        && Number(e.ts) > 0 && now - Number(e.ts) <= RPC_RATE_MAX_AGE_MS) rs.push(Number(e.b) / Number(e.ms));
+    }
+    return rs.length ? Math.min.apply(null, rs) : 0;
+  }
+  function _capFor(def, bytes){
+    var ms = _rpcCapMs(def);
+    if(!_capOv() && bytes > 0){
+      var rate = _upRate(), est = rate > 0 ? Math.ceil(3 * bytes / rate) : Math.ceil(bytes / 25600) * 1000;
+      ms = Math.max(ms, Math.min(RPC_CAP_HI_MS, est));
+    }
+    return ms;
+  }
+  // 🆕 SSH1 verify 2 (#5): ขนาดคำขอโดยไม่ serialize ทั้งก้อนซ้ำทุกรอบ — ค่าระดับหมวด (อ้างอิงเดิมข้ามรอบลองใหม่) จำขนาดไว้ตาม identity
+  //   (เดิม JSON.stringify(args) ทุกคำขอ = ก้อน 10–20 MB ถูกแปลงเพิ่ม 1 รอบบน main thread ทุกครั้ง รวม keys/peek ที่ไม่ได้ใช้ค่า)
+  var _szCache = (typeof WeakMap === 'function') ? new WeakMap() : null;
+  function _szOf(v){
+    if(v == null) return 4;
+    if(typeof v !== 'object'){ try { return String(JSON.stringify(v) || '').length; } catch(_e){ return 0; } }
+    if(_szCache){ var c = _szCache.get(v); if(c != null) return c; }
+    var n = 0; try { n = JSON.stringify(v).length; } catch(_e){}
+    if(_szCache){ try { _szCache.set(v, n); } catch(_s){} }
+    return n;
+  }
+  function _estBytes(args){
+    var n = 2, k, j, o;
+    for(k in args){
+      if(!_own(args, k)) continue;
+      o = args[k]; n += k.length + 4;
+      if(_plain(o)){ n += 2; for(j in o) if(_own(o, j)) n += j.length + 4 + _szOf(o[j]); }
+      else n += _szOf(o);
+    }
+    return n;
+  }
+  async function _rpcTimed(sb, fn, args, ms, kind, bytes, flow){
+    var t0 = Date.now(), ac = null, q, tm = null, isApply = /^apply/.test(String(kind || ''));
+    if(bytes == null && isApply){ try { bytes = _estBytes(args); } catch(_j){ bytes = null; } }   // วัดเฉพาะงานส่ง (ต้องใช้คิดเพดาน/ความเร็ว)
+    if(isApply){
+      ms = Math.max(ms, _capFor(ms, bytes || 0));
+      if(_applyTo > 0) ms = Math.max(ms, Math.min(RPC_CAP_HI_MS, ms * Math.pow(2, Math.min(_applyTo, APPLY_TO_STEPS))));   // final review #3
+    }
+    _opT0 = t0; _opCap = ms;
+    try { ac = (typeof AbortController === 'function') ? new AbortController() : null; } catch(_a){ ac = null; }
+    q = sb.rpc(fn, args);
+    if(ac && q && typeof q.abortSignal === 'function'){ try { q = q.abortSignal(ac.signal); } catch(_s){} }
+    var res;
+    try {
+      res = await Promise.race([Promise.resolve(q), new Promise(function(r){ tm = setTimeout(function(){
+        try { if(ac) ac.abort(); } catch(_x){}
+        r({ data:null, error:{ code:'', message:'client_timeout ' + Math.round(ms / 1000) + 's' }, status:0, clientTimeout:true }); }, ms); })]);
+    } catch(e){ res = { data:null, error:{ code:'', message:String(e && e.message || e) }, status:0 }; }
+    if(tm) clearTimeout(tm);
+    if(_opT0 === t0){ _opT0 = 0; _opCap = 0; }
+    if(res && res.error && /abort/i.test(String(res.error.message || '')) && !res.clientTimeout) res = Object.assign({}, res, { clientTimeout:true });
+    var err = res && res.error, ok = !err && !!(res && res.data && res.data.ok !== false);
+    if(err) _opFail(ms, t0, isApply ? 'push' : flow);
+    if(isApply){ if(res && res.clientTimeout) _applyTo++; else if(!err) _applyTo = 0; }
+    syncTrace(kind, ok, { code: err ? (err.code || (res.clientTimeout ? 'timeout' : String(res.status || ''))) : (res && res.data && res.data.reason) || '',
+      msg: err ? err.message : (res && res.data && res.data.stale ? 'stale:' + [].concat(res.data.stale).slice(0, 6).join(',') : ''), ms: Date.now() - t0, bytes: bytes });
+    return res;
+  }
+  // 🆕 SSH1 verify 1 (F2a ทางเดิม): จำกัดเวลา query PostgREST ทั่วไป (insert/update ทั้งก้อน) · หมดเวลา = { error:{ message:'client_timeout …' }, clientTimeout:true }
+  async function _qTimed(q, ms){
+    var ac = null, tm = null, res, t0 = Date.now();
+    _opT0 = t0; _opCap = ms;
+    try { ac = (typeof AbortController === 'function') ? new AbortController() : null; } catch(_a){ ac = null; }
+    if(ac && q && typeof q.abortSignal === 'function'){ try { q = q.abortSignal(ac.signal); } catch(_s){} }
+    try {
+      res = await Promise.race([Promise.resolve(q), new Promise(function(r){ tm = setTimeout(function(){
+        try { if(ac) ac.abort(); } catch(_x){}
+        r({ data:null, error:{ code:'', message:'client_timeout ' + Math.round(ms / 1000) + 's' }, status:0, clientTimeout:true }); }, ms); })]);
+    } catch(e){ res = { data:null, error:{ code:'', message:String(e && e.message || e) }, status:0 }; }
+    if(tm) clearTimeout(tm);
+    if(_opT0 === t0){ _opT0 = 0; _opCap = 0; }
+    if(res && res.error && /abort/i.test(String(res.error.message || '')) && !res.clientTimeout) res = Object.assign({}, res, { clientTimeout:true });
+    if(res && res.error) _opFail(ms, t0, 'push');   // ใช้เฉพาะเขียนทั้งก้อนใน pushCloudState
+    return res;
+  }
   // debug (เทสต์คลื่น 3): localStorage erp_v5__w3freeze = '1' → แช่แข็งค่าใน _syncedState (reducer/UI ที่แก้ object ในที่ = TypeError เพราะ 'use strict')
   function _deepFreeze(v){
     if(v && typeof v === 'object' && !Object.isFrozen(v)){
@@ -18475,8 +18662,9 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     }
     return v;
   }
+  var _syncedAt = 0;   // 🆕 SSH1 F2(b): เวลาที่ได้ฐานในเครื่องล่าสุด (ฐานเก่ามาก + ดึงเฉพาะส่วนล้ม → ดึงเต็มก้อน)
   function _setSynced(st){
-    _syncedState = st;
+    _syncedState = st; _syncedAt = Date.now();
     if(_landW && _landW.length) setTimeout(_landTick, 0);   // 🆕 SSP1 S4: ก้อนบน cloud ขยับ → ตรวจงานที่เฝ้าอยู่ (หลัง _journalAfterPush)
     try {
       if(st && typeof st === 'object' && global.localStorage && global.localStorage.getItem('erp_v5__w3freeze') === '1'){
@@ -18613,8 +18801,8 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       var t = list[i] && list[i].type; if(!t) return 'ALL';
       if(_AUDIT_ONLY[t]) continue;
       var r = _own(R, t) ? R[t] : null; if(!r || typeof r.forEach !== 'function') return 'ALL';
-      var ao = _own(AO, t) ? AO[t] : [], pr = _own(PR, t) ? PR[t] : [];
-      r.forEach(function(k){ out[k] = 1; if(ao.indexOf(k) < 0 && pr.indexOf(k) < 0) real[k] = 1; });
+      var ao = _own(AO, t) ? AO[t] : [], pr = _own(PR, t) ? PR[t] : [], dr = _readsDrop(t, list[i].data);   // 🆕 SSH1 F3
+      r.forEach(function(k){ if(_own(dr, k)) return; out[k] = 1; if(ao.indexOf(k) < 0 && pr.indexOf(k) < 0) real[k] = 1; });
     }
     return { keys:out, real:real };
   }
@@ -18699,34 +18887,82 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   //   เดิม loadCloudState เลื่อน _tok ทันทีระหว่างรอโหลด 1-3 วิ → ผู้ใช้กดอะไรช่วงนั้น = ก้อนเก่า+งานนั้น ถูก push ด้วย token ใหม่
   //   แล้วผ่าน → งานของเครื่องที่เพิ่งบันทึกหายเงียบ · ตอนนี้รับ token (adoptPulled) พร้อมเอาก้อนเข้าจอเท่านั้น
   //   🌊 คลื่น 3: RPC ใช้ได้ + ฐานในเครื่องตรง server รายหมวด → ดึงเฉพาะหมวดที่เปลี่ยน (erp_state_keys) · ไม่งั้นดึงเต็มก้อน
-  async function _peekFull(){
+  var _peekTo = 0;   // 🆕 SSH1 verify 1: ดึงเต็มก้อนหมดเวลาติดกันกี่ครั้ง
+  async function _peekFull(flow){   // flow 'push' = ดึงในรอบส่ง (rebase) · ไม่ระบุ = เบื้องหลัง (final review #4)
     var sb = _sb(); if(!sb) throw new Error('Supabase ยังไม่พร้อม (config/lib)');
-    var res = await sb.from('erp_state_snapshots').select('*').eq('id', CLOUD_ID).maybeSingle();
+    // 🆕 SSH1 F2(a): จำกัดเวลา (ก้อนใหญ่บนเน็ตค้าง) · หมดเวลา = throw → ผู้เรียกลองใหม่ (เพดานรวม F2c)
+    //   🆕 SSH1 verify 1: หมดเวลาติดกัน = เพิ่มเพดานเท่าตัว (120 → 240 → 480 วิ) · สำเร็จ = กลับค่าเดิม
+    var t0 = Date.now(), ms = _capFor(RPC_APPLY_MAX_MS, 0) * Math.pow(2, Math.min(_peekTo, 2)), tm = null, ac = null;
+    _opT0 = t0; _opCap = ms;
+    try { ac = (typeof AbortController === 'function') ? new AbortController() : null; } catch(_a){}
+    var q = sb.from('erp_state_snapshots').select('*').eq('id', CLOUD_ID);
+    if(ac && typeof q.abortSignal === 'function'){ try { q = q.abortSignal(ac.signal); } catch(_s){} }
+    var res = await Promise.race([Promise.resolve(q.maybeSingle()), new Promise(function(r){ tm = setTimeout(function(){
+      try { if(ac) ac.abort(); } catch(_x){} r({ data:null, error:{ message:'client_timeout ' + Math.round(ms / 1000) + 's' } }); }, ms); })]);
+    if(tm) clearTimeout(tm);
+    if(_opT0 === t0){ _opT0 = 0; _opCap = 0; }
+    if(res.error) _opFail(ms, t0, flow);
+    if(res.error && /client_timeout|abort/i.test(String(res.error.message || ''))) _peekTo++; else if(!res.error) _peekTo = 0;
+    syncTrace('peekfull', !res.error, { code: res.error ? (res.error.code || 'err') : '', msg: res.error ? res.error.message : '', ms: Date.now() - t0 });
     if(res.error) throw new Error(res.error.message);
     if(!res.data || !res.data.state) return null;
     if(_own(res.data, 'rev')) _hasRevCol = true;
     if(_own(res.data, 'rewrite_revs')) _w4Col = true;   // 🌊 คลื่น 4: SQL ติดตั้งแล้ว (หลักฐาน G6)
     return { state:res.data.state, savedAt:res.data.saved_at, rev:(res.data.rev != null ? Number(res.data.rev) : null), byUser:res.data.by_user || null, full:true };
   }
-  async function _peekDelta(pb){   // ห้ามแตะตัวแปร committed (กฎ UAT คลื่น 2) — ยกเว้นธงถอย (_rpcOff) ซึ่งทำให้ระมัดระวังขึ้นเท่านั้น
+  var _peekFails = 0, PEEK_STALE_BASE_MS = 10 * 60 * 1000;
+  // 🆕 SSH1 verify 2 (#1): เพดานดึงเฉพาะส่วนปรับตามจริง — ไม่ตอบทันเวลา (client_timeout) = เพิ่มเท่าตัว 60 → 120 → 240 วิ แล้วลองดึงเฉพาะส่วนอีกครั้ง
+  //   (คำตอบมีทั้งหมวดที่เปลี่ยน เช่น invoices/journalEntries ~10 MB → เน็ต 1 Mbps ใช้ ~80 วิ · เดิมเพดานตายตัว 60 วิ → หมดเวลาทุกครั้ง แล้วถอยไปดึงเต็มก้อน ~19 MB ซึ่งช้ากว่า)
+  //   สำเร็จ = กลับค่าเริ่ม แต่จำเวลาที่ใช้จริง (รอบหน้าเพดาน ≥ 2 เท่าของครั้งก่อน · ไม่เสียรอบ 60 วิ ซ้ำทุกรอบ)
+  //   ถอยไปดึงเต็มก้อนเฉพาะ: 57014/statement timeout หรือ 5xx (ต้นทุนฝั่งเซิร์ฟเวอร์) ล้ม 2 ครั้งติด/ฐานเก่า > 10 นาที · หรือหมดเวลาครบ 3 ขั้นแล้ว
+  //   #4: pool/การเชื่อมต่อเต็ม/ล็อก (PGRST00x · 08001 · 08004 · 53300 · 53400 · 55P03 · 40001 · 40P01) และเน็ตขาด = ลองใหม่ ไม่นับ ไม่ดึงเต็มก้อน (ไม่ซ้ำเติมโหลด)
+  var _keysTo = 0, _keysOkMs = 0, KEYS_TO_STEPS = 2;
+  function _keysCap(){
+    var base = _rpcCapMs(RPC_KEYS_MAX_MS), ms = base * Math.pow(2, Math.min(_keysTo, KEYS_TO_STEPS));
+    if(!_capOv() && _keysOkMs > 0) ms = Math.max(ms, Math.min(base * Math.pow(2, KEYS_TO_STEPS), 2 * _keysOkMs));
+    return ms;
+  }
+  function _peekFullWorthy(err, status){   // ล้มแบบไหนที่ "ดึงเต็มก้อน" ช่วยได้
+    var code = String(err && err.code || ''), msg = String(err && (err.message || err) || '');
+    if(code === '57014' || /statement timeout|canceling statement due to statement/i.test(msg)) return true;
+    return _rpcErrKind(err, status) === 'busy_unknown';
+  }
+  async function _peekDelta(pb, flow){   // ห้ามแตะตัวแปร committed (กฎ UAT คลื่น 2) — ยกเว้นธงถอย (_rpcOff) ซึ่งทำให้ระมัดระวังขึ้นเท่านั้น
     var sb = _sb(); if(!sb) throw new Error('Supabase ยังไม่พร้อม (config/lib)');
     var args = { p_since: pb.rev || 0, p_known: pb.known || {}, p_sess: _sessKey() };
     // 🌊 คลื่น 4: ขอ "เฉพาะท้ายรายการ" ของหมวดต่อท้าย (เฉพาะเมื่อ SQL คลื่น 4 ติดตั้งแล้ว และไม่อยู่ในช่วงพัก)
     if(_w4Col && !(_w4 === false && Date.now() < _w4OffUntil) && pb.tails && Object.keys(pb.tails).length && _w4Pref()) args.p_tails = pb.tails;
-    var res = await sb.rpc('erp_state_keys', args);
+    var kcap = _keysCap(), kt0 = Date.now();
+    var res = await _rpcTimed(sb, 'erp_state_keys', args, kcap, 'peek', null, flow);
     if(res.error && args.p_tails && _rpcErrKind(res.error, res.status) === 'gone'){
       _w4Off('keys-no-tails', 10 * 60 * 1000);                     // เซิร์ฟเวอร์คลื่น 3: ไม่รู้จัก p_tails → เรียกซ้ำแบบคลื่น 3 (ห้าม _rpcOff)
       delete args.p_tails;
-      res = await sb.rpc('erp_state_keys', args);
+      kt0 = Date.now();
+      res = await _rpcTimed(sb, 'erp_state_keys', args, kcap, 'peek', null, flow);
     }
     if(res.error){
       var kind = _rpcErrKind(res.error, res.status), em = String(res.error.code || '') + ' ' + String(res.error.message || '');
-      if(kind === 'gone'){ _rpcOff('keys-gone:' + em, 10 * 60 * 1000, true); return _peekFull(); }
-      if(kind === 'error'){ _rpcOff('keys-error:' + em, 2 * 60 * 1000, true); return _peekFull(); }   // ฟังก์ชันพังฝั่งเซิร์ฟเวอร์ → ดึงเต็มก้อน (ไม่วนลองใหม่ไม่รู้จบ)
+      if(kind === 'gone'){ _rpcOff('keys-gone:' + em, 10 * 60 * 1000, true); return _peekFull(flow); }
+      if(kind === 'error'){ _rpcOff('keys-error:' + em, 2 * 60 * 1000, true); return _peekFull(flow); }   // ฟังก์ชันพังฝั่งเซิร์ฟเวอร์ → ดึงเต็มก้อน (ไม่วนลองใหม่ไม่รู้จบ)
+      // 🆕 SSH1 F2(b): busy/หมดเวลา/5xx/เน็ต — ครั้งที่ 2 ติดกัน หรือฐานเก่ากว่า 10 นาที → ดึงเต็มก้อน (เดิม throw วนจากฐานเดิมตลอดไป · delta โตขึ้นเรื่อย ๆ)
+      //   ไม่ _rpcOff (การเขียนยังใช้ RPC ได้) · ดึงเต็มก้อนล้มด้วย = throw ตามเดิม → ผู้เรียกลองใหม่ (มีเพดานรวม F2c)
+      var toFull = false;
+      if(res.clientTimeout || /client_timeout/i.test(em)){
+        _keysTo++;                                                  // #1: หมดเวลา → รอบหน้าเพดานเท่าตัว (ดึงเฉพาะส่วนอีกครั้ง)
+        if(_keysTo > KEYS_TO_STEPS) toFull = true;                  // หมดเวลาครบทุกขั้น (240 วิ) แล้ว → ลองดึงเต็มก้อนสักครั้ง
+      } else if(kind !== 'auth' && _peekFullWorthy(res.error, res.status)){
+        _peekFails++;
+        if(_peekFails >= 2 || (_syncedAt && Date.now() - _syncedAt > PEEK_STALE_BASE_MS)) toFull = true;
+      }
+      if(toFull){
+        syncTrace('peek', false, { code:'full-fallback', msg: em, ms: 0 });
+        var fr = await _peekFull(flow); _peekFails = 0; _keysTo = 0; return fr;
+      }
       throw new Error(String(res.error.message || em));
     }
+    _peekFails = 0; _keysTo = 0; _keysOkMs = Date.now() - kt0;
     var r = res.data || {};
-    if(!r.ok) return r.reason === 'no_row' ? null : _peekFull();
+    if(!r.ok) return r.reason === 'no_row' ? null : _peekFull(flow);
     if(r.full) return { state:r.state, savedAt:r.saved_at, rev:Number(r.rev), byUser:r.by_user || null, full:true };
     if(_w4Pref(pb.state)) _w4Seen(r);   // สวิตช์ถอยเปิดอยู่ (ปิดคลื่น 4 ในเครื่อง/ทั้งบริษัท) → ห้ามให้คำตอบ w:4 ทำสถานะเป็น "ต่อท้ายฝั่งเซิร์ฟเวอร์ ✓"
     var st = Object.assign({}, pb.state), k;
@@ -18737,7 +18973,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       var c = (tb && Array.isArray(b0) && b0.length >= tb.n) ? _compose(k, b0.slice(0, tb.n), r.tails[k] || {}) : null;
       if(!c){
         try { logAudit({ ts:new Date().toISOString(), action:'state_drift', label:'ท้ายรายการไม่ต่อกับฐานในเครื่อง → ดึงเต็มก้อน', ref:'tail:' + k, device:deviceId() }); } catch(_l){}
-        return _peekFull();
+        return _peekFull(flow);
       }
       st[k] = c;
     }
@@ -18746,7 +18982,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     var bad = _shapeDiff(st, r.shape || {});                       // must-fix 7: ตรวจว่าฐานในเครื่องไม่เพี้ยน
     if(bad.length){
       try { logAudit({ ts:new Date().toISOString(), action:'state_drift', label:'ข้อมูลในเครื่องเพี้ยนจาก cloud → ดึงเต็มก้อน', ref:bad.slice(0, 10).join(','), device:deviceId() }); } catch(_l){}
-      return _peekFull();
+      return _peekFull(flow);
     }
     // 🆕 SSP1 S1: หมวดที่ขยับระหว่างรอบ (ไว้ใส่ประวัติ rebase_fallback — อ่านอย่างเดียว ไม่แตะตัวแปร committed)
     return { state:st, savedAt:r.saved_at, rev:Number(r.rev), byUser:r.by_user || null, delta:true, keys: Object.keys(r.keys || {}).concat(Object.keys(r.tails || {})).slice(0, 40) };
@@ -19147,6 +19383,8 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(extra.tabs != null) op.tabs = extra.tabs;
     // 🆕 SSP1 UAT S1: เก็บขณะกำลังส่ง/ไม่รู้ผลรอบส่ง = งานชุดนี้ "อาจขึ้นแล้ว" → หน้า งานค้าง ให้ตรวจก่อน (บันทึกอีกครั้งต้องยืนยันทุกรายการ)
     if(extra.inflight) op.inflight = true;
+    // 🆕 SSH1 F2(d): ร่องรอยการส่งล่าสุด (ไม่มี token/ข้อมูลงาน) → หน้า 🧾 งานค้าง "รายละเอียด"
+    try { var _tr = getSyncTrace(); if(_tr.length) op.trace = _tr.slice(-SYNC_TRACE_MAX); } catch(_tr0){}
     var list = readOpq().concat([op]);
     // เกินเพดาน → ตัดสำเนา was ทิ้งก่อนอย่างอื่น (มีไว้ช่วยตัดสินเท่านั้น ไม่ใช่งานของผู้ใช้)
     //   final verify 1 F4: ชุดเก่าที่ยังค้างก็ถือ was ไว้ (เอกสารเต็มใบ) → ตัดของชุดใหม่ก่อน แล้วไล่ตัดชุดเก่าสุดก่อน จนพอดีเพดาน
@@ -19168,7 +19406,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(ok){ _journal = []; _rebaseBlocked = false; }   // อยู่ในคิวแล้ว — ไม่ให้เทซ้ำรอบหน้า
     // 🆕 verify คลื่น 2 (audit): บันทึกว่างานชุดไหนถูกย้ายเข้างานค้าง (ไม่ขึ้นระบบ) — เดิมมีแค่ "สร้างแล้ว" ใน audit ทั้งที่เอกสารไม่อยู่บน cloud
     if(ok){ try { logAudit({ ts: new Date().toISOString(), action:'journal_spill', label:'งานไม่ขึ้นระบบ → 🧾 งานค้าง', ref: op.opId,
-      by_user: by || null, device: deviceId(), detail:{ reason: op.reason, cause: op.cause || null, tabs: op.tabs != null ? op.tabs : null, count: actions.length,
+      by_user: by || null, device: deviceId(), detail:{ reason: op.reason, cause: op.cause || null, tabs: op.tabs != null ? op.tabs : null, count: actions.length, trace: op.trace ? op.trace.slice(-12) : null,
         items: actions.slice(0, 40).map(function(x){ var d = x.data || {}; var inner = d.issue || d.gr || d.inv || d.posImport || d.log || d.rtv || d.scrap || d;
           return { type:x.type, id: inner && inner.id || null, no: inner && (inner.poNumber || inner.grNumber || inner.invNumber || inner.number || inner.importNumber || inner.lot) || null }; }) } }); } catch(_la){} }
     // สมุดเคยล้นเพดาน = มีงานเก่ากว่าที่ไม่ได้อยู่ในคิว → ต้องไม่ reload (ให้คนจดงานจากจอก่อน)
@@ -19247,7 +19485,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(nA) params.p_appends = d.appends;
     if(nB) params.p_seq_bump = d.bumps;
     if(nP) params.p_patch = d.patches;
-    var res = await sb.rpc('erp_state_apply', params);
+    var res = await _rpcTimed(sb, 'erp_state_apply', params, _rpcCapMs(RPC_APPLY_MAX_MS), 'apply4');
     if(res.error){
       if(has4 && _rpcErrKind(res.error, res.status) === 'gone'){ _w4Off('gone:' + String(res.error.code || ''), 10 * 60 * 1000); return null; }
       return _rpcResErr(res);
@@ -19326,13 +19564,13 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(!Object.keys(d.sets).length && !d.dels.length) return { ok:true, noop:true, local:true };   // ไม่มีอะไรเปลี่ยน — ไม่ยิง
     var entries = _journal.filter(function(e){ return !e.noop && (!(seqCovered > 0) || e.seq <= seqCovered); });
     var reads = opt.strict ? [] : (opt.readsAll ? 'ALL' : _readsFor(entries, opt.actions));
-    var res = await sb.rpc('erp_state_apply', {
+    var res = await _rpcTimed(sb, 'erp_state_apply', {
       p_check: opt.strict ? {} : _checkKeys(d, known, floor, next, base, reads),
       p_sets: d.sets, p_deletes: d.dels,
       p_expect_rev: opt.strict ? (opt.base ? floor : _seenRev) : null,
       p_seen_rev: _seenRev || null,
       p_sess: seqCovered > 0 ? _sessKey() : null, p_seq: seqCovered > 0 ? seqCovered : null,
-      p_by: byUser || null, p_device: deviceId(), p_build: global.__ERP_BUILD_ID__ || null });
+      p_by: byUser || null, p_device: deviceId(), p_build: global.__ERP_BUILD_ID__ || null }, _rpcCapMs(RPC_APPLY_MAX_MS), 'apply');
     if(res.error) return _rpcResErr(res);
     var r = res.data || {};
     if(!opt.w3only && _w4Pref(next)) _w4Seen(r);   // ส่งแบบคลื่น 3 เพราะสวิตช์ถอย → ไม่ถือว่าคลื่น 4 ทำงาน (สถานะในหน้าตั้งค่าต้องไม่เขียว)
@@ -19502,6 +19740,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       }
       if(rr.ok){
         _lastCloudSaveAt = Date.now(); _lastCloudErr = null; _lastPingOk = true; _inDoubt = false;
+        _stkReset();   // 🆕 SSH1 verify 1: ส่งสำเร็จทางใดก็ได้ (pushNow เครื่องชั่ง/เบิกด่วน) = ล้างเวลาเริ่มเพดาน F2(c) · ไม่งั้นค่าเก่าค้าง → ล้มครั้งเดียวเข้างานค้างทันที
         if(!rr.noop){ _announceSaved(byUser); _dailyAfterSave(sb, null); }   // สำเนารายวันเซิร์ฟเวอร์ทำแล้ว · แอปแค่ลบของเก่า (ไม่รอ)
         return rr;
       }
@@ -19520,6 +19759,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       by_user: byUser || null, state: _pushState, bytes: json.length,
     };
     var prevRev = opt.base ? Number(opt.rev || 0) : _seenRev;   // rev ของแถวก่อนเขียน (token ตรง = ไม่มีใครเขียนแทรก) — ใช้ดูว่าตัวประทับยังทำงาน
+    var _legacyCap = _capFor(RPC_APPLY_MAX_MS, json.length);
     try {
       var res, wasRow = _hasRow;
       for(var attempt = 0; attempt < 2; attempt++){
@@ -19529,13 +19769,15 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         var sel = withRev ? 'saved_at, rev' : 'saved_at';
         if(!wasRow){
           // ครั้งแรกของบริษัท: insert (แพ้ race insert ซ้ำ → unique violation → conflict → โหลดใหม่) · ตัวประทับตั้ง rev = เลขตามนาฬิกา
-          res = await sb.from('erp_state_snapshots').insert(Object.assign({ id: CLOUD_ID }, row2)).select(sel);
+          res = await _qTimed(sb.from('erp_state_snapshots').insert(Object.assign({ id: CLOUD_ID }, row2)).select(sel), _legacyCap);
         } else {
           // optimistic: update เฉพาะเมื่อ saved_at ตรงกับ token ที่เรารู้ → เครื่องอื่นเขียนไปก่อน = 0 แถว = conflict
-          res = await sb.from('erp_state_snapshots')
+          res = await _qTimed(sb.from('erp_state_snapshots')
             .update(row2)
-            .eq('id', CLOUD_ID).eq('saved_at', _tok).select(sel);
+            .eq('id', CLOUD_ID).eq('saved_at', _tok).select(sel), _legacyCap);
         }
+        // 🆕 SSH1 verify 1: หมดเวลา = ไม่รู้ว่าเขียนแล้วไหม → latch ชน (รอบหน้า rebase ตรวจ my_devseq) · คืน error → ทางลองใหม่ + เพดาน F2(c)
+        if(res && res.clientTimeout){ _conflict = true; _inDoubt = true; _lastCloudErr = String(res.error.message); _lastPingOk = false; return { ok:false, error:_lastCloudErr }; }
         // ยังไม่มีคอลัมน์คลื่น 3 (PostgREST ปฏิเสธก่อนรัน = ยังไม่มีอะไรถูกเขียน) → ลองใหม่แบบเดิม 1 ครั้ง
         if(res && res.error && withRev && _noColErr(res.error)){ _hasRevCol = false; continue; }
         break;
@@ -19562,8 +19804,9 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       _setSynced(_pushState);   // 🆕 MW-2
       _lastCloudSaveAt = Date.now(); _lastCloudErr = null; _lastPingOk = true;
       _announceSaved(byUser);   // 🆕 MW-1: บอกเครื่องอื่นว่ามีของใหม่ (สัญญาณเปล่า)
-      // daily snapshot วันละครั้ง (สำเนาย้อนหลัง — เงียบๆ พลาดได้)
-      await _dailyAfterSave(sb, row);
+      // daily snapshot วันละครั้ง (สำเนาย้อนหลัง — เงียบๆ พลาดได้) · 🆕 SSH1 verify 1: ไม่รอ (ก้อนใหญ่บนเน็ตค้าง = รอบส่งไม่จบ)
+      _stkReset();
+      try { _dailyAfterSave(sb, row).catch(function(){}); } catch(_dl){}
       return { ok:true };
     } catch(e){
       _lastCloudErr = String(e && e.message || e); _lastPingOk = false;
@@ -19884,7 +20127,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       var seqTop = _journal.length ? _journal[_journal.length - 1].seq : 0;
       var cloud;
       // UAT: อ่านแบบไม่แตะ token/ฐาน (_syncedState คงเป็น ref จนกว่า push สำเร็จ) · เน็ตสะดุด = ลองใหม่ ไม่ใช่โหลดทิ้ง
-      try { cloud = (_rpcOn(loc0) && pb.state && !_needFullSync) ? await _peekDelta(pb) : await _peekFull(); }
+      try { cloud = (_rpcOn(loc0) && pb.state && !_needFullSync) ? await _peekDelta(pb, 'push') : await _peekFull('push'); }
       catch(e){ return { ok:false, retry:true, reason:'load:' + (e && e.message || e) }; }
       if(!cloud || !cloud.state) return { ok:false, reason:'no-cloud' };
       try { _rbTrace.rounds.push({ a: attempt, mode: cloud.delta ? 'delta' : 'full', keys: cloud.keys || null, rev: cloud.rev || 0 }); } catch(_rt){}
@@ -20286,12 +20529,28 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       ms: tr.t0 ? Date.now() - tr.t0 : null, mode: mode, tabs: _tabsAlive,
       types: Object.assign({}, types), journal: _liveEntries().length, build: global.__ERP_BUILD_ID__ || null, s2: rb.s2 || null };
   }
+  // 🆕 SSH1 F2(c): เกินเพดานรวม → เหตุ 'stuck:<เหตุล่าสุด>' · ไม่รู้ผลรอบส่งล่าสุด (in-doubt) = inflight (บันทึกอีกครั้งต้องยืนยันก่อน)
+  function _stkRb(rb){
+    rb = rb || {};
+    var why = String(rb.reason || _stkWhy || 'retry').replace(/^stuck:/, ''), ms = _stkSince ? Date.now() - _stkSince : 0;
+    return Object.assign({}, rb, { reason: 'stuck:' + why.slice(0, 80), stuck: { ms: ms, n: _stkN }, inflight: !!_inDoubt,
+      msg: rb.msg || ('ลองส่งซ้ำ ' + _stkN + ' รอบ นาน ' + Math.round(ms / 1000) + ' วิ ไม่สำเร็จ (' + why.slice(0, 80) + ')') });
+  }
+  function _stuckSpill(u, r){
+    var rb = _stkRb({ reason: _stkWhy || 'retry', msg: r && r.error ? String(r.error).slice(0, 200) : null });
+    _conflict = true;
+    try { logAudit({ ts: new Date().toISOString(), action:'rebase_fallback', label:'ส่งไม่ขึ้นนานเกินเพดาน → งานค้าง', ref: String(rb.reason).slice(0, 120), by_user: u || null, device: deviceId(), detail: _rbFallbackDetail(rb) }); } catch(_lg){}
+    _onConflictFallback(u, '', null, rb);
+  }
   function _onConflictFallback(u, why, info, rb){
+    var _wasInDoubt = _inDoubt || _pushing; _stkReset();
     _inDoubt = false; _fallbackWhy = (why === 'version' || why === 'switch') ? why : 'other';
     //   ต้องเขียนคิวให้สำเร็จก่อน ถึงจะยอมล้างของในเครื่อง/โหลดใหม่ได้
     var hasWeigh = false; try { hasWeigh = _liveEntries().some(function(e){ return !!_DROP_IF_REJECTED[e.type] && e.type !== 'SET_PAY_TAG' && e.type !== 'SI_PRINT_MARK' && e.type !== 'ACK_SI_PRINT_REVIEW'; }); } catch(_hw){}   // 🌊 คลื่น 4 must-fix 9
     var extra = { cause: rb && rb.reason ? String(rb.reason) : null, causeMsg: rb && rb.msg ? String(rb.msg).slice(0, 300) : null,
-      failedSeq: rb && rb.entry && rb.entry.seq != null ? rb.entry.seq : null, tabs: _tabsAlive };
+      failedSeq: rb && rb.entry && rb.entry.seq != null ? rb.entry.seq : null, tabs: _tabsAlive,
+      // 🆕 SSH1 final review #2: ไม่รู้ผลรอบส่งล่าสุด (in-doubt) = inflight ทุกเหตุ (เดิมเฉพาะ stuck → เพดาน S2 หลัง apply ล้มกลางทาง = การ์ดไม่เตือนว่าอาจขึ้นแล้ว)
+      inflight: !!(rb && rb.inflight) || _wasInDoubt };
     var sp = _spillJournalToOpq(u, why === 'numlock' && info ? ('numlock:' + info.type + ':' + info.number) : 'conflict', extra);
     var detail = { opId: sp.opId || null, why: why || '', numType: info && info.type || null, numNumber: info && info.number || null,
       cause: extra.cause, causeMsg: extra.causeMsg, failedIdx: sp.failedIdx != null ? sp.failedIdx : null, tabs: _tabsAlive,
@@ -20313,12 +20572,14 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(_wait > 20){ if(_pushTimer) clearTimeout(_pushTimer); _pushTimer = setTimeout(_flushCloudPush, _wait + 5); return; }
     if(_pushing){ _pushTimer = setTimeout(_flushCloudPush, 800); return; }   // รอรอบก่อนจบ
     var st = _pendingState, u = _pendingUser, seqSent = _pendingSeq;
-    if(!st){ return; }
+    if(!st){ _stkReset(); return; }   // 🆕 SSH1 verify 1: ไม่มีของค้างส่ง (pushNow ส่งไปแล้ว) = ไม่ติดค้าง
     _pushing = true; _pushOrphan = false;
+    var _pt0 = Date.now();
     pushCloudState(st, u, seqSent).then(function(r){
       _pushing = false;
+      try { syncTrace('push', !!r.ok, { code: r.ok ? (r.noop ? 'noop' : '') : (r.conflict ? 'conflict' : r.busy ? 'busy' : r.fatal ? 'fatal' : 'err'), msg: r.ok ? '' : (r.stale ? 'stale:' + [].concat(r.stale).slice(0, 6).join(',') : r.error), ms: Date.now() - _pt0 }); } catch(_st){}
       if(r.ok){
-        _s2Reset();
+        _s2Reset(); _stkReset();
         _journalAfterPush(seqSent);   // 🆕 MW-0: action ที่อยู่ในก้อนนี้ขึ้น cloud แล้ว
         if(_pendingState === st){ _pendingState = null; _dirty = false; }
         else { _pushTimer = setTimeout(_flushCloudPush, 200); }   // มีของใหม่ระหว่าง push → ตามอีกรอบ
@@ -20326,10 +20587,12 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         // 🆕 MW-2: ลองรวมงานอัตโนมัติก่อน (ส่วนใหญ่สำเร็จ = ผู้ใช้ไม่เห็นอะไรเลย) · ไม่สำเร็จค่อยทางเดิม
         _pushing = true;
         var why0 = _needFullSync ? 'switch' : '';   // review #10: ชนเพราะต้องดึงเต็มก้อน ไม่ใช่เครื่องอื่น
+        var _rt0 = Date.now();
         _rebaseOnConflict(u).then(function(rb){
           _pushing = false;
+          try { syncTrace('rebase', !!rb.ok, { code: rb.ok ? '' : String(rb.reason || '').slice(0, 24), msg: rb.ok ? '' : rb.reason, ms: Date.now() - _rt0 }); } catch(_st){}
           _lastRebase = { at: Date.now(), ok: !!rb.ok, reason: rb.reason || '', attempts: rb.attempts || 0, renum: rb.renum || [] };
-          if(rb.ok){ _inDoubt = false; _s2Reset(); _applyRebased(rb, u); return; }
+          if(rb.ok){ _inDoubt = false; _s2Reset(); _stkReset(); _applyRebased(rb, u); return; }
           _conflict = true;
           // 🆕 SSP1 S2: ชนถี่ (max-attempts) + งาน add/delta ล้วน → ลองต่อแบบถอยสุ่ม (ยังไม่เกินเพดาน) · ไม่ log rebase_fallback
           if(String(rb.reason || '') === 'max-attempts' && _s2Eligible()){
@@ -20347,8 +20610,13 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
           // 🆕 verify 1: ห้ามล้างตัวนับช่วงลองต่อตรงนี้ (เดิม busy/load สลับ max-attempts = เพดาน 5 นาทีไม่เคยถึง ค้างในหน่วยความจำไม่จบ)
           //   เลยเพดานแล้ว + งาน add/delta ล้วน → ตกลงทางงานค้างเลย · งานไม่ใช่ add/delta ล้วน = ล้างตัวนับ (ทางเดิม)
           if(rb.retry){
-            var _s2Over = !!_s2Since && (Date.now() - _s2Since >= _S2.cap) && _s2Eligible();
-            if(!_s2Over){
+            // 🆕 SSH1 final review #1: 'push:' = รอบนี้ดึงจาก server สำเร็จแล้ว (server ตอบ) → apply ล้มแบบ Failed to fetch ไม่ใช่เน็ตขาด = นับเพดาน
+            //   #2: ออฟไลน์/เน็ตขาดทั้งเส้น = ห้ามใช้เพดาน S2 เทเข้างานค้าง + โหลดหน้าใหม่ระหว่างเน็ตขาด (เหมือน _stkOver)
+            var _rr0 = String(rb.reason || ''), _reach = /^push:/.test(_rr0), _netWait = _stkOffline() || (!_reach && _stkNetLevel(_rr0));
+            var _s2Over = !_netWait && !!_s2Since && (Date.now() - _s2Since >= _S2.cap) && _s2Eligible();
+            _stkMark(rb.reason || 'retry', _reach);   // 🆕 SSH1 F2(c)
+            if(!_s2Over && _stkOver()) rb = _stkRb(rb);
+            else if(!_s2Over){
               if(_s2Since && !_s2Eligible()) _s2Reset();
               if(_retryTimer) clearTimeout(_retryTimer); _retryTimer = setTimeout(_flushCloudPush, rb.reason === 'busy' ? _busyWait() : 10000); return;
             }
@@ -20373,6 +20641,8 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         return;
       } else if(r.busy){
         // 🌊 คลื่น 3: ฐานข้อมูลคิวยาว (lock timeout) → ลองใหม่แบบ backoff 1→10 วิ + สุ่ม (ของยังค้างใน _pendingState)
+        _stkMark('busy:' + String(r.error || '').slice(0, 40));   // 🆕 SSH1 F2(c): เกินเพดาน → งานค้าง
+        if(_stkOver()){ _stuckSpill(u, r); return; }
         if(_retryTimer) clearTimeout(_retryTimer);
         _retryTimer = setTimeout(_flushCloudPush, _busyWait());
       } else if(r.fatal){
@@ -20381,11 +20651,15 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         _conflict = true; _onConflictFallback(u, 'version', null, { reason:'fatal:' + r.error });
       } else {
         // network/อื่นๆ → เก็บของไว้ retry ทุก 10 วิ (ข้อมูลค้างใน memory — เตือนก่อนปิดด้วย beforeunload)
+        _stkMark('net:' + String(r.error || '').slice(0, 40));   // 🆕 SSH1 F2(c)
+        if(_stkOver()){ _stuckSpill(u, r); return; }
         if(_retryTimer) clearTimeout(_retryTimer);
         _retryTimer = setTimeout(_flushCloudPush, 10000);
       }
     }).catch(function(e){
       _pushing = false; _lastCloudErr = String(e && e.message || e);
+      _stkMark('throw:' + _lastCloudErr.slice(0, 40));   // 🆕 SSH1 F2(c)
+      if(_stkOver()){ _stuckSpill(u, { error:_lastCloudErr }); return; }
       if(_retryTimer) clearTimeout(_retryTimer);
       _retryTimer = setTimeout(_flushCloudPush, 10000);
     });
@@ -20566,6 +20840,12 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   try {
     global.addEventListener('beforeunload', function(){ try { _auditSaveLocal(); } catch(_e){} });
     global.addEventListener('visibilitychange', function(){ if(global.document && global.document.hidden) flushAudit(); else if(_auditCensusDone) _auditCensusTick(); });
+    // 🆕 SSH1 UAT M2: เน็ตกลับมา → เริ่มนับเพดานใหม่ + ส่งงานที่ค้างอยู่ทันที (ไม่รอรอบ 10 วิ · ไม่ข้ามช่วงถอย S2 — _flushCloudPush ตรวจ _retryAt เอง)
+    global.addEventListener('online', function(){
+      try { syncTrace('online', true, {}); } catch(_t){}
+      _stkReset();
+      if(_pendingState && !_pushing && !_conflict){ if(_retryTimer){ clearTimeout(_retryTimer); _retryTimer = null; } if(_pushTimer) clearTimeout(_pushTimer); _pushTimer = setTimeout(_flushCloudPush, 300); }
+    });
   } catch(_e){}
 
   var _unsyncedSince = 0;   // 🆕 SSP1 S6: เริ่มค้าง (ยังไม่ขึ้นระบบ) ตั้งแต่เมื่อไร — ป้ายแดงเมื่อเกิน 2 นาที
@@ -20937,6 +21217,8 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
   // final verify 1 F3: สิทธิ์ที่งานต้องใช้ (เช็กกับผู้ใช้ที่ล็อกอินตอนนี้ — reducer เชื่อหน้าจอ) · คืน [[mod,tab,action]…] = มีอย่างใดอย่างหนึ่งพอ
   function _reapplyPerms(a, st){
     var t = a && a.type || '', d = (a && a.data) || {};
+    // 🆕 SSH1 F1: จ่ายเงินสดย่อยทันที (self-approved) = สิทธิ์เดียวกับหน้าคีย์ (canPettyDirect ใน mod-purchase) — ไม่ต้องมีสิทธิ์อนุมัติจ่าย
+    if(t === 'ADD_PAY' && d.paySource === 'petty' && d.selfApproved === true) return [['accounting','payment','create'], ['accounting','payApprove','approve']];
     if(t === 'ADD_PAY' || t === 'UPDATE_PAY'){
       if(d.approvalStatus === 'approved') return [['accounting','payApprove','approve']];
       return t === 'ADD_PAY' ? [['accounting','payment','create'], ['purchase','payment','create'], ['accounting','payApprove','approve']]
@@ -20956,6 +21238,25 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     // ทางสำรองทั่วไป: ต้องมีสิทธิ์ สร้าง/แก้ ในหน้าที่คีย์งานนี้ (หาหน้าไม่เจอ = null → เช็กแค่เจ้าของงาน)
     var E = global.ERP || {};
     try { return (E.reapplyPermNeed && E.reapplyPermNeed(a, st)) || null; } catch(_p){ return null; }
+  }
+  // 🆕 SSH1 F1: รายการที่ "ตามเอกสารต้นทางในงานเดียวกัน" — JE อัตโนมัติ (sourceId = เอกสารที่ไม่ใช่ JE ในงาน) ·
+  //   PATCH_INV ของใบที่ ADD_INV อยู่ในงานเดียวกัน → คืน index ของต้นทาง (ไม่มี = -1) · ไม่ต้องขอสิทธิ์แยก (ระบบลงให้ตอนคีย์ต้นทาง)
+  function _jobSrcIdx(a, acts, idxs){
+    var d = (a && a.data) || {}, t = a && a.type;
+    for(var k = 0; k < idxs.length; k++){
+      var b = acts[idxs[k]]; if(!b || b === a || !b.type) continue;
+      if(t === 'ADD_JE' && d.sourceId != null && b.type !== 'ADD_JE' && _opqRefs(b).indexOf(String(d.sourceId)) >= 0) return idxs[k];
+      if(t === 'PATCH_INV' && d.id != null && b.type === 'ADD_INV' && b.data && b.data.id === d.id) return idxs[k];
+    }
+    // 🆕 SSH1 verify 1: จ่ายใบเดิมด้วยเงินสดย่อย (ADD_PAY · ADD_PETTY_TXN · PATCH_INV{add:paidAmount} · ADD_JE) — ส่งก้อนเดียวกัน
+    //   ADD_PAY ยังไม่ขึ้น = patch ยังไม่เคยลง → ส่งได้ · ADD_PAY ขึ้นแล้ว = ทางเดิม (noguard) · ADD_INV ในงานมาก่อนเสมอ
+    if(t === 'PATCH_INV' && d.id != null){
+      for(var j = 0; j < idxs.length; j++){
+        var c = acts[idxs[j]]; if(!c || c === a) continue;
+        if(c.type === 'ADD_PAY' && c.data && c.data.invId === d.id) return idxs[j];
+      }
+    }
+    return -1;
   }
   function opqReapplyPlan(op, jobIdx, state, opts){
     opts = opts || {};
@@ -20979,7 +21280,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     if(!isSU){
       var other = owners.filter(function(o){ return o !== cu.username; });
       if(other.length){ var nm = other.filter(Boolean).join(', '); res.owner = nm || null; return fail('owner', nm ? ' (' + nm + ')' : ' (ไม่ทราบผู้บันทึก — ให้ผู้ดูแลระบบตรวจ)'); }
-      var noPerm = idxs.filter(function(i){ var a = acts[i], need = a && _reapplyPerms(a, st);
+      var noPerm = idxs.filter(function(i){ var a = acts[i], need = a && _jobSrcIdx(a, acts, idxs) < 0 && _reapplyPerms(a, st);
         return need && !need.some(function(pth){ return !!(E.hasPerm && E.hasPerm(liveU, pth[0], pth[1], pth[2])); }); });
       if(noPerm.length){ res.perm = acts[noPerm[0]].type; return fail('perm'); }
     }
@@ -21005,7 +21306,15 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
         if(applied){ res.skipped.push(i); return; }
         return block('stale');
       }
+      // 🆕 SSH1 F1: ส่งไปแล้วจากปุ่มบันทึกอีกครั้งบนเครื่องนี้ (op.sentIdx) = ขึ้นแล้ว (กันส่งซ้ำ delta ที่ไม่มีด่านกันซ้ำ)
+      if((op.sentIdx || []).indexOf(i) >= 0){ res.skipped.push(i); return; }
       // add / delta: ต้องมีด่านกันซ้ำด้วย id (_ADD_DUP) ถึงจะส่งซ้ำได้
+      //   🆕 SSH1 F1: PATCH_INV ของใบที่ ADD_INV ในงานเดียวกันยังไม่ขึ้น = ใบยังไม่มีบนระบบ → patch ยังไม่เคยลง ส่งซ้ำได้ · ใบขึ้นแล้ว = ทางเดิม (noguard)
+      if(!dupT[a.type] && a.type === 'PATCH_INV'){
+        var si = _jobSrcIdx(a, acts, idxs), sa = si >= 0 ? acts[si] : null, sLanded = true;
+        if(sa){ try { sLanded = !!(E.isDupAdd && E.isDupAdd(st, { type:sa.type, data:sa.data })); } catch(_sl){ sLanded = true; } }
+        if(sa && !sLanded && res.skipped.indexOf(si) < 0){ res.pending.push(i); return; }
+      }
       if(!dupT[a.type]) return block('noguard');
       var landed = false; try { landed = !!(E.isDupAdd && E.isDupAdd(st, { type:a.type, data:a.data })); } catch(_d){}
       if(landed){ res.skipped.push(i); return; }
@@ -21024,8 +21333,8 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       var a0 = acts[res.pending[k]], kd = (pol[a0.type] || {}).kind;
       if(kd !== 'add' && kd !== 'delta') continue;
       // JE อัตโนมัติของเอกสารที่อยู่ในงานเดียวกัน → ใช้ผลเทียบของเอกสารต้นทาง (คีย์ต้นทางใหม่ = ระบบลง JE ใหม่ให้เอง)
-      var srcId = a0.type === 'ADD_JE' && a0.data && a0.data.sourceId;
-      if(srcId && res.pending.some(function(j){ var b = acts[j]; return b && b.type !== 'ADD_JE' && _opqRefs(b).indexOf(String(srcId)) >= 0; })) continue;
+      //   🆕 SSH1 F1: + PATCH_INV ของใบที่ ADD_INV อยู่ในงานเดียวกัน (ใช้ผลเทียบของ ADD_INV)
+      if((a0.type === 'ADD_JE' || a0.type === 'PATCH_INV') && _jobSrcIdx(a0, acts, res.pending) >= 0) continue;
       var hit = _rekeyHit(st, a0, ts);
       if(hit === _REKEY_UNKNOWN){ unknown.push(res.pending[k]); continue; }
       if(hit){ res.maybeRekeyed = hit; return fail('rekey', ' (' + hit.number + ')'); }
@@ -21039,10 +21348,13 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
       if(ref === st) ref = Object.assign({}, st);
       ref[coll] = ref[coll].map(function(x){ return x && x.id === id ? a.was : x; });
     });
-    var entries = res.pending.map(function(i){ var a = acts[i]; return { type:a.type, data:a.data, t:a.t, by:a.by }; });
+    // 🆕 SSH1 verify 2 (เจ้าของ 5 พ.ย.): seq = index ของ action → fr.dataBySeq = payload หลังเปลี่ยนเลข (ผู้กดส่งตัวนี้แทนต้นฉบับ)
+    var entries = res.pending.map(function(i){ var a = acts[i]; return { type:a.type, data:a.data, t:a.t, by:a.by, seq:i }; });
     var fr; try { fr = _foldEntries(st, entries, ref, null, st, false); } catch(_f){ fr = { ok:false, reason:'throw:' + (_f && _f.message || _f) }; }
     if(!fr || !fr.ok){ res.dry = fr && fr.reason || ''; return fail('dry', fr && fr.msg ? ': ' + String(fr.msg).slice(0, 200) : ''); }
-    if(fr.renum && fr.renum.length) res.renum = fr.renum;
+    // 🆕 SSH1 verify 2: เลขชนกับใบที่ขึ้นแล้ว (เช่น งานค้าง 2 ใบเลขเดียวกัน — ใบที่กดก่อนได้เลขเดิม) → ออกเลขใหม่ให้ตอนบันทึกอีกครั้ง
+    //   (ชนิดเลขล็อก _NO_RENUMBER ถูกกันที่ numlock/dry แล้ว) · ต้องให้ผู้ใช้ยืนยันเสมอ (อาจเป็นใบเดียวกันที่คีย์ใหม่ไปแล้ว — ด่าน rekey ผ่านแล้ว)
+    if(fr.renum && fr.renum.length){ res.renum = fr.renum; res.dataByIdx = fr.dataBySeq || {}; unknown = res.pending.slice(); }
     // 🆕 SSP1 UAT S1: ชุดที่เก็บขณะกำลังส่ง (op.inflight) = อาจขึ้น cloud ไปแล้ว → ทุกรายการต้องให้ผู้ใช้ตรวจ+ยืนยันเอง
     if(op.inflight){ res.inflight = true; unknown = res.pending.slice(); }
     if(unknown.length){
@@ -21080,7 +21392,7 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
     pushCloudState: pushCloudState, scheduleCloudPush: scheduleCloudPush, pushNow: pushNow, pushNowBusy: function(){ return _pushNowBusy > 0; },
     cloudSaveStatus: cloudSaveStatus, checkCloudChanged: checkCloudChanged,
     // 🆕 MW-0: สมุดจดงาน + คิวงานค้าง + ปลด latch
-    journalAdd: journalAdd, readOpq: readOpq, writeOpq: writeOpq, clearConflict: clearConflict,
+    journalAdd: journalAdd, readOpq: readOpq, writeOpq: writeOpq, clearConflict: clearConflict, getSyncTrace: getSyncTrace, stuckEta: stuckEta,
     backupBeforeOverwrite: backupBeforeOverwrite, safeReload: safeReload, beginWork: beginWork, endWork: endWork, workInFlight: function(){ return _workInFlight; },   // R1104F F1
     spillJournalToOpq: _spillJournalToOpq,
     // 🆕 OPQ-READABLE: งานค้างอ่านรู้เรื่อง/บันทึกอีกครั้ง/โมดัลชนทันที/กันเปิดซ้อนแท็บ
@@ -21120,8 +21432,15 @@ Object.assign(global.ERP, { cloudPrintGate, _printGateDocLabels, pvShown });
            reset:function(){ _w4 = null; _w4OffUntil = 0; _w4Why = ''; }, setTail:function(k, t){ _tail[k] = t; } },   // สำหรับเทสต์
     _debug: { cfg: _cfg, client: _sb, tok: function(){ return _tok; }, synced: function(){ return _syncedState; }, setSynced: function(st){ _syncedState = st; }, setBehind: function(v){ _behind = !!v; }, setBusyStreak: function(n){ _busyStreak = n|0; },
       // 🆕 SSP1 S2 (เทสต์): ย่อเวลาถอย/เพดาน · อ่านสถานะช่วงลองต่อ
-      setS2: function(o){ Object.keys(o || {}).forEach(function(k){ if(k in _S2) _S2[k] = Number(o[k]); }); return Object.assign({}, _S2); },
-      s2: function(){ return { retryAt: _retryAt, since: _s2Since, tries: _s2Tries, cfg: Object.assign({}, _S2) }; } },
+      setS2: function(o){ Object.keys(o || {}).forEach(function(k){ if(k in _S2) _S2[k] = Number(o[k]); }); if(o && 'cap' in o) _S2.fixed = true; return Object.assign({}, _S2); },
+      s2: function(){ return { retryAt: _retryAt, since: _s2Since, tries: _s2Tries, cfg: Object.assign({}, _S2) }; },
+      stuck: function(){ return { since: _stkSince, why: _stkWhy, n: _stkN, pushing: _pushing, conflict: _conflict, inDoubt: _inDoubt, peekFails: _peekFails,
+        keysTo: _keysTo, keysCap: _keysCap(), keysOkMs: _keysOkMs, cap: _stkCap, thr: _stkThr(), netDown: _stkNetDown }; },
+      capFor: function(def, bytes){ return _capFor(def, bytes); }, upRate: function(){ return _upRate(); }, estBytes: function(a){ return _estBytes(a); },
+      // 🆕 SSH1 verify 2 (เทสต์): ใส่ร่องรอยปลอม (ความเร็ววัดได้) · กดตัวนับเพดานตรง ๆ · ชนิด error ที่ดึงเต็มก้อนช่วยได้
+      trace: function(k, ok, info){ var ev = syncTrace(k, ok, info); if(info && info.ts){ ev.ts = Number(info.ts); try { global.localStorage.setItem(SYNC_TRACE_KEY, JSON.stringify(_trList())); } catch(_e){} } return ev; },   // final review #3: ts = ร่องรอยเก่า
+      stkMark: function(w, r){ _stkMark(w, r); }, stkReset: function(){ _stkReset(); }, applyTo: function(){ return _applyTo; },
+      stkOver: function(){ return _stkOver(); }, fullWorthy: function(e, st){ return _peekFullWorthy(e, st); } },
   };
 })(window);
 
@@ -36963,8 +37282,9 @@ const P = E.chargeStockClearPlan ? E.chargeStockClearPlan(s, d.itemId) : null;
         const _cr = _ls.reduce((s2,l) => s2 + (Number(l.credit)||0), 0);
         if(Math.abs(_dr - _cr) > 0.01){
           console.warn('⚠️ ADD_JE ไม่บาลานซ์: DR ' + _dr + ' ≠ CR ' + _cr + ' (' + jeNumber + ')');
-          _jeExtra = { auditLog: [ ...(s.auditLog||[]), { id:'al_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
-            ts:Date.now(), type:'je_imbalance', by: a.data.postedBy || a.data.createdBy || 'system',
+          // 🆕 SSH1 F3: id/เวลา audit ตายตัวจาก JE (al_jeimb_<id>) → ต่อท้ายอย่างเดียว = APPEND_ONLY_READS (เดิมสุ่ม — rebase ทุกรอบได้แถวใหม่)
+          _jeExtra = { auditLog: [ ...(s.auditLog||[]), { id:'al_jeimb_' + (a.data.id || jeNumber),
+            ts:Number(a.data.createdAt || a.data.postedAt) || Date.now(), type:'je_imbalance', by: a.data.postedBy || a.data.createdBy || 'system',
             entityId: a.data.id || jeNumber, entityRef: jeNumber,
             note:'JE ไม่บาลานซ์: DR '+_dr.toFixed(2)+' / CR '+_cr.toFixed(2)+' ผลต่าง '+(_dr-_cr).toFixed(2) } ] };
         }
@@ -38889,6 +39209,7 @@ const APPEND_ONLY_READS = Object.freeze({
   UPDATE_PO_FULL: ['auditLog'],   // ต่อท้าย po_edit_full อย่างเดียว
   RECEIVE_PO: ['grs', 'movements', 'auditLog'],   // 🆕 RECV-ONBEHALF UAT S2: ต่อท้าย gr_onbehalf (id ตายตัว al_grob_<gr.id>) — อ่านแค่กันซ้ำด้วย id
   ADD_INV: ['auditLog'],
+  ADD_JE: ['auditLog'],   // 🆕 SSH1 F3: ต่อท้าย je_orphan_blocked (al_jeorphan_<id>) / je_imbalance (al_jeimb_<id>) อย่างเดียว ไม่อ่านหา
   ADD_MIG_LATE_INV: ['auditLog'],   // 🆕 MIG_LATE_INV: ต่อท้าย mig_late_inv (id ตายตัว al_miglate_<id>)
   ADD_SALES_INV: ['auditLog'],   // 🆕 DOC-NUMBER verify 1: ต่อท้าย si_filed_period อย่างเดียว (id ตายตัว al_sifp_<id>)
   ADD_COMBINED_INV: ['auditLog'],
@@ -38945,6 +39266,14 @@ const APPEND_ONLY_READS = Object.freeze({
 });
 // หมวดที่ reducer อ่านเพื่อแก้ทีละชุด แล้วเซิร์ฟเวอร์ตรวจด่านเดียวกันซ้ำใต้ล็อก (p_patch) → ไม่ต้องอยู่ใน p_check เมื่อส่งเป็น patch
 const PATCH_READS = Object.freeze({ REVIEW_WEIGH_LOG:['weighLogs'], MARK_WEIGH_REPRINT:['weighLogs'] });
+// 🆕 SSH1 F3: หมวดใน ACTION_READS ที่ "ไม่อ่านจริง" เมื่อข้อมูลงานเข้าเงื่อนไข — ตัดออกจาก p_check (ไม่ชนเครื่องชั่งโดยไม่จำเป็น)
+//   แถว: [{ when(data) → true = ตัด, drop:[หมวด ⊆ แถว ACTION_READS] }] · ฟังก์ชันคิดพลาด/ข้อมูลแปลก = ไม่ตัด (นับครบเหมือนเดิม)
+//   ทุกแถวต้องมี fixture ใน w3_reads (Proxy พิสูจน์ว่า reducer ไม่แตะหมวดที่ตัด · และงานที่ไม่เข้าเงื่อนไขยังอ่านอยู่)
+const _invUnlinked = d => !!d && typeof d === 'object' && !d.grId && !(d.grIds && (!Array.isArray(d.grIds) || d.grIds.length)) && !d.poId;
+const ACTION_READS_WHEN = Object.freeze({
+  // ใบค่าใช้จ่าย/EXP (รวมจ่ายเงินสดย่อยทันที) ไม่ผูก GR/PO → ด่าน GR/PO/รับเกิน/ต่ำกว่าเกณฑ์/แยกใบไม่อ่าน grs/pos/items/returns
+  ADD_INV: Object.freeze([Object.freeze({ when: _invUnlinked, drop: Object.freeze(['grs','pos','items','returns']) })]),
+});
 // reducer ที่บอกได้ว่า action "ไม่มีผล" (คืน state เดิม — ถูกปฏิเสธ/ซ้ำ) → สมุดตัดทิ้ง ไม่ค้างให้เล่นซ้ำแล้วพัง (ค้างจาก verify คลื่น 0)
 //   journalAdd ผูก entry ไว้ที่ action.__jref (ไม่ enumerable) — React เรียก reducer ตอน render ซึ่งมาหลัง journalAdd เสมอ (useReducer ไม่คำนวณล่วงหน้า)
 function reducerTracked(s, a){
@@ -38958,6 +39287,7 @@ global.ERP = global.ERP || {};
 Object.assign(global.ERP, {
   INIT_STATE, reducer, svcPoDeny: _svcPoDeny, deductFIFO, deductFromStore, siEditStock: _siEditStock, ADD_REPLAY_SAFE, ADD_DUP_TYPES: Object.freeze(Object.keys(_ADD_DUP)), isDupAdd: _isDupAdd, grVoidDeny: _grVoidDeny, payTagName: _payTagName, docTagSame: _docTagSame, ACTION_MERGE, DOC_NUMBERS, reducerTracked,
   ACTION_READS, MERGE_GUARD_KEYS, capLogsForSave: _capLogsForSave,   // 🆕 คลื่น 3 (WAVE3_CONTRACT §B4.1)
+  ACTION_READS_WHEN,   // 🆕 SSH1 F3
   APPEND_KEYS, SEQ_BUMP_KEYS, SEQ_BUMPS, APPEND_ONLY_READS, PATCH_READS, CAP_LIMITS: Object.freeze({ auditLog:AUDIT_LOG_CAP, weighLogs:WEIGH_LOG_CAP }),   // 🌊 คลื่น 4 (WAVE4_CONTRACT §B4.1)
   PUSH_LINE_REASONS,   // 🆕 TR_PUSH_FAV (A2)
   lineShareNetValueDiff,   // 🆕 LSS3 UAT ชุด 1 S1: ผลต่างมูลค่าจากการหักล้างบวก/ลบ (จอสรุป = reducer)
@@ -93629,7 +93959,7 @@ function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
 
     // ถ้าต้องขออนุมัติ → ยังไม่ deduct bank / update INV / post JE
     if(requiresApproval){
-      alert(_watch ? `⏳ กำลังส่งขึ้นระบบ — คำขออนุมัติจ่าย ${fmtCur(amount)}\nรอข้อความ ✅ ขึ้นระบบแล้ว (ผู้อนุมัติจึงจะเห็นที่ บัญชี → 🔒 รออนุมัติจ่าย) — อย่าปิดหน้า`
+      alert(_watch ? `⏳ กำลังส่งขึ้นระบบ — คำขออนุมัติจ่าย ${fmtCur(amount)}\nรอข้อความ ✅ ขึ้นระบบแล้ว (ผู้อนุมัติจึงจะเห็นที่ บัญชี → 🔒 รออนุมัติจ่าย)\n⏳ ${(global.ERP.PAY_LAND_WAIT_TXT || 'อย่าปิดหรือโหลดหน้า ปกติไม่เกิน 1–2 นาที')}`
         : `📋 ส่งคำขออนุมัติจ่ายแล้ว ${fmtCur(amount)}\nรอหัวหน้าอนุมัติที่ บัญชี → 🔒 รออนุมัติจ่าย`);
       onClose();
       onDone && onDone();
@@ -93667,7 +93997,7 @@ function PayINVModal({ inv, remain, state, dispatch, user, onClose, onDone }){
 
     // 🆕 SSP1 UAT M2: เฝ้าการขึ้นระบบอยู่ = ยังไม่บอก "จ่ายแล้ว" (ห้ามบอกสำเร็จก่อนขึ้น cloud — เคส PV-0008 3 พ.ย.)
     const _ovTxt = excess > 0.01 ? `\n⚠️ โอนเกิน ${fmtCur(excess)} → ${overMode==='credit'?'เก็บเป็นเครดิต (หักรอบหน้า)':'รอรับเงินคืน'}` : '';
-    alert(_watch ? `⏳ กำลังส่งขึ้นระบบ — จ่าย ${fmtCur(amount)}` + _ovTxt + `\nรอข้อความ ✅ ขึ้นระบบแล้ว ก่อนพิมพ์ใบ/ปิดหน้า`
+    alert(_watch ? `⏳ กำลังส่งขึ้นระบบ — จ่าย ${fmtCur(amount)}` + _ovTxt + `\nรอข้อความ ✅ ขึ้นระบบแล้ว ก่อนพิมพ์ใบ\n⏳ ${(global.ERP.PAY_LAND_WAIT_TXT || 'อย่าปิดหรือโหลดหน้า ปกติไม่เกิน 1–2 นาที')}`
       : `✅ จ่ายแล้ว ${fmtCur(amount)}\nสถานะ: ${INV_STATUS[newStatus][0]}` + _ovTxt + `\n✓ JE posted`);
     onClose();
     onDone && onDone();
@@ -97319,7 +97649,7 @@ function DirectExpenseModal({ state, dispatch, user, onClose }){
       + `\nPV: ${_watch ? '(รอเลข) — แจ้งเลขจริงเมื่อขึ้นระบบแล้ว' : ((pv && pv.pvNumber) || '(ดูที่ ✅ รายการที่จ่ายแล้ว)')} · จ่าย ${fmtCur(amt)} · ${fmtDate(pdDate)}`
       + (wht > 0 ? `\n🧾 หัก ณ ที่จ่าย ${fmtCur(wht)}` + (certNos.length ? ` · 50 ทวิ ${certNos.join(', ')}` : '') : '')
       + `\n✓ JE ตั้งหนี้ + JE จ่าย (CR เงินสดย่อย) posted`
-      + (_watch ? `\n→ รอข้อความ ✅ ขึ้นระบบแล้ว ก่อนพิมพ์ใบ/ปิดหน้า` : ''));
+      + (_watch ? `\n→ รอข้อความ ✅ ขึ้นระบบแล้ว ก่อนพิมพ์ใบ\n⏳ ${(global.ERP.PAY_LAND_WAIT_TXT || 'อย่าปิดหรือโหลดหน้า ปกติไม่เกิน 1–2 นาที')}` : ''));
     onClose();
   };
 
@@ -112849,7 +113179,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         + (tagSel.length ? `\n🏷️ แท็ก: ${tagSel.map(t => t.name).join(', ')} (ทุกใบในรอบนี้)` : '')
         + (capped ? `\n(ปรับยอดลงให้พอดียอดค้าง ${capped} ใบ)` : '')
         + (skipped.length ? `\n⛔ ข้าม ${skipped.length} ใบ:\n• ` + skipped.join('\n• ') : '')
-        + (_watch ? `\n→ เลข PV (รอเลข) จะแจ้งเมื่อขึ้นระบบแล้ว — รอข้อความ ✅ ก่อนพิมพ์ใบ/ปิดหน้า` : `\n→ ออกเลข PV แล้ว — ดูที่ ✅ รายการที่จ่ายแล้ว`));
+        + (_watch ? `\n→ เลข PV (รอเลข) จะแจ้งเมื่อขึ้นระบบแล้ว — รอข้อความ ✅ ก่อนพิมพ์ใบ\n⏳ ${PAY_LAND_WAIT_TXT}` : `\n→ ออกเลข PV แล้ว — ดูที่ ✅ รายการที่จ่ายแล้ว`));
     } else if(!requests.length){
       // verify 2: ไม่มีคำขอไหนผ่าน (เช่น ชุด 50 ทวิ รวมมีคำขอยกเลิกค้าง) → ไม่แจ้งว่าส่งแล้ว · ไม่ปิดหน้าต่าง
       alert('⛔ ยังไม่ได้ส่งคำขออนุมัติจ่าย' + (skipped.length ? `\n• ` + skipped.join('\n• ') : ''));
@@ -112866,7 +113196,7 @@ function BulkRequestPayModal({ invIds, state, dispatch, user, onClose, onDone })
         + (bank ? `\n🏦 บัญชีที่ขอโอน: ${bank.bank||''} ${bank.name}` : '')
         + (capped ? `\n(ปรับยอดลงให้พอดียอดค้าง ${capped} ใบ)` : '')
         + (skipped.length ? `\n⛔ ข้าม ${skipped.length} ใบ:\n• ` + skipped.join('\n• ') : '')
-        + (_watch ? `\n→ รอข้อความ ✅ ขึ้นระบบแล้ว (ผู้อนุมัติจึงจะเห็น) — อย่าปิดหน้า` : '')
+        + (_watch ? `\n→ รอข้อความ ✅ ขึ้นระบบแล้ว (ผู้อนุมัติจึงจะเห็น)\n⏳ ${PAY_LAND_WAIT_TXT}` : '')
         + `\n→ รออนุมัติที่แท็บ 🔒 รออนุมัติ${nGroup ? ' (คำขอรวมแสดงเป็น 1 แถว กด ▸ ดูรายการ PI)' : ''}`);
     }
     onClose();
@@ -113480,12 +113810,54 @@ global.ERP.pettyPayInvoice = pettyPayInvoice;
 // 🆕 SSP1 S4: เฝ้าคำขอจ่าย/จ่ายเงินสดย่อย "ขึ้นระบบจริง" (เหตุ 3 พ.ย.: บอกสำเร็จ+พิมพ์ PV ทั้งที่ไม่ขึ้น cloud)
 //   payIds = id ของ pay ที่เพิ่ง dispatch · kind 'request' (รออนุมัติ) | 'petty' (ออกเลข PV — เลขจริงอ่านจากก้อนบน cloud)
 //   ขึ้นแล้ว → toast เขียว · เข้างานค้าง/ต้องโหลดใหม่ → toast แดง · ผลล่าสุดเก็บใน global.__ERP_PAY_LANDING (เทสต์)
+// 🆕 SSH1 F4(a): แถบเด่นค้างบนจอ "⏳ กำลังส่งขึ้นระบบ (N วิ)" ตั้งแต่กดบันทึกงานเงิน จนขึ้น ✅ หรือเข้า 🧾 งานค้าง
+//   DOM ตรง (อยู่นอก React — ปิดหน้าต่าง/โมดัลแล้วแถบยังอยู่) · หลายงานพร้อมกัน = นับจากงานที่ค้างนานสุด
+const PAY_LAND_WAIT_TXT = 'อย่าปิดหรือโหลดหน้า ปกติไม่เกิน 1–2 นาที';
+const _plBar = { recs: [], timer: null };
+function _plBarPaint(){
+  const doc = global.document; if(!doc || !doc.body) return;
+  const pend = _plBar.recs.filter(r => r.state === 'pending');
+  let el = doc.getElementById('erp-pay-landing-bar');
+  if(!pend.length){
+    if(_plBar.timer){ clearInterval(_plBar.timer); _plBar.timer = null; }
+    if(el) el.remove();
+    return;
+  }
+  if(!el){
+    el = doc.createElement('div'); el.id = 'erp-pay-landing-bar'; el.setAttribute('data-testid', 'pay-landing-bar'); el.setAttribute('role', 'status');
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483000;background:#f59e0b;color:#1f2937;font-weight:700;'
+      + 'font-size:16px;text-align:center;padding:10px 16px;box-shadow:0 2px 8px rgba(0,0,0,.25);'
+      + 'pointer-events:none';   // 🆕 SSH1 UAT S1: แถบแสดงสถานะอย่างเดียว — กดทะลุถึงหัวจอ/เมนูได้ (แท็บเล็ต)
+    doc.body.appendChild(el);
+  }
+  const sec = Math.max(0, Math.round((Date.now() - Math.min(...pend.map(r => r.at))) / 1000));
+  const n = pend.reduce((s, r) => s + r.ids.length, 0);
+  el.textContent = _plBarText(sec) + (n > 1 ? ` · ${n} รายการ` : '');
+}
+// 🆕 SSH1 verify 2 (#3): เกิน 120 วิ ข้อความเปลี่ยน — บอกว่าระบบยังส่งอยู่ + จะเก็บเข้า 🧾 งานค้างให้เองภายในกี่นาที (คนจะได้ไม่กด F5 เอง = เหตุต้นเรื่อง)
+//   เน็ตขาด/ออฟไลน์ = ระบบส่งให้เองเมื่อเน็ตกลับ (ไม่นับเพดาน) · เวลาที่เหลือจาก SBSync.stuckEta()
+const PAY_LAND_SLOW_SEC = 120;
+function _plBarText(sec){
+  if(sec < PAY_LAND_SLOW_SEC) return `⏳ กำลังส่งขึ้นระบบ (${sec} วิ) — ${PAY_LAND_WAIT_TXT}`;
+  let eta = null; try { const SB = global.ERP.SBSync; eta = SB && SB.stuckEta ? SB.stuckEta() : null; } catch(_e){ eta = null; }
+  if(eta && eta.paused) return `⏳ เน็ตขาดอยู่ (${sec} วิ) — ระบบจะส่งให้เองเมื่อเน็ตกลับ · อย่าปิดหรือโหลดหน้า`;
+  const min = eta && eta.ms != null ? Math.max(1, Math.ceil(eta.ms / 60000)) : 5;
+  return `⏳ ช้ากว่าปกติ (${sec} วิ) — ระบบยังส่งอยู่ จะเก็บเข้า 🧾 งานค้างให้ภายใน ${min} นาที · อย่าปิดหรือโหลดหน้า`;
+}
+function _plBarAdd(rec){
+  _plBar.recs = _plBar.recs.filter(r => r.state === 'pending').concat([rec]);
+  if(!_plBar.timer) _plBar.timer = setInterval(_plBarPaint, 1000);
+  _plBarPaint();
+}
+global.ERP.PAY_LAND_WAIT_TXT = PAY_LAND_WAIT_TXT;
+global.ERP._plBarText = _plBarText;   // เทสต์
 function payLandingWatch(payIds, kind, extraIds){   // extraIds = id อื่นที่ต้องขึ้นด้วย (เช่น PI ที่สร้างพร้อมกัน) — ไม่นับในจำนวน
   const SB = global.ERP.SBSync; const ids = (payIds || []).filter(Boolean);
   if(!ids.length || !SB || !SB.watchLanding || !(SB.isCloudOnly && SB.isCloudOnly())) return false;
   const n = ids.length; const t = global.ERP.toast;
   const rec = { kind, ids, at: Date.now(), state:'pending', msg:'' };
   try { (global.__ERP_PAY_LANDING = global.__ERP_PAY_LANDING || []).push(rec); } catch(_g){}
+  try { _plBarAdd(rec); } catch(_b){}   // 🆕 SSH1 F4(a)
   SB.watchLanding(ids.concat((extraIds || []).filter(Boolean)), (r) => {
     let msg;
     if(r && r.ok){
@@ -113501,6 +113873,7 @@ function payLandingWatch(payIds, kind, extraIds){   // extraIds = id อื่�
       try { if(t && t.error) t.error(msg, { duration:20000 }); } catch(_t){}
     }
     rec.msg = msg;
+    try { _plBarPaint(); } catch(_b){}   // 🆕 SSH1 F4(a): ขึ้น ✅/เข้างานค้าง → ปิดแถบ (เหลืองานอื่นค้าง = แถบอยู่ต่อ)
   });
   return true;
 }
@@ -130787,7 +131160,9 @@ function _opqJobList(op){
 // สถานะของงาน: ขึ้นครบ = done · ขึ้นบางส่วน = partial · ที่เหลือใช้สถานะหัวงาน
 function _opqJobStatus(state, op, job){
   const acts = op.actions || [];
-  const sts = job.idxs.map(i => _opqActStatus(state, acts[i]));
+  // 🆕 SSH1 F1: รายการที่ปุ่มบันทึกอีกครั้งส่งไปแล้ว (op.sentIdx) = ขึ้นแล้ว — PATCH_INV (delta ไม่มีด่านกันซ้ำ) ดูจากข้อมูลไม่ได้
+  const sent = op.sentIdx || [];
+  const sts = job.idxs.map(i => sent.indexOf(i) >= 0 ? { code:'done', text:'✅ ขึ้นระบบแล้ว' } : _opqActStatus(state, acts[i]));
   const ok = (s) => s.code === 'done' || s.code === 'applied';
   if(sts.every(ok)) return { code:'done', text:'✅ ขึ้นระบบแล้ว', per:sts };
   if(sts.some(ok) && sts.some(s => s.code === 'pending' || s.code === 'clash')) return { code:'partial', text:'⚪ ขึ้นบางส่วน ต้องเช็กเอง', per:sts };
@@ -130817,8 +131192,10 @@ const _OPQ_CAUSE = [
   // 🆕 SSP1 S6: แยก "เครื่องอื่นบันทึกถี่" ออกจากเน็ตล่ม (เดิมรวมกัน คนเข้าใจผิดว่าเน็ตเสีย) + เหตุจากการปิด/โหลดหน้า
   [/^max-attempts/, () => 'เครื่องอื่นบันทึกถี่ ระบบลองส่งไม่ทัน — งานไม่ได้ผิด'],
   [/^logout/, () => 'ออกจากระบบ (หรือหมดเวลา) ก่อนงานส่งขึ้นระบบเสร็จ'],
-  [/^unload/, () => 'ปิดหน้า/ปิดแท็บ ก่อนงานส่งขึ้นระบบเสร็จ'],
+  [/^unload/, () => 'ปิด/โหลดหน้าระหว่างส่ง (ปิดแท็บหรือกด F5 ก่อนงานส่งขึ้นระบบเสร็จ)'],   // 🆕 SSH1 F4(b): บอกตรง ๆ
   [/^reload/, () => 'แอปโหลดหน้าใหม่ (รุ่นใหม่/รีเฟรช) ก่อนงานส่งขึ้นระบบเสร็จ'],
+  // 🆕 SSH1 F2(c): ลองส่งซ้ำเกินเพดานรวม ~5 นาที (ระบบช้า/ไม่ตอบ/เน็ตสะดุด) — บอกเหตุล่าสุดตรง ๆ
+  [/^stuck:/, (c, op) => 'ส่งขึ้นระบบไม่สำเร็จนานเกิน 5 นาที (ระบบไม่ตอบ/ช้า หรือเน็ตสะดุด) — เหตุล่าสุด: ' + _opqStuckWhy(c.slice(6)) + (op.causeMsg ? ' · ' + String(op.causeMsg).slice(0, 160) : '')],
   [/^(throw:|busy|load:|push:|no-cloud)/, () => 'เน็ตหรือระบบไม่ตอบระหว่างรวมงาน'],
   [/^(truncated|full|blocked)/, () => 'งานค้างในเครื่องมากเกินจะรวมอัตโนมัติ'],
   [/^conflict/, () => 'มีเครื่องอื่นบันทึกข้อมูลส่วนเดียวกันไปก่อน'],
@@ -130839,6 +131216,33 @@ function _opqNavOk(nav){
 }
 const _OPQ_NUMLOCK_T = /^(RECEIVE_PO|ADD_GR|ADD_REPLACEMENT_GR)$/;
 // แผงรายละเอียดของงาน: ช่องสำคัญ (ป้ายไทย) · ตารางสินค้า · งานแก้ใบ = ค่าในระบบตอนนี้ → ค่าที่จะบันทึก · ข้อมูลดิบซ่อนไว้ (ผู้ดูแลระบบ)
+// 🆕 SSH1 F2(c/d): เหตุล่าสุดก่อนเกินเพดาน (load:/push:/busy/net/throw) → ภาษาไทยสั้น ๆ
+function _opqStuckWhy(w){
+  w = String(w || '');
+  if(/timeout|57014|55P03/i.test(w)) return 'ระบบตอบช้าเกินเวลา';
+  if(/^busy/.test(w)) return 'ฐานข้อมูลคิวยาว (เครื่องอื่นบันทึกพร้อมกัน)';
+  if(/^load:/.test(w)) return 'ดึงข้อมูลล่าสุดไม่สำเร็จ';
+  if(/^push:/.test(w)) return 'ส่งงานที่รวมแล้วไม่สำเร็จ';
+  if(/^(net|throw):/.test(w)) return 'เน็ตสะดุด/ไม่มีคำตอบ';
+  return w.slice(0, 60) || 'ไม่ทราบ';
+}
+// 🆕 SSH1 F2(d): ร่องรอยการส่งล่าสุดของเครื่องนี้ (แนบมากับงานค้าง) — ไว้หาสาเหตุโดยไม่ต้องดู log ระบบ
+const _OPQ_TR_KIND = { push:'ส่ง', rebase:'รวมงาน', peek:'ดึงเฉพาะส่วน', peekfull:'ดึงทั้งก้อน', apply:'บันทึก', apply4:'บันทึก' };
+function OpqTrace({ trace }){
+  const [open, setOpen] = useState(false);
+  const list = trace.slice(-30);
+  return h('div', { className:'text-xs', 'data-testid':'opq-trace' },
+    h('button', { type:'button', className:'text-gray-500 underline', onClick:() => setOpen(!open) },
+      (open ? 'ซ่อน' : 'ดู') + 'ร่องรอยการส่ง (' + list.length + ' เหตุการณ์ล่าสุด)'),
+    open && h('table', { className:'w-full mt-1 border-t text-[11px]' },
+      h('tbody', null, list.map((e, i) => h('tr', { key:i, className:'border-t ' + (e.ok ? 'text-gray-600' : 'text-red-700') },
+        h('td', { className:'py-0.5 pr-2 whitespace-nowrap' }, (() => { try { return new Date(e.ts).toLocaleTimeString('th-TH'); } catch(_e){ return String(e.ts); } })()),
+        h('td', { className:'pr-2' }, _OPQ_TR_KIND[e.k] || e.k),
+        h('td', { className:'pr-2' }, e.ok ? '✓' : '✗ ' + (e.code || '')),
+        h('td', { className:'pr-2 whitespace-nowrap' }, e.ms != null ? (e.ms / 1000).toFixed(1) + ' วิ' : ''),
+        h('td', { className:'pr-2 whitespace-nowrap' }, e.b ? Math.round(e.b / 1024) + ' KB' : ''),
+        h('td', { className:'break-all' }, e.msg || ''))))));
+}
 function OpqDetail({ op, job, state }){
   const E = global.ERP, acts = op.actions || [];
   const [raw, setRaw] = useState(false);
@@ -130868,6 +131272,7 @@ function OpqDetail({ op, job, state }){
           : h('div', { className:small }, rc.cur ? 'ทุกช่องในระบบตรงกับที่จะบันทึกแล้ว' : 'ไม่พบใบนี้ในระบบแล้ว (อาจถูกลบ/ยกเลิก)')),
         a.type === 'ADD_JE' && obj && obj.sourceId && h('div', { className:small }, 'รายการบัญชีอัตโนมัติ — คีย์เอกสารต้นทางใหม่ ระบบลงบัญชีให้เอง (ห้ามคีย์ JE เอง)'));
     }),
+    Array.isArray(op.trace) && op.trace.length > 0 && h(OpqTrace, { trace: op.trace }),   // 🆕 SSH1 F2(d)
     h('button', { type:'button', 'data-testid':'opq-raw-toggle', className:'text-xs text-gray-500 underline', onClick:() => setRaw(!raw) },
       raw ? 'ซ่อนข้อมูลดิบ' : 'ข้อมูลดิบ (สำหรับผู้ดูแลระบบ)'),
     raw && h('pre', { 'data-testid':'opq-raw', className:'bg-gray-50 border rounded p-2 text-[11px] whitespace-pre-wrap break-all max-h-60 overflow-auto' },
@@ -130949,10 +131354,21 @@ function _opqNextStep(op, job, jst, info, plan, state){
   if(jst.code === 'done') return { text:'ไม่ต้องทำอะไร — กด ✓ คีย์ใหม่/ตรวจครบแล้ว ที่หัวชุด', acts:open };
   // งานชั่งมีคิวส่งซ้ำของสถานีชั่งเอง · เลขชน/แผนที่ต้องเปลี่ยนเลข = ส่งซ้ำตรง ๆ ไม่ได้ (reducer จะไม่รับเลขซ้ำ)
   const weigh = /WEIGH/.test(head.type || ''), clash = jst.code === 'clash' || !!(plan && plan.renum && plan.renum.length);
-  if(plan && plan.ok && !weigh && !clash) return { text:'กด บันทึกอีกครั้ง ได้เลย — ไม่พบใบที่ตรงกันในระบบ', acts:[{ k:'reapply' }].concat(open) };
+  // 🆕 SSH1 F4(b): ปิด/โหลดหน้าระหว่างส่ง → ตรวจก่อนว่ายังไม่มีในระบบ แล้วกด บันทึกอีกครั้ง (F1: เจ้าของงานที่มีสิทธิ์หน้าคีย์กดเองได้ · ยืนยันอีกชั้นตอนกด)
+  const unl = /^unload/.test(String(op.cause || op.reason || ''));
+  const UNL_T = 'ปิด/โหลดหน้าระหว่างส่ง — ตรวจว่ายังไม่มีในระบบ แล้วกด บันทึกอีกครั้ง';
+  // 🆕 SSH1 verify 2 (เจ้าของ 5 พ.ย.): เลขชนกับใบที่ขึ้นแล้ว (เช่น งานค้าง 2 ใบเลขเดียวกัน — ใบที่กดก่อนได้เลขเดิม) + ด่านอื่นผ่านหมด
+  //   → บันทึกอีกครั้งได้ ระบบออกเลขใหม่ให้ · ต้องยืนยันเสมอ (opqReapplyPlan บังคับ) · เดิม = ไปคีย์ใหม่เอง
+  const rn = (plan && plan.renum) || [];
+  if(rn.length && plan.reason === 'rekey-unknown' && plan.canConfirm && !weigh)
+    return { text:`เลข ${rn.map(r => r.from).join(', ')} มีใบอื่นใช้แล้ว — ตรวจก่อนว่าไม่ใช่ใบเดียวกันที่คีย์ใหม่ไปแล้ว ถ้าไม่ใช่ กด ยังไม่ได้คีย์ใหม่ — บันทึกเลย ระบบออกเลขใหม่ให้ (${rn.map(r => r.from + ' → ' + r.to).join(', ')})`,
+      acts:(open.length ? open : goto).concat([{ k:'reapply', confirm:true }]) };
+  if(plan && plan.ok && !weigh && !clash) return { text: unl ? UNL_T + ' (ระบบไม่พบใบที่ตรงกัน · ข้ามรายการที่ขึ้นแล้วให้เอง)' : 'กด บันทึกอีกครั้ง ได้เลย — ไม่พบใบที่ตรงกันในระบบ',
+    acts:(unl && !open.length ? goto : []).concat([{ k:'reapply' }], open) };
   // final verify 1 F1: งานที่ระบบเทียบไม่ได้ว่าคีย์ใหม่ไปแล้วหรือยัง (ไม่มีตัวเทียบ) → ห้ามบอกว่าเช็กแล้ว · ให้เปิดดูก่อน แล้วยืนยันเอง
   if(plan && plan.reason === 'rekey-unknown' && plan.canConfirm && !weigh && !clash)
-    return { text: plan.inflight
+    return { text: unl ? UNL_T + ' — เปิดดูว่าเอกสาร/ยอดนี้อยู่ในระบบแล้วหรือยัง ถ้ายังไม่มีจริง ๆ กด ยังไม่ได้คีย์ใหม่ — บันทึกเลย'
+      : plan.inflight
         ? 'อาจขึ้นแล้ว — ตรวจก่อน: เปิดดูว่าเอกสาร/ยอดนี้อยู่ในระบบแล้วหรือยัง (เก็บตอนกำลังส่ง) — ถ้ายังไม่มีจริง ๆ ค่อยกด ยังไม่ได้คีย์ใหม่ — บันทึกเลย'   // 🆕 SSP1 UAT S1
         : 'เปิดดูก่อนว่าคีย์ใหม่ไปแล้วหรือยัง (ระบบเช็กงานประเภทนี้ให้ไม่ได้) — ถ้ายังไม่ได้คีย์ใหม่ ให้กด ยังไม่ได้คีย์ใหม่ — บันทึกเลย',
       acts:(open.length ? open : goto).concat([{ k:'reapply', confirm:true }]) };
@@ -131019,20 +131435,26 @@ function PendingOpsTab({ state, dispatch, onClose, focus }){
     if(E.blockWrite && E.blockWrite(acts[(job.idxs || [])[0]] || { type:'ADD_PO' })) return;
     const p1 = SB.opqReapplyPlan(op, job.idxs, getS(), { confirmUnknown:cu0 });
     if(!p1 || !p1.ok){ alert('ยังบันทึกอีกครั้งไม่ได้: ' + ((p1 && p1.msg) || '')); reload(); return; }
-    const nm = (i) => { const d = E.describeActionFull(acts[i], getS()); return '• ' + d.label + (d.ref ? ' ' + d.ref : ''); };
+    // 🆕 SSH1 verify 2: เลขชน → ส่ง payload ที่เปลี่ยนเลขแล้วจากแผน (dataByIdx) แทนต้นฉบับ (เดิมส่งเลขเดิม = เลขซ้ำในระบบ)
+    const dOf = (p, i) => (p && p.dataByIdx && p.dataByIdx[i]) || acts[i].data;
+    const rnTxt = (p) => (p && p.renum && p.renum.length) ? p.renum.map(r => r.from + ' → ' + r.to).join(', ') : '';
+    const nm = (i) => { const d = E.describeActionFull({ ...acts[i], data:dOf(p1, i) }, getS()); return '• ' + d.label + (d.ref ? ' ' + d.ref : ''); };
     const tailQ = p1.inflight
       ? '⚠️ งานชุดนี้ถูกเก็บตอนที่ระบบกำลังส่งขึ้น cloud — อาจขึ้นระบบไปแล้ว ถ้าขึ้นแล้วกดบันทึกจะซ้ำ (ตัดสต๊อก/ลงเงินสองรอบ)\n\nตรวจแล้วว่า "ยังไม่มีในระบบ" — บันทึกเลยไหม?'   // 🆕 SSP1 UAT S1
       : p1.confirmed
       ? '⚠️ ระบบเช็กไม่ได้ว่างานนี้ถูกคีย์ใหม่ไปแล้วหรือยัง — ถ้าคีย์ใหม่ไปแล้ว กดบันทึกจะซ้ำ (ตัดสต๊อก/ลงเงินสองรอบ)\n\nยืนยันว่า "ยังไม่ได้คีย์ใหม่" — บันทึกเลยไหม?'
       : 'ไม่พบใบที่ตรงกันในระบบ — บันทึกเลยไหม?';
-    if(!confirm(`↩️ บันทึกอีกครั้ง\n\nจะบันทึก:\n${p1.pending.map(nm).join('\n')}\n\nข้ามเพราะขึ้นแล้ว:\n${p1.skipped.length ? p1.skipped.map(nm).join('\n') : '—'}\n\n${tailQ}`)) return;
+    const rnQ = rnTxt(p1) ? `🔢 เลขเดิมมีใบอื่นใช้แล้ว — ระบบจะออกเลขใหม่: ${rnTxt(p1)}\n(ใบที่พิมพ์/ส่งไปแล้วด้วยเลขเดิม ต้องแก้เป็นเลขใหม่)\n\n` : '';
+    if(!confirm(`↩️ บันทึกอีกครั้ง\n\nจะบันทึก:\n${p1.pending.map(nm).join('\n')}\n\nข้ามเพราะขึ้นแล้ว:\n${p1.skipped.length ? p1.skipped.map(nm).join('\n') : '—'}\n\n${rnQ}${tailQ}`)) return;
     const cur = getS(), p2 = SB.opqReapplyPlan(op, job.idxs, cur, { confirmUnknown:cu0 });
     if(!p2 || !p2.ok){ alert('ข้อมูลในระบบเพิ่งเปลี่ยน — ยังบันทึกอีกครั้งไม่ได้: ' + ((p2 && p2.msg) || '')); reload(); return; }
+    // 🆕 SSH1 final review #5: ระหว่างรอยืนยัน ข้อมูลเข้ามาใหม่ → เลขที่จะออกไม่ตรงกับที่ผู้ใช้เพิ่งยืนยัน (ส่งตาม p2) → ถามใหม่ด้วยเลขของ p2
+    if(rnTxt(p2) !== rnTxt(p1) && !confirm(`🔢 ข้อมูลในระบบเพิ่งเปลี่ยนระหว่างรอยืนยัน — เลขเอกสารที่จะบันทึก${rnTxt(p2) ? 'เปลี่ยนเป็น: ' + rnTxt(p2) + '\n(ใบที่พิมพ์/ส่งไปแล้วด้วยเลขเดิม ต้องแก้เป็นเลขใหม่)' : ': ใช้เลขเดิม (ไม่ต้องออกเลขใหม่แล้ว)'}\n\nบันทึกเลยไหม?`)){ reload(); return; }
     busy.current = true;
     let sim = cur, ok = true; const red = E.reducer;
     for(const i of p2.pending){
       if(!red) break;
-      let ns; try { ns = red(sim, { type:acts[i].type, data:acts[i].data }); } catch(_r){ ns = sim; }
+      let ns; try { ns = red(sim, { type:acts[i].type, data:dOf(p2, i) }); } catch(_r){ ns = sim; }
       if(ns === sim){ ok = false; break; }   // reducer ไม่รับ (แจ้งเหตุผลเองแล้ว) → หยุด ไม่ส่งตัวที่เหลือ
       sim = ns;
     }
@@ -131044,7 +131466,7 @@ function PendingOpsTab({ state, dispatch, onClose, focus }){
     const markData = (t, d) => (/^ADD_/.test(t) && d && typeof d === 'object' && !Array.isArray(d) && (typeof d.id === 'string' || typeof d.id === 'number'))
       ? { ...d, reapplied:{ opId:op.opId, by:ru, at:rAt } } : d;
     if(ok) for(const i of p2.pending){
-      const a = { type:acts[i].type, data:markData(acts[i].type, acts[i].data),
+      const a = { type:acts[i].type, data:markData(acts[i].type, dOf(p2, i)),
         _reapplyOf:{ opId:op.opId, origBy:acts[i].by || op.by || null, origAt:acts[i].t || op.ts || null } };
       if(E.writeBlockedMsg && E.writeBlockedMsg(a)){ ok = false; blocked = true; if(E.blockWrite) E.blockWrite(a); break; }
       try { dispatch(a); } catch(_d){ ok = false; blocked = !!(_d && _d.__erpBlocked); break; }
@@ -131053,11 +131475,12 @@ function PendingOpsTab({ state, dispatch, onClose, focus }){
     setTimeout(() => {
       busy.current = false;
       const st = getS(), u = (st.currentUser || {}).username || null;
-      const allDone = _opqJobList(op).every(j => _opqJobStatus(st, op, j).code === 'done');
       const patch = { reapply:{ at:Date.now(), by:u, ok, job:ji, sent, skipped:p2.skipped, ...(blocked ? { blocked:true } : {}) } };
       // 🆕 verify 1 (SSP1): จำ index ที่ส่งแล้ว/ขึ้นแล้วสะสมทั้งชุด → ด่านพิมพ์/(รอเลข) ไม่นับใบที่ขึ้นแล้ว แม้งานอื่นในชุดยังค้าง
       try { const _o0 = ((SB.readOpq && SB.readOpq()) || []).find(o => o && o.opId === op.opId) || op;
         patch.sentIdx = Array.from(new Set([].concat(_o0.sentIdx || [], sent, p2.skipped || []).filter(i => Number.isInteger(i)))).sort((a, b) => a - b); } catch(_si){}
+      // 🆕 SSH1 F1: นับ "ขึ้นครบ" รวมรายการที่เพิ่งส่ง (PATCH_INV ดูจากข้อมูลไม่ได้) → ปิดชุดได้
+      const allDone = _opqJobList(op).every(j => _opqJobStatus(st, { ...op, sentIdx: patch.sentIdx || sent }, j).code === 'done');
       if(ok && allDone) Object.assign(patch, { status:'closed', closedAt:Date.now() });
       if(SB.markOpq) SB.markOpq(op.opId, patch);
       // final verify 2 F8: รายการที่ส่งซ้ำ (เลขเอกสาร/ยอด/ผู้คีย์เดิม/เวลาเดิม) — ตัว op อยู่แค่ในเครื่องนี้ ประวัติต้องตามรอยได้เอง
@@ -131067,9 +131490,23 @@ function PendingOpsTab({ state, dispatch, onClose, focus }){
           origBy:acts[i].by || op.by || null, origAt:acts[i].t || op.ts || null }; }); } catch(_it){ items = sent.map(i => ({ type:acts[i].type })); }
       try { SB.logAudit && SB.logAudit({ ts:new Date().toISOString(), action:'opq_reapply', label:'บันทึกงานค้างอีกครั้ง', ref:op.opId, by_user:u,
         by_name:(st.currentUser || {}).name || u, device: SB.deviceId ? SB.deviceId() : null,
-        detail:{ opId:op.opId, job:ji, types:sent.map(i => acts[i].type), items, by:op.by || null, reappliedBy:u, reappliedAt:rAt, ok, blocked, ...(p2.confirmed ? { confirmedNotRekeyed:true } : {}) } }); } catch(_la){}
+        detail:{ opId:op.opId, job:ji, types:sent.map(i => acts[i].type), items, by:op.by || null, reappliedBy:u, reappliedAt:rAt, ok, blocked, ...(p2.confirmed ? { confirmedNotRekeyed:true } : {}),
+          ...(rnTxt(p2) ? { renum:(p2.renum || []).map(r => ({ type:r.type, from:r.from, to:r.to })) } : {}) } }); } catch(_la){}
+      // 🆕 SSH1 verify 2: เปลี่ยนเลขตอนบันทึกอีกครั้ง → ลงประวัติชุดเดียวกับตอนรวมงาน (doc_renumber)
+      if(ok && sent.length && rnTxt(p2)) try { (p2.renum || []).forEach(r => SB.logAudit && SB.logAudit({ ts:new Date().toISOString(), action:'doc_renumber',
+        label:'เปลี่ยนเลขเอกสาร ' + r.from + ' → ' + r.to + ' (บันทึกงานค้างอีกครั้ง · เลขเดิมมีใบอื่นใช้แล้ว)', ref:r.to, by_user:u,
+        detail:{ type:r.type, from:r.from, to:r.to, opId:op.opId } })); } catch(_rl){}
       reload(); try { global.dispatchEvent(new Event('erp:opq')); } catch(_e){}
-      if(ok) _toastOk('↩️ บันทึกอีกครั้งแล้ว — รอขึ้นระบบ'); else if(blocked) _toastWarn(sent.length ? `บันทึกไปได้ ${sent.length} รายการ แล้วต้องรอโหลดข้อมูลล่าสุด — โหลดแล้วกดบันทึกอีกครั้ง (ระบบข้ามที่ขึ้นแล้วให้)` : 'ยังไม่ได้บันทึก — รอโหลดข้อมูลล่าสุดก่อน'); else _toastWarn('ระบบไม่รับงานนี้เมื่อเทียบกับข้อมูลล่าสุด — ยังไม่ได้บันทึก ให้คีย์ใหม่ที่หน้าจอเดิม');
+      // 🆕 SSH1 verify 2: การจ่ายที่ส่งซ้ำ → แถบ ⏳ + เฝ้าจนขึ้นระบบ (✅/⛔) เหมือนหน้าคีย์เดิม — ช่วงนี้คนมักปิด/โหลดหน้าอีก
+      let _rw = false;
+      try { const _pays = sent.map(i => acts[i]).filter(a => a && a.type === 'ADD_PAY' && a.data && a.data.id);
+        if(_pays.length && E.payLandingWatch){
+          const _d0 = _pays[0].data, _kind = _d0.paySource === 'petty' ? 'petty' : (_d0.approvalStatus === 'pending' ? 'request' : 'pay');
+          const _other = sent.map(i => acts[i]).filter(a => a && a.type !== 'ADD_PAY' && /^ADD_/.test(a.type) && a.data && a.data.id != null && typeof a.data.id !== 'object').map(a => a.data.id);
+          _rw = !!E.payLandingWatch(_pays.map(a => a.data.id), _kind, _other);
+        } } catch(_pw){}
+      const _rnT = ok && sent.length && rnTxt(p2) ? ` · 🔢 เปลี่ยนเลข ${rnTxt(p2)}` : '';
+      if(ok) _toastOk((_rw ? `↩️ บันทึกอีกครั้งแล้ว — ⏳ กำลังส่งขึ้นระบบ ${E.PAY_LAND_WAIT_TXT || 'อย่าปิดหรือโหลดหน้า'}` : '↩️ บันทึกอีกครั้งแล้ว — รอขึ้นระบบ') + _rnT); else if(blocked) _toastWarn(sent.length ? `บันทึกไปได้ ${sent.length} รายการ แล้วต้องรอโหลดข้อมูลล่าสุด — โหลดแล้วกดบันทึกอีกครั้ง (ระบบข้ามที่ขึ้นแล้วให้)` : 'ยังไม่ได้บันทึก — รอโหลดข้อมูลล่าสุดก่อน'); else _toastWarn('ระบบไม่รับงานนี้เมื่อเทียบกับข้อมูลล่าสุด — ยังไม่ได้บันทึก ให้คีย์ใหม่ที่หน้าจอเดิม');
     }, 400);
   };
   // 🆕 OPQ-READABLE B5: มาจากโมดัลชน (โหลดใหม่แล้ว) → เลื่อนไปชุดนั้น · reapply = เช็กแผนบนข้อมูลล่าสุด ผ่าน → ถามยืนยันบันทึกอีกครั้งเลย
